@@ -4,6 +4,15 @@
 //! protocols used in Jolt. The primary field is the BN254 scalar field.
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+/// Comptime flag: true when x86-64 BMI2+ADX instructions are available
+const use_asm_mul = blk: {
+    if (builtin.cpu.arch != .x86_64) break :blk false;
+    const features = builtin.cpu.features;
+    break :blk features.isEnabled(@intFromEnum(std.Target.x86.Feature.bmi2)) and
+        features.isEnabled(@intFromEnum(std.Target.x86.Feature.adx));
+};
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
@@ -327,6 +336,172 @@ pub fn MontgomeryField(
             return result;
         }
 
+        /// x86-64 BMI2+ADX accelerated CIOS Montgomery multiplication.
+        /// Uses mulxq (flag-free multiply) + adcxq/adoxq (dual carry chains)
+        /// for ~20% speedup over pure Zig. Adapted from arkworks ff-asm.
+        fn montgomeryMulX86(self: Self, other: Self) Self {
+            const a = self.limbs;
+            const b = other.limbs;
+            const mod_arr: [4]u64 = modulus;
+
+            var r0: u64 = undefined;
+            var r1: u64 = undefined;
+            var r2: u64 = undefined;
+            var r3: u64 = undefined;
+
+            // 4-limb CIOS Montgomery multiplication, fully unrolled.
+            // Register mapping:
+            //   r8-r11: accumulator t[0..3] (rotated each iteration)
+            //   rdi: pointer to a[], rsi: pointer to b[], r14: pointer to mod[]
+            //   rbx: montgomery_inv, rdx: mulxq multiplier
+            //   rax, rcx, r13: scratch
+            asm volatile (
+                \\xorq %%rcx, %%rcx
+                // Iteration 0: mul_1 + reduction
+                \\movq (%%rdi), %%rdx
+                \\mulxq (%%rsi), %%r8, %%r9
+                \\mulxq 8(%%rsi), %%rax, %%r10
+                \\adcxq %%rax, %%r9
+                \\mulxq 16(%%rsi), %%rax, %%r11
+                \\adcxq %%rax, %%r10
+                \\mulxq 24(%%rsi), %%rax, %%rcx
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r11
+                \\adcxq %%r13, %%rcx
+                //
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r8, %%rdx, %%rax
+                \\mulxq (%%r14), %%rax, %%r13
+                \\adcxq %%r8, %%rax
+                \\adoxq %%r13, %%r9
+                \\mulxq 8(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%r10
+                \\mulxq 16(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%r11
+                \\mulxq 24(%%r14), %%rax, %%r8
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%rcx, %%r8
+                \\adcxq %%r13, %%r8
+                // Iteration 1: mul_add_1 + reduction
+                \\movq 8(%%rdi), %%rdx
+                \\mulxq (%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%r10
+                \\mulxq 8(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%r11
+                \\mulxq 16(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 24(%%rsi), %%rax, %%rcx
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%rcx
+                \\adcxq %%r13, %%rcx
+                //
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r9, %%rdx, %%rax
+                \\mulxq (%%r14), %%rax, %%r13
+                \\adcxq %%r9, %%rax
+                \\adoxq %%r13, %%r10
+                \\mulxq 8(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%r11
+                \\mulxq 16(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 24(%%r14), %%rax, %%r9
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%rcx, %%r9
+                \\adcxq %%r13, %%r9
+                // Iteration 2: mul_add_1 + reduction
+                \\movq 16(%%rdi), %%rdx
+                \\mulxq (%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%r11
+                \\mulxq 8(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 16(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%r9
+                \\mulxq 24(%%rsi), %%rax, %%rcx
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%rcx
+                \\adcxq %%r13, %%rcx
+                //
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r10, %%rdx, %%rax
+                \\mulxq (%%r14), %%rax, %%r13
+                \\adcxq %%r10, %%rax
+                \\adoxq %%r13, %%r11
+                \\mulxq 8(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 16(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%r9
+                \\mulxq 24(%%r14), %%rax, %%r10
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%rcx, %%r10
+                \\adcxq %%r13, %%r10
+                // Iteration 3: mul_add_1 + reduction
+                \\movq 24(%%rdi), %%rdx
+                \\mulxq (%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 8(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%r9
+                \\mulxq 16(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%r10
+                \\mulxq 24(%%rsi), %%rax, %%rcx
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%rcx
+                \\adcxq %%r13, %%rcx
+                //
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r11, %%rdx, %%rax
+                \\mulxq (%%r14), %%rax, %%r13
+                \\adcxq %%r11, %%rax
+                \\adoxq %%r13, %%r8
+                \\mulxq 8(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%r9
+                \\mulxq 16(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%r10
+                \\mulxq 24(%%r14), %%rax, %%r11
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%rcx, %%r11
+                \\adcxq %%r13, %%r11
+                : [_r0] "={r8}" (r0),
+                  [_r1] "={r9}" (r1),
+                  [_r2] "={r10}" (r2),
+                  [_r3] "={r11}" (r3),
+                : [_a] "{rdi}" (&a),
+                  [_b] "{rsi}" (&b),
+                  [_mod] "{r14}" (&mod_arr),
+                  [_inv] "{rbx}" (montgomery_inv),
+                : .{ .rax = true, .rcx = true, .rdx = true, .r13 = true, .cc = true, .memory = true }
+            );
+
+            var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
+            if (!result.lessThanModulus()) {
+                result = result.subtractModulus();
+            }
+            return result;
+        }
+
         /// Optimized multiplication by a 128-bit value stored in high limbs
         /// Matches arkworks' mul_hi_bigint_u128 behavior
         ///
@@ -456,11 +631,17 @@ pub fn MontgomeryField(
 
         /// Field multiplication
         pub fn mul(self: Self, other: Self) Self {
+            if (comptime use_asm_mul) {
+                return self.montgomeryMulX86(other);
+            }
             return self.montgomeryMul(other);
         }
 
         /// Field squaring
         pub fn square(self: Self) Self {
+            if (comptime use_asm_mul) {
+                return self.montgomeryMulX86(self);
+            }
             return self.montgomeryMul(self);
         }
 
@@ -866,8 +1047,164 @@ pub const BN254Scalar = struct {
         return res;
     }
 
+    /// x86-64 BMI2+ADX accelerated CIOS Montgomery multiplication (BN254 scalar field).
+    fn montgomeryMulX86(self: Self, other: Self) Self {
+        const a = self.limbs;
+        const b = other.limbs;
+        const mod_arr: [4]u64 = BN254_MODULUS;
+
+        var r0: u64 = undefined;
+        var r1: u64 = undefined;
+        var r2: u64 = undefined;
+        var r3: u64 = undefined;
+
+        asm volatile (
+            \\xorq %%rcx, %%rcx
+            \\movq (%%rdi), %%rdx
+            \\mulxq (%%rsi), %%r8, %%r9
+            \\mulxq 8(%%rsi), %%rax, %%r10
+            \\adcxq %%rax, %%r9
+            \\mulxq 16(%%rsi), %%rax, %%r11
+            \\adcxq %%rax, %%r10
+            \\mulxq 24(%%rsi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r11
+            \\adcxq %%r13, %%rcx
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r8, %%rdx, %%rax
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r8, %%rax
+            \\adoxq %%r13, %%r9
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 24(%%r14), %%rax, %%r8
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%rcx, %%r8
+            \\adcxq %%r13, %%r8
+            //
+            \\movq 8(%%rdi), %%rdx
+            \\mulxq (%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 8(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 16(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 24(%%rsi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%rcx
+            \\adcxq %%r13, %%rcx
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r9, %%rdx, %%rax
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r9, %%rax
+            \\adoxq %%r13, %%r10
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 24(%%r14), %%rax, %%r9
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%rcx, %%r9
+            \\adcxq %%r13, %%r9
+            //
+            \\movq 16(%%rdi), %%rdx
+            \\mulxq (%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 8(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 16(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%r9
+            \\mulxq 24(%%rsi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%rcx
+            \\adcxq %%r13, %%rcx
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r10, %%rdx, %%rax
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r10, %%rax
+            \\adoxq %%r13, %%r11
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%r9
+            \\mulxq 24(%%r14), %%rax, %%r10
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%rcx, %%r10
+            \\adcxq %%r13, %%r10
+            //
+            \\movq 24(%%rdi), %%rdx
+            \\mulxq (%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 8(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%r9
+            \\mulxq 16(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 24(%%rsi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%rcx
+            \\adcxq %%r13, %%rcx
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r11, %%rdx, %%rax
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r11, %%rax
+            \\adoxq %%r13, %%r8
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%r9
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 24(%%r14), %%rax, %%r11
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%rcx, %%r11
+            \\adcxq %%r13, %%r11
+            : [_r0] "={r8}" (r0),
+              [_r1] "={r9}" (r1),
+              [_r2] "={r10}" (r2),
+              [_r3] "={r11}" (r3),
+            : [_a] "{rdi}" (&a),
+              [_b] "{rsi}" (&b),
+              [_mod] "{r14}" (&mod_arr),
+              [_inv] "{rbx}" (BN254_INV),
+            : .{ .rax = true, .rcx = true, .rdx = true, .r13 = true, .cc = true, .memory = true }
+        );
+
+        var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
+        if (!result.lessThanModulus()) {
+            result = result.subtractModulus();
+        }
+        return result;
+    }
+
     /// Field multiplication
     pub fn mul(self: Self, other: Self) Self {
+        if (comptime use_asm_mul) {
+            return self.montgomeryMulX86(other);
+        }
         return self.montgomeryMul(other);
     }
 
@@ -1003,6 +1340,9 @@ pub const BN254Scalar = struct {
     /// Field squaring (optimized using Karatsuba-like technique)
     /// Saves ~25% multiplications compared to naive multiplication
     pub fn square(self: Self) Self {
+        if (comptime use_asm_mul) {
+            return self.montgomeryMulX86(self);
+        }
         // Optimized squaring: we can compute a^2 with fewer multiplications
         // Since (a0 + a1*2^64 + a2*2^128 + a3*2^192)^2 has symmetric terms
         // For example: 2*a0*a1 instead of a0*a1 + a1*a0

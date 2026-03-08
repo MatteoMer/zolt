@@ -187,16 +187,8 @@ pub fn nextPowerOfTwo(n: usize) usize {
     return std.math.ceilPowerOfTwo(usize, n) catch std.math.maxInt(usize);
 }
 
-/// Parallel iterator helper
-///
-/// This implementation processes items sequentially for simplicity and determinism.
-/// For parallel execution, use ThreadPool or std.Thread directly with explicit
-/// work partitioning for your specific use case.
-pub fn parallelFor(comptime T: type, slice: []T, context: anytype, comptime func: fn (*T, @TypeOf(context)) void) void {
-    for (slice) |*item| {
-        func(item, context);
-    }
-}
+pub const thread_pool = @import("thread_pool.zig");
+pub const ThreadPool = thread_pool.ThreadPool;
 
 /// Timer for profiling
 pub const Timer = struct {
@@ -223,27 +215,7 @@ pub const Timer = struct {
     }
 };
 
-/// Simple thread pool for parallel operations
-pub const ThreadPool = struct {
-    threads: []std.Thread,
-    allocator: Allocator,
-
-    pub fn init(allocator: Allocator, num_threads: usize) !ThreadPool {
-        const threads = try allocator.alloc(std.Thread, num_threads);
-        return .{
-            .threads = threads,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *ThreadPool) void {
-        self.allocator.free(self.threads);
-    }
-
-    pub fn numThreads() usize {
-        return std.Thread.getCpuCount() catch 1;
-    }
-};
+// ThreadPool re-exported from thread_pool.zig above
 
 /// Bit manipulation utilities
 pub const BitUtils = struct {

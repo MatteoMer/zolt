@@ -32,6 +32,7 @@ const Allocator = std.mem.Allocator;
 const pairing = @import("../../field/pairing.zig");
 const field = @import("../../field/mod.zig");
 const msm = @import("../../msm/mod.zig");
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 const Fp = field.BN254BaseField;
 const Fr = field.BN254Scalar;
@@ -700,26 +701,87 @@ fn computeRowCommitmentsWithCols(comptime F: type, params: anytype, evals: []con
     return row_commitments;
 }
 
-/// Compute multi-pairing of G1 and G2 vectors using shared final exponentiation
-fn multiPairG1G2(g1_vec: []const G1Point, g2_vec: []const G2Point) GT {
+fn computeRowCommitmentsWithColsParallel(comptime F: type, params: anytype, evals: []const F, num_cols: usize, allocator: Allocator, tp: *ThreadPool) ![]G1Point {
+    const num_rows = (evals.len + num_cols - 1) / num_cols;
+
+    const row_commitments = try allocator.alloc(G1Point, num_rows);
+    errdefer allocator.free(row_commitments);
+
+    const Params = @TypeOf(params.*);
+    const Ctx = struct {
+        params_ptr: *const Params,
+        evals_ptr: []const F,
+        out: []G1Point,
+        n_cols: usize,
+        evals_len: usize,
+    };
+    const ctx = Ctx{
+        .params_ptr = params,
+        .evals_ptr = evals,
+        .out = row_commitments,
+        .n_cols = num_cols,
+        .evals_len = evals.len,
+    };
+
+    tp.parallelForForce(num_rows, ctx, struct {
+        fn f(c: Ctx, row: usize) void {
+            const start = row * c.n_cols;
+            const end = @min(start + c.n_cols, c.evals_len);
+
+            if (start >= c.evals_len) {
+                c.out[row] = G1Point.identity();
+                return;
+            }
+
+            const row_evals = c.evals_ptr[start..end];
+            c.out[row] = msm.MSM(F, Fp).compute(
+                c.params_ptr.g1_vec[0..row_evals.len],
+                row_evals,
+            );
+        }
+    }.f);
+
+    return row_commitments;
+}
+
+/// Compute multi-pairing of G1 and G2 vectors using shared final exponentiation.
+/// Optionally uses thread pool for parallel Miller loop computation.
+fn multiPairG1G2WithPool(g1_vec: []const G1Point, g2_vec: []const G2Point, tp: ?*ThreadPool) GT {
     const n = @min(g1_vec.len, g2_vec.len);
-    var miller_acc = pairing.Fp12.one();
-    var any_non_trivial = false;
+    if (n == 0) return GT.one();
 
-    for (0..n) |i| {
-        if (g1_vec[i].infinity or g2_vec[i].infinity) continue;
+    const Ctx = struct { g1_vec: []const G1Point, g2_vec: []const G2Point };
+    const ctx = Ctx{ .g1_vec = g1_vec, .g2_vec = g2_vec };
 
-        const g1_fp = G1PointFp{
-            .x = g1_vec[i].x,
-            .y = g1_vec[i].y,
-            .infinity = false,
-        };
-        const ml = pairing.millerLoopArkworks(g1_fp, g2_vec[i]);
-        miller_acc = miller_acc.mul(ml);
-        any_non_trivial = true;
-    }
+    const mapFn = struct {
+        fn map(c: Ctx, start: usize, end: usize) pairing.Fp12 {
+            var acc = pairing.Fp12.one();
+            for (start..end) |i| {
+                if (c.g1_vec[i].infinity or c.g2_vec[i].infinity) continue;
+                const g1_fp = G1PointFp{
+                    .x = c.g1_vec[i].x,
+                    .y = c.g1_vec[i].y,
+                    .infinity = false,
+                };
+                const ml = pairing.millerLoopArkworks(g1_fp, c.g2_vec[i]);
+                acc = acc.mul(ml);
+            }
+            return acc;
+        }
+    }.map;
 
-    if (!any_non_trivial) return GT.one();
+    const reduceFn = struct {
+        fn reduce(a: pairing.Fp12, b: pairing.Fp12) pairing.Fp12 {
+            return a.mul(b);
+        }
+    }.reduce;
+
+    const miller_acc = if (tp) |pool|
+        pool.parallelReduceForce(pairing.Fp12, n, pairing.Fp12.one(), ctx, mapFn, reduceFn)
+    else
+        mapFn(ctx, 0, n);
+
+    if (miller_acc.eql(pairing.Fp12.one())) return GT.one();
     return pairing.finalExponentiation(miller_acc);
 }
 
@@ -1040,60 +1102,77 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         ///
         /// This matches Jolt/dory-pcs matrix layout for compatible commitments.
         pub fn commit(params: *const SetupParams, evals: []const F) Commitment {
+            return commitWithPool(params, evals, null);
+        }
+
+        pub fn commitWithPool(params: *const SetupParams, evals: []const F, tp: ?*ThreadPool) Commitment {
             if (evals.len == 0) {
                 return GT.one();
             }
 
-            // Compute matrix dimensions from polynomial length
-            // This matches Jolt's DoryGlobals layout:
-            //   sigma = (num_vars + 1) / 2 (integer division, rounding down)
-            //   nu = num_vars - sigma
-            //
-            // For num_vars=3 (8 coeffs): sigma=2, nu=1 → 4 cols × 2 rows
-            // For num_vars=2 (4 coeffs): sigma=1, nu=1 → 2 cols × 2 rows
-            // For num_vars=1 (2 coeffs): sigma=1, nu=0 → 2 cols × 1 row
             const poly_len = evals.len;
             const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
-
-            // Match Jolt's formula: sigma = (num_vars + 1) / 2
             const sigma: usize = (num_vars + 1) / 2;
             const nu: usize = num_vars - sigma;
-
             const num_cols = @as(usize, 1) << @intCast(sigma);
             const num_rows = @as(usize, 1) << @intCast(nu);
 
-            // Compute row commitments with shared final exponentiation
-            var miller_acc = pairing.Fp12.one();
-            var any_non_trivial = false;
+            // Use parallel reduce over rows: each row does MSM + Miller loop independently
+            const Params = SetupParams;
+            const Ctx = struct {
+                params_ptr: *const Params,
+                evals_ptr: []const F,
+                n_cols: usize,
+                n_rows: usize,
+            };
+            const ctx = Ctx{
+                .params_ptr = params,
+                .evals_ptr = evals,
+                .n_cols = num_cols,
+                .n_rows = num_rows,
+            };
 
-            for (0..num_rows) |row| {
-                const start = row * num_cols;
-                const end = @min(start + num_cols, evals.len);
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) pairing.Fp12 {
+                    var acc = pairing.Fp12.one();
+                    for (start..end) |row| {
+                        const row_start = row * c.n_cols;
+                        if (row_start >= c.evals_ptr.len) break;
+                        const row_end = @min(row_start + c.n_cols, c.evals_ptr.len);
+                        const row_evals = c.evals_ptr[row_start..row_end];
 
-                if (start >= evals.len) break;
+                        const row_commitment = msm.MSM(F, Fp).compute(
+                            c.params_ptr.g1_vec[0..row_evals.len],
+                            row_evals,
+                        );
 
-                const row_evals = evals[start..end];
-
-                // Compute MSM for this row
-                const row_commitment = msm.MSM(F, Fp).compute(
-                    params.g1_vec[0..row_evals.len],
-                    row_evals,
-                );
-
-                // Accumulate Miller loop with corresponding G2 generator
-                if (row < params.g2_vec.len and !row_commitment.infinity) {
-                    const row_g1 = G1PointFp{
-                        .x = row_commitment.x,
-                        .y = row_commitment.y,
-                        .infinity = false,
-                    };
-                    const ml = pairing.millerLoopArkworks(row_g1, params.g2_vec[row]);
-                    miller_acc = miller_acc.mul(ml);
-                    any_non_trivial = true;
+                        if (row < c.params_ptr.g2_vec.len and !row_commitment.infinity) {
+                            const row_g1 = G1PointFp{
+                                .x = row_commitment.x,
+                                .y = row_commitment.y,
+                                .infinity = false,
+                            };
+                            const ml = pairing.millerLoopArkworks(row_g1, c.params_ptr.g2_vec[row]);
+                            acc = acc.mul(ml);
+                        }
+                    }
+                    return acc;
                 }
-            }
+            }.f;
 
-            if (!any_non_trivial) return GT.one();
+            const reduceFn = struct {
+                fn f(a: pairing.Fp12, b: pairing.Fp12) pairing.Fp12 {
+                    return a.mul(b);
+                }
+            }.f;
+
+            const miller_acc = if (tp) |pool|
+                pool.parallelReduceForce(pairing.Fp12, num_rows, pairing.Fp12.one(), ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, num_rows);
+
+            // Check if any non-trivial contribution
+            if (std.mem.eql(u8, &std.mem.toBytes(miller_acc), &std.mem.toBytes(pairing.Fp12.one()))) return GT.one();
             return pairing.finalExponentiation(miller_acc);
         }
 
@@ -1111,7 +1190,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             point: []const F,
             allocator: Allocator,
         ) !Proof {
-            return openWithRowCommitments(params, evals, point, null, allocator);
+            return openWithRowCommitments(params, evals, point, null, allocator, null);
         }
 
         /// Create an opening proof with pre-computed row commitments
@@ -1121,6 +1200,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             point: []const F,
             row_commitments_opt: ?[]const G1Point,
             allocator: Allocator,
+            tp: ?*ThreadPool,
         ) !Proof {
             // Compute nu/sigma from the polynomial's actual size, not from SRS params.
             // This matches Jolt's balanced_sigma_nu: sigma = ceil(num_vars/2), nu = num_vars - sigma
@@ -1135,7 +1215,11 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 @memcpy(owned, rc);
                 break :blk owned;
             } else blk: {
-                break :blk try computeRowCommitmentsWithCols(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator);
+                if (tp) |pool| {
+                    break :blk try computeRowCommitmentsWithColsParallel(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator, pool);
+                } else {
+                    break :blk try computeRowCommitmentsWithCols(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator);
+                }
             };
             defer allocator.free(row_commitments);
 
@@ -1301,14 +1385,14 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 // Compute first reduce message
                 // D1L = multiPair(v1_l, g2_vec[0..g2_size])
                 // D1R = multiPair(v1_r, g2_vec[0..g2_size])
-                const d1_left = multiPairG1G2(v1_work[0..g2_size], params.g2_vec[0..g2_size]);
-                const d1_right = multiPairG1G2(v1_work[n2..@min(n2 + g2_size, current_len)], params.g2_vec[0..g2_size]);
+                const d1_left = multiPairG1G2WithPool(v1_work[0..g2_size], params.g2_vec[0..g2_size], tp);
+                const d1_right = multiPairG1G2WithPool(v1_work[n2..@min(n2 + g2_size, current_len)], params.g2_vec[0..g2_size], tp);
 
                 // D2L = multiPair(g1_vec[0..n2], v2_l)
                 // D2R = multiPair(g1_vec[0..n2], v2_r)
                 const g1_size = @min(n2, current_col_len);
-                const d2_left = multiPairG1G2(params.g1_vec[0..g1_size], v2_work[0..g1_size]);
-                const d2_right = multiPairG1G2(params.g1_vec[0..g1_size], v2_work[n2..@min(n2 + g1_size, current_len)]);
+                const d2_left = multiPairG1G2WithPool(params.g1_vec[0..g1_size], v2_work[0..g1_size], tp);
+                const d2_right = multiPairG1G2WithPool(params.g1_vec[0..g1_size], v2_work[n2..@min(n2 + g1_size, current_len)], tp);
 
                 // E1_beta = MSM(g1_vec[0..current_col_len], s2_work[0..current_col_len])
                 const e1_beta = msm.MSM(F, Fp).compute(
@@ -1354,13 +1438,30 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 // Pre-convert scalars from Montgomery form once
                 const beta_limbs = beta.fromMontgomery().limbs;
                 const beta_inv_limbs = beta_inv.fromMontgomery().limbs;
-                for (0..current_col_len) |i| {
-                    const scaled_g1 = msm.MSM(F, Fp).scalarMulWithLimbs(params.g1_vec[i], beta_limbs).toAffine();
-                    v1_work[i] = v1_work[i].add(scaled_g1);
-                }
-                for (0..current_row_len) |i| {
-                    const scaled_proj = params.g2_vec[i].scalarMulWithLimbsProjective(beta_inv_limbs);
-                    v2_work[i] = scaled_proj.addAffine(v2_work[i]).toAffine();
+                if (tp) |pool| {
+                    const BetaCtx1 = struct { v1: []G1Point, g1: []const G1Point, b: [4]u64 };
+                    pool.parallelForForce(current_col_len, BetaCtx1{ .v1 = v1_work, .g1 = params.g1_vec, .b = beta_limbs }, struct {
+                        fn f(cx: BetaCtx1, i: usize) void {
+                            const scaled_g1 = msm.MSM(F, Fp).scalarMulWithLimbs(cx.g1[i], cx.b).toAffine();
+                            cx.v1[i] = cx.v1[i].add(scaled_g1);
+                        }
+                    }.f);
+                    const BetaCtx2 = struct { v2: []G2Point, g2: []const G2Point, bi: [4]u64 };
+                    pool.parallelForForce(current_row_len, BetaCtx2{ .v2 = v2_work, .g2 = params.g2_vec, .bi = beta_inv_limbs }, struct {
+                        fn f(cx: BetaCtx2, i: usize) void {
+                            const scaled_proj = cx.g2[i].scalarMulWithLimbsProjective(cx.bi);
+                            cx.v2[i] = scaled_proj.addAffine(cx.v2[i]).toAffine();
+                        }
+                    }.f);
+                } else {
+                    for (0..current_col_len) |i| {
+                        const scaled_g1 = msm.MSM(F, Fp).scalarMulWithLimbs(params.g1_vec[i], beta_limbs).toAffine();
+                        v1_work[i] = v1_work[i].add(scaled_g1);
+                    }
+                    for (0..current_row_len) |i| {
+                        const scaled_proj = params.g2_vec[i].scalarMulWithLimbsProjective(beta_inv_limbs);
+                        v2_work[i] = scaled_proj.addAffine(v2_work[i]).toAffine();
+                    }
                 }
 
                 // Compute second reduce message
@@ -1368,8 +1469,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 // C- = multiPair(v1_r, v2_l)
                 const v1_half = @min(n2, current_col_len);
                 const v2_half = @min(n2, current_row_len);
-                const c_plus = multiPairG1G2(v1_work[0..v1_half], v2_work[n2..@min(n2 + v2_half, current_len)]);
-                const c_minus = multiPairG1G2(v1_work[n2..@min(n2 + v1_half, current_len)], v2_work[0..v2_half]);
+                const c_plus = multiPairG1G2WithPool(v1_work[0..v1_half], v2_work[n2..@min(n2 + v2_half, current_len)], tp);
+                const c_minus = multiPairG1G2WithPool(v1_work[n2..@min(n2 + v1_half, current_len)], v2_work[0..v2_half], tp);
 
                 // E1+ = MSM(v1_l, s2_r)
                 // E1- = MSM(v1_r, s2_l)
@@ -1397,26 +1498,48 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 // Apply second challenge: fold vectors (pre-convert scalars once)
                 const alpha_limbs = alpha.fromMontgomery().limbs;
                 const alpha_inv_limbs = alpha_inv.fromMontgomery().limbs;
-                // v1 = alpha * v1_l + v1_r
-                for (0..v1_half) |i| {
-                    const scaled_l = msm.MSM(F, Fp).scalarMulWithLimbs(v1_work[i], alpha_limbs).toAffine();
-                    v1_work[i] = scaled_l.add(v1_work[i + n2]);
-                }
-
-                // v2 = alpha_inv * v2_l + v2_r
-                for (0..v2_half) |i| {
-                    const scaled_proj = v2_work[i].scalarMulWithLimbsProjective(alpha_inv_limbs);
-                    v2_work[i] = scaled_proj.addAffine(v2_work[i + n2]).toAffine();
-                }
-
-                // s1 = alpha * s1_l + s1_r (row dimension)
-                for (0..v2_half) |i| {
-                    s1_work[i] = alpha.mul(s1_work[i]).add(s1_work[i + n2]);
-                }
-
-                // s2 = alpha_inv * s2_l + s2_r (col dimension)
-                for (0..v1_half) |i| {
-                    s2_work[i] = alpha_inv.mul(s2_work[i]).add(s2_work[i + n2]);
+                if (tp) |pool| {
+                    const FoldCtx1 = struct { v1: []G1Point, a: [4]u64, half: usize };
+                    pool.parallelForForce(v1_half, FoldCtx1{ .v1 = v1_work, .a = alpha_limbs, .half = n2 }, struct {
+                        fn f(cx: FoldCtx1, i: usize) void {
+                            const scaled_l = msm.MSM(F, Fp).scalarMulWithLimbs(cx.v1[i], cx.a).toAffine();
+                            cx.v1[i] = scaled_l.add(cx.v1[i + cx.half]);
+                        }
+                    }.f);
+                    const FoldCtx2 = struct { v2: []G2Point, ai: [4]u64, half: usize };
+                    pool.parallelForForce(v2_half, FoldCtx2{ .v2 = v2_work, .ai = alpha_inv_limbs, .half = n2 }, struct {
+                        fn f(cx: FoldCtx2, i: usize) void {
+                            const scaled_proj = cx.v2[i].scalarMulWithLimbsProjective(cx.ai);
+                            cx.v2[i] = scaled_proj.addAffine(cx.v2[i + cx.half]).toAffine();
+                        }
+                    }.f);
+                    const FoldCtxS1 = struct { s: []F, a_val: F, half: usize };
+                    pool.parallelFor(v2_half, FoldCtxS1{ .s = s1_work, .a_val = alpha, .half = n2 }, struct {
+                        fn f(cx: FoldCtxS1, i: usize) void {
+                            cx.s[i] = cx.a_val.mul(cx.s[i]).add(cx.s[i + cx.half]);
+                        }
+                    }.f);
+                    const FoldCtxS2 = struct { s: []F, ai_val: F, half: usize };
+                    pool.parallelFor(v1_half, FoldCtxS2{ .s = s2_work, .ai_val = alpha_inv, .half = n2 }, struct {
+                        fn f(cx: FoldCtxS2, i: usize) void {
+                            cx.s[i] = cx.ai_val.mul(cx.s[i]).add(cx.s[i + cx.half]);
+                        }
+                    }.f);
+                } else {
+                    for (0..v1_half) |i| {
+                        const scaled_l = msm.MSM(F, Fp).scalarMulWithLimbs(v1_work[i], alpha_limbs).toAffine();
+                        v1_work[i] = scaled_l.add(v1_work[i + n2]);
+                    }
+                    for (0..v2_half) |i| {
+                        const scaled_proj = v2_work[i].scalarMulWithLimbsProjective(alpha_inv_limbs);
+                        v2_work[i] = scaled_proj.addAffine(v2_work[i + n2]).toAffine();
+                    }
+                    for (0..v2_half) |i| {
+                        s1_work[i] = alpha.mul(s1_work[i]).add(s1_work[i + n2]);
+                    }
+                    for (0..v1_half) |i| {
+                        s2_work[i] = alpha_inv.mul(s2_work[i]).add(s2_work[i + n2]);
+                    }
                 }
 
                 // Update dimensions for next round
@@ -1488,6 +1611,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             row_commitments_opt: ?[]const G1Point,
             transcript: anytype,
             allocator: Allocator,
+            tp: ?*ThreadPool,
         ) !Proof {
             // Compute nu/sigma from the polynomial's actual size, not from SRS params.
             // This matches Jolt's balanced_sigma_nu: sigma = ceil(num_vars/2), nu = num_vars - sigma
@@ -1502,7 +1626,11 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 @memcpy(owned, rc);
                 break :blk owned;
             } else blk: {
-                break :blk try computeRowCommitmentsWithCols(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator);
+                if (tp) |pool| {
+                    break :blk try computeRowCommitmentsWithColsParallel(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator, pool);
+                } else {
+                    break :blk try computeRowCommitmentsWithCols(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator);
+                }
             };
             defer allocator.free(row_commitments);
 
@@ -1664,10 +1792,10 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const n2 = current_len / 2;
 
                 // Compute first reduce message
-                const d1_left = multiPairG1G2(v1_work[0..n2], params.g2_vec[0..n2]);
-                const d1_right = multiPairG1G2(v1_work[n2..current_len], params.g2_vec[0..n2]);
-                const d2_left = multiPairG1G2(params.g1_vec[0..n2], v2_work[0..n2]);
-                const d2_right = multiPairG1G2(params.g1_vec[0..n2], v2_work[n2..current_len]);
+                const d1_left = multiPairG1G2WithPool(v1_work[0..n2], params.g2_vec[0..n2], tp);
+                const d1_right = multiPairG1G2WithPool(v1_work[n2..current_len], params.g2_vec[0..n2], tp);
+                const d2_left = multiPairG1G2WithPool(params.g1_vec[0..n2], v2_work[0..n2], tp);
+                const d2_right = multiPairG1G2WithPool(params.g1_vec[0..n2], v2_work[n2..current_len], tp);
                 const e1_beta = msm.MSM(F, Fp).compute(params.g1_vec[0..current_len], s2_work[0..current_len]);
                 const e2_beta = msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len]);
 
@@ -1724,17 +1852,43 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 // Apply first challenge (pre-convert scalars from Montgomery form once)
                 const beta_limbs = beta.fromMontgomery().limbs;
                 const beta_inv_limbs = beta_inv.fromMontgomery().limbs;
-                for (0..current_len) |i| {
-                    const scaled_g1 = msm.MSM(F, Fp).scalarMulWithLimbs(params.g1_vec[i], beta_limbs).toAffine();
-                    v1_work[i] = v1_work[i].add(scaled_g1);
-
-                    const scaled_proj = params.g2_vec[i].scalarMulWithLimbsProjective(beta_inv_limbs);
-                    v2_work[i] = scaled_proj.addAffine(v2_work[i]).toAffine();
+                if (tp) |pool| {
+                    const BetaCtx = struct {
+                        v1: []G1Point,
+                        v2: []G2Point,
+                        g1: []const G1Point,
+                        g2: []const G2Point,
+                        b_limbs: [4]u64,
+                        bi_limbs: [4]u64,
+                    };
+                    const beta_ctx = BetaCtx{
+                        .v1 = v1_work,
+                        .v2 = v2_work,
+                        .g1 = params.g1_vec,
+                        .g2 = params.g2_vec,
+                        .b_limbs = beta_limbs,
+                        .bi_limbs = beta_inv_limbs,
+                    };
+                    pool.parallelForForce(current_len, beta_ctx, struct {
+                        fn f(cx: BetaCtx, i: usize) void {
+                            const scaled_g1 = msm.MSM(F, Fp).scalarMulWithLimbs(cx.g1[i], cx.b_limbs).toAffine();
+                            cx.v1[i] = cx.v1[i].add(scaled_g1);
+                            const scaled_proj = cx.g2[i].scalarMulWithLimbsProjective(cx.bi_limbs);
+                            cx.v2[i] = scaled_proj.addAffine(cx.v2[i]).toAffine();
+                        }
+                    }.f);
+                } else {
+                    for (0..current_len) |i| {
+                        const scaled_g1 = msm.MSM(F, Fp).scalarMulWithLimbs(params.g1_vec[i], beta_limbs).toAffine();
+                        v1_work[i] = v1_work[i].add(scaled_g1);
+                        const scaled_proj = params.g2_vec[i].scalarMulWithLimbsProjective(beta_inv_limbs);
+                        v2_work[i] = scaled_proj.addAffine(v2_work[i]).toAffine();
+                    }
                 }
 
                 // Compute second reduce message
-                const c_plus = multiPairG1G2(v1_work[0..n2], v2_work[n2..current_len]);
-                const c_minus = multiPairG1G2(v1_work[n2..current_len], v2_work[0..n2]);
+                const c_plus = multiPairG1G2WithPool(v1_work[0..n2], v2_work[n2..current_len], tp);
+                const c_minus = multiPairG1G2WithPool(v1_work[n2..current_len], v2_work[0..n2], tp);
                 const e1_plus = msm.MSM(F, Fp).compute(v1_work[0..n2], s2_work[n2..current_len]);
                 const e1_minus = msm.MSM(F, Fp).compute(v1_work[n2..current_len], s2_work[0..n2]);
                 const e2_plus = msmG2(F, v2_work[n2..current_len], s1_work[0..n2]);
@@ -1764,22 +1918,54 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 // Fold vectors (pre-convert scalars from Montgomery form once)
                 const alpha_limbs = alpha.fromMontgomery().limbs;
                 const alpha_inv_limbs = alpha_inv.fromMontgomery().limbs;
-                for (0..n2) |i| {
-                    const scaled_l = msm.MSM(F, Fp).scalarMulWithLimbs(v1_work[i], alpha_limbs).toAffine();
-                    v1_work[i] = scaled_l.add(v1_work[i + n2]);
-                }
-
-                for (0..n2) |i| {
-                    const scaled_proj = v2_work[i].scalarMulWithLimbsProjective(alpha_inv_limbs);
-                    v2_work[i] = scaled_proj.addAffine(v2_work[i + n2]).toAffine();
-                }
-
-                for (0..n2) |i| {
-                    s1_work[i] = alpha.mul(s1_work[i]).add(s1_work[i + n2]);
-                }
-
-                for (0..n2) |i| {
-                    s2_work[i] = alpha_inv.mul(s2_work[i]).add(s2_work[i + n2]);
+                if (tp) |pool| {
+                    const FoldCtx = struct {
+                        v1: []G1Point,
+                        v2: []G2Point,
+                        s1: []F,
+                        s2: []F,
+                        a_limbs: [4]u64,
+                        ai_limbs: [4]u64,
+                        a: F,
+                        ai: F,
+                        half: usize,
+                    };
+                    const fold_ctx = FoldCtx{
+                        .v1 = v1_work,
+                        .v2 = v2_work,
+                        .s1 = s1_work,
+                        .s2 = s2_work,
+                        .a_limbs = alpha_limbs,
+                        .ai_limbs = alpha_inv_limbs,
+                        .a = alpha,
+                        .ai = alpha_inv,
+                        .half = n2,
+                    };
+                    pool.parallelForForce(n2, fold_ctx, struct {
+                        fn f(cx: FoldCtx, i: usize) void {
+                            const scaled_l = msm.MSM(F, Fp).scalarMulWithLimbs(cx.v1[i], cx.a_limbs).toAffine();
+                            cx.v1[i] = scaled_l.add(cx.v1[i + cx.half]);
+                            const scaled_proj = cx.v2[i].scalarMulWithLimbsProjective(cx.ai_limbs);
+                            cx.v2[i] = scaled_proj.addAffine(cx.v2[i + cx.half]).toAffine();
+                            cx.s1[i] = cx.a.mul(cx.s1[i]).add(cx.s1[i + cx.half]);
+                            cx.s2[i] = cx.ai.mul(cx.s2[i]).add(cx.s2[i + cx.half]);
+                        }
+                    }.f);
+                } else {
+                    for (0..n2) |i| {
+                        const scaled_l = msm.MSM(F, Fp).scalarMulWithLimbs(v1_work[i], alpha_limbs).toAffine();
+                        v1_work[i] = scaled_l.add(v1_work[i + n2]);
+                    }
+                    for (0..n2) |i| {
+                        const scaled_proj = v2_work[i].scalarMulWithLimbsProjective(alpha_inv_limbs);
+                        v2_work[i] = scaled_proj.addAffine(v2_work[i + n2]).toAffine();
+                    }
+                    for (0..n2) |i| {
+                        s1_work[i] = alpha.mul(s1_work[i]).add(s1_work[i + n2]);
+                    }
+                    for (0..n2) |i| {
+                        s2_work[i] = alpha_inv.mul(s2_work[i]).add(s2_work[i + n2]);
+                    }
                 }
 
                 current_len = n2;

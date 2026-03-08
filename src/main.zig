@@ -291,7 +291,10 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
     // Initialize prover
     std.debug.print("\n[1/2] Initializing prover...\n", .{});
 
-    var prover_inst = zolt.zkvm.JoltProver(BN254Scalar).init(allocator);
+    var thread_pool = try zolt.utils.ThreadPool.init(allocator);
+    defer thread_pool.deinit();
+
+    var prover_inst = zolt.zkvm.JoltProver(BN254Scalar).initWithThreadPool(allocator, &thread_pool);
 
     // Generate Jolt-compatible proof with Dory commitments
     std.debug.print("\n[2/2] Generating proof...\n", .{});

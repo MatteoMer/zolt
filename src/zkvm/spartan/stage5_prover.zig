@@ -20,6 +20,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 const poly_mod = @import("../../poly/mod.zig");
 const UniPoly = poly_mod.UniPoly;
@@ -85,6 +86,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         const Self = @This();
 
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(allocator: Allocator) Self {
             return .{ .allocator = allocator };
@@ -563,8 +565,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Build eq_reduction[j] = eq(j, r_reduction) for all cycles j
             // r_reduction is in BIG_ENDIAN order (MSB first)
-            for (0..T) |j| {
-                lookups_eq_evals[j] = computeEqAtIndex(r_reduction, j);
+            if (self.thread_pool) |tp| {
+                const EqCtx = struct { r: []const F, out: []F };
+                const eq_ctx = EqCtx{ .r = r_reduction, .out = lookups_eq_evals };
+                tp.parallelFor(T, eq_ctx, struct {
+                    fn f(c: EqCtx, j: usize) void {
+                        c.out[j] = computeEqAtIndex(c.r, j);
+                    }
+                }.f);
+            } else {
+                for (0..T) |j| {
+                    lookups_eq_evals[j] = computeEqAtIndex(r_reduction, j);
+                }
             }
 
             // Debug: print first few eq values and verify sum = 1
@@ -642,7 +654,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // BRUTE FORCE: Compute val(r_address, r_cycle) directly from register state
             // val(k, j) = value of register k at START of cycle j
             // val(r_address, r_cycle) = Σ_{k,j} eq(r_address, k) * eq(r_cycle, j) * register_value(k, j)
-            {
+            if (comptime debug_verbose) {
                 const REGS_K: usize = 1 << REGISTERS_LOG_K; // 128
                 var register_vals: [REGS_K]u64 = [_]u64{0} ** REGS_K;
                 var brute_val = F.zero();
@@ -687,7 +699,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Also verify inc values match between Stage 4 style and trace
-            {
+            if (comptime debug_verbose) {
                 const REGS_K2: usize = 1 << REGISTERS_LOG_K; // 128
                 var reg_vals2: [REGS_K2]u64 = [_]u64{0} ** REGS_K2;
                 var inc_mismatches: usize = 0;
@@ -722,6 +734,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Verify the sum Σ_j inc(j) · wa(j) · lt(j) matches the input claim
+            if (comptime debug_verbose) {
             var computed_sum = F.zero();
             var non_zero_terms: usize = 0;
             for (0..T) |j| {
@@ -816,6 +829,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     });
                 }
             }
+            } // end debug_verbose verify/cumsum block
 
             // Build combined values for LookupsReadRaf from trace
             // combined(j) = lookup_output(j) + gamma*left_op(j) + gamma^2*right_op(j)
@@ -2690,16 +2704,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Run the batched sumcheck
             dbg("[STAGE5] Entering main sumcheck loop, max_num_rounds={}\n", .{max_num_rounds});
 
-            // BRUTE FORCE PER-ROUND DIAGNOSTIC: Track per-cycle weights independently
-            // bf_weights[j] starts at u_initial[j] (= eq(j, r_reduction))
-            // At each round R, bf_weights[j] *= eq_bit(challenge[R], K(j)_{127-R})
-            // Then bf_eval_0 = Σ_{j: bit_R=0} bf_weights[j] * cv[j]
-            // This provides a ground-truth eval_0 for comparison with prefix-suffix
-            var bf_weights = try self.allocator.alloc(F, T);
-            defer self.allocator.free(bf_weights);
-            for (0..T) |j| {
-                bf_weights[j] = lookups_eq_evals[j].mul(lookups_combined_vals[j]);
+            // BRUTE FORCE PER-ROUND DIAGNOSTIC (disabled in release)
+            var bf_weights: []F = &[_]F{};
+            if (comptime debug_verbose) {
+                bf_weights = try self.allocator.alloc(F, T);
+                for (0..T) |j| {
+                    bf_weights[j] = lookups_eq_evals[j].mul(lookups_combined_vals[j]);
+                }
             }
+            defer if (comptime debug_verbose) self.allocator.free(bf_weights);
 
             // Track accumulated eq factor for bound cycle variables
             // This matches Jolt's current_scalar in GruenSplitEqPolynomial
@@ -2729,7 +2742,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 } else {
                     // Instance is active - compute actual round polynomial
                     const regs_round = regs_val_num_rounds - remaining_rounds;
-                    const poly_evals = computeRegsValRoundPoly(inc_evals, wa_evals, lt_evals, regs_round);
+                    const poly_evals = computeRegsValRoundPoly(inc_evals, wa_evals, lt_evals, regs_round, self.thread_pool);
                     combined_poly[0] = combined_poly[0].add(batch0.mul(poly_evals[0]));
                     combined_poly[1] = combined_poly[1].add(batch0.mul(poly_evals[1]));
                     combined_poly[2] = combined_poly[2].add(batch0.mul(poly_evals[2]));
@@ -3164,7 +3177,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // (TARGETED DEBUG moved after eval_1 derivation below)
 
-                    // *** PER-ROUND BRUTE FORCE eval_0 CHECK (ALWAYS ON) ***
+                    // *** PER-ROUND BRUTE FORCE eval_0 CHECK ***
+                    if (comptime debug_verbose)
                     // bf_weights[j] = eq(j,r_red) * cv[j] * Π_{i<round} eq_bit(r_i, K(j)_{127-i})
                     // eval_0 = Σ_{j: bit(round) of K(j) = 0} bf_weights[j]
                     {
@@ -3280,10 +3294,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
 
                     // BRUTE FORCE VERIFICATION: At round 0, compute the Instance 2 eval_0
-                    // directly from the trace data. eval_0 = sum of all u_evals[j] * combined[j]
-                    // where bit round (HighToLow) of lookup_index[j] is 0.
-                    // eval_1 = sum where that bit is 1.
-                    // eval_0 + eval_1 should equal lookups_claim.
+                    if (comptime debug_verbose) {
                     if (round == 0) {
                         // At round 0, verify that combined_vals matches trace
                         const bit_pos_r0 = LOOKUPS_LOG_K - 1; // bit 127 for round 0
@@ -3315,6 +3326,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             print("[BRUTE R0] bf_eval_0 == ps_eval_0: {}\n", .{bf_eval_0_r0.eql(eval_0_inst2)});
                         }
                     }
+                    } // end comptime debug_verbose round-0 brute force
+                    if (comptime debug_verbose) {
                     if (round < 3 or round == 7 or round == 15 or round == 127) {
                         const bit_pos = LOOKUPS_LOG_K - 1 - round;
                         var direct_eval_0 = F.zero();
@@ -3659,6 +3672,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             dbg("[CORRECT_RAF R{}] matches raf_evals[0]: {}\n", .{ round, correct_raf_eval_0.eql(raf_evals[0]) });
                         }
                     }
+                    } // end comptime debug_verbose round diagnostics
 
                     // Combine Instance 2 with Instance 0 and 1 contributions
                     // During address rounds, all active instances produce degree-2 polynomials:
@@ -3723,13 +3737,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     challenges[round] = challenge;
 
                     // DEBUG: Print challenge and coefficients for comparison with Jolt verifier
-                    if (round < 4 or round == 7 or round == 127 or round == 128) {
+                    if (comptime debug_verbose) if (round < 4 or round == 7 or round == 127 or round == 128) {
                         const print = std.debug.print;
                         print("[ZOLT S5V R{}] hint={any}\n", .{ round, current_batched_claim.toBytes()[0..16].* });
                         print("[ZOLT S5V R{}] c0={any}\n", .{ round, coeffs[0].toBytes()[0..16].* });
                         print("[ZOLT S5V R{}] c2={any}\n", .{ round, coeffs[1].toBytes()[0..16].* });
                         print("[ZOLT S5V R{}] challenge={any}\n", .{ round, challenge.toBytes()[0..16].* });
-                    }
+                    };
 
                     // Update current_batched_claim by evaluating degree-2 polynomial at challenge
                     // p(r) = c0 + r*c1 + r^2*c2
@@ -3953,11 +3967,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Print Instance 2 claim at EVERY round (matches Jolt's [S5 INST2 CLAIM R{}])
                     dbg("[S5 INST2 CLAIM R{}] {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
 
-                    // BRUTE FORCE CHAIN CHECK: Compute the expected claim directly
-                    // After binding rounds 0..round with challenges, the claim should be:
-                    // Σ_t u[t] * Π_{j=0}^{round} eq_bit(challenges[j], K(t)_{127-j}) * cv[t]
-                    // where cv[t] = table(K(t)) + γ*raf(K(t), t) (the INITIAL combined value)
-                    if (round < 16) {
+                    // BRUTE FORCE CHAIN CHECK (debug only)
+                    if (comptime debug_verbose) if (round < 16) {
                         var bf_chain_sum = F.zero();
                         for (0..T) |jj| {
                             const u_j = lookups_eq_evals[jj]; // eq(j, r_reduction) at round 0, but CONDENSED after phase transitions
@@ -3979,11 +3990,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             round,
                             bf_chain_sum.eql(lookups_claim),
                         });
-                    }
+                    };
 
-                    // BINARY SEARCH: Compute "correct" Instance 2 claim from batched polynomial
-                    // and compare with lookups_claim (which is derived from eval_0/eval_2)
-                    {
+                    // BINARY SEARCH debug diagnostic
+                    if (comptime debug_verbose) {
                         // The correct inst2 claim should equal the one derived from evaluating
                         // the Instance 2 polynomial at the challenge. If eval_0_inst2 or eval_2_inst2
                         // were wrong, lookups_claim would be wrong.
@@ -4199,7 +4209,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
                         const factor = if (bit == 0) one_minus_r else challenge;
                         lookups_ra_weights[j] = lookups_ra_weights[j].mul(factor);
-                        bf_weights[j] = bf_weights[j].mul(factor);
+                        if (comptime debug_verbose) bf_weights[j] = bf_weights[j].mul(factor);
 
                         if (chunk_idx < ra_num_chunks) {
                             ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
@@ -5944,7 +5954,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // Update Instance 0 claim: new_claim = p0(challenge)
                         // Get the polynomial coefficients from Toom-Cook evaluations
-                        const poly_evals = computeRegsValRoundPoly(inc_evals, wa_evals, lt_evals, regs_round);
+                        const poly_evals = computeRegsValRoundPoly(inc_evals, wa_evals, lt_evals, regs_round, self.thread_pool);
                         const inst0_coeffs = UniPoly(F).toomCookToCoeffs(poly_evals);
                         // Evaluate at challenge using Horner's method
                         var p0_at_r = inst0_coeffs[3]; // c3 (highest)
@@ -7058,57 +7068,57 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
         /// Compute round polynomial for RegistersValEvaluation
         /// Returns [p(0), p(1), p(2), p(3)] for degree-3 sumcheck
-        fn computeRegsValRoundPoly(inc: []F, wa: []F, lt: []F, round: usize) [4]F {
-            var evals = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+        fn computeRegsValRoundPoly(inc: []F, wa: []F, lt: []F, round: usize, tp: ?*ThreadPool) [4]F {
             const n = inc.len >> @intCast(round);
             const half = n / 2;
 
             if (half == 0) {
+                var evals = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
                 if (n > 0) {
-                    // Constant polynomial: p(x) = c
-                    // For Toom-Cook: [p(0), p(1), p(2), p_inf] = [c, c, c, 0]
-                    // p_inf = 0 for constant polynomials (no x^3 term)
                     evals[0] = inc[0].mul(wa[0]).mul(lt[0]);
                     evals[1] = evals[0];
                     evals[2] = evals[0];
-                    // evals[3] remains zero for constant polynomial
                 }
                 return evals;
             }
 
-            for (0..half) |i| {
-                const inc_0 = inc[2 * i];
-                const wa_0 = wa[2 * i];
-                const lt_0 = lt[2 * i];
+            const Ctx = struct {
+                inc_p: []F,
+                wa_p: []F,
+                lt_p: []F,
+            };
+            const ctx = Ctx{ .inc_p = inc, .wa_p = wa, .lt_p = lt };
+            const identity = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
 
-                const inc_1 = inc[2 * i + 1];
-                const wa_1 = wa[2 * i + 1];
-                const lt_1 = lt[2 * i + 1];
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) [4]F {
+                    var r = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                    for (start..end) |i| {
+                        const inc_0 = c.inc_p[2 * i];
+                        const wa_0 = c.wa_p[2 * i];
+                        const lt_0 = c.lt_p[2 * i];
+                        const inc_1 = c.inc_p[2 * i + 1];
+                        const wa_1 = c.wa_p[2 * i + 1];
+                        const lt_1 = c.lt_p[2 * i + 1];
 
-                // p(0): product at x = 0
-                evals[0] = evals[0].add(inc_0.mul(wa_0).mul(lt_0));
+                        r[0] = r[0].add(inc_0.mul(wa_0).mul(lt_0));
+                        r[1] = r[1].add(inc_1.mul(wa_1).mul(lt_1));
+                        r[2] = r[2].add(inc_1.add(inc_1).sub(inc_0).mul(wa_1.add(wa_1).sub(wa_0)).mul(lt_1.add(lt_1).sub(lt_0)));
+                        r[3] = r[3].add(inc_1.sub(inc_0).mul(wa_1.sub(wa_0)).mul(lt_1.sub(lt_0)));
+                    }
+                    return r;
+                }
+            }.f;
+            const reduceFn = struct {
+                fn f(a: [4]F, b: [4]F) [4]F {
+                    return [4]F{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]), a[3].add(b[3]) };
+                }
+            }.f;
 
-                // p(1): product at x = 1
-                evals[1] = evals[1].add(inc_1.mul(wa_1).mul(lt_1));
-
-                // Extrapolate for degree-3 polynomial using Toom-Cook encoding
-                // For a linear polynomial f(x) = f_0 + x*(f_1 - f_0):
-                //   f(2) = 2*f_1 - f_0
-                //   f_inf (leading coefficient) = f_1 - f_0
-                const inc_2 = inc_1.add(inc_1).sub(inc_0); // 2*inc_1 - inc_0
-                const wa_2 = wa_1.add(wa_1).sub(wa_0);
-                const lt_2 = lt_1.add(lt_1).sub(lt_0);
-                evals[2] = evals[2].add(inc_2.mul(wa_2).mul(lt_2));
-
-                // eval_at_inf = product of leading coefficients
-                // For Toom-Cook: evals[3] = eval_at_infinity
-                const inc_inf = inc_1.sub(inc_0);
-                const wa_inf = wa_1.sub(wa_0);
-                const lt_inf = lt_1.sub(lt_0);
-                evals[3] = evals[3].add(inc_inf.mul(wa_inf).mul(lt_inf));
+            if (tp) |pool| {
+                return pool.parallelReduce([4]F, half, identity, ctx, mapFn, reduceFn);
             }
-
-            return evals;
+            return mapFn(ctx, 0, half);
         }
 
         /// Bind challenge for RegistersValEvaluation polynomials
@@ -7136,14 +7146,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         /// Compute round polynomial for LookupsReadRaf (cycle rounds only)
         /// This computes Σ_j eq_reduction(j) * combined_vals(j)
         /// Returns [p(0), p(1), p(2), p_inf] for degree-2 polynomial (product of 2 linears)
-        fn computeLookupsRoundPoly(eq_evals: []F, combined: []F, round: usize) [4]F {
-            var evals = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+        fn computeLookupsRoundPoly(eq_evals: []F, combined: []F, round: usize, tp: ?*ThreadPool) [4]F {
             const n = eq_evals.len >> @intCast(round);
             const half = n / 2;
 
             if (half == 0) {
+                var evals = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
                 if (n > 0) {
-                    // Constant polynomial
                     const c = eq_evals[0].mul(combined[0]);
                     evals[0] = c;
                     evals[1] = c;
@@ -7152,30 +7161,36 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 return evals;
             }
 
-            for (0..half) |i| {
-                const eq_0 = eq_evals[2 * i];
-                const eq_1 = eq_evals[2 * i + 1];
-                const c_0 = combined[2 * i];
-                const c_1 = combined[2 * i + 1];
+            const Ctx = struct { eq: []F, comb: []F };
+            const ctx = Ctx{ .eq = eq_evals, .comb = combined };
+            const identity = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
 
-                // p(0) = eq_0 * c_0
-                evals[0] = evals[0].add(eq_0.mul(c_0));
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) [4]F {
+                    var r = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                    for (start..end) |i| {
+                        const eq_0 = c.eq[2 * i];
+                        const eq_1 = c.eq[2 * i + 1];
+                        const c_0 = c.comb[2 * i];
+                        const c_1 = c.comb[2 * i + 1];
+                        r[0] = r[0].add(eq_0.mul(c_0));
+                        r[1] = r[1].add(eq_1.mul(c_1));
+                        r[2] = r[2].add(eq_1.add(eq_1).sub(eq_0).mul(c_1.add(c_1).sub(c_0)));
+                        r[3] = r[3].add(eq_1.sub(eq_0).mul(c_1.sub(c_0)));
+                    }
+                    return r;
+                }
+            }.f;
+            const reduceFn = struct {
+                fn f(a: [4]F, b: [4]F) [4]F {
+                    return [4]F{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]), a[3].add(b[3]) };
+                }
+            }.f;
 
-                // p(1) = eq_1 * c_1
-                evals[1] = evals[1].add(eq_1.mul(c_1));
-
-                // p(2) = (2*eq_1 - eq_0) * (2*c_1 - c_0)
-                const eq_2 = eq_1.add(eq_1).sub(eq_0);
-                const c_2 = c_1.add(c_1).sub(c_0);
-                evals[2] = evals[2].add(eq_2.mul(c_2));
-
-                // p_inf = (eq_1 - eq_0) * (c_1 - c_0)
-                const eq_inf = eq_1.sub(eq_0);
-                const c_inf = c_1.sub(c_0);
-                evals[3] = evals[3].add(eq_inf.mul(c_inf));
+            if (tp) |pool| {
+                return pool.parallelReduce([4]F, half, identity, ctx, mapFn, reduceFn);
             }
-
-            return evals;
+            return mapFn(ctx, 0, half);
         }
 
         /// Bind challenge for LookupsReadRaf polynomials (cycle rounds) - legacy version
@@ -7201,14 +7216,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         /// Compute round polynomial for LookupsReadRaf with ra_weights (cycle rounds)
         /// This computes Σ_j eq(j) * ra(j) * combined(j)
         /// Returns [p(0), p(1), p(2), p_inf] for degree-3 polynomial (product of 3 linears)
-        fn computeLookupsRoundPolyWithRa(eq_evals: []F, ra_weights: []F, combined: []F, round: usize) [4]F {
-            var evals = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+        fn computeLookupsRoundPolyWithRa(eq_evals: []F, ra_weights: []F, combined: []F, round: usize, tp: ?*ThreadPool) [4]F {
             const n = eq_evals.len >> @intCast(round);
             const half = n / 2;
 
             if (half == 0) {
+                var evals = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
                 if (n > 0) {
-                    // Constant polynomial
                     const c = eq_evals[0].mul(ra_weights[0]).mul(combined[0]);
                     evals[0] = c;
                     evals[1] = c;
@@ -7217,34 +7231,38 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 return evals;
             }
 
-            for (0..half) |i| {
-                const eq_0 = eq_evals[2 * i];
-                const eq_1 = eq_evals[2 * i + 1];
-                const ra_0 = ra_weights[2 * i];
-                const ra_1 = ra_weights[2 * i + 1];
-                const c_0 = combined[2 * i];
-                const c_1 = combined[2 * i + 1];
+            const Ctx = struct { eq: []F, ra: []F, comb: []F };
+            const ctx = Ctx{ .eq = eq_evals, .ra = ra_weights, .comb = combined };
+            const identity = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
 
-                // p(0) = eq_0 * ra_0 * c_0
-                evals[0] = evals[0].add(eq_0.mul(ra_0).mul(c_0));
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) [4]F {
+                    var r = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                    for (start..end) |i| {
+                        const eq_0 = c.eq[2 * i];
+                        const eq_1 = c.eq[2 * i + 1];
+                        const ra_0 = c.ra[2 * i];
+                        const ra_1 = c.ra[2 * i + 1];
+                        const c_0 = c.comb[2 * i];
+                        const c_1 = c.comb[2 * i + 1];
+                        r[0] = r[0].add(eq_0.mul(ra_0).mul(c_0));
+                        r[1] = r[1].add(eq_1.mul(ra_1).mul(c_1));
+                        r[2] = r[2].add(eq_1.add(eq_1).sub(eq_0).mul(ra_1.add(ra_1).sub(ra_0)).mul(c_1.add(c_1).sub(c_0)));
+                        r[3] = r[3].add(eq_1.sub(eq_0).mul(ra_1.sub(ra_0)).mul(c_1.sub(c_0)));
+                    }
+                    return r;
+                }
+            }.f;
+            const reduceFn = struct {
+                fn f(a: [4]F, b: [4]F) [4]F {
+                    return [4]F{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]), a[3].add(b[3]) };
+                }
+            }.f;
 
-                // p(1) = eq_1 * ra_1 * c_1
-                evals[1] = evals[1].add(eq_1.mul(ra_1).mul(c_1));
-
-                // p(2) = (2*eq_1 - eq_0) * (2*ra_1 - ra_0) * (2*c_1 - c_0)
-                const eq_2 = eq_1.add(eq_1).sub(eq_0);
-                const ra_2 = ra_1.add(ra_1).sub(ra_0);
-                const c_2 = c_1.add(c_1).sub(c_0);
-                evals[2] = evals[2].add(eq_2.mul(ra_2).mul(c_2));
-
-                // p_inf = (eq_1 - eq_0) * (ra_1 - ra_0) * (c_1 - c_0)
-                const eq_inf = eq_1.sub(eq_0);
-                const ra_inf = ra_1.sub(ra_0);
-                const c_inf = c_1.sub(c_0);
-                evals[3] = evals[3].add(eq_inf.mul(ra_inf).mul(c_inf));
+            if (tp) |pool| {
+                return pool.parallelReduce([4]F, half, identity, ctx, mapFn, reduceFn);
             }
-
-            return evals;
+            return mapFn(ctx, 0, half);
         }
 
         /// Bind challenge for LookupsReadRaf polynomials with ra_weights (cycle rounds)

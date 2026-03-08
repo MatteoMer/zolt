@@ -307,14 +307,23 @@ pub const VMState = struct {
 
 /// Jolt prover
 pub fn JoltProver(comptime F: type) type {
+    const ThreadPool = @import("../utils/thread_pool.zig").ThreadPool;
     return struct {
         const Self = @This();
 
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(allocator: Allocator) Self {
             return .{
                 .allocator = allocator,
+            };
+        }
+
+        pub fn initWithThreadPool(allocator: Allocator, tp: *ThreadPool) Self {
+            return .{
+                .allocator = allocator,
+                .thread_pool = tp,
             };
         }
 
@@ -372,7 +381,10 @@ pub fn JoltProver(comptime F: type) type {
             defer self.allocator.free(cycle_witnesses);
 
             // Convert to Jolt format using the proof converter with transcript
-            var converter = jolt_prover.JoltProver(F).init(self.allocator);
+            var converter = if (self.thread_pool) |tp|
+                jolt_prover.JoltProver(F).initWithThreadPool(self.allocator, tp)
+            else
+                jolt_prover.JoltProver(F).init(self.allocator);
 
             // Compute log_t and log_k directly from trace (already padded to power of 2)
             const trace_length = emulator.trace.steps.items.len;
@@ -436,11 +448,14 @@ pub fn JoltProver(comptime F: type) type {
 
             // Load SRS from file if path provided (for Jolt compatibility)
             // Otherwise generate SRS deterministically (may not match Jolt exactly)
+            var phase_timer = std.time.Timer.start() catch unreachable;
             var dory_srs = if (srs_path) |path|
                 try DoryScheme.loadFromFile(self.allocator, path)
             else
                 try DoryScheme.setup(self.allocator, log_size);
             defer dory_srs.deinit();
+            const srs_time = phase_timer.read();
+            std.debug.print("  [TIMING] SRS setup: {d:.1} ms\n", .{@as(f64, @floatFromInt(srs_time)) / 1_000_000.0});
 
             dbg("[SRS] Loaded: g1_vec={}, g2_vec={}\n", .{dory_srs.g1_vec.len, dory_srs.g2_vec.len});
 
@@ -541,6 +556,7 @@ pub fn JoltProver(comptime F: type) type {
             }
             var witness_idx: usize = 0;
 
+            phase_timer.reset();
             // RdInc: dense polynomial, trace_length entries
             // CRITICAL: Must pad to k_chunk*trace_length for Dory commitment
             // Jolt commits ALL polynomials using the same matrix layout (K*T sized),
@@ -552,7 +568,7 @@ pub fn JoltProver(comptime F: type) type {
             @memcpy(rd_inc_poly[0..rd_inc_poly_raw.len], rd_inc_poly_raw);
             witness_polys[witness_idx] = rd_inc_poly;
             witness_idx += 1;
-            const rd_inc_comm = DoryScheme.commit(&dory_srs, rd_inc_poly);
+            const rd_inc_comm = DoryScheme.commitWithPool(&dory_srs, rd_inc_poly, self.thread_pool);
             try all_commitments.append(self.allocator, rd_inc_comm);
 
             // RamInc: dense polynomial, trace_length entries
@@ -564,7 +580,7 @@ pub fn JoltProver(comptime F: type) type {
             @memcpy(ram_inc_poly[0..ram_inc_poly_raw.len], ram_inc_poly_raw);
             witness_polys[witness_idx] = ram_inc_poly;
             witness_idx += 1;
-            try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_inc_poly));
+            try all_commitments.append(self.allocator, DoryScheme.commitWithPool(&dory_srs, ram_inc_poly, self.thread_pool));
 
             // InstructionRa[0..instruction_d-1]: one-hot expanded to k_chunk * T
             var idx: usize = 0;
@@ -583,7 +599,7 @@ pub fn JoltProver(comptime F: type) type {
                 }
                 witness_polys[witness_idx] = onehot_poly;
                 witness_idx += 1;
-                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, onehot_poly));
+                try all_commitments.append(self.allocator, DoryScheme.commitWithPool(&dory_srs, onehot_poly, self.thread_pool));
             }
 
             // RamRa[0..ram_d-1]: one-hot expanded to k_chunk * T
@@ -602,7 +618,7 @@ pub fn JoltProver(comptime F: type) type {
                 }
                 witness_polys[witness_idx] = onehot_poly;
                 witness_idx += 1;
-                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, onehot_poly));
+                try all_commitments.append(self.allocator, DoryScheme.commitWithPool(&dory_srs, onehot_poly, self.thread_pool));
             }
 
             // BytecodeRa[0..bytecode_d-1]: one-hot expanded to k_chunk * T
@@ -624,7 +640,7 @@ pub fn JoltProver(comptime F: type) type {
                 }
                 witness_polys[witness_idx] = onehot_poly;
                 witness_idx += 1;
-                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, onehot_poly));
+                try all_commitments.append(self.allocator, DoryScheme.commitWithPool(&dory_srs, onehot_poly, self.thread_pool));
             }
 
             // Store witness polynomials and one-hot params in result
@@ -634,6 +650,8 @@ pub fn JoltProver(comptime F: type) type {
             result.ram_d = ram_d;
             result.log_k_chunk = log_k_chunk;
 
+            const commit_time = phase_timer.read();
+            std.debug.print("  [TIMING] Dory commits: {d:.1} ms ({} commitments)\n", .{ @as(f64, @floatFromInt(commit_time)) / 1_000_000.0, all_commitments.items.len });
             dbg("[DORY] All {} commitments computed.\n", .{all_commitments.items.len});
             // Debug: print first 3 commitment bytes
             for (0..@min(3, all_commitments.items.len)) |ci| {
@@ -702,6 +720,7 @@ pub fn JoltProver(comptime F: type) type {
             defer bytecode_prep_dory.deinit();
 
             // Convert to Jolt-compatible format with transcript integration
+            phase_timer.reset();
             result.proof = try converter.proveWithTranscript(
                 commitment_types.PolyCommitment,
                 commitment_types.OpeningProof,
@@ -735,6 +754,10 @@ pub fn JoltProver(comptime F: type) type {
                 tau,
                 &transcript,
             );
+            const prove_phase_time = phase_timer.read();
+            std.debug.print("  [TIMING] Prove (stages 1-7): {d:.1} ms\n", .{@as(f64, @floatFromInt(prove_phase_time)) / 1_000_000.0});
+
+            phase_timer.reset();
 
             // ================================================================
             // Stage 8: Dory Opening Proof Generation
@@ -958,7 +981,7 @@ pub fn JoltProver(comptime F: type) type {
                 // so the Dory protocol's internal challenges match between prover and verifier.
                 // Debug: compute commitment to joint_poly and print for comparison with verifier's joint_commitment
                 {
-                    const joint_commitment_gt = DoryScheme.commit(&dory_srs, joint_poly);
+                    const joint_commitment_gt = DoryScheme.commitWithPool(&dory_srs, joint_poly, self.thread_pool);
                     // Serialize GT to bytes for comparison
                     const gt_bytes = joint_commitment_gt.toBytes();
                     dbg("[STAGE8] commit(joint_poly) first 32: [", .{});
@@ -976,10 +999,13 @@ pub fn JoltProver(comptime F: type) type {
                     null, // row commitments will be computed internally
                     &transcript,
                     self.allocator,
+                    self.thread_pool,
                 );
                 dbg("[STAGE8] Dory opening proof generated.\n", .{});
                 result.dory_opening_proof = dory_proof;
                 result.opening_point = opening_point;
+                const stage8_time = phase_timer.read();
+                std.debug.print("  [TIMING] Stage 8 (Dory opening): {d:.1} ms\n", .{@as(f64, @floatFromInt(stage8_time)) / 1_000_000.0});
 
                 dbg("[STAGE8] Dory proof: nu={}, sigma={}, first_messages={}, second_messages={}\n", .{
                     dory_proof.nu, dory_proof.sigma,

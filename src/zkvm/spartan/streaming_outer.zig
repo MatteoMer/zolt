@@ -119,6 +119,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// Allocator
         allocator: Allocator,
 
+        /// Thread pool for parallel operations
+        thread_pool: ?*@import("../../utils/thread_pool.zig").ThreadPool = null,
+
         /// Initialize the streaming outer prover (without scaling)
         ///
         /// tau: Full challenge vector of length (num_cycle_vars + 2)
@@ -292,39 +295,51 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // Polynomial size = E_out.len * E_in.len * grid_size
             const poly_size = num_x_out_vals * num_x_in_vals * grid_size;
 
-            var az_evals = try self.allocator.alloc(F, poly_size);
+            const az_evals = try self.allocator.alloc(F, poly_size);
             errdefer self.allocator.free(az_evals);
-            var bz_evals = try self.allocator.alloc(F, poly_size);
+            const bz_evals = try self.allocator.alloc(F, poly_size);
             errdefer self.allocator.free(bz_evals);
 
             // Initialize to zero
             @memset(az_evals, F.zero());
             @memset(bz_evals, F.zero());
 
-            // Iterate over (x_out, x_in) pairs
+            // Iterate over flattened (x_out, x_in) pairs — each pair is independent.
             // This matches Jolt's round_zero loop: for i in 0..E_out.len*E_in.len
-            for (0..num_x_out_vals) |x_out_val| {
-                for (0..num_x_in_vals) |x_in_val| {
-                    const i = x_out_val * num_x_in_vals + x_in_val;
+            const total_pairs = num_x_out_vals * num_x_in_vals;
 
-                    // Process pairs of grid positions together (j, j+1) for both constraint groups
-                    // This matches Jolt's optimized path: while j < grid_size { ... j += 2 }
+            const MatCtx = struct {
+                cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+                lagrange_evals_r0: *const [FIRST_GROUP_SIZE]F,
+                az_evals: []F,
+                bz_evals: []F,
+                num_x_in_vals: usize,
+                grid_size: usize,
+            };
+
+            const mat_ctx = MatCtx{
+                .cycle_witnesses = self.cycle_witnesses,
+                .lagrange_evals_r0 = &self.lagrange_evals_r0,
+                .az_evals = az_evals,
+                .bz_evals = bz_evals,
+                .num_x_in_vals = num_x_in_vals,
+                .grid_size = grid_size,
+            };
+
+            const materializeOnePair = struct {
+                fn run(ctx: MatCtx, flat_i: usize) void {
+                    const x_in_val = flat_i % ctx.num_x_in_vals;
+                    const x_out_val = flat_i / ctx.num_x_in_vals;
+                    const i = x_out_val * ctx.num_x_in_vals + x_in_val;
+
                     var j: usize = 0;
-                    while (j < grid_size) : (j += 2) {
-                        // Jolt's round_zero formula:
-                        //   full_idx = grid_size * i + j
-                        //   time_step_idx = full_idx >> 1
-                        //
-                        // For grid_size=2:
-                        //   full_idx = 2*i + j
-                        //   time_step_idx = i (since j is 0 or 1)
-                        const full_idx = grid_size * i + j;
+                    while (j < ctx.grid_size) : (j += 2) {
+                        const full_idx = ctx.grid_size * i + j;
                         const time_step_idx = full_idx >> 1;
 
-                        if (time_step_idx < self.cycle_witnesses.len) {
-                            const witness = &self.cycle_witnesses[time_step_idx];
+                        if (time_step_idx < ctx.cycle_witnesses.len) {
+                            const witness = &ctx.cycle_witnesses[time_step_idx];
 
-                            // Compute Az and Bz for first group (selector=0, j position)
                             var az0 = F.zero();
                             var bz0 = F.zero();
                             for (0..FIRST_GROUP_SIZE) |t| {
@@ -334,14 +349,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                 const left = constraint.left.evaluate(F, witness.asSlice());
                                 const right = constraint.right.evaluate(F, witness.asSlice());
                                 const magnitude = left.sub(right);
-
-                                // Use lagrange_evals_r0 directly (no r_grid scaling at round zero)
-                                const w = self.lagrange_evals_r0[t];
+                                const w = ctx.lagrange_evals_r0[t];
                                 az0 = az0.add(w.mul(condition));
                                 bz0 = bz0.add(w.mul(magnitude));
                             }
 
-                            // Compute Az and Bz for second group (selector=1, j+1 position)
                             var az1 = F.zero();
                             var bz1 = F.zero();
                             for (0..@min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE)) |t| {
@@ -351,24 +363,25 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                 const left = constraint.left.evaluate(F, witness.asSlice());
                                 const right = constraint.right.evaluate(F, witness.asSlice());
                                 const magnitude = left.sub(right);
-
-                                // Use lagrange_evals_r0 directly (no r_grid scaling at round zero)
-                                const w = self.lagrange_evals_r0[t];
+                                const w = ctx.lagrange_evals_r0[t];
                                 az1 = az1.add(w.mul(condition));
                                 bz1 = bz1.add(w.mul(magnitude));
                             }
 
-                            // Store in polynomial array
-                            // Jolt uses: az_chunk[j] = az0, az_chunk[j+1] = az1
-                            // Array index = grid_size * i + j
-                            const base_idx = grid_size * i;
-                            az_evals[base_idx + j] = az0;
-                            bz_evals[base_idx + j] = bz0;
-                            az_evals[base_idx + j + 1] = az1;
-                            bz_evals[base_idx + j + 1] = bz1;
+                            const base_idx = ctx.grid_size * i;
+                            ctx.az_evals[base_idx + j] = az0;
+                            ctx.bz_evals[base_idx + j] = bz0;
+                            ctx.az_evals[base_idx + j + 1] = az1;
+                            ctx.bz_evals[base_idx + j + 1] = bz1;
                         }
                     }
                 }
+            }.run;
+
+            if (self.thread_pool) |tp| {
+                tp.parallelFor(total_pairs, mat_ctx, materializeOnePair);
+            } else {
+                for (0..total_pairs) |flat_i| materializeOnePair(mat_ctx, flat_i);
             }
 
             // Create DensePolynomials

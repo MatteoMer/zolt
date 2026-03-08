@@ -20,6 +20,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 const poly_mod = @import("../../poly/mod.zig");
 const UniPoly = poly_mod.UniPoly;
@@ -3764,6 +3765,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
         const Self = @This();
 
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(allocator: Allocator) Self {
             return .{ .allocator = allocator };
@@ -4127,7 +4129,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             defer inc_prover.deinit();
 
             // Direct comparison: Stage 6 rd_inc vs Stage 4 inc_poly
-            if (stage4_inc_poly_copy.len > 0) {
+            if (comptime debug_verbose) if (stage4_inc_poly_copy.len > 0) {
                 var inc_diff_count: usize = 0;
                 const cmp_len = @min(inc_prover.rd_inc.len, stage4_inc_poly_copy.len);
                 for (0..cmp_len) |j| {
@@ -4148,10 +4150,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
                 std.debug.print("[S6 vs S4 INC] total differences: {}\n", .{inc_diff_count});
-            }
+            };
 
             // Diagnostic: verify IncClaimReduction individual component sums
-            {
+            if (comptime debug_verbose) {
                 const T_inc = inc_prover.current_len;
                 // Recompute individual eq tables for diagnosis
                 var rev_buf2 = try self.allocator.alloc(F, n_cycle_vars);

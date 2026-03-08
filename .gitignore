@@ -7,3 +7,6 @@ node_modules/
 .smithers/
 .DS_Store
 jolt/
+bench/results/
+jolt-bench/target/
+flamegraph.svg

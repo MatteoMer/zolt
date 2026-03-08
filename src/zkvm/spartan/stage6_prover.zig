@@ -4056,7 +4056,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // ====================================================================
 
             const LOOKUPS_LOG_K: usize = 128;
-            const ram_log_k: usize = std.math.log2_int(usize, @as(usize, 1) << @intCast(ram_d * log_k_chunk));
+            const ram_log_k: usize = ram_r_address_stage2_be.len;
 
             // RamRaVirtual: r_cycle from Stage 5 RamRaClaimReduction, r_address from Stage 2
             // RamRaClaimReduction is cycle-only (log_T rounds), NOT address+cycle.
@@ -4075,14 +4075,27 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             }
 
             // r_address for RamRa: from Stage 2 aligned RAM address (already BIG_ENDIAN)
-            const ram_ra_r_address_be = ram_r_address_stage2_be;
+            // Pad with leading zeros to make length a multiple of log_k_chunk (matching Jolt's compute_r_address_chunks)
+            const padded_ram_len = ((ram_log_k + log_k_chunk - 1) / log_k_chunk) * log_k_chunk;
+            var ram_ra_r_address_be: []F = undefined;
+            var ram_ra_r_address_allocated = false;
+            if (padded_ram_len != ram_log_k) {
+                ram_ra_r_address_be = try self.allocator.alloc(F, padded_ram_len);
+                ram_ra_r_address_allocated = true;
+                const pad_count = padded_ram_len - ram_log_k;
+                @memset(ram_ra_r_address_be[0..pad_count], F.zero());
+                @memcpy(ram_ra_r_address_be[pad_count..], ram_r_address_stage2_be);
+            } else {
+                ram_ra_r_address_be = @constCast(ram_r_address_stage2_be);
+            }
+            defer if (ram_ra_r_address_allocated) self.allocator.free(ram_ra_r_address_be);
 
             // Split r_address into chunks (BIG_ENDIAN, chunk[0] = MSB)
             var ram_ra_addr_chunks = try self.allocator.alloc([]const F, ram_d);
             defer self.allocator.free(ram_ra_addr_chunks);
             for (0..ram_d) |i| {
                 const chunk_start = i * log_k_chunk;
-                const chunk_end = @min(chunk_start + log_k_chunk, ram_log_k);
+                const chunk_end = chunk_start + log_k_chunk;
                 ram_ra_addr_chunks[i] = ram_ra_r_address_be[chunk_start..chunk_end];
             }
 

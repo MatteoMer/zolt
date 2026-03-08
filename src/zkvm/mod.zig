@@ -377,7 +377,34 @@ pub fn JoltProver(comptime F: type) type {
             // Compute log_t and log_k directly from trace (already padded to power of 2)
             const trace_length = emulator.trace.steps.items.len;
             const log_t: u8 = @intCast(std.math.log2_int(usize, trace_length));
-            const log_k: u8 = 16; // log2 of RAM address space size (2^16)
+            // Compute ram_K from trace like Jolt: max remapped address across all
+            // trace steps, combined with bytecode region, rounded to next power of 2.
+            const log_k: u8 = blk: {
+                const ml = emulator.device.memory_layout;
+
+                // 1. Find max remapped address from trace
+                var max_remapped: u64 = 0;
+                for (emulator.trace.steps.items) |step| {
+                    if (step.memory_addr) |addr| {
+                        if (ml.remapAddress(addr)) |raddr| {
+                            if (raddr > max_remapped) max_remapped = raddr;
+                        }
+                    }
+                }
+
+                // 2. Account for bytecode region (like Jolt's min_bytecode_address + bytecode_words.len + 1)
+                const min_word = base_address / 8;
+                const max_word = (base_address + program_bytecode.len - 1 + 7) / 8;
+                const num_bytecode_words = max_word - min_word + 1;
+                const min_bytecode_address = min_word * 8;
+                if (ml.remapAddress(min_bytecode_address)) |raddr| {
+                    const bytecode_end = raddr + num_bytecode_words + 1;
+                    if (bytecode_end > max_remapped) max_remapped = bytecode_end;
+                }
+
+                const ram_k = std.math.ceilPowerOfTwo(u64, max_remapped) catch (1 << 16);
+                break :blk @intCast(std.math.log2_int(u64, ram_k));
+            };
 
             // Create JoltDevice for Fiat-Shamir preamble
             // CRITICAL: Use actual emulator outputs and panic state for Fiat-Shamir transcript

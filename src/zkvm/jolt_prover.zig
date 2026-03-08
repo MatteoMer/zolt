@@ -2739,13 +2739,18 @@ pub fn JoltProver(comptime F: type) type {
                 // Stage 2 aligns all RAM sumchecks to share the same r_address.
                 // The RamRaClaimReduction (Stage 5) is cycle-only; the address comes from Stage 2.
                 {
-                    // stage2_result.r_address_raf is BIG_ENDIAN, length = ram_d * log_k_chunk
-                    // Split into ram_d chunks of log_k_chunk (matching Stage 6's ram_ra_addr_chunks)
+                    // Pad r_address_raf with leading zeros to make length a multiple of
+                    // log_k_chunk (matching Jolt's compute_r_address_chunks)
+                    const raf_len = stage2_result.r_address_raf.len;
+                    const padded_len = ((raf_len + s6_log_k_chunk - 1) / s6_log_k_chunk) * s6_log_k_chunk;
+                    const pad_count = padded_len - raf_len;
+
                     for (0..s6_ram_d) |i| {
                         var chunk = try self.allocator.alloc(F, s6_log_k_chunk);
                         const chunk_start = i * s6_log_k_chunk;
                         for (0..s6_log_k_chunk) |ci| {
-                            chunk[ci] = stage2_result.r_address_raf[chunk_start + ci];
+                            const src_idx = chunk_start + ci;
+                            chunk[ci] = if (src_idx < pad_count) F.zero() else stage2_result.r_address_raf[src_idx - pad_count];
                         }
                         r_addr_virt[s6_instruction_d + s6_bytecode_d + i] = chunk;
                     }

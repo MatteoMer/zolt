@@ -454,6 +454,8 @@ pub fn JoltProver(comptime F: type) type {
             else
                 try DoryScheme.setup(self.allocator, log_size);
             defer dory_srs.deinit();
+            // Precompute G2 Miller loop coefficients for fast pairings
+            dory_srs.initPreparedCache(self.thread_pool);
             const srs_time = phase_timer.read();
             std.debug.print("  [TIMING] SRS setup: {d:.1} ms\n", .{@as(f64, @floatFromInt(srs_time)) / 1_000_000.0});
 

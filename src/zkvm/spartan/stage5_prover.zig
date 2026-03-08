@@ -565,19 +565,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Build eq_reduction[j] = eq(j, r_reduction) for all cycles j
             // r_reduction is in BIG_ENDIAN order (MSB first)
-            if (self.thread_pool) |tp| {
-                const EqCtx = struct { r: []const F, out: []F };
-                const eq_ctx = EqCtx{ .r = r_reduction, .out = lookups_eq_evals };
-                tp.parallelFor(T, eq_ctx, struct {
-                    fn f(c: EqCtx, j: usize) void {
-                        c.out[j] = computeEqAtIndex(c.r, j);
-                    }
-                }.f);
-            } else {
-                for (0..T) |j| {
-                    lookups_eq_evals[j] = computeEqAtIndex(r_reduction, j);
-                }
-            }
+            // Use O(2^n) doubling technique instead of O(n * 2^n) per-element computation
+            buildFullEqTable(r_reduction, lookups_eq_evals[0..T]);
 
             // Debug: print first few eq values and verify sum = 1
             dbg("[STAGE5 EQ DEBUG] T={}, n_vars={}, First 5 eq_evals:\n", .{ T, n_cycle_vars });
@@ -4037,7 +4026,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // ===================================================================
 
                     // Bind challenge to all suffix polynomials
-                    suffix_polys.bindAll(challenge);
+                    if (self.thread_pool) |tp| {
+                        suffix_polys.bindAllParallel(challenge, tp);
+                    } else {
+                        suffix_polys.bindAll(challenge);
+                    }
 
                     // Bind challenge to RAF decompositions
                     left_raf.bind(challenge);
@@ -5225,9 +5218,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
 
                         dbg("[STAGE5 CYCLE] Reinitializing lookups_eq_evals for cycle rounds\n", .{});
-                        for (0..T) |j| {
-                            lookups_eq_evals[j] = computeEqAtIndex(r_reduction, j);
-                        }
+                        buildFullEqTable(r_reduction, lookups_eq_evals[0..T]);
                         // Debug: verify sum = 1
                         var eq_sum_verify = F.zero();
                         for (0..T) |j| {
@@ -5591,68 +5582,61 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             dbg("[SPLIT_TEST] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                         }
                     }
-                    // Verify full sum at the start of cycle rounds
-                    if (lookups_round == 0) {
-                        // Before any cycle binding, check: lookups_claim == Σ_j eq(j, r_reduction) * Π_c ra_c[j] * cv[j]
-                        var full_sum_check = F.zero();
-                        for (0..T) |fj| {
-                            const fj_eq = computeEqAtIndex(r_reduction, fj);
-                            var fj_ra = F.one();
-                            for (0..ra_num_chunks) |fc| {
-                                fj_ra = fj_ra.mul(ra_chunk_weights[fc][fj]);
+                    // Verify full sum at the start of cycle rounds (debug only)
+                    if (comptime debug_verbose) {
+                        if (lookups_round == 0) {
+                            var full_sum_check = F.zero();
+                            for (0..T) |fj| {
+                                const fj_eq = computeEqAtIndex(r_reduction, fj);
+                                var fj_ra = F.one();
+                                for (0..ra_num_chunks) |fc| {
+                                    fj_ra = fj_ra.mul(ra_chunk_weights[fc][fj]);
+                                }
+                                full_sum_check = full_sum_check.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[fj]));
                             }
-                            full_sum_check = full_sum_check.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[fj]));
-                        }
-                        {
-                            const print = std.debug.print;
-                            print("[CYCLE_START_CHECK] Full sum = {any}\n", .{full_sum_check.toBytes()});
-                            print("[CYCLE_START_CHECK] lookups_claim = {any}\n", .{lookups_claim.toBytes()});
-                            print("[CYCLE_START_CHECK] MATCH: {}\n", .{full_sum_check.eql(lookups_claim)});
-                        }
-                        dbg("[CYCLE_START_CHECK] Full sum = {x}\n", .{full_sum_check.toBytesBE()[16..32].*});
-                        dbg("[CYCLE_START_CHECK] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                        dbg("[CYCLE_START_CHECK] MATCH: {}\n", .{full_sum_check.eql(lookups_claim)});
-
-                        // Also check: what does the sum give for cv ONLY (without ra)?
-                        var cv_only_sum = F.zero();
-                        for (0..T) |fj| {
-                            const fj_eq = computeEqAtIndex(r_reduction, fj);
-                            cv_only_sum = cv_only_sum.add(fj_eq.mul(lookups_combined_vals[fj]));
-                        }
-                        dbg("[CYCLE_START_CHECK] cv_only_sum (no ra) = {x}\n", .{cv_only_sum.toBytesBE()[16..32].*});
-
-                        // Check ra products - all should be 1 if address rounds are correct
-                        var all_ra_one = true;
-                        var non_one_count: usize = 0;
-                        for (0..T) |fj| {
-                            var fj_ra = F.one();
-                            for (0..ra_num_chunks) |fc| {
-                                fj_ra = fj_ra.mul(ra_chunk_weights[fc][fj]);
+                            {
+                                const print = std.debug.print;
+                                print("[CYCLE_START_CHECK] Full sum = {any}\n", .{full_sum_check.toBytes()});
+                                print("[CYCLE_START_CHECK] lookups_claim = {any}\n", .{lookups_claim.toBytes()});
+                                print("[CYCLE_START_CHECK] MATCH: {}\n", .{full_sum_check.eql(lookups_claim)});
                             }
-                            if (!fj_ra.eql(F.one())) {
-                                all_ra_one = false;
-                                non_one_count += 1;
-                                if (non_one_count <= 3) {
-                                    dbg("[CYCLE_START_CHECK] ra_product[{}] != 1: {x}\n", .{fj, fj_ra.toBytesBE()[16..32].*});
+
+                            var cv_only_sum = F.zero();
+                            for (0..T) |fj| {
+                                const fj_eq = computeEqAtIndex(r_reduction, fj);
+                                cv_only_sum = cv_only_sum.add(fj_eq.mul(lookups_combined_vals[fj]));
+                            }
+                            dbg("[CYCLE_START_CHECK] cv_only_sum (no ra) = {x}\n", .{cv_only_sum.toBytesBE()[16..32].*});
+
+                            var all_ra_one = true;
+                            var non_one_count: usize = 0;
+                            for (0..T) |fj| {
+                                var fj_ra = F.one();
+                                for (0..ra_num_chunks) |fc| {
+                                    fj_ra = fj_ra.mul(ra_chunk_weights[fc][fj]);
+                                }
+                                if (!fj_ra.eql(F.one())) {
+                                    all_ra_one = false;
+                                    non_one_count += 1;
+                                    if (non_one_count <= 3) {
+                                        dbg("[CYCLE_START_CHECK] ra_product[{}] != 1: {x}\n", .{fj, fj_ra.toBytesBE()[16..32].*});
+                                    }
                                 }
                             }
-                        }
-                        dbg("[CYCLE_START_CHECK] all_ra_one={}, non_one_count={}\n", .{all_ra_one, non_one_count});
+                            dbg("[CYCLE_START_CHECK] all_ra_one={}, non_one_count={}\n", .{all_ra_one, non_one_count});
 
-                        // Also check: does sum_evals[0] (g(1)) match what we expect?
-                        // g(1) = Σ_j eq_prefix(j) * Π_c ra_c[2j+1] * cv[2j+1]
-                        // (because lin(1) = val_at_1 for all linear polys)
-                        var g1_brute = F.zero();
-                        const half_T = T >> 1;
-                        for (0..half_T) |fj| {
-                            const fj_eq = computeEqAtIndexPartial(r_reduction, fj, n_cycle_vars - 1);
-                            var fj_ra = F.one();
-                            for (0..ra_num_chunks) |fc| {
-                                fj_ra = fj_ra.mul(ra_chunk_weights[fc][2 * fj + 1]);
+                            var g1_brute = F.zero();
+                            const half_T = T >> 1;
+                            for (0..half_T) |fj| {
+                                const fj_eq = computeEqAtIndexPartial(r_reduction, fj, n_cycle_vars - 1);
+                                var fj_ra = F.one();
+                                for (0..ra_num_chunks) |fc| {
+                                    fj_ra = fj_ra.mul(ra_chunk_weights[fc][2 * fj + 1]);
+                                }
+                                g1_brute = g1_brute.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[2 * fj + 1]));
                             }
-                            g1_brute = g1_brute.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[2 * fj + 1]));
+                            dbg("[CYCLE_START_CHECK] g(1)_brute = {x}\n", .{g1_brute.toBytesBE()[16..32].*});
                         }
-                        dbg("[CYCLE_START_CHECK] g(1)_brute = {x}\n", .{g1_brute.toBytesBE()[16..32].*});
                     }
 
                     // CRITICAL: current_half_size is the number of pairs we iterate over
@@ -5963,7 +5947,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         p0_at_r = p0_at_r.mulHiBigIntU128(challenge.limbs).add(inst0_coeffs[0]); // c0
                         regs_val_current_claim = p0_at_r;
 
-                        bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge);
+                        bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge, self.thread_pool);
                     }
 
                     // Bind the challenge for RamRaClaimReduction cycle rounds
@@ -6103,7 +6087,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // CRITICAL: Do NOT bind eq_evals - keep them as original eq(j, r_reduction)
                     // Only bind combined_vals (standard MLE binding)
                     // This matches Jolt's GruenSplitEqPolynomial where E_in/E_out are not modified
-                    bindSinglePolynomial(lookups_combined_vals, lookups_round, challenge);
+                    bindSinglePolynomial(lookups_combined_vals, lookups_round, challenge, self.thread_pool);
 
                     // CRITICAL FIX: Update lookups_current_scalar with eq(w_i, challenge)
                     // This matches Jolt's GruenSplitEqPolynomial.bind() which accumulates:
@@ -6137,7 +6121,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Bind the per-chunk ra weights
                     for (0..ra_num_chunks) |chunk_idx| {
-                        bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge);
+                        bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge, self.thread_pool);
                     }
                     // Debug: show ra_chunk values before/after binding
                     if (lookups_round == 0) {
@@ -6972,6 +6956,44 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             return result;
         }
 
+        /// Build the full EQ table for all indices 0..2^n using the doubling technique.
+        /// O(2^n) field multiplications instead of O(n * 2^n) for element-wise computation.
+        /// r is in BIG_ENDIAN order: r[0] is MSB.
+        /// output must have length >= 2^r.len.
+        fn buildFullEqTable(r: []const F, output: []F) void {
+            const n = r.len;
+            if (n == 0) {
+                output[0] = F.one();
+                return;
+            }
+            // Start with r[0] (MSB)
+            output[0] = F.one().sub(r[0]);
+            output[1] = r[0];
+            var size: usize = 2;
+            for (1..n) |i| {
+                const ri = r[i];
+                const one_minus_ri = F.one().sub(ri);
+                // Process in reverse to avoid overwriting source values
+                var j: usize = size;
+                while (j > 0) {
+                    j -= 1;
+                    output[2 * j + 1] = output[j].mul(ri);
+                    output[2 * j] = output[j].mul(one_minus_ri);
+                }
+                size *= 2;
+            }
+        }
+
+        /// Build partial EQ table for first num_vars variables of r.
+        /// Output has 2^num_vars entries.
+        fn buildPartialEqTable(r: []const F, num_vars: usize, output: []F) void {
+            if (num_vars == 0) {
+                output[0] = F.one();
+                return;
+            }
+            buildFullEqTable(r[0..num_vars], output);
+        }
+
         /// Compute eq(k, r[0:num_vars]) - partial eq polynomial over first num_vars variables.
         /// This is used in cycle rounds where some variables have been bound.
         ///
@@ -7122,17 +7144,45 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Bind challenge for RegistersValEvaluation polynomials
-        fn bindRegsValChallenge(inc: []F, wa: []F, lt: []F, round: usize, r: F) void {
+        fn bindRegsValChallenge(inc: []F, wa: []F, lt: []F, round: usize, r: F, tp: ?*ThreadPool) void {
             const n = inc.len >> @intCast(round);
             const half = n / 2;
             if (half == 0) return;
 
             const one_minus_r = F.one().sub(r);
 
-            for (0..half) |i| {
-                inc[i] = one_minus_r.mul(inc[2 * i]).add(r.mul(inc[2 * i + 1]));
-                wa[i] = one_minus_r.mul(wa[2 * i]).add(r.mul(wa[2 * i + 1]));
-                lt[i] = one_minus_r.mul(lt[2 * i]).add(r.mul(lt[2 * i + 1]));
+            // NOTE: In-place binding has data dependencies (write[i] overlaps read[2*j] where j=i/2),
+            // so we parallelize across the 3 independent arrays instead of across indices.
+            if (tp) |pool| {
+                if (half >= 256) {
+                    const BindCtx = struct { inc: []F, wa: []F, lt: []F, omr: F, rv: F, h: usize };
+                    const ctx = BindCtx{ .inc = inc, .wa = wa, .lt = lt, .omr = one_minus_r, .rv = r, .h = half };
+                    pool.parallelForForce(3, ctx, struct {
+                        fn f(c: BindCtx, arr_idx: usize) void {
+                            const arr = switch (arr_idx) {
+                                0 => c.inc,
+                                1 => c.wa,
+                                2 => c.lt,
+                                else => unreachable,
+                            };
+                            for (0..c.h) |i| {
+                                arr[i] = c.omr.mul(arr[2 * i]).add(c.rv.mul(arr[2 * i + 1]));
+                            }
+                        }
+                    }.f);
+                } else {
+                    for (0..half) |i| {
+                        inc[i] = one_minus_r.mul(inc[2 * i]).add(r.mul(inc[2 * i + 1]));
+                        wa[i] = one_minus_r.mul(wa[2 * i]).add(r.mul(wa[2 * i + 1]));
+                        lt[i] = one_minus_r.mul(lt[2 * i]).add(r.mul(lt[2 * i + 1]));
+                    }
+                }
+            } else {
+                for (0..half) |i| {
+                    inc[i] = one_minus_r.mul(inc[2 * i]).add(r.mul(inc[2 * i + 1]));
+                    wa[i] = one_minus_r.mul(wa[2 * i]).add(r.mul(wa[2 * i + 1]));
+                    lt[i] = one_minus_r.mul(lt[2 * i]).add(r.mul(lt[2 * i + 1]));
+                }
             }
 
             // Zero out upper half
@@ -7194,16 +7244,37 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Bind challenge for LookupsReadRaf polynomials (cycle rounds) - legacy version
-        fn bindLookupsChallenge(eq_evals: []F, combined: []F, round: usize, r: F) void {
+        fn bindLookupsChallenge(eq_evals: []F, combined: []F, round: usize, r: F, tp: ?*ThreadPool) void {
             const n = eq_evals.len >> @intCast(round);
             const half = n / 2;
             if (half == 0) return;
 
             const one_minus_r = F.one().sub(r);
 
-            for (0..half) |i| {
-                eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
-                combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+            // Parallelize across arrays (not indices) due to in-place data dependencies
+            if (tp) |pool| {
+                if (half >= 256) {
+                    const BindCtx = struct { eq: []F, comb: []F, omr: F, rv: F, h: usize };
+                    const ctx = BindCtx{ .eq = eq_evals, .comb = combined, .omr = one_minus_r, .rv = r, .h = half };
+                    pool.parallelForForce(2, ctx, struct {
+                        fn f(c: BindCtx, arr_idx: usize) void {
+                            const arr = if (arr_idx == 0) c.eq else c.comb;
+                            for (0..c.h) |i| {
+                                arr[i] = c.omr.mul(arr[2 * i]).add(c.rv.mul(arr[2 * i + 1]));
+                            }
+                        }
+                    }.f);
+                } else {
+                    for (0..half) |i| {
+                        eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
+                        combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+                    }
+                }
+            } else {
+                for (0..half) |i| {
+                    eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
+                    combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+                }
             }
 
             // Zero out upper half
@@ -7266,17 +7337,44 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Bind challenge for LookupsReadRaf polynomials with ra_weights (cycle rounds)
-        fn bindLookupsCycleChallengeWithRa(eq_evals: []F, ra_weights: []F, combined: []F, round: usize, r: F) void {
+        fn bindLookupsCycleChallengeWithRa(eq_evals: []F, ra_weights: []F, combined: []F, round: usize, r: F, tp: ?*ThreadPool) void {
             const n = eq_evals.len >> @intCast(round);
             const half = n / 2;
             if (half == 0) return;
 
             const one_minus_r = F.one().sub(r);
 
-            for (0..half) |i| {
-                eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
-                ra_weights[i] = one_minus_r.mul(ra_weights[2 * i]).add(r.mul(ra_weights[2 * i + 1]));
-                combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+            // Parallelize across arrays (not indices) due to in-place data dependencies
+            if (tp) |pool| {
+                if (half >= 256) {
+                    const BindCtx = struct { eq: []F, ra: []F, comb: []F, omr: F, rv: F, h: usize };
+                    const ctx = BindCtx{ .eq = eq_evals, .ra = ra_weights, .comb = combined, .omr = one_minus_r, .rv = r, .h = half };
+                    pool.parallelForForce(3, ctx, struct {
+                        fn f(c: BindCtx, arr_idx: usize) void {
+                            const arr = switch (arr_idx) {
+                                0 => c.eq,
+                                1 => c.ra,
+                                2 => c.comb,
+                                else => unreachable,
+                            };
+                            for (0..c.h) |i| {
+                                arr[i] = c.omr.mul(arr[2 * i]).add(c.rv.mul(arr[2 * i + 1]));
+                            }
+                        }
+                    }.f);
+                } else {
+                    for (0..half) |i| {
+                        eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
+                        ra_weights[i] = one_minus_r.mul(ra_weights[2 * i]).add(r.mul(ra_weights[2 * i + 1]));
+                        combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+                    }
+                }
+            } else {
+                for (0..half) |i| {
+                    eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
+                    ra_weights[i] = one_minus_r.mul(ra_weights[2 * i]).add(r.mul(ra_weights[2 * i + 1]));
+                    combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+                }
             }
 
             // Zero out upper half
@@ -7288,7 +7386,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Bind challenge for a single polynomial (used for per-chunk ra weights)
-        fn bindSinglePolynomial(poly: []F, round: usize, r: F) void {
+        fn bindSinglePolynomial(poly: []F, round: usize, r: F, tp: ?*ThreadPool) void {
+            _ = tp; // Single polynomial can't be parallelized across arrays
             const n = poly.len >> @intCast(round);
             const half = n / 2;
             if (half == 0) return;

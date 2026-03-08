@@ -593,8 +593,87 @@ pub fn MontgomeryField(
             return result;
         }
 
+        /// Fused multiply-accumulate: computes a[0]*b[0] + a[1]*b[1] with only
+        /// 2 Montgomery reductions instead of 3 (vs separate mul + mul + add).
+        /// Interleaved CIOS: both products share the same reduction step per limb iteration.
+        /// Safe for BN254 since modulus_size (254) < 64*N - 1 (255).
+        pub inline fn sumOfProducts(a: [2]Self, b: [2]Self) Self {
+            var t: [5]u64 = .{ 0, 0, 0, 0, 0 };
+
+            inline for (0..4) |i| {
+                // Accumulate both products at limb i into t
+                var carry1: u64 = 0;
+                inline for (0..2) |pair| {
+                    var carry: u64 = 0;
+                    inline for (0..4) |j| {
+                        const prod = mulWide(a[pair].limbs[i], b[pair].limbs[j]);
+                        const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                        t[j] = @truncate(sum);
+                        carry = @truncate(sum >> 64);
+                    }
+                    const sum_t4 = @as(u128, t[4]) + @as(u128, carry) + @as(u128, carry1);
+                    t[4] = @truncate(sum_t4);
+                    carry1 = @truncate(sum_t4 >> 64);
+                }
+
+                // Montgomery reduction step (shared for both products)
+                const m = t[0] *% montgomery_inv;
+
+                var carry: u64 = 0;
+                const prod0 = mulWide(m, modulus[0]);
+                const sum0 = @as(u128, t[0]) + prod0;
+                carry = @truncate(sum0 >> 64);
+
+                inline for (1..4) |j| {
+                    const prod = mulWide(m, modulus[j]);
+                    const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                    t[j - 1] = @truncate(sum);
+                    carry = @truncate(sum >> 64);
+                }
+                const final_sum = @as(u128, t[4]) + @as(u128, carry);
+                t[3] = @truncate(final_sum);
+                t[4] = @as(u64, @truncate(final_sum >> 64)) +% carry1;
+            }
+
+            var result = Self{ .limbs = .{ t[0], t[1], t[2], t[3] } };
+            if (t[4] != 0 or !result.lessThanModulus()) {
+                result = result.subtractModulus();
+            }
+            return result;
+        }
+
+        /// Addition without final reduction. Result in [0, 2p).
+        /// Only valid when both inputs are in [0, p).
+        pub inline fn addNoReduce(self: Self, other: Self) Self {
+            @setEvalBranchQuota(10000);
+            var result: [4]u64 = undefined;
+            var carry: u64 = 0;
+
+            inline for (0..4) |i| {
+                const ac = addCarry(self.limbs[i], other.limbs[i], carry);
+                result[i] = ac.result;
+                carry = ac.carry;
+            }
+
+            var res = Self{ .limbs = result };
+            // Only subtract if overflowed 256 bits; result stays in [0, 2p)
+            if (carry != 0) {
+                res = res.subtractModulus();
+            }
+            return res;
+        }
+
+        /// Reduce from [0, 2p) to [0, p)
+        pub inline fn reduce(self: Self) Self {
+            if (!self.lessThanModulus()) {
+                return self.subtractModulus();
+            }
+            return self;
+        }
+
         /// Field addition
-        pub fn add(self: Self, other: Self) Self {
+        pub inline fn add(self: Self, other: Self) Self {
+            @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var carry: u64 = 0;
 
@@ -612,7 +691,8 @@ pub fn MontgomeryField(
         }
 
         /// Field subtraction
-        pub fn sub(self: Self, other: Self) Self {
+        pub inline fn sub(self: Self, other: Self) Self {
+            @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var borrow: u64 = 0;
 
@@ -630,7 +710,7 @@ pub fn MontgomeryField(
         }
 
         /// Field multiplication
-        pub fn mul(self: Self, other: Self) Self {
+        pub inline fn mul(self: Self, other: Self) Self {
             if (comptime use_asm_mul) {
                 return self.montgomeryMulX86(other);
             }
@@ -638,7 +718,7 @@ pub fn MontgomeryField(
         }
 
         /// Field squaring
-        pub fn square(self: Self) Self {
+        pub inline fn square(self: Self) Self {
             if (comptime use_asm_mul) {
                 return self.montgomeryMulX86(self);
             }
@@ -687,12 +767,12 @@ pub fn MontgomeryField(
         }
 
         /// Doubling (2*self)
-        pub fn double(self: Self) Self {
+        pub inline fn double(self: Self) Self {
             return self.add(self);
         }
 
         /// Negation
-        pub fn neg(self: Self) Self {
+        pub inline fn neg(self: Self) Self {
             if (self.isZero()) return self;
             return (Self{ .limbs = modulus }).sub(self);
         }
@@ -718,7 +798,8 @@ pub fn MontgomeryField(
             return result;
         }
 
-        fn lessThanModulus(self: Self) bool {
+        inline fn lessThanModulus(self: Self) bool {
+            @setEvalBranchQuota(10000);
             var i: usize = 3;
             while (true) : (i -= 1) {
                 if (self.limbs[i] < modulus[i]) return true;
@@ -728,7 +809,8 @@ pub fn MontgomeryField(
             return false;
         }
 
-        fn subtractModulus(self: Self) Self {
+        inline fn subtractModulus(self: Self) Self {
+            @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var borrow: u64 = 0;
 
@@ -741,7 +823,8 @@ pub fn MontgomeryField(
             return Self{ .limbs = result };
         }
 
-        fn addModulus(self: Self) Self {
+        inline fn addModulus(self: Self) Self {
+            @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var carry: u64 = 0;
 
@@ -1195,6 +1278,51 @@ pub const BN254Scalar = struct {
 
         var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
         if (!result.lessThanModulus()) {
+            result = result.subtractModulus();
+        }
+        return result;
+    }
+
+    /// Fused multiply-accumulate: computes a[0]*b[0] + a[1]*b[1] with only
+    /// 2 Montgomery reductions instead of 3 (vs separate mul + mul + add).
+    pub fn sumOfProducts(a: [2]Self, b: [2]Self) Self {
+        var t: [5]u64 = .{ 0, 0, 0, 0, 0 };
+
+        inline for (0..4) |i| {
+            var carry1: u64 = 0;
+            inline for (0..2) |pair| {
+                var carry: u64 = 0;
+                inline for (0..4) |j| {
+                    const prod = mulWide(a[pair].limbs[i], b[pair].limbs[j]);
+                    const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                    t[j] = @truncate(sum);
+                    carry = @truncate(sum >> 64);
+                }
+                const sum_t4 = @as(u128, t[4]) + @as(u128, carry) + @as(u128, carry1);
+                t[4] = @truncate(sum_t4);
+                carry1 = @truncate(sum_t4 >> 64);
+            }
+
+            const m = t[0] *% BN254_INV;
+
+            var carry: u64 = 0;
+            const prod0 = mulWide(m, BN254_MODULUS[0]);
+            const sum0 = @as(u128, t[0]) + prod0;
+            carry = @truncate(sum0 >> 64);
+
+            inline for (1..4) |j| {
+                const prod = mulWide(m, BN254_MODULUS[j]);
+                const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                t[j - 1] = @truncate(sum);
+                carry = @truncate(sum >> 64);
+            }
+            const final_sum = @as(u128, t[4]) + @as(u128, carry);
+            t[3] = @truncate(final_sum);
+            t[4] = @as(u64, @truncate(final_sum >> 64)) +% carry1;
+        }
+
+        var result = Self{ .limbs = .{ t[0], t[1], t[2], t[3] } };
+        if (t[4] != 0 or !result.lessThanModulus()) {
             result = result.subtractModulus();
         }
         return result;
@@ -1670,6 +1798,68 @@ test "mulHiBigIntU128 vs montgomeryMul equivalence" {
     const p_zolt = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2.mul(r2_zolt));
 
     try std.testing.expect(p_jolt.eql(p_zolt));
+}
+
+test "sumOfProducts equivalence" {
+    // Test BN254Scalar sumOfProducts
+    {
+        const a = BN254Scalar.fromU64(12345);
+        const b = BN254Scalar.fromU64(67890);
+        const c = BN254Scalar.fromU64(11111);
+        const d = BN254Scalar.fromU64(22222);
+
+        const expected = a.mul(b).add(c.mul(d));
+        const fused = BN254Scalar.sumOfProducts(.{ a, c }, .{ b, d });
+        try std.testing.expect(expected.eql(fused));
+    }
+
+    // Test with larger values (near modulus)
+    {
+        const a = BN254Scalar{ .limbs = .{ 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0x0fffffffffffffff } };
+        const b = BN254Scalar{ .limbs = .{ 0xeeeeeeeeeeeeeeee, 0xdddddddddddddddd, 0xcccccccccccccccc, 0x0bbbbbbbbbbbbbbb } };
+        const c = BN254Scalar.fromU64(999999999);
+        const d = BN254Scalar.fromU64(888888888);
+
+        const expected = a.mul(b).add(c.mul(d));
+        const fused = BN254Scalar.sumOfProducts(.{ a, c }, .{ b, d });
+        try std.testing.expect(expected.eql(fused));
+    }
+
+    // Test BN254BaseField (Fp) sumOfProducts
+    {
+        const Fp = BN254BaseField;
+        const a = Fp.fromU64(54321);
+        const b = Fp.fromU64(98765);
+        const c = Fp.fromU64(33333);
+        const d = Fp.fromU64(44444);
+
+        const expected = a.mul(b).add(c.mul(d));
+        const fused = Fp.sumOfProducts(.{ a, c }, .{ b, d });
+        try std.testing.expect(expected.eql(fused));
+    }
+
+    // Test with subtraction (a*b + (-c)*d = a*b - c*d)
+    {
+        const Fp = BN254BaseField;
+        const a = Fp.fromU64(100000);
+        const b = Fp.fromU64(200000);
+        const c = Fp.fromU64(50000);
+        const d = Fp.fromU64(30000);
+
+        const expected = a.mul(b).sub(c.mul(d));
+        const fused = Fp.sumOfProducts(.{ a, c.neg() }, .{ b, d });
+        try std.testing.expect(expected.eql(fused));
+    }
+
+    // Test zero cases
+    {
+        const zero = BN254Scalar.zero();
+        const a = BN254Scalar.fromU64(42);
+        const b = BN254Scalar.fromU64(99);
+
+        const result = BN254Scalar.sumOfProducts(.{ a, zero }, .{ b, zero });
+        try std.testing.expect(result.eql(a.mul(b)));
+    }
 }
 
 test "bn254 scalar toBytes/fromBytes roundtrip" {

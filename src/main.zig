@@ -412,7 +412,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
         };
         defer srs.deinit();
 
-        var verifier_setup = preprocessing.DoryVerifierSetup.fromSRS(allocator, &srs) catch |err| {
+        var verifier_setup = preprocessing.DoryVerifierSetup.fromSRS(allocator, &srs, &thread_pool) catch |err| {
             std.debug.print("  Error creating verifier setup: {s}\n", .{@errorName(err)});
             return err;
         };

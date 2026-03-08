@@ -21,6 +21,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 const prefixes_mod = @import("prefixes.zig");
 const suffixes_mod = @import("suffixes.zig");
@@ -266,6 +267,22 @@ pub fn AllSuffixPolys(comptime F: type) type {
                     table.bind(r);
                 }
             }
+        }
+
+        /// Bind a challenge in all suffix polynomials (parallel version)
+        /// Each table's bind is independent — safe to parallelize across tables.
+        pub fn bindAllParallel(self: *Self, r: F, tp: *ThreadPool) void {
+            const BindCtx = struct {
+                tables: *[NUM_TABLES]?TableSuffixPolys(F),
+                rv: F,
+            };
+            tp.parallelForForce(NUM_TABLES, BindCtx{ .tables = &self.tables, .rv = r }, struct {
+                fn f(ctx: BindCtx, idx: usize) void {
+                    if (ctx.tables[idx]) |*table| {
+                        table.bind(ctx.rv);
+                    }
+                }
+            }.f);
         }
     };
 }

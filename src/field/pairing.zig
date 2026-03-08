@@ -217,23 +217,21 @@ pub const Fp2 = struct {
     }
 
     pub fn mul(self: Fp2, other: Fp2) Fp2 {
-        // Karatsuba: (a + bu)(c + du) = (ac - bd) + ((a+b)(c+d) - ac - bd)u
-        // 3 Fp muls instead of 4
-        const ac = self.c0.mul(other.c0);
-        const bd = self.c1.mul(other.c1);
-        const ab_cd = self.c0.add(self.c1).mul(other.c0.add(other.c1));
-
+        // sumOfProducts fusion: 2 fused reductions instead of 3 separate muls
+        // c0 = a0*b0 - a1*b1 (NONRESIDUE = -1)
+        // c1 = a0*b1 + a1*b0
+        const neg_a1 = self.c1.neg();
         return .{
-            .c0 = ac.sub(bd),
-            .c1 = ab_cd.sub(ac).sub(bd),
+            .c0 = Fp.sumOfProducts(.{ self.c0, neg_a1 }, .{ other.c0, other.c1 }),
+            .c1 = Fp.sumOfProducts(.{ self.c0, self.c1 }, .{ other.c1, other.c0 }),
         };
     }
 
     pub fn square(self: Fp2) Fp2 {
         // (a + bu)² = (a² - b²) + 2abu
         // Karatsuba optimization: (a+b)(a-b) = a² - b²
-        const a_plus_b = self.c0.add(self.c1);
-        const a_minus_b = self.c0.sub(self.c1);
+        const a_plus_b = self.c0.addNoReduce(self.c1); // [0, 2p), saves 1 reduction
+        const a_minus_b = self.c0.sub(self.c1); // [0, p)
         const a_squared_minus_b_squared = a_plus_b.mul(a_minus_b);
         const two_ab = self.c0.mul(self.c1).double();
 
@@ -321,12 +319,23 @@ pub const Fp6 = struct {
     }
 
     /// Multiplication by ξ = 9 + u (the non-residue for BN254)
+    /// Uses shift-add (9x = 8x + x): 4 additions instead of 1 Montgomery mul
     fn mulByXi(x: Fp2) Fp2 {
-        // ξ * (a + bu) = (a + bu)(9 + u) = (9a - b) + (a + 9b)u
-        const nine = Fp.fromU64(9);
+        const a = x.c0;
+        const a2 = a.add(a);
+        const a4 = a2.add(a2);
+        const a8 = a4.add(a4);
+        const a9 = a8.add(a);
+
+        const b = x.c1;
+        const b2 = b.add(b);
+        const b4 = b2.add(b2);
+        const b8 = b4.add(b4);
+        const b9 = b8.add(b);
+
         return Fp2.init(
-            nine.mul(x.c0).sub(x.c1),
-            x.c0.add(nine.mul(x.c1)),
+            a9.sub(b),
+            a.add(b9),
         );
     }
 
@@ -357,8 +366,21 @@ pub const Fp6 = struct {
         return .{ .c0 = new_c0, .c1 = new_c1, .c2 = new_c2 };
     }
 
+    /// Chung-Hasan SQ2 squaring: 2 Fp2.mul + 3 Fp2.square instead of 6 Fp2.mul
     pub fn square(self: Fp6) Fp6 {
-        return self.mul(self);
+        const s0 = self.c0.square();
+        const ab = self.c0.mul(self.c1);
+        const s1 = ab.add(ab); // 2*c0*c1
+        const s2 = self.c0.sub(self.c1).add(self.c2).square();
+        const bc = self.c1.mul(self.c2);
+        const s3 = bc.add(bc); // 2*c1*c2
+        const s4 = self.c2.square();
+
+        return .{
+            .c0 = s0.add(mulByXi(s3)),
+            .c1 = s1.add(mulByXi(s4)),
+            .c2 = s1.add(s2).add(s3).sub(s0).sub(s4),
+        };
     }
 
     pub fn inverse(self: Fp6) ?Fp6 {
@@ -445,30 +467,92 @@ pub const Fp12 = struct {
         };
     }
 
-    /// Multiplication in Fp12
+    /// Multiplication in Fp12 using Karatsuba (3 Fp6.mul instead of 4)
     pub fn mul(self: Fp12, other: Fp12) Fp12 {
-        // (a + bw)(c + dw) = (ac + bdv) + (ad + bc)w
-        // where v is the element that w² = v
+        // (a + bw)(c + dw) = (ac + bdv) + ((a+b)(c+d) - ac - bd)w
+        // where w² = v
         const ac = self.c0.mul(other.c0);
         const bd = self.c1.mul(other.c1);
-        const ad = self.c0.mul(other.c1);
-        const bc = self.c1.mul(other.c0);
+        const ad_plus_bc = self.c0.add(self.c1).mul(other.c0.add(other.c1)).sub(ac).sub(bd);
 
         // Multiply bd by v (shift in the Fp6 tower)
-        const bd_times_v = Fp6{
-            .c0 = Fp6.mulByXi(bd.c2),
-            .c1 = bd.c0,
-            .c2 = bd.c1,
-        };
+        const bd_times_v = fp6MulByV(bd);
 
         return .{
             .c0 = ac.add(bd_times_v),
-            .c1 = ad.add(bc),
+            .c1 = ad_plus_bc,
         };
     }
 
+    /// Complex squaring: 2 Fp6.mul instead of 4
+    /// For f = a + bw, f² = (a² + b²·v) + 2ab·w
     pub fn square(self: Fp12) Fp12 {
-        return self.mul(self);
+        const ab = self.c0.mul(self.c1);
+        const c1_new = ab.add(ab); // 2ab
+
+        // (a+b)(a+bv) - ab - v·ab = a² + b²v
+        const a_plus_b = self.c0.add(self.c1);
+        const bv = fp6MulByV(self.c1);
+        const a_plus_bv = self.c0.add(bv);
+        const abv = fp6MulByV(ab);
+        const c0_new = a_plus_b.mul(a_plus_bv).sub(ab).sub(abv);
+
+        return .{ .c0 = c0_new, .c1 = c1_new };
+    }
+
+    /// Cyclotomic squaring for unitary Fp12 elements (where x * conjugate(x) = 1).
+    /// Uses Granger-Scott algorithm: 6 Fp2 squarings instead of full Fp12 square.
+    /// ~40% fewer Fp2 multiplications than generic square.
+    pub fn cyclotomicSquare(self: Fp12) Fp12 {
+        // Extract the 6 Fp2 components using arkworks naming convention:
+        // self.c0 = r0 + r4*v + r3*v²
+        // self.c1 = r2 + r1*v + r5*v²
+        const r0 = self.c0.c0;
+        const r4 = self.c0.c1;
+        const r3 = self.c0.c2;
+        const r2 = self.c1.c0;
+        const r1 = self.c1.c1;
+        const r5 = self.c1.c2;
+
+        // fp4_square helper: (a, b) -> (t_even, t_odd) where
+        // (a + b*y)² = t_even + t_odd*y  with y² = ξ (nonresidue)
+        // Uses Karatsuba: (a+b)(ξ·b+a) - a·b - ξ(a·b)
+        //                 and 2·a·b
+
+        // Pair 1: (r0, r1)
+        const tmp01 = r0.mul(r1);
+        const t0 = r0.add(r1).mul(Fp6.mulByXi(r1).add(r0)).sub(tmp01).sub(Fp6.mulByXi(tmp01));
+        const t1 = tmp01.add(tmp01);
+
+        // Pair 2: (r2, r3)
+        const tmp23 = r2.mul(r3);
+        const t2 = r2.add(r3).mul(Fp6.mulByXi(r3).add(r2)).sub(tmp23).sub(Fp6.mulByXi(tmp23));
+        const t3 = tmp23.add(tmp23);
+
+        // Pair 3: (r4, r5)
+        const tmp45 = r4.mul(r5);
+        const t4 = r4.add(r5).mul(Fp6.mulByXi(r5).add(r4)).sub(tmp45).sub(Fp6.mulByXi(tmp45));
+        const t5 = tmp45.add(tmp45);
+
+        // Update using cyclotomic relations:
+        // z0 = 3*t0 - 2*r0
+        const z0 = t0.sub(r0).add(t0.sub(r0)).add(t0);
+        // z1 = 3*t1 + 2*r1
+        const z1 = t1.add(r1).add(t1.add(r1)).add(t1);
+        // z2 = 3*ξ(t5) + 2*r2
+        const xi_t5 = Fp6.mulByXi(t5);
+        const z2 = xi_t5.add(r2).add(xi_t5.add(r2)).add(xi_t5);
+        // z3 = 3*t4 - 2*r3
+        const z3 = t4.sub(r3).add(t4.sub(r3)).add(t4);
+        // z4 = 3*t2 - 2*r4
+        const z4 = t2.sub(r4).add(t2.sub(r4)).add(t2);
+        // z5 = 3*t3 + 2*r5
+        const z5 = t3.add(r5).add(t3.add(r5)).add(t3);
+
+        return .{
+            .c0 = .{ .c0 = z0, .c1 = z4, .c2 = z3 },
+            .c1 = .{ .c0 = z2, .c1 = z1, .c2 = z5 },
+        };
     }
 
     /// Conjugate for unitary elements: a + bw -> a - bw
@@ -1771,6 +1855,121 @@ pub fn millerLoopArkworks(p: G1PointFp, q: G2Point) Fp12 {
     return f;
 }
 
+/// Number of EllCoeff entries in a prepared G2 point.
+/// 64 doubling steps + up to 21 addition steps + 2 final Frobenius additions = 87.
+const PREPARED_COEFFS_LEN: usize = 87;
+
+/// Precomputed G2 point for fast Miller loop evaluation.
+/// Stores all line function coefficients so the Miller loop
+/// only needs Fp12 arithmetic (no G2 projective operations).
+pub const G2Prepared = struct {
+    coeffs: [PREPARED_COEFFS_LEN]EllCoeff,
+    infinity: bool,
+
+    pub fn fromG2Point(q: G2Point) G2Prepared {
+        if (q.infinity) {
+            return G2Prepared{
+                .coeffs = [_]EllCoeff{.{ .c0 = Fp2.zero(), .c1 = Fp2.zero(), .c2 = Fp2.zero() }} ** PREPARED_COEFFS_LEN,
+                .infinity = true,
+            };
+        }
+
+        const two_inv = Fp.fromU64(2).inverse().?;
+        var r = G2HomProjective.fromAffine(q);
+        const neg_q = q.neg();
+
+        var result: G2Prepared = undefined;
+        result.infinity = false;
+        var coeff_idx: usize = 0;
+
+        // Main loop
+        var idx: usize = ATE_LOOP_COUNT.len - 1;
+        while (idx >= 1) : (idx -= 1) {
+            // Doubling step
+            result.coeffs[coeff_idx] = r.double_in_place(two_inv);
+            coeff_idx += 1;
+
+            // Addition step if bit is non-zero
+            const bit = ATE_LOOP_COUNT[idx - 1];
+            if (bit == 1) {
+                result.coeffs[coeff_idx] = r.add_in_place(q);
+                coeff_idx += 1;
+            } else if (bit == -1) {
+                result.coeffs[coeff_idx] = r.add_in_place(neg_q);
+                coeff_idx += 1;
+            }
+        }
+
+        // Final Frobenius steps
+        const q1 = mulByChar(q);
+        result.coeffs[coeff_idx] = r.add_in_place(q1);
+        coeff_idx += 1;
+
+        var q2 = mulByChar(q1);
+        q2.y = q2.y.neg();
+        result.coeffs[coeff_idx] = r.add_in_place(q2);
+        coeff_idx += 1;
+
+        std.debug.assert(coeff_idx == PREPARED_COEFFS_LEN);
+        return result;
+    }
+};
+
+/// Miller loop using precomputed G2 coefficients.
+/// Avoids all G2 projective arithmetic — only Fp12 multiplications.
+pub fn millerLoopPrepared(p: G1PointFp, q_prep: *const G2Prepared) Fp12 {
+    if (p.infinity or q_prep.infinity) {
+        return Fp12.one();
+    }
+
+    var f = Fp12.one();
+    var coeff_idx: usize = 0;
+
+    var idx: usize = ATE_LOOP_COUNT.len - 1;
+    while (idx >= 1) : (idx -= 1) {
+        if (idx != ATE_LOOP_COUNT.len - 1) {
+            f = f.square();
+        }
+
+        // Doubling coefficients
+        const coeffs_dbl = q_prep.coeffs[coeff_idx];
+        coeff_idx += 1;
+        const c0_eval = fp2ScalarMul(coeffs_dbl.c0, p.y);
+        const c1_eval = fp2ScalarMul(coeffs_dbl.c1, p.x);
+        f = fp12MulBy034(f, c0_eval, c1_eval, coeffs_dbl.c2);
+
+        // Addition coefficients if bit is non-zero
+        const bit = ATE_LOOP_COUNT[idx - 1];
+        if (bit == 1 or bit == -1) {
+            const coeffs_add = q_prep.coeffs[coeff_idx];
+            coeff_idx += 1;
+            const c0_add = fp2ScalarMul(coeffs_add.c0, p.y);
+            const c1_add = fp2ScalarMul(coeffs_add.c1, p.x);
+            f = fp12MulBy034(f, c0_add, c1_add, coeffs_add.c2);
+        }
+    }
+
+    if (X_IS_NEGATIVE) {
+        f = f.conjugate();
+    }
+
+    // Final Frobenius steps
+    const coeffs_q1 = q_prep.coeffs[coeff_idx];
+    coeff_idx += 1;
+    const c0_q1 = fp2ScalarMul(coeffs_q1.c0, p.y);
+    const c1_q1 = fp2ScalarMul(coeffs_q1.c1, p.x);
+    f = fp12MulBy034(f, c0_q1, c1_q1, coeffs_q1.c2);
+
+    const coeffs_q2 = q_prep.coeffs[coeff_idx];
+    coeff_idx += 1;
+    const c0_q2 = fp2ScalarMul(coeffs_q2.c0, p.y);
+    const c1_q2 = fp2ScalarMul(coeffs_q2.c1, p.x);
+    f = fp12MulBy034(f, c0_q2, c1_q2, coeffs_q2.c2);
+
+    std.debug.assert(coeff_idx == PREPARED_COEFFS_LEN);
+    return f;
+}
+
 /// Apply Frobenius endomorphism to G2 point
 /// π: (x, y) → (x^p · γ_{1,2}, y^p · γ_{1,3})
 /// where x^p = conjugate(x), y^p = conjugate(y) in Fp2
@@ -1895,7 +2094,7 @@ fn hardPartExponentiation(m: Fp12) Fp12 {
     // Compute y1·y2²·y3⁶·y4¹²·y5¹⁸·y6³⁰·y7³⁶ using the optimized addition chain from ziskos:
     //
     // T11 = y7² · y5 · y6
-    var t11 = y7.square();
+    var t11 = y7.cyclotomicSquare();
     t11 = t11.mul(y5);
     t11 = t11.mul(y6);
 
@@ -1907,11 +2106,11 @@ fn hardPartExponentiation(m: Fp12) Fp12 {
     const t12 = t11.mul(mxxpp);
 
     // T22 = T21² · T12
-    var t22 = t21.square();
+    var t22 = t21.cyclotomicSquare();
     t22 = t22.mul(t12);
 
     // T23 = T22²
-    const t23 = t22.square();
+    const t23 = t22.cyclotomicSquare();
 
     // T24 = T23 · y1
     const t24 = t23.mul(y1);
@@ -1920,13 +2119,14 @@ fn hardPartExponentiation(m: Fp12) Fp12 {
     const t13 = t23.mul(y2);
 
     // T14 = T13² · T24
-    var t14 = t13.square();
+    var t14 = t13.cyclotomicSquare();
     t14 = t14.mul(t24);
 
     return t14;
 }
 
 /// Compute f^x where x is the BN254 curve parameter
+/// Uses cyclotomic squaring since f is a unitary element in the cyclotomic subgroup.
 fn expByX(f: Fp12) Fp12 {
     var result = Fp12.one();
     var base = f;
@@ -1936,7 +2136,7 @@ fn expByX(f: Fp12) Fp12 {
         if (exp & 1 == 1) {
             result = result.mul(base);
         }
-        base = base.square();
+        base = base.cyclotomicSquare();
         exp >>= 1;
     }
 
@@ -1958,10 +2158,10 @@ fn hardPartExponentiationArkworks(r: Fp12) Fp12 {
     const y0 = expByNegX(r);
 
     // y1 = y0^2 (cyclotomic square)
-    const y1 = y0.square();
+    const y1 = y0.cyclotomicSquare();
 
     // y2 = y1^2
-    const y2 = y1.square();
+    const y2 = y1.cyclotomicSquare();
 
     // y3 = y2 * y1
     var y3 = y2.mul(y1);
@@ -1970,7 +2170,7 @@ fn hardPartExponentiationArkworks(r: Fp12) Fp12 {
     const y4 = expByNegX(y3);
 
     // y5 = y4^2
-    const y5 = y4.square();
+    const y5 = y4.cyclotomicSquare();
 
     // y6 = exp_by_neg_x(y5)
     var y6 = expByNegX(y5);
@@ -2037,17 +2237,25 @@ pub const PairingInput = struct {
 };
 
 /// Multi-pairing: product of pairings e(P1,Q1) * e(P2,Q2) * ...
-/// More efficient than computing individual pairings
+/// Uses batch Miller loop with shared final exponentiation for efficiency.
 pub fn multiPairing(pairs: []const PairingInput) PairingResult {
-    var result = Fp12.one();
+    if (pairs.len == 0) return Fp12.one();
 
+    var miller_acc = Fp12.one();
     for (pairs) |pair| {
-        // In a real implementation, we'd use a shared Miller loop
-        const single = pairing(pair.p, pair.q);
-        result = result.mul(single);
+        if (pair.p.infinity or pair.q.infinity) continue;
+        // Convert Fr-coordinate G1 to Fp for Miller loop
+        const p_fp = G1PointFp{
+            .x = Fp{ .limbs = pair.p.x.limbs },
+            .y = Fp{ .limbs = pair.p.y.limbs },
+            .infinity = false,
+        };
+        const ml = millerLoopArkworks(p_fp, pair.q);
+        miller_acc = miller_acc.mul(ml);
     }
 
-    return result;
+    if (miller_acc.eql(Fp12.one())) return Fp12.one();
+    return finalExponentiation(miller_acc);
 }
 
 /// Check if e(P1, Q1) == e(P2, Q2)
@@ -2076,13 +2284,19 @@ pub const PairingInputFp = struct {
 };
 
 /// Multi-pairing with Fp coordinates: product of pairings e(P1,Q1) * e(P2,Q2) * ...
+/// Uses batch Miller loop with shared final exponentiation for efficiency.
 pub fn multiPairingFp(pairs: []const PairingInputFp) PairingResult {
-    var result = Fp12.one();
+    if (pairs.len == 0) return Fp12.one();
+
+    var miller_acc = Fp12.one();
     for (pairs) |pair| {
-        const single = pairingFp(pair.p, pair.q);
-        result = result.mul(single);
+        if (pair.p.infinity or pair.q.infinity) continue;
+        const ml = millerLoopArkworks(pair.p, pair.q);
+        miller_acc = miller_acc.mul(ml);
     }
-    return result;
+
+    if (miller_acc.eql(Fp12.one())) return Fp12.one();
+    return finalExponentiation(miller_acc);
 }
 
 /// Check if e(P1, Q1) == e(P2, Q2) with proper Fp coordinates

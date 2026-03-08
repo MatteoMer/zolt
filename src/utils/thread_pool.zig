@@ -20,7 +20,7 @@ pub const ThreadPool = struct {
     /// Initialize a thread pool with auto-detected CPU count (capped at 8).
     pub fn init(allocator: Allocator) !ThreadPool {
         const cpu_count = std.Thread.getCpuCount() catch 4;
-        const thread_count = @min(cpu_count, 8);
+        const thread_count = @min(cpu_count, 16);
         return initWithCount(allocator, thread_count);
     }
 

@@ -2,7 +2,7 @@
 
 A Zig zkVM prover that generates proofs verifiable by the unmodified upstream [a16z/jolt](https://github.com/a16z/jolt) verifier — no patched fork needed. Zero dependencies, zero FFI — all cryptography (field arithmetic, pairings, MSM, polynomial commitments) is implemented from scratch using only the Zig standard library.
 
-> This project is 100% AI generated with the [ralph method](https://ghuntley.com/ralph/)
+> **WARNING:** This project is experimental and has not been audited. Do not use in production.
 
 ## Quick Start
 
@@ -70,6 +70,22 @@ Requires a RISC-V toolchain (e.g., `riscv32-unknown-elf-gcc`):
 cd examples
 make all
 ```
+
+## Benchmarks
+
+Compared against [Jolt](https://github.com/a16z/jolt) (Rust) on a Hetzner CPX41 — 8 vCPU AMD EPYC (Zen 2), 16 GB RAM, Ubuntu 22.04.
+
+| Program | Trace | Jolt (ms) | Zolt (ms) | Ratio |
+|---------|------:|----------:|----------:|------:|
+| fibonacci | 256 | 1240.01 | 929.33 | 0.75x |
+| factorial | 256 | 1150.95 | 1027.77 | 0.89x |
+| bitwise | 512 | 1351.32 | 1475.52 | 1.09x |
+| collatz | 2048 | 1567.96 | 2541.66 | 1.62x |
+| primes | 2048 | 1464.57 | 3443.07 | 2.35x |
+| sum | 256 | 1260.56 | 953.11 | 0.76x |
+| gcd | 256 | 1271.58 | 1427.87 | 1.12x |
+| signed | 256 | 1323.29 | 976.55 | 0.74x |
+| primes_large | 65536 | 2541.32 | 30773.29 | 12.11x |
 
 ## Upstream Compatibility
 

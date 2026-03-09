@@ -1496,6 +1496,157 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             return pairing.finalExponentiation(miller_acc);
         }
 
+        /// Commit to a one-hot polynomial using batch affine additions instead of MSM.
+        ///
+        /// For one-hot polys (CycleMajor layout: poly[addr*T + cycle] = 1 if active),
+        /// each matrix row has only a few nonzero entries. Instead of expanding to K*T
+        /// field elements and running Pippenger MSM, we directly sum the relevant G1
+        /// basis points using batch affine additions with shared batch inversion.
+        ///
+        /// `indices[cycle] = addr` (or null if no entry this cycle).
+        /// The polynomial has k_chunk * trace_length entries in CycleMajor layout.
+        pub fn commitOneHotWithPool(
+            params: *const SetupParams,
+            indices: []const ?u8,
+            k_chunk: usize,
+            trace_length: usize,
+            allocator: Allocator,
+            tp: ?*ThreadPool,
+        ) !Commitment {
+            const poly_size = k_chunk * trace_length;
+            if (poly_size == 0) return GT.one();
+
+            const num_vars: usize = if (poly_size <= 1) 1 else std.math.log2_int(usize, poly_size);
+            const sigma: usize = (num_vars + 1) / 2;
+            const nu: usize = num_vars - sigma;
+            const num_cols = @as(usize, 1) << @intCast(sigma);
+            const num_rows = @as(usize, 1) << @intCast(nu);
+            const rows_per_k = trace_length / num_cols;
+
+            // In CycleMajor layout, row index = addr * rows_per_k + (cycle / num_cols)
+            // and column index = cycle % num_cols.
+            // Each row has at most `num_cols` entries (one per column-aligned cycle).
+            // We collect column indices per row, then use batch affine additions.
+
+            // Allocate per-row index lists
+            // Max entries per row = num_cols (if every cycle in that chunk maps to same addr)
+            // but typically much fewer. Use dynamic lists.
+            const row_counts = try allocator.alloc(u16, num_rows);
+            defer allocator.free(row_counts);
+            @memset(row_counts, 0);
+
+            // First pass: count entries per row
+            for (0..trace_length) |cycle| {
+                if (indices[cycle]) |addr| {
+                    const row = @as(usize, addr) * rows_per_k + cycle / num_cols;
+                    if (row < num_rows) {
+                        row_counts[row] += 1;
+                    }
+                }
+            }
+
+            // Allocate flat buffer for all column indices
+            var total_entries: usize = 0;
+            for (row_counts) |c| total_entries += c;
+
+            const col_indices_flat = try allocator.alloc(u16, total_entries);
+            defer allocator.free(col_indices_flat);
+
+            // Build offset table
+            const row_offsets = try allocator.alloc(usize, num_rows + 1);
+            defer allocator.free(row_offsets);
+            row_offsets[0] = 0;
+            for (0..num_rows) |r| {
+                row_offsets[r + 1] = row_offsets[r] + row_counts[r];
+            }
+
+            // Second pass: fill column indices
+            const row_fill = try allocator.alloc(u16, num_rows);
+            defer allocator.free(row_fill);
+            @memset(row_fill, 0);
+
+            for (0..trace_length) |cycle| {
+                if (indices[cycle]) |addr| {
+                    const row = @as(usize, addr) * rows_per_k + cycle / num_cols;
+                    if (row < num_rows) {
+                        const off = row_offsets[row] + row_fill[row];
+                        col_indices_flat[off] = @intCast(cycle % num_cols);
+                        row_fill[row] += 1;
+                    }
+                }
+            }
+
+            // Build per-row index slices
+            const row_index_slices = try allocator.alloc([]const u16, num_rows);
+            defer allocator.free(row_index_slices);
+            for (0..num_rows) |r| {
+                row_index_slices[r] = col_indices_flat[row_offsets[r]..row_offsets[r + 1]];
+            }
+
+            // Process rows: batch affine additions + Miller loops
+            // Each row: sum G1 bases at selected columns, then pair with G2
+            const g1_bases = params.g1_vec[0..num_cols];
+            const batch_add = msm.batch_affine;
+
+            const RowCtx = struct {
+                params_ptr: *const SetupParams,
+                row_slices: []const []const u16,
+                g1_bases_ptr: []const G1Point,
+                n_rows: usize,
+                alloc: Allocator,
+            };
+            const ctx = RowCtx{
+                .params_ptr = params,
+                .row_slices = row_index_slices,
+                .g1_bases_ptr = g1_bases,
+                .n_rows = num_rows,
+                .alloc = allocator,
+            };
+
+            const mapFn = struct {
+                fn f(c: RowCtx, start: usize, end: usize) pairing.Fp12 {
+                    var acc = pairing.Fp12.one();
+                    for (start..end) |row| {
+                        const row_indices = c.row_slices[row];
+                        if (row_indices.len == 0) continue;
+
+                        const row_commitment = if (row_indices.len == 1)
+                            c.g1_bases_ptr[row_indices[0]]
+                        else
+                            batch_add.batchG1Additions(c.g1_bases_ptr, row_indices);
+
+                        if (row < c.params_ptr.g2_vec.len and !row_commitment.infinity) {
+                            const row_g1 = G1PointFp{
+                                .x = row_commitment.x,
+                                .y = row_commitment.y,
+                                .infinity = false,
+                            };
+                            const ml = if (c.params_ptr.g2_prepared) |prep|
+                                pairing.millerLoopPrepared(row_g1, &prep[row])
+                            else
+                                pairing.millerLoopArkworks(row_g1, c.params_ptr.g2_vec[row]);
+                            acc = acc.mul(ml);
+                        }
+                    }
+                    return acc;
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: pairing.Fp12, b: pairing.Fp12) pairing.Fp12 {
+                    return a.mul(b);
+                }
+            }.f;
+
+            const miller_acc = if (tp) |pool|
+                pool.parallelReduceForce(pairing.Fp12, num_rows, pairing.Fp12.one(), ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, num_rows);
+
+            if (std.mem.eql(u8, &std.mem.toBytes(miller_acc), &std.mem.toBytes(pairing.Fp12.one()))) return GT.one();
+            return pairing.finalExponentiation(miller_acc);
+        }
+
         /// Create an opening proof using the Dory reduce-and-fold IPA
         ///
         /// Implements the full Dory protocol:

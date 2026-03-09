@@ -798,6 +798,36 @@ pub fn MontgomeryField(
             return result;
         }
 
+        /// Batch inversion using Montgomery's trick: invert n elements with 1 inversion + 3(n-1) muls.
+        /// Elements are inverted in-place. Zero elements are skipped (left as zero).
+        /// `scratch` must have the same length as `elements`.
+        pub fn batchInversion(elements: []Self, scratch: []Self) void {
+            const n = elements.len;
+            if (n == 0) return;
+
+            // Forward pass: compute prefix products, skipping zeros
+            var acc = one();
+            for (0..n) |i| {
+                scratch[i] = acc;
+                if (!elements[i].isZero()) {
+                    acc = acc.mul(elements[i]);
+                }
+            }
+
+            // Single inversion of the accumulated product
+            var inv = acc.inverse() orelse return;
+
+            // Backward pass: extract individual inverses
+            var i: usize = n;
+            while (i > 0) {
+                i -= 1;
+                if (elements[i].isZero()) continue;
+                const old = elements[i];
+                elements[i] = scratch[i].mul(inv);
+                inv = inv.mul(old);
+            }
+        }
+
         inline fn lessThanModulus(self: Self) bool {
             @setEvalBranchQuota(10000);
             var i: usize = 3;

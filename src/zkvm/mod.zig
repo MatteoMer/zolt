@@ -588,11 +588,23 @@ pub fn JoltProver(comptime F: type) type {
             // Store one-hot index arrays for sparse polynomials
             const num_onehot = instruction_d + ram_d + bytecode_d;
             var onehot_indices = try self.allocator.alloc([]?u8, num_onehot);
+            var onehot_idx: usize = 0;
             errdefer {
-                for (onehot_indices[0..@min(onehot_indices.len, num_onehot)]) |idx_arr| self.allocator.free(idx_arr);
+                for (onehot_indices[0..onehot_idx]) |idx_arr| self.allocator.free(idx_arr);
                 self.allocator.free(onehot_indices);
             }
-            var onehot_idx: usize = 0;
+
+            // Cache row commitments (G1 points) from each polynomial's Dory commit
+            // for homomorphic combination in Stage 8.
+            // Order: RdInc, RamInc, InstructionRa[0..inst_d], RamRa[0..ram_d], BytecodeRa[0..bc_d]
+            const num_total_polys = num_dense + num_onehot;
+            const G1Point = Dory.G1Point;
+            var row_commitments_cache = try self.allocator.alloc([]G1Point, num_total_polys);
+            var rc_idx: usize = 0;
+            errdefer {
+                for (row_commitments_cache[0..rc_idx]) |rc| self.allocator.free(rc);
+                self.allocator.free(row_commitments_cache);
+            }
 
             phase_timer.reset();
             // RdInc: dense polynomial, trace_length entries
@@ -606,8 +618,10 @@ pub fn JoltProver(comptime F: type) type {
             @memcpy(rd_inc_poly[0..rd_inc_poly_raw.len], rd_inc_poly_raw);
             witness_polys[witness_idx] = rd_inc_poly;
             witness_idx += 1;
-            const rd_inc_comm = DoryScheme.commitWithPool(&dory_srs, rd_inc_poly, self.thread_pool);
-            try all_commitments.append(self.allocator, rd_inc_comm);
+            const rd_inc_result = try DoryScheme.commitWithPoolAndHints(&dory_srs, rd_inc_poly, self.allocator, self.thread_pool);
+            try all_commitments.append(self.allocator, rd_inc_result.commitment);
+            row_commitments_cache[rc_idx] = rd_inc_result.row_commitments;
+            rc_idx += 1;
 
             // RamInc: dense polynomial, trace_length entries
             // CRITICAL: Must pad to k_chunk*trace_length (same as RdInc)
@@ -618,7 +632,13 @@ pub fn JoltProver(comptime F: type) type {
             @memcpy(ram_inc_poly[0..ram_inc_poly_raw.len], ram_inc_poly_raw);
             witness_polys[witness_idx] = ram_inc_poly;
             witness_idx += 1;
-            try all_commitments.append(self.allocator, DoryScheme.commitWithPool(&dory_srs, ram_inc_poly, self.thread_pool));
+            const ram_inc_result = try DoryScheme.commitWithPoolAndHints(&dory_srs, ram_inc_poly, self.allocator, self.thread_pool);
+            try all_commitments.append(self.allocator, ram_inc_result.commitment);
+            row_commitments_cache[rc_idx] = ram_inc_result.row_commitments;
+            rc_idx += 1;
+
+            // Guard: k_chunk must fit in u8 for sparse one-hot index arrays
+            std.debug.assert(k_chunk <= 256);
 
             // InstructionRa[0..instruction_d-1]: one-hot, commit with batch affine additions
             var idx: usize = 0;
@@ -634,7 +654,10 @@ pub fn JoltProver(comptime F: type) type {
                 }
                 onehot_indices[onehot_idx] = oh_indices;
                 onehot_idx += 1;
-                try all_commitments.append(self.allocator, try DoryScheme.commitOneHotWithPool(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool));
+                const oh_result = try DoryScheme.commitOneHotWithPoolAndHints(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool);
+                try all_commitments.append(self.allocator, oh_result.commitment);
+                row_commitments_cache[rc_idx] = oh_result.row_commitments;
+                rc_idx += 1;
             }
 
             // RamRa[0..ram_d-1]: one-hot, commit with batch affine additions
@@ -650,7 +673,10 @@ pub fn JoltProver(comptime F: type) type {
                 }
                 onehot_indices[onehot_idx] = oh_indices;
                 onehot_idx += 1;
-                try all_commitments.append(self.allocator, try DoryScheme.commitOneHotWithPool(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool));
+                const oh_result = try DoryScheme.commitOneHotWithPoolAndHints(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool);
+                try all_commitments.append(self.allocator, oh_result.commitment);
+                row_commitments_cache[rc_idx] = oh_result.row_commitments;
+                rc_idx += 1;
             }
 
             // BytecodeRa[0..bytecode_d-1]: one-hot, commit with batch affine additions
@@ -669,12 +695,16 @@ pub fn JoltProver(comptime F: type) type {
                 }
                 onehot_indices[onehot_idx] = oh_indices;
                 onehot_idx += 1;
-                try all_commitments.append(self.allocator, try DoryScheme.commitOneHotWithPool(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool));
+                const oh_result = try DoryScheme.commitOneHotWithPoolAndHints(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool);
+                try all_commitments.append(self.allocator, oh_result.commitment);
+                row_commitments_cache[rc_idx] = oh_result.row_commitments;
+                rc_idx += 1;
             }
 
-            // Store witness polynomials, one-hot indices, and params in result
+            // Store witness polynomials, one-hot indices, row commitments cache, and params in result
             result.witness_polys = witness_polys;
             result.onehot_indices = onehot_indices;
+            result.row_commitments_cache = row_commitments_cache;
             result.instruction_d = instruction_d;
             result.bytecode_d = bytecode_d;
             result.ram_d = ram_d;
@@ -983,59 +1013,76 @@ pub fn JoltProver(comptime F: type) type {
                     dory_point[i] = opening_point[opening_point.len - 1 - i];
                 }
 
-                // Debug: print joint_claim and transcript state (ALWAYS ON for debugging)
-                {
+                // Combine cached row commitment hints homomorphically instead of
+                // recomputing row commitments from joint_poly via full MSM.
+                // Reorder from Zolt cache order to Jolt gamma order:
+                //   Cache:  [0]=RdInc, [1]=RamInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+ram_d]=RamRa, [2+inst_d+ram_d..]=BytecodeRa
+                //   Gamma:  [0]=RamInc, [1]=RdInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+bc_d]=BytecodeRa, [2+inst_d+bc_d..]=RamRa
+                const rc_cache = result.row_commitments_cache;
+                const hints_ordered = try self.allocator.alloc([]const G1Point, num_claims);
+                defer self.allocator.free(hints_ordered);
+                hints_ordered[0] = rc_cache[1]; // RamInc (cache[1]) → gamma[0]
+                hints_ordered[1] = rc_cache[0]; // RdInc (cache[0]) → gamma[1]
+                for (0..instruction_d) |i| {
+                    hints_ordered[2 + i] = rc_cache[2 + i]; // InstructionRa: same order
+                }
+                for (0..bytecode_d) |i| {
+                    // BytecodeRa: cache[2+inst_d+ram_d+i] → gamma[2+inst_d+i]
+                    hints_ordered[2 + instruction_d + i] = rc_cache[2 + instruction_d + ram_d + i];
+                }
+                for (0..ram_d) |i| {
+                    // RamRa: cache[2+inst_d+i] → gamma[2+inst_d+bc_d+i]
+                    hints_ordered[2 + instruction_d + bytecode_d + i] = rc_cache[2 + instruction_d + i];
+                }
+
+                // Compute num_rows from poly dimensions (same as Dory internally computes)
+                const total_num_vars: usize = if (total_poly_size <= 1) 1 else std.math.log2_int(usize, total_poly_size);
+                const total_sigma: usize = (total_num_vars + 1) / 2;
+                const total_nu: usize = total_num_vars - total_sigma;
+                const hint_num_rows = @as(usize, 1) << @intCast(total_nu);
+
+                const joint_row_commitments = try DoryScheme.combineRowCommitmentHints(
+                    hints_ordered,
+                    gamma_powers,
+                    hint_num_rows,
+                    self.allocator,
+                    self.thread_pool,
+                );
+                defer self.allocator.free(joint_row_commitments);
+
+                // Debug: print joint_claim and transcript state
+                if (comptime debug_verbose) {
                     // Compute joint_claim = Σ γ^i * claim_i
                     var expected_joint_claim = F.zero();
                     for (0..num_claims) |i| {
                         expected_joint_claim = expected_joint_claim.add(gamma_powers[i].mul(claims_ordered[i]));
                     }
                     const ejc_be = expected_joint_claim.toBytesBE();
-                    dbg("[STAGE8] joint_claim_LE=[", .{});
-                    for (0..32) |bi| dbg("{x:0>2}", .{ejc_be[31 - bi]});
-                    dbg("]\n", .{});
-                    // Print gamma_powers[1] for comparison
+                    std.debug.print("[STAGE8] joint_claim_LE=[", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{ejc_be[31 - bi]});
+                    std.debug.print("]\n", .{});
                     const gp1_be = gamma_powers[1].toBytesBE();
-                    dbg("[STAGE8] gamma_powers[1]_LE=[", .{});
-                    for (0..16) |bi| dbg("{x:0>2}", .{gp1_be[31 - bi]});
-                    dbg("]\n", .{});
-                    // Print transcript state before Dory
-                    dbg("[STAGE8] transcript_state_before_dory=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] n_rounds={}\n", .{
+                    std.debug.print("[STAGE8] gamma_powers[1]_LE=[", .{});
+                    for (0..16) |bi| std.debug.print("{x:0>2}", .{gp1_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                    std.debug.print("[STAGE8] transcript_state_before_dory=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] n_rounds={}\n", .{
                         transcript.state[0], transcript.state[1], transcript.state[2], transcript.state[3],
                         transcript.state[4], transcript.state[5], transcript.state[6], transcript.state[7],
                         transcript.n_rounds,
                     });
-                    // Print first 5 claims_ordered
                     for (0..@min(5, num_claims)) |i| {
                         const cl_be = claims_ordered[i].toBytesBE();
-                        dbg("[STAGE8] claim[{}]_LE=[", .{i});
-                        for (0..16) |bi| dbg("{x:0>2}", .{cl_be[31 - bi]});
-                        dbg("]\n", .{});
+                        std.debug.print("[STAGE8] claim[{}]_LE=[", .{i});
+                        for (0..16) |bi| std.debug.print("{x:0>2}", .{cl_be[31 - bi]});
+                        std.debug.print("]\n", .{});
                     }
-                }
-                // Use the same SRS that was used for commitments (loaded from file for Jolt compatibility)
-                // CRITICAL: Must use openWithTranscript to integrate with Fiat-Shamir.
-                // The Jolt verifier uses JoltToDoryTranscript which bridges the Jolt transcript
-                // to Dory's internal transcript. The prover must use the same transcript state
-                // so the Dory protocol's internal challenges match between prover and verifier.
-                // Debug: compute commitment to joint_poly and print for comparison with verifier's joint_commitment
-                {
-                    const joint_commitment_gt = DoryScheme.commitWithPool(&dory_srs, joint_poly, self.thread_pool);
-                    // Serialize GT to bytes for comparison
-                    const gt_bytes = joint_commitment_gt.toBytes();
-                    dbg("[STAGE8] commit(joint_poly) first 32: [", .{});
-                    for (0..32) |bi| dbg("{x:0>2}, ", .{gt_bytes[bi]});
-                    dbg("]\n", .{});
-                    dbg("[STAGE8] commit(joint_poly) bytes 352-383: [", .{});
-                    for (352..384) |bi| dbg("{x:0>2}, ", .{gt_bytes[bi]});
-                    dbg("]\n", .{});
                 }
                 dbg("[STAGE8] Starting Dory opening proof (total_poly_size={}, num_claims={})...\n", .{ total_poly_size, num_claims });
                 const dory_proof = try DoryScheme.openWithTranscript(
                     &dory_srs,
                     joint_poly,
                     dory_point,
-                    null, // row commitments will be computed internally
+                    joint_row_commitments, // pre-computed via homomorphic hint combining
                     &transcript,
                     self.allocator,
                     self.thread_pool,

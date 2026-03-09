@@ -1583,24 +1583,23 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 row_index_slices[r] = col_indices_flat[row_offsets[r]..row_offsets[r + 1]];
             }
 
-            // Process rows: batch affine additions + Miller loops
-            // Each row: sum G1 bases at selected columns, then pair with G2
+            // Process rows: projective accumulation + Miller loops
+            // Each row: sum G1 bases at selected columns using projective coords (no inversions),
+            // convert to affine once, then pair with G2.
             const g1_bases = params.g1_vec[0..num_cols];
-            const batch_add = msm.batch_affine;
+            const G1Proj = msm.ProjectivePoint(Fp);
 
             const RowCtx = struct {
                 params_ptr: *const SetupParams,
                 row_slices: []const []const u16,
                 g1_bases_ptr: []const G1Point,
                 n_rows: usize,
-                alloc: Allocator,
             };
             const ctx = RowCtx{
                 .params_ptr = params,
                 .row_slices = row_index_slices,
                 .g1_bases_ptr = g1_bases,
                 .n_rows = num_rows,
-                .alloc = allocator,
             };
 
             const mapFn = struct {
@@ -1610,10 +1609,16 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         const row_indices = c.row_slices[row];
                         if (row_indices.len == 0) continue;
 
+                        // Use projective accumulation: no field inversions until toAffine
                         const row_commitment = if (row_indices.len == 1)
                             c.g1_bases_ptr[row_indices[0]]
-                        else
-                            batch_add.batchG1Additions(c.g1_bases_ptr, row_indices);
+                        else blk: {
+                            var proj = G1Proj.fromAffine(c.g1_bases_ptr[row_indices[0]]);
+                            for (row_indices[1..]) |col_idx| {
+                                proj = proj.addAffine(c.g1_bases_ptr[col_idx]);
+                            }
+                            break :blk proj.toAffine();
+                        };
 
                         if (row < c.params_ptr.g2_vec.len and !row_commitment.infinity) {
                             const row_g1 = G1PointFp{

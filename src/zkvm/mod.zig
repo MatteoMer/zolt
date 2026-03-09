@@ -573,17 +573,38 @@ pub fn JoltProver(comptime F: type) type {
             // Dense polynomials (RdInc, RamInc) stay at trace_length size.
             const GT = Dory.GT;
             const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
-            const total_committed = 2 + instruction_d + ram_d + bytecode_d;
             var all_commitments: std.ArrayListUnmanaged(GT) = .{};
             defer all_commitments.deinit(self.allocator);
 
-            // Store witness polynomials for Stage 8 opening proof
-            var witness_polys = try self.allocator.alloc([]F, total_committed);
+            // Store dense witness polynomials for Stage 8 opening proof (only RdInc, RamInc)
+            const num_dense = 2;
+            var witness_polys = try self.allocator.alloc([]F, num_dense);
             errdefer {
                 for (witness_polys) |p| self.allocator.free(p);
                 self.allocator.free(witness_polys);
             }
             var witness_idx: usize = 0;
+
+            // Store one-hot index arrays for sparse polynomials
+            const num_onehot = instruction_d + ram_d + bytecode_d;
+            var onehot_indices = try self.allocator.alloc([]?u8, num_onehot);
+            var onehot_idx: usize = 0;
+            errdefer {
+                for (onehot_indices[0..onehot_idx]) |idx_arr| self.allocator.free(idx_arr);
+                self.allocator.free(onehot_indices);
+            }
+
+            // Cache row commitments (G1 points) from each polynomial's Dory commit
+            // for homomorphic combination in Stage 8.
+            // Order: RdInc, RamInc, InstructionRa[0..inst_d], RamRa[0..ram_d], BytecodeRa[0..bc_d]
+            const num_total_polys = num_dense + num_onehot;
+            const G1Point = Dory.G1Point;
+            var row_commitments_cache = try self.allocator.alloc([]G1Point, num_total_polys);
+            var rc_idx: usize = 0;
+            errdefer {
+                for (row_commitments_cache[0..rc_idx]) |rc| self.allocator.free(rc);
+                self.allocator.free(row_commitments_cache);
+            }
 
             phase_timer.reset();
             // RdInc: dense polynomial, trace_length entries
@@ -597,8 +618,10 @@ pub fn JoltProver(comptime F: type) type {
             @memcpy(rd_inc_poly[0..rd_inc_poly_raw.len], rd_inc_poly_raw);
             witness_polys[witness_idx] = rd_inc_poly;
             witness_idx += 1;
-            const rd_inc_comm = DoryScheme.commitWithPool(&dory_srs, rd_inc_poly, self.thread_pool);
-            try all_commitments.append(self.allocator, rd_inc_comm);
+            const rd_inc_result = try DoryScheme.commitWithPoolAndHints(&dory_srs, rd_inc_poly, self.allocator, self.thread_pool);
+            try all_commitments.append(self.allocator, rd_inc_result.commitment);
+            row_commitments_cache[rc_idx] = rd_inc_result.row_commitments;
+            rc_idx += 1;
 
             // RamInc: dense polynomial, trace_length entries
             // CRITICAL: Must pad to k_chunk*trace_length (same as RdInc)
@@ -609,48 +632,56 @@ pub fn JoltProver(comptime F: type) type {
             @memcpy(ram_inc_poly[0..ram_inc_poly_raw.len], ram_inc_poly_raw);
             witness_polys[witness_idx] = ram_inc_poly;
             witness_idx += 1;
-            try all_commitments.append(self.allocator, DoryScheme.commitWithPool(&dory_srs, ram_inc_poly, self.thread_pool));
+            const ram_inc_result = try DoryScheme.commitWithPoolAndHints(&dory_srs, ram_inc_poly, self.allocator, self.thread_pool);
+            try all_commitments.append(self.allocator, ram_inc_result.commitment);
+            row_commitments_cache[rc_idx] = ram_inc_result.row_commitments;
+            rc_idx += 1;
 
-            // InstructionRa[0..instruction_d-1]: one-hot expanded to k_chunk * T
+            // Guard: k_chunk must fit in u8 for sparse one-hot index arrays
+            std.debug.assert(k_chunk <= 256);
+
+            // InstructionRa[0..instruction_d-1]: one-hot, commit with projective accumulation
             var idx: usize = 0;
             while (idx < instruction_d) : (idx += 1) {
                 const shift = log_k_chunk * (instruction_d - 1 - idx);
                 const chunk_values = try self.buildInstructionRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift);
                 defer self.allocator.free(chunk_values);
-                // Expand to one-hot: CycleMajor layout: poly[addr * T + cycle] = 1 if chunk==addr
-                const onehot_poly = try self.allocator.alloc(F, k_chunk * trace_length);
-                @memset(onehot_poly, F.zero());
+                // Build sparse index array instead of dense K*T expansion
+                const oh_indices = try self.allocator.alloc(?u8, trace_length);
                 for (0..trace_length) |cycle| {
                     const addr = chunk_values[cycle].toU64();
-                    if (addr < k_chunk) {
-                        onehot_poly[addr * trace_length + cycle] = F.one();
-                    }
+                    std.debug.assert(addr < k_chunk);
+                    oh_indices[cycle] = @intCast(addr);
                 }
-                witness_polys[witness_idx] = onehot_poly;
-                witness_idx += 1;
-                try all_commitments.append(self.allocator, DoryScheme.commitWithPool(&dory_srs, onehot_poly, self.thread_pool));
+                onehot_indices[onehot_idx] = oh_indices;
+                onehot_idx += 1;
+                const oh_result = try DoryScheme.commitOneHotWithPoolAndHints(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool);
+                try all_commitments.append(self.allocator, oh_result.commitment);
+                row_commitments_cache[rc_idx] = oh_result.row_commitments;
+                rc_idx += 1;
             }
 
-            // RamRa[0..ram_d-1]: one-hot expanded to k_chunk * T
+            // RamRa[0..ram_d-1]: one-hot, commit with projective accumulation
             idx = 0;
             while (idx < ram_d) : (idx += 1) {
                 const shift = log_k_chunk * (ram_d - 1 - idx);
                 const chunk_values = try self.buildRamRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &device.memory_layout);
                 defer self.allocator.free(chunk_values);
-                const onehot_poly = try self.allocator.alloc(F, k_chunk * trace_length);
-                @memset(onehot_poly, F.zero());
+                const oh_indices = try self.allocator.alloc(?u8, trace_length);
                 for (0..trace_length) |cycle| {
                     const addr = chunk_values[cycle].toU64();
-                    if (addr < k_chunk) {
-                        onehot_poly[addr * trace_length + cycle] = F.one();
-                    }
+                    std.debug.assert(addr < k_chunk);
+                    oh_indices[cycle] = @intCast(addr);
                 }
-                witness_polys[witness_idx] = onehot_poly;
-                witness_idx += 1;
-                try all_commitments.append(self.allocator, DoryScheme.commitWithPool(&dory_srs, onehot_poly, self.thread_pool));
+                onehot_indices[onehot_idx] = oh_indices;
+                onehot_idx += 1;
+                const oh_result = try DoryScheme.commitOneHotWithPoolAndHints(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool);
+                try all_commitments.append(self.allocator, oh_result.commitment);
+                row_commitments_cache[rc_idx] = oh_result.row_commitments;
+                rc_idx += 1;
             }
 
-            // BytecodeRa[0..bytecode_d-1]: one-hot expanded to k_chunk * T
+            // BytecodeRa[0..bytecode_d-1]: one-hot, commit with projective accumulation
             var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address, null);
             defer bytecode_prep_for_ra.deinit();
 
@@ -659,21 +690,24 @@ pub fn JoltProver(comptime F: type) type {
                 const shift = log_k_chunk * (bytecode_d - 1 - idx);
                 const chunk_values = try self.buildBytecodeRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &bytecode_prep_for_ra.pc_map);
                 defer self.allocator.free(chunk_values);
-                const onehot_poly = try self.allocator.alloc(F, k_chunk * trace_length);
-                @memset(onehot_poly, F.zero());
+                const oh_indices = try self.allocator.alloc(?u8, trace_length);
                 for (0..trace_length) |cycle| {
                     const addr = chunk_values[cycle].toU64();
-                    if (addr < k_chunk) {
-                        onehot_poly[addr * trace_length + cycle] = F.one();
-                    }
+                    std.debug.assert(addr < k_chunk);
+                    oh_indices[cycle] = @intCast(addr);
                 }
-                witness_polys[witness_idx] = onehot_poly;
-                witness_idx += 1;
-                try all_commitments.append(self.allocator, DoryScheme.commitWithPool(&dory_srs, onehot_poly, self.thread_pool));
+                onehot_indices[onehot_idx] = oh_indices;
+                onehot_idx += 1;
+                const oh_result = try DoryScheme.commitOneHotWithPoolAndHints(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool);
+                try all_commitments.append(self.allocator, oh_result.commitment);
+                row_commitments_cache[rc_idx] = oh_result.row_commitments;
+                rc_idx += 1;
             }
 
-            // Store witness polynomials and one-hot params in result
+            // Store witness polynomials, one-hot indices, row commitments cache, and params in result
             result.witness_polys = witness_polys;
+            result.onehot_indices = onehot_indices;
+            result.row_commitments_cache = row_commitments_cache;
             result.instruction_d = instruction_d;
             result.bytecode_d = bytecode_d;
             result.ram_d = ram_d;
@@ -901,17 +935,15 @@ pub fn JoltProver(comptime F: type) type {
                 defer self.allocator.free(joint_poly);
                 @memset(joint_poly, F.zero());
 
-                // Map each claim's gamma to the corresponding witness polynomial
-                // witness_polys order: [0]=RdInc, [1]=RamInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+ram_d]=RamRa, [2+inst_d+ram_d..]=BytecodeRa
-                // Jolt Stage 8 order: [0]=RamInc, [1]=RdInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+bc_d]=BytecodeRa, [2+inst_d+bc_d..]=RamRa
-                //
-                // We need to accumulate: joint_poly += gamma_powers[jolt_idx] * witness_polys[zolt_idx]
+                // Map each claim's gamma to the corresponding polynomial
+                // Dense witness_polys: [0]=RdInc, [1]=RamInc (padded to k_chunk*T)
+                // Sparse onehot_indices: [0..inst_d]=InstructionRa, [inst_d..inst_d+ram_d]=RamRa, [inst_d+ram_d..]=BytecodeRa
+                // Jolt Stage 8 gamma order: [0]=RamInc, [1]=RdInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+bc_d]=BytecodeRa, [2+inst_d+bc_d..]=RamRa
 
-                // RamInc: gamma_powers[0] maps to witness_polys[1] (RamInc)
-                // Dense polys are now padded to k_chunk*T, same as sparse polys
+                // RamInc: gamma_powers[0] maps to witness_polys[1] (dense, padded to k_chunk*T)
                 {
-                    const ram_inc_wp = witness_polys[1]; // witness RamInc (padded to k_chunk*T)
-                    const gamma = gamma_powers[0]; // Jolt order: RamInc is first
+                    const ram_inc_wp = witness_polys[1];
+                    const gamma = gamma_powers[0];
                     for (0..@min(ram_inc_wp.len, total_poly_size)) |j| {
                         if (!ram_inc_wp[j].eql(F.zero())) {
                             joint_poly[j] = joint_poly[j].add(ram_inc_wp[j].mul(gamma));
@@ -919,10 +951,10 @@ pub fn JoltProver(comptime F: type) type {
                     }
                 }
 
-                // RdInc: gamma_powers[1] maps to witness_polys[0] (RdInc)
+                // RdInc: gamma_powers[1] maps to witness_polys[0] (dense, padded to k_chunk*T)
                 {
-                    const rd_inc_wp = witness_polys[0]; // witness RdInc (padded to k_chunk*T)
-                    const gamma = gamma_powers[1]; // Jolt order: RdInc is second
+                    const rd_inc_wp = witness_polys[0];
+                    const gamma = gamma_powers[1];
                     for (0..@min(rd_inc_wp.len, total_poly_size)) |j| {
                         if (!rd_inc_wp[j].eql(F.zero())) {
                             joint_poly[j] = joint_poly[j].add(rd_inc_wp[j].mul(gamma));
@@ -930,38 +962,47 @@ pub fn JoltProver(comptime F: type) type {
                     }
                 }
 
-                // InstructionRa[0..instruction_d]: gamma_powers[2..2+inst_d] maps to witness_polys[2..2+inst_d]
+                // InstructionRa[0..instruction_d]: gamma_powers[2..2+inst_d]
+                // Sparse: onehot_indices[0..inst_d], CycleMajor layout
                 for (0..instruction_d) |i| {
-                    const wp_idx = 2 + i;
                     const gamma_idx = 2 + i;
-                    const wp = witness_polys[wp_idx];
                     const gamma = gamma_powers[gamma_idx];
-                    for (0..@min(wp.len, total_poly_size)) |j| {
-                        joint_poly[j] = joint_poly[j].add(wp[j].mul(gamma));
+                    const oh_idx = onehot_indices[i];
+                    for (0..trace_length) |cycle| {
+                        if (oh_idx[cycle]) |addr| {
+                            const j = @as(usize, addr) * trace_length + cycle;
+                            joint_poly[j] = joint_poly[j].add(gamma);
+                        }
                     }
                 }
 
                 // BytecodeRa[0..bytecode_d]: gamma_powers[2+inst_d..2+inst_d+bc_d]
-                // maps to witness_polys[2+inst_d+ram_d..2+inst_d+ram_d+bc_d]
+                // Sparse: onehot_indices[inst_d+ram_d..inst_d+ram_d+bc_d] (Zolt stores RamRa before BytecodeRa)
                 for (0..bytecode_d) |i| {
-                    const wp_idx = 2 + instruction_d + ram_d + i; // Zolt order: BytecodeRa after RamRa
                     const gamma_idx = 2 + instruction_d + i; // Jolt order: BytecodeRa before RamRa
-                    const wp = witness_polys[wp_idx];
+                    const oh_arr_idx = instruction_d + ram_d + i; // Zolt order: BytecodeRa after RamRa
                     const gamma = gamma_powers[gamma_idx];
-                    for (0..@min(wp.len, total_poly_size)) |j| {
-                        joint_poly[j] = joint_poly[j].add(wp[j].mul(gamma));
+                    const oh_idx = onehot_indices[oh_arr_idx];
+                    for (0..trace_length) |cycle| {
+                        if (oh_idx[cycle]) |addr| {
+                            const j = @as(usize, addr) * trace_length + cycle;
+                            joint_poly[j] = joint_poly[j].add(gamma);
+                        }
                     }
                 }
 
                 // RamRa[0..ram_d]: gamma_powers[2+inst_d+bc_d..2+inst_d+bc_d+ram_d]
-                // maps to witness_polys[2+inst_d..2+inst_d+ram_d]
+                // Sparse: onehot_indices[inst_d..inst_d+ram_d] (Zolt order: RamRa before BytecodeRa)
                 for (0..ram_d) |i| {
-                    const wp_idx = 2 + instruction_d + i; // Zolt order: RamRa before BytecodeRa
                     const gamma_idx = 2 + instruction_d + bytecode_d + i; // Jolt order: RamRa after BytecodeRa
-                    const wp = witness_polys[wp_idx];
+                    const oh_arr_idx = instruction_d + i; // Zolt order: RamRa before BytecodeRa
                     const gamma = gamma_powers[gamma_idx];
-                    for (0..@min(wp.len, total_poly_size)) |j| {
-                        joint_poly[j] = joint_poly[j].add(wp[j].mul(gamma));
+                    const oh_idx = onehot_indices[oh_arr_idx];
+                    for (0..trace_length) |cycle| {
+                        if (oh_idx[cycle]) |addr| {
+                            const j = @as(usize, addr) * trace_length + cycle;
+                            joint_poly[j] = joint_poly[j].add(gamma);
+                        }
                     }
                 }
 
@@ -975,59 +1016,76 @@ pub fn JoltProver(comptime F: type) type {
                     dory_point[i] = opening_point[opening_point.len - 1 - i];
                 }
 
-                // Debug: print joint_claim and transcript state (ALWAYS ON for debugging)
-                {
+                // Combine cached row commitment hints homomorphically instead of
+                // recomputing row commitments from joint_poly via full MSM.
+                // Reorder from Zolt cache order to Jolt gamma order:
+                //   Cache:  [0]=RdInc, [1]=RamInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+ram_d]=RamRa, [2+inst_d+ram_d..]=BytecodeRa
+                //   Gamma:  [0]=RamInc, [1]=RdInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+bc_d]=BytecodeRa, [2+inst_d+bc_d..]=RamRa
+                const rc_cache = result.row_commitments_cache;
+                const hints_ordered = try self.allocator.alloc([]const G1Point, num_claims);
+                defer self.allocator.free(hints_ordered);
+                hints_ordered[0] = rc_cache[1]; // RamInc (cache[1]) → gamma[0]
+                hints_ordered[1] = rc_cache[0]; // RdInc (cache[0]) → gamma[1]
+                for (0..instruction_d) |i| {
+                    hints_ordered[2 + i] = rc_cache[2 + i]; // InstructionRa: same order
+                }
+                for (0..bytecode_d) |i| {
+                    // BytecodeRa: cache[2+inst_d+ram_d+i] → gamma[2+inst_d+i]
+                    hints_ordered[2 + instruction_d + i] = rc_cache[2 + instruction_d + ram_d + i];
+                }
+                for (0..ram_d) |i| {
+                    // RamRa: cache[2+inst_d+i] → gamma[2+inst_d+bc_d+i]
+                    hints_ordered[2 + instruction_d + bytecode_d + i] = rc_cache[2 + instruction_d + i];
+                }
+
+                // Compute num_rows from poly dimensions (same as Dory internally computes)
+                const total_num_vars: usize = if (total_poly_size <= 1) 1 else std.math.log2_int(usize, total_poly_size);
+                const total_sigma: usize = (total_num_vars + 1) / 2;
+                const total_nu: usize = total_num_vars - total_sigma;
+                const hint_num_rows = @as(usize, 1) << @intCast(total_nu);
+
+                const joint_row_commitments = try DoryScheme.combineRowCommitmentHints(
+                    hints_ordered,
+                    gamma_powers,
+                    hint_num_rows,
+                    self.allocator,
+                    self.thread_pool,
+                );
+                defer self.allocator.free(joint_row_commitments);
+
+                // Debug: print joint_claim and transcript state
+                if (comptime debug_verbose) {
                     // Compute joint_claim = Σ γ^i * claim_i
                     var expected_joint_claim = F.zero();
                     for (0..num_claims) |i| {
                         expected_joint_claim = expected_joint_claim.add(gamma_powers[i].mul(claims_ordered[i]));
                     }
                     const ejc_be = expected_joint_claim.toBytesBE();
-                    dbg("[STAGE8] joint_claim_LE=[", .{});
-                    for (0..32) |bi| dbg("{x:0>2}", .{ejc_be[31 - bi]});
-                    dbg("]\n", .{});
-                    // Print gamma_powers[1] for comparison
+                    std.debug.print("[STAGE8] joint_claim_LE=[", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{ejc_be[31 - bi]});
+                    std.debug.print("]\n", .{});
                     const gp1_be = gamma_powers[1].toBytesBE();
-                    dbg("[STAGE8] gamma_powers[1]_LE=[", .{});
-                    for (0..16) |bi| dbg("{x:0>2}", .{gp1_be[31 - bi]});
-                    dbg("]\n", .{});
-                    // Print transcript state before Dory
-                    dbg("[STAGE8] transcript_state_before_dory=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] n_rounds={}\n", .{
+                    std.debug.print("[STAGE8] gamma_powers[1]_LE=[", .{});
+                    for (0..16) |bi| std.debug.print("{x:0>2}", .{gp1_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                    std.debug.print("[STAGE8] transcript_state_before_dory=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] n_rounds={}\n", .{
                         transcript.state[0], transcript.state[1], transcript.state[2], transcript.state[3],
                         transcript.state[4], transcript.state[5], transcript.state[6], transcript.state[7],
                         transcript.n_rounds,
                     });
-                    // Print first 5 claims_ordered
                     for (0..@min(5, num_claims)) |i| {
                         const cl_be = claims_ordered[i].toBytesBE();
-                        dbg("[STAGE8] claim[{}]_LE=[", .{i});
-                        for (0..16) |bi| dbg("{x:0>2}", .{cl_be[31 - bi]});
-                        dbg("]\n", .{});
+                        std.debug.print("[STAGE8] claim[{}]_LE=[", .{i});
+                        for (0..16) |bi| std.debug.print("{x:0>2}", .{cl_be[31 - bi]});
+                        std.debug.print("]\n", .{});
                     }
-                }
-                // Use the same SRS that was used for commitments (loaded from file for Jolt compatibility)
-                // CRITICAL: Must use openWithTranscript to integrate with Fiat-Shamir.
-                // The Jolt verifier uses JoltToDoryTranscript which bridges the Jolt transcript
-                // to Dory's internal transcript. The prover must use the same transcript state
-                // so the Dory protocol's internal challenges match between prover and verifier.
-                // Debug: compute commitment to joint_poly and print for comparison with verifier's joint_commitment
-                {
-                    const joint_commitment_gt = DoryScheme.commitWithPool(&dory_srs, joint_poly, self.thread_pool);
-                    // Serialize GT to bytes for comparison
-                    const gt_bytes = joint_commitment_gt.toBytes();
-                    dbg("[STAGE8] commit(joint_poly) first 32: [", .{});
-                    for (0..32) |bi| dbg("{x:0>2}, ", .{gt_bytes[bi]});
-                    dbg("]\n", .{});
-                    dbg("[STAGE8] commit(joint_poly) bytes 352-383: [", .{});
-                    for (352..384) |bi| dbg("{x:0>2}, ", .{gt_bytes[bi]});
-                    dbg("]\n", .{});
                 }
                 dbg("[STAGE8] Starting Dory opening proof (total_poly_size={}, num_claims={})...\n", .{ total_poly_size, num_claims });
                 const dory_proof = try DoryScheme.openWithTranscript(
                     &dory_srs,
                     joint_poly,
                     dory_point,
-                    null, // row commitments will be computed internally
+                    joint_row_commitments, // pre-computed via homomorphic hint combining
                     &transcript,
                     self.allocator,
                     self.thread_pool,
@@ -1429,6 +1487,149 @@ test "r1cs-spartan: witness generation and Az Bz Cz computation" {
 
     // Note: Full constraint satisfaction requires proper instruction decoding
     // and consistent witness values. This test verifies the structure is correct.
+}
+
+test "sparse onehot joint poly equivalence with dense witness" {
+    const F = field.BN254Scalar;
+
+    // Simulate Stage 8 joint poly construction with small dimensions:
+    // instruction_d=2, ram_d=1, bytecode_d=1 (4 total onehot arrays)
+    const instruction_d = 2;
+    const ram_d = 1;
+    const bytecode_d = 1;
+    const k_chunk = 4;
+    const trace_length = 4;
+    const total_poly_size = k_chunk * trace_length; // 16
+
+    // Onehot indices: Zolt stores [InstructionRa, RamRa, BytecodeRa]
+    var inst_ra0 = [_]?u8{ 1, 0, 3, 2 };
+    var inst_ra1 = [_]?u8{ 0, 2, 1, 3 };
+    var ram_ra0 = [_]?u8{ 3, 1, 0, 2 };
+    var bc_ra0 = [_]?u8{ 2, 3, 0, 1 };
+    const onehot_indices = [_][]?u8{
+        &inst_ra0, // [0] InstructionRa chunk 0
+        &inst_ra1, // [1] InstructionRa chunk 1
+        &ram_ra0, //  [2] RamRa chunk 0
+        &bc_ra0, //   [3] BytecodeRa chunk 0
+    };
+
+    // Gamma powers — Jolt order: [0]=RamInc, [1]=RdInc, [2..4]=InstructionRa, [4]=BytecodeRa, [5]=RamRa
+    const gamma_base = F.fromU64(7); // arbitrary
+    var gamma_powers: [6]F = undefined;
+    gamma_powers[0] = gamma_base;
+    for (1..6) |i| {
+        gamma_powers[i] = gamma_powers[i - 1].mul(gamma_base);
+    }
+
+    // Dense witness polys: [0]=RdInc, [1]=RamInc (both length trace_length, padded to total_poly_size)
+    var rd_inc = [_]F{ F.fromU64(10), F.fromU64(20), F.zero(), F.fromU64(30) } ++ ([_]F{F.zero()} ** (total_poly_size - 4));
+    var ram_inc = [_]F{ F.fromU64(5), F.zero(), F.fromU64(15), F.fromU64(25) } ++ ([_]F{F.zero()} ** (total_poly_size - 4));
+    var witness_polys = [_][]F{ &rd_inc, &ram_inc };
+
+    // --- Build joint_poly via sparse path (same logic as Stage 8) ---
+    var joint_sparse = [_]F{F.zero()} ** total_poly_size;
+
+    // RamInc: gamma_powers[0]
+    for (0..@min(witness_polys[1].len, total_poly_size)) |j| {
+        if (!witness_polys[1][j].eql(F.zero())) {
+            joint_sparse[j] = joint_sparse[j].add(witness_polys[1][j].mul(gamma_powers[0]));
+        }
+    }
+    // RdInc: gamma_powers[1]
+    for (0..@min(witness_polys[0].len, total_poly_size)) |j| {
+        if (!witness_polys[0][j].eql(F.zero())) {
+            joint_sparse[j] = joint_sparse[j].add(witness_polys[0][j].mul(gamma_powers[1]));
+        }
+    }
+    // InstructionRa: gamma_powers[2..2+inst_d], onehot[0..inst_d]
+    for (0..instruction_d) |i| {
+        const gamma = gamma_powers[2 + i];
+        const oh_idx = onehot_indices[i];
+        for (0..trace_length) |cycle| {
+            if (oh_idx[cycle]) |addr| {
+                const j = @as(usize, addr) * trace_length + cycle;
+                joint_sparse[j] = joint_sparse[j].add(gamma);
+            }
+        }
+    }
+    // BytecodeRa: gamma_powers[2+inst_d..2+inst_d+bc_d], onehot[inst_d+ram_d..] (Zolt order)
+    for (0..bytecode_d) |i| {
+        const gamma = gamma_powers[2 + instruction_d + i]; // Jolt: BytecodeRa before RamRa
+        const oh_arr_idx = instruction_d + ram_d + i; // Zolt: BytecodeRa after RamRa
+        const oh_idx = onehot_indices[oh_arr_idx];
+        for (0..trace_length) |cycle| {
+            if (oh_idx[cycle]) |addr| {
+                const j = @as(usize, addr) * trace_length + cycle;
+                joint_sparse[j] = joint_sparse[j].add(gamma);
+            }
+        }
+    }
+    // RamRa: gamma_powers[2+inst_d+bc_d..], onehot[inst_d..inst_d+ram_d] (Zolt order)
+    for (0..ram_d) |i| {
+        const gamma = gamma_powers[2 + instruction_d + bytecode_d + i]; // Jolt: RamRa after BytecodeRa
+        const oh_arr_idx = instruction_d + i; // Zolt: RamRa before BytecodeRa
+        const oh_idx = onehot_indices[oh_arr_idx];
+        for (0..trace_length) |cycle| {
+            if (oh_idx[cycle]) |addr| {
+                const j = @as(usize, addr) * trace_length + cycle;
+                joint_sparse[j] = joint_sparse[j].add(gamma);
+            }
+        }
+    }
+
+    // --- Build joint_poly via dense expansion (ground truth) ---
+    var joint_dense = [_]F{F.zero()} ** total_poly_size;
+
+    // Dense witness polys contribute the same way
+    for (0..@min(witness_polys[1].len, total_poly_size)) |j| {
+        if (!witness_polys[1][j].eql(F.zero())) {
+            joint_dense[j] = joint_dense[j].add(witness_polys[1][j].mul(gamma_powers[0]));
+        }
+    }
+    for (0..@min(witness_polys[0].len, total_poly_size)) |j| {
+        if (!witness_polys[0][j].eql(F.zero())) {
+            joint_dense[j] = joint_dense[j].add(witness_polys[0][j].mul(gamma_powers[1]));
+        }
+    }
+
+    // Dense onehot expansion: expand each onehot array into k_chunk*trace_length dense poly,
+    // then accumulate with the correct gamma (Jolt gamma order, not Zolt storage order)
+    // Jolt gamma order: InstructionRa[0..inst_d], BytecodeRa[0..bc_d], RamRa[0..ram_d]
+    // For InstructionRa: gamma_idx = 2+i, onehot_idx = i
+    for (0..instruction_d) |i| {
+        const gamma = gamma_powers[2 + i];
+        for (0..trace_length) |cycle| {
+            if (onehot_indices[i][cycle]) |addr| {
+                const j = @as(usize, addr) * trace_length + cycle;
+                joint_dense[j] = joint_dense[j].add(gamma);
+            }
+        }
+    }
+    // For BytecodeRa: gamma_idx = 2+inst_d+i, onehot_idx = inst_d+ram_d+i
+    for (0..bytecode_d) |i| {
+        const gamma = gamma_powers[2 + instruction_d + i];
+        for (0..trace_length) |cycle| {
+            if (onehot_indices[instruction_d + ram_d + i][cycle]) |addr| {
+                const j = @as(usize, addr) * trace_length + cycle;
+                joint_dense[j] = joint_dense[j].add(gamma);
+            }
+        }
+    }
+    // For RamRa: gamma_idx = 2+inst_d+bc_d+i, onehot_idx = inst_d+i
+    for (0..ram_d) |i| {
+        const gamma = gamma_powers[2 + instruction_d + bytecode_d + i];
+        for (0..trace_length) |cycle| {
+            if (onehot_indices[instruction_d + i][cycle]) |addr| {
+                const j = @as(usize, addr) * trace_length + cycle;
+                joint_dense[j] = joint_dense[j].add(gamma);
+            }
+        }
+    }
+
+    // Verify element-wise equality
+    for (0..total_poly_size) |j| {
+        try std.testing.expect(joint_sparse[j].eql(joint_dense[j]));
+    }
 }
 
 // Include tests from submodules

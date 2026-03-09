@@ -821,6 +821,7 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
 pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime Proof: type) type {
     const Dory = @import("../poly/commitment/dory.zig");
     const GT = Dory.GT;
+    const G1Point = Dory.G1Point;
 
     return struct {
         const Self = @This();
@@ -840,11 +841,20 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
         register_evals: []F,
         register_final_evals: []F,
 
-        /// Witness polynomials for all committed polynomials (for Stage 8 opening proof)
-        /// Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
-        /// Dense polys (RdInc, RamInc) have trace_length entries
-        /// Sparse one-hot polys have k_chunk * trace_length entries (CycleMajor layout)
+        /// Witness polynomials for dense committed polynomials (for Stage 8 opening proof)
+        /// Order: RdInc, RamInc (only 2 dense polys)
+        /// Dense polys have k_chunk * trace_length entries (padded, CycleMajor layout)
         witness_polys: [][]F,
+
+        /// One-hot index arrays for sparse committed polynomials (for Stage 8 joint poly)
+        /// Order: InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
+        /// Each sub-array has trace_length entries; indices[cycle] = address or null
+        onehot_indices: [][]?u8,
+
+        /// Cached row commitments (G1 points) from each polynomial's Dory commit.
+        /// Used for homomorphic combination in Stage 8 to avoid recomputing row commitments.
+        /// Order: RdInc, RamInc, InstructionRa[0..inst_d], RamRa[0..ram_d], BytecodeRa[0..bc_d]
+        row_commitments_cache: [][]G1Point,
 
         /// OneHot parameters for the committed polynomials
         instruction_d: usize,
@@ -878,6 +888,8 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
                 .register_evals = &[_]F{},
                 .register_final_evals = &[_]F{},
                 .witness_polys = &[_][]F{},
+                .onehot_indices = &[_][]?u8{},
+                .row_commitments_cache = &[_][]G1Point{},
                 .instruction_d = 0,
                 .bytecode_d = 0,
                 .ram_d = 0,
@@ -899,6 +911,10 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
             if (self.register_final_evals.len > 0) self.allocator.free(self.register_final_evals);
             for (self.witness_polys) |poly| self.allocator.free(poly);
             if (self.witness_polys.len > 0) self.allocator.free(self.witness_polys);
+            for (self.onehot_indices) |idx_arr| self.allocator.free(idx_arr);
+            if (self.onehot_indices.len > 0) self.allocator.free(self.onehot_indices);
+            for (self.row_commitments_cache) |rc| self.allocator.free(rc);
+            if (self.row_commitments_cache.len > 0) self.allocator.free(self.row_commitments_cache);
             // Note: opening_point is already freed by self.proof.deinit() above
             // (JoltProof.deinit frees its own opening_point), so don't double-free here.
             if (self.dory_opening_proof) |*p| p.deinit();

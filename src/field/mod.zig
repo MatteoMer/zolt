@@ -798,6 +798,36 @@ pub fn MontgomeryField(
             return result;
         }
 
+        /// Batch inversion using Montgomery's trick: invert n elements with 1 inversion + 3(n-1) muls.
+        /// Elements are inverted in-place. Zero elements are skipped (left as zero).
+        /// `scratch` must have the same length as `elements`.
+        pub fn batchInversion(elements: []Self, scratch: []Self) void {
+            const n = elements.len;
+            if (n == 0) return;
+
+            // Forward pass: compute prefix products, skipping zeros
+            var acc = one();
+            for (0..n) |i| {
+                scratch[i] = acc;
+                if (!elements[i].isZero()) {
+                    acc = acc.mul(elements[i]);
+                }
+            }
+
+            // Single inversion of the accumulated product
+            var inv = acc.inverse() orelse unreachable;
+
+            // Backward pass: extract individual inverses
+            var i: usize = n;
+            while (i > 0) {
+                i -= 1;
+                if (elements[i].isZero()) continue;
+                const old = elements[i];
+                elements[i] = scratch[i].mul(inv);
+                inv = inv.mul(old);
+            }
+        }
+
         inline fn lessThanModulus(self: Self) bool {
             @setEvalBranchQuota(10000);
             var i: usize = 3;
@@ -2214,6 +2244,54 @@ test "batch operations" {
         const prod = non_zero_a[i].mul(inverses[i]);
         try std.testing.expect(prod.eql(BN254Scalar.one()));
     }
+}
+
+test "batchInversion known values" {
+    const Fp = BN254BaseField;
+    var elems = [_]Fp{ Fp.fromU64(2), Fp.fromU64(3), Fp.fromU64(7) };
+    var scratch: [3]Fp = undefined;
+    Fp.batchInversion(&elems, &scratch);
+    // Each element should now be its inverse
+    try std.testing.expect(elems[0].mul(Fp.fromU64(2)).eql(Fp.one()));
+    try std.testing.expect(elems[1].mul(Fp.fromU64(3)).eql(Fp.one()));
+    try std.testing.expect(elems[2].mul(Fp.fromU64(7)).eql(Fp.one()));
+}
+
+test "batchInversion with zeros" {
+    const Fp = BN254BaseField;
+    var elems = [_]Fp{ Fp.fromU64(5), Fp.zero(), Fp.fromU64(11), Fp.zero(), Fp.fromU64(13) };
+    var scratch: [5]Fp = undefined;
+    Fp.batchInversion(&elems, &scratch);
+    // Zeros stay zero
+    try std.testing.expect(elems[1].isZero());
+    try std.testing.expect(elems[3].isZero());
+    // Non-zeros are inverted
+    try std.testing.expect(elems[0].mul(Fp.fromU64(5)).eql(Fp.one()));
+    try std.testing.expect(elems[2].mul(Fp.fromU64(11)).eql(Fp.one()));
+    try std.testing.expect(elems[4].mul(Fp.fromU64(13)).eql(Fp.one()));
+}
+
+test "batchInversion single element" {
+    const Fp = BN254BaseField;
+    var elems = [_]Fp{Fp.fromU64(42)};
+    var scratch: [1]Fp = undefined;
+    Fp.batchInversion(&elems, &scratch);
+    try std.testing.expect(elems[0].mul(Fp.fromU64(42)).eql(Fp.one()));
+}
+
+test "batchInversion empty" {
+    const Fp = BN254BaseField;
+    var elems: [0]Fp = .{};
+    var scratch: [0]Fp = .{};
+    Fp.batchInversion(&elems, &scratch);
+}
+
+test "batchInversion all zeros" {
+    const Fp = BN254BaseField;
+    var elems = [_]Fp{ Fp.zero(), Fp.zero(), Fp.zero() };
+    var scratch: [3]Fp = undefined;
+    Fp.batchInversion(&elems, &scratch);
+    for (elems) |e| try std.testing.expect(e.isZero());
 }
 
 // Export pairing module

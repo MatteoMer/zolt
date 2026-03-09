@@ -1492,8 +1492,298 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 mapFn(ctx, 0, num_rows);
 
             // Check if any non-trivial contribution
-            if (std.mem.eql(u8, &std.mem.toBytes(miller_acc), &std.mem.toBytes(pairing.Fp12.one()))) return GT.one();
+            if (miller_acc.isOne()) return GT.one();
             return pairing.finalExponentiation(miller_acc);
+        }
+
+        /// Like commitWithPool, but also returns the intermediate row commitments (G1 points).
+        /// These can later be combined homomorphically to avoid recomputing row commitments
+        /// when opening a joint polynomial (Stage 8).
+        pub fn commitWithPoolAndHints(
+            params: *const SetupParams,
+            evals: []const F,
+            allocator: Allocator,
+            tp: ?*ThreadPool,
+        ) !struct { commitment: Commitment, row_commitments: []G1Point } {
+            if (evals.len == 0) {
+                return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
+            }
+
+            const poly_len = evals.len;
+            const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
+            const sigma: usize = (num_vars + 1) / 2;
+            const nu: usize = num_vars - sigma;
+            const num_cols = @as(usize, 1) << @intCast(sigma);
+            const num_rows = @as(usize, 1) << @intCast(nu);
+
+            // Phase 1: Compute row commitments (G1 points via MSM)
+            const row_commitments = if (tp) |pool|
+                try computeRowCommitmentsWithColsParallel(F, params, evals, num_cols, allocator, pool)
+            else
+                try computeRowCommitmentsWithCols(F, params, evals, num_cols, allocator);
+            errdefer allocator.free(row_commitments);
+
+            // Phase 2: Miller loops over row commitments + final exponentiation
+            const commitment = rowCommitmentsToCommitment(params, row_commitments, num_rows, tp);
+
+            return .{ .commitment = commitment, .row_commitments = row_commitments };
+        }
+
+        const OneHotRowIndices = struct {
+            row_index_slices: [][]const u16,
+            col_indices_flat: []u16,
+        };
+
+        /// Build per-row column index slices from one-hot indices in CycleMajor layout.
+        fn buildOneHotRowIndexSlices(
+            indices: []const ?u8,
+            rows_per_k: usize,
+            num_cols: usize,
+            num_rows: usize,
+            trace_length: usize,
+            allocator: Allocator,
+        ) !OneHotRowIndices {
+            std.debug.assert(num_cols <= std.math.maxInt(u16));
+            const row_counts = try allocator.alloc(u16, num_rows);
+            defer allocator.free(row_counts);
+            @memset(row_counts, 0);
+
+            for (0..trace_length) |cycle| {
+                if (indices[cycle]) |addr| {
+                    const row = @as(usize, addr) * rows_per_k + cycle / num_cols;
+                    if (row < num_rows) {
+                        row_counts[row] += 1;
+                    }
+                }
+            }
+
+            var total_entries: usize = 0;
+            for (row_counts) |c| total_entries += c;
+
+            const col_indices_flat = try allocator.alloc(u16, total_entries);
+            errdefer allocator.free(col_indices_flat);
+
+            const row_offsets = try allocator.alloc(usize, num_rows + 1);
+            defer allocator.free(row_offsets);
+            row_offsets[0] = 0;
+            for (0..num_rows) |r| {
+                row_offsets[r + 1] = row_offsets[r] + row_counts[r];
+            }
+
+            const row_fill = try allocator.alloc(u16, num_rows);
+            defer allocator.free(row_fill);
+            @memset(row_fill, 0);
+
+            for (0..trace_length) |cycle| {
+                if (indices[cycle]) |addr| {
+                    const row = @as(usize, addr) * rows_per_k + cycle / num_cols;
+                    if (row < num_rows) {
+                        const off = row_offsets[row] + row_fill[row];
+                        col_indices_flat[off] = @intCast(cycle % num_cols);
+                        row_fill[row] += 1;
+                    }
+                }
+            }
+
+            const row_index_slices = try allocator.alloc([]const u16, num_rows);
+            for (0..num_rows) |r| {
+                row_index_slices[r] = col_indices_flat[row_offsets[r]..row_offsets[r + 1]];
+            }
+
+            return .{
+                .row_index_slices = row_index_slices,
+                .col_indices_flat = col_indices_flat,
+            };
+        }
+
+        /// Like commitOneHotWithPool, but also returns the intermediate row commitments (G1 points).
+        pub fn commitOneHotWithPoolAndHints(
+            params: *const SetupParams,
+            indices: []const ?u8,
+            k_chunk: usize,
+            trace_length: usize,
+            allocator: Allocator,
+            tp: ?*ThreadPool,
+        ) !struct { commitment: Commitment, row_commitments: []G1Point } {
+            const poly_size = k_chunk * trace_length;
+            if (poly_size == 0) return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
+
+            const num_vars: usize = if (poly_size <= 1) 1 else std.math.log2_int(usize, poly_size);
+            const sigma: usize = (num_vars + 1) / 2;
+            const nu: usize = num_vars - sigma;
+            const num_cols = @as(usize, 1) << @intCast(sigma);
+            const num_rows = @as(usize, 1) << @intCast(nu);
+            const rows_per_k = trace_length / num_cols;
+            std.debug.assert(trace_length % num_cols == 0);
+
+            // Build per-row column index lists
+            const row_idx = try buildOneHotRowIndexSlices(indices, rows_per_k, num_cols, num_rows, trace_length, allocator);
+            defer allocator.free(row_idx.col_indices_flat);
+            defer allocator.free(row_idx.row_index_slices);
+
+            // Phase 1: Compute G1 row commitments via projective accumulation
+            const g1_bases = params.g1_vec[0..num_cols];
+            const G1Proj = msm.ProjectivePoint(Fp);
+
+            const row_commitments = try allocator.alloc(G1Point, num_rows);
+            errdefer allocator.free(row_commitments);
+
+            const RowHintCtx = struct {
+                row_slices: []const []const u16,
+                g1_bases_ptr: []const G1Point,
+                out: []G1Point,
+            };
+            const hint_ctx = RowHintCtx{
+                .row_slices = row_idx.row_index_slices,
+                .g1_bases_ptr = g1_bases,
+                .out = row_commitments,
+            };
+
+            const computeRowFn = struct {
+                fn f(c: RowHintCtx, row: usize) void {
+                    const row_indices = c.row_slices[row];
+                    if (row_indices.len == 0) {
+                        c.out[row] = G1Point.identity();
+                        return;
+                    }
+                    c.out[row] = if (row_indices.len == 1)
+                        c.g1_bases_ptr[row_indices[0]]
+                    else blk: {
+                        var proj = G1Proj.fromAffine(c.g1_bases_ptr[row_indices[0]]);
+                        for (row_indices[1..]) |col_idx| {
+                            proj = proj.addAffine(c.g1_bases_ptr[col_idx]);
+                        }
+                        break :blk proj.toAffine();
+                    };
+                }
+            }.f;
+
+            if (tp) |pool| {
+                pool.parallelForForce(num_rows, hint_ctx, computeRowFn);
+            } else {
+                for (0..num_rows) |row| computeRowFn(hint_ctx, row);
+            }
+
+            // Phase 2: Miller loops + final exponentiation
+            const commitment = rowCommitmentsToCommitment(params, row_commitments, num_rows, tp);
+
+            return .{ .commitment = commitment, .row_commitments = row_commitments };
+        }
+
+        /// Convert row commitments (G1 points) to a GT commitment via Miller loops.
+        fn rowCommitmentsToCommitment(
+            params: *const SetupParams,
+            row_commitments: []const G1Point,
+            num_rows: usize,
+            tp: ?*ThreadPool,
+        ) Commitment {
+            const Ctx = struct {
+                params_ptr: *const SetupParams,
+                row_comms: []const G1Point,
+            };
+            const ctx = Ctx{
+                .params_ptr = params,
+                .row_comms = row_commitments,
+            };
+
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) pairing.Fp12 {
+                    var acc = pairing.Fp12.one();
+                    for (start..end) |row| {
+                        if (row >= c.row_comms.len) break;
+                        const rc = c.row_comms[row];
+                        if (rc.infinity) continue;
+                        const row_g1 = G1PointFp{
+                            .x = rc.x,
+                            .y = rc.y,
+                            .infinity = false,
+                        };
+                        const ml = if (c.params_ptr.g2_prepared) |prep|
+                            pairing.millerLoopPrepared(row_g1, &prep[row])
+                        else
+                            pairing.millerLoopArkworks(row_g1, c.params_ptr.g2_vec[row]);
+                        acc = acc.mul(ml);
+                    }
+                    return acc;
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: pairing.Fp12, b: pairing.Fp12) pairing.Fp12 {
+                    return a.mul(b);
+                }
+            }.f;
+
+            const miller_acc = if (tp) |pool|
+                pool.parallelReduceForce(pairing.Fp12, num_rows, pairing.Fp12.one(), ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, num_rows);
+
+            if (miller_acc.isOne()) return GT.one();
+            return pairing.finalExponentiation(miller_acc);
+        }
+
+        /// Combine row commitment hints from multiple polynomials using homomorphic combination.
+        /// Given row commitments for each polynomial and gamma coefficients, computes:
+        ///   joint_rows[i] = Σ_k γ^k · rows_k[i]
+        /// This avoids recomputing row commitments for the joint polynomial from scratch.
+        pub fn combineRowCommitmentHints(
+            hints: []const []const G1Point,
+            coeffs: []const F,
+            num_rows: usize,
+            allocator: Allocator,
+            tp: ?*ThreadPool,
+        ) ![]G1Point {
+            const result = try allocator.alloc(G1Point, num_rows);
+            errdefer allocator.free(result);
+
+            const G1Proj = msm.ProjectivePoint(Fp);
+            const Ctx = struct {
+                hints_ptr: []const []const G1Point,
+                coeffs_ptr: []const F,
+                out: []G1Point,
+            };
+            const ctx = Ctx{
+                .hints_ptr = hints,
+                .coeffs_ptr = coeffs,
+                .out = result,
+            };
+
+            const combineFn = struct {
+                fn f(c: Ctx, row: usize) void {
+                    var acc = G1Proj.identity();
+                    for (0..c.hints_ptr.len) |k| {
+                        if (row < c.hints_ptr[k].len and !c.hints_ptr[k][row].infinity) {
+                            const scaled = glv.glvScalarMulG1(c.hints_ptr[k][row], c.coeffs_ptr[k]);
+                            acc = acc.add(scaled);
+                        }
+                    }
+                    c.out[row] = acc.toAffine();
+                }
+            }.f;
+
+            if (tp) |pool| {
+                pool.parallelForForce(num_rows, ctx, combineFn);
+            } else {
+                for (0..num_rows) |row| combineFn(ctx, row);
+            }
+
+            return result;
+        }
+
+        /// Commit to a one-hot polynomial using projective accumulation instead of MSM.
+        /// Thin wrapper around commitOneHotWithPoolAndHints that discards row commitments.
+        pub fn commitOneHotWithPool(
+            params: *const SetupParams,
+            indices: []const ?u8,
+            k_chunk: usize,
+            trace_length: usize,
+            allocator: Allocator,
+            tp: ?*ThreadPool,
+        ) !Commitment {
+            const result = try commitOneHotWithPoolAndHints(params, indices, k_chunk, trace_length, allocator, tp);
+            allocator.free(result.row_commitments);
+            return result.commitment;
         }
 
         /// Create an opening proof using the Dory reduce-and-fold IPA
@@ -2606,6 +2896,272 @@ test "dory empty polynomial commits to one" {
 
     // Empty polynomial should commit to identity (one)
     try std.testing.expect(commitment.isOne());
+}
+
+test "commitOneHotWithPool equivalence with commitWithPool" {
+    const allocator = std.testing.allocator;
+    const DoryScheme = DoryCommitmentScheme(Fr);
+
+    // num_vars=4 → 16 entries, sigma=2, nu=2 → 4 cols, 4 rows
+    var srs = try DoryScheme.setup(allocator, 4);
+    defer srs.deinit();
+
+    const k_chunk: usize = 4;
+    const trace_length: usize = 4; // 16 / k_chunk
+
+    // Build sparse indices: cycle 0→addr 1, cycle 1→addr 0, cycle 2→addr 3, cycle 3→null
+    var indices = [_]?u8{ 1, 0, 3, null };
+
+    // Build equivalent dense polynomial (k_chunk * trace_length = 16 entries, CycleMajor layout)
+    // CycleMajor: poly[addr * trace_length + cycle] = 1 if that cycle maps to addr
+    var dense = [_]Fr{Fr.zero()} ** 16;
+    for (0..trace_length) |cycle| {
+        if (indices[cycle]) |addr| {
+            dense[@as(usize, addr) * trace_length + cycle] = Fr.one();
+        }
+    }
+
+    const dense_commit = DoryScheme.commitWithPool(&srs, &dense, null);
+    const sparse_commit = try DoryScheme.commitOneHotWithPool(&srs, &indices, k_chunk, trace_length, allocator, null);
+
+    try std.testing.expect(dense_commit.eql(sparse_commit));
+}
+
+test "commitOneHotWithPool all null indices" {
+    const allocator = std.testing.allocator;
+    const DoryScheme = DoryCommitmentScheme(Fr);
+
+    var srs = try DoryScheme.setup(allocator, 4);
+    defer srs.deinit();
+
+    var indices = [_]?u8{ null, null, null, null };
+    const commit = try DoryScheme.commitOneHotWithPool(&srs, &indices, 4, 4, allocator, null);
+
+    try std.testing.expect(commit.isOne());
+}
+
+test "commitOneHotWithPoolAndHints equivalence" {
+    const allocator = std.testing.allocator;
+    const DoryScheme = DoryCommitmentScheme(Fr);
+
+    // num_vars=4 → 16 entries, sigma=2, nu=2 → 4 cols, 4 rows
+    var srs = try DoryScheme.setup(allocator, 4);
+    defer srs.deinit();
+
+    const k_chunk: usize = 4;
+    const trace_length: usize = 4;
+
+    var indices = [_]?u8{ 1, 0, 3, null };
+
+    // Build equivalent dense polynomial
+    var dense = [_]Fr{Fr.zero()} ** 16;
+    for (0..trace_length) |cycle| {
+        if (indices[cycle]) |addr| {
+            dense[@as(usize, addr) * trace_length + cycle] = Fr.one();
+        }
+    }
+
+    // Get sparse result with hints
+    const sparse_result = try DoryScheme.commitOneHotWithPoolAndHints(&srs, &indices, k_chunk, trace_length, allocator, null);
+    defer allocator.free(sparse_result.row_commitments);
+
+    // Get dense result with hints
+    const dense_result = try DoryScheme.commitWithPoolAndHints(&srs, &dense, allocator, null);
+    defer allocator.free(dense_result.row_commitments);
+
+    // Commitments must match
+    try std.testing.expect(sparse_result.commitment.eql(dense_result.commitment));
+
+    // Row commitments must match element-wise
+    try std.testing.expectEqual(sparse_result.row_commitments.len, dense_result.row_commitments.len);
+    for (sparse_result.row_commitments, dense_result.row_commitments) |s, d| {
+        try std.testing.expect(s.x.eql(d.x));
+        try std.testing.expect(s.y.eql(d.y));
+    }
+}
+
+test "commitOneHotWithPool multi-row per address" {
+    const allocator = std.testing.allocator;
+    const DoryScheme = DoryCommitmentScheme(Fr);
+
+    // k_chunk=2, trace_length=8 → poly_size=16, num_vars=4, sigma=2, nu=2
+    // num_cols=4, num_rows=4, rows_per_k=2
+    // Address 0 spans rows 0-1, address 1 spans rows 2-3
+    const k_chunk: usize = 2;
+    const trace_length: usize = 8;
+
+    var srs = try DoryScheme.setup(allocator, 4);
+    defer srs.deinit();
+
+    // cycle 0→addr 0 (row=0, col=0), cycle 4→addr 0 (row=1, col=0)
+    // cycle 1→addr 1 (row=2, col=1), cycle 5→addr 1 (row=3, col=1)
+    var indices = [_]?u8{ 0, 1, null, null, 0, 1, null, null };
+
+    // Build equivalent dense polynomial (CycleMajor: poly[addr*T + cycle])
+    var dense = [_]Fr{Fr.zero()} ** 16;
+    for (0..trace_length) |cycle| {
+        if (indices[cycle]) |addr| {
+            dense[@as(usize, addr) * trace_length + cycle] = Fr.one();
+        }
+    }
+
+    const dense_commit = DoryScheme.commitWithPool(&srs, &dense, null);
+    const sparse_commit = try DoryScheme.commitOneHotWithPool(&srs, &indices, k_chunk, trace_length, allocator, null);
+
+    try std.testing.expect(dense_commit.eql(sparse_commit));
+}
+
+test "commitOneHotWithPool all-active indices" {
+    const allocator = std.testing.allocator;
+    const DoryScheme = DoryCommitmentScheme(Fr);
+
+    // num_vars=4 → 16 entries, k_chunk=4, trace_length=4
+    var srs = try DoryScheme.setup(allocator, 4);
+    defer srs.deinit();
+
+    const k_chunk: usize = 4;
+    const trace_length: usize = 4;
+
+    // Every cycle maps to an address (no nulls) — the common production case
+    var indices = [_]?u8{ 2, 0, 1, 3 };
+
+    // Build equivalent dense polynomial
+    var dense = [_]Fr{Fr.zero()} ** 16;
+    for (0..trace_length) |cycle| {
+        if (indices[cycle]) |addr| {
+            dense[@as(usize, addr) * trace_length + cycle] = Fr.one();
+        }
+    }
+
+    const dense_commit = DoryScheme.commitWithPool(&srs, &dense, null);
+    const sparse_commit = try DoryScheme.commitOneHotWithPool(&srs, &indices, k_chunk, trace_length, allocator, null);
+
+    try std.testing.expect(dense_commit.eql(sparse_commit));
+}
+
+test "combineRowCommitmentHints matches direct joint commit" {
+    const allocator = std.testing.allocator;
+    const DoryScheme = DoryCommitmentScheme(Fr);
+
+    // num_vars=4 → 16 entries, sigma=2, nu=2 → 4 cols, 4 rows
+    var srs = try DoryScheme.setup(allocator, 4);
+    defer srs.deinit();
+
+    const k_chunk: usize = 4;
+    const trace_length: usize = 4;
+
+    // Polynomial A: one-hot sparse
+    var indices_a = [_]?u8{ 1, 0, 3, null };
+    // Polynomial B: one-hot sparse (different pattern)
+    var indices_b = [_]?u8{ 0, 2, null, 1 };
+    // Polynomial C: dense (non-one-hot, arbitrary values)
+    var dense_c = [_]Fr{Fr.zero()} ** 16;
+    dense_c[0] = Fr.fromU64(7);
+    dense_c[3] = Fr.fromU64(2);
+    dense_c[5] = Fr.fromU64(11);
+    dense_c[10] = Fr.fromU64(5);
+    dense_c[15] = Fr.fromU64(3);
+
+    // Commit each polynomial and get row commitment hints
+    const result_a = try DoryScheme.commitOneHotWithPoolAndHints(&srs, &indices_a, k_chunk, trace_length, allocator, null);
+    defer allocator.free(result_a.row_commitments);
+    const result_b = try DoryScheme.commitOneHotWithPoolAndHints(&srs, &indices_b, k_chunk, trace_length, allocator, null);
+    defer allocator.free(result_b.row_commitments);
+    const result_c = try DoryScheme.commitWithPoolAndHints(&srs, &dense_c, allocator, null);
+    defer allocator.free(result_c.row_commitments);
+
+    // Gamma coefficients (arbitrary non-trivial scalars)
+    const gamma0 = Fr.fromU64(42);
+    const gamma1 = Fr.fromU64(137);
+    const gamma2 = Fr.fromU64(999);
+    const coeffs = [_]Fr{ gamma0, gamma1, gamma2 };
+
+    // Build joint polynomial: joint = γ0*A + γ1*B + γ2*C
+    var joint = [_]Fr{Fr.zero()} ** 16;
+
+    // Expand A into dense and accumulate
+    for (0..trace_length) |cycle| {
+        if (indices_a[cycle]) |addr| {
+            const j = @as(usize, addr) * trace_length + cycle;
+            joint[j] = joint[j].add(gamma0); // one-hot: value is 1, so γ0 * 1 = γ0
+        }
+    }
+    // Expand B into dense and accumulate
+    for (0..trace_length) |cycle| {
+        if (indices_b[cycle]) |addr| {
+            const j = @as(usize, addr) * trace_length + cycle;
+            joint[j] = joint[j].add(gamma1);
+        }
+    }
+    // Accumulate C (dense)
+    for (0..16) |j| {
+        if (!dense_c[j].eql(Fr.zero())) {
+            joint[j] = joint[j].add(dense_c[j].mul(gamma2));
+        }
+    }
+
+    // Get row commitments of the joint polynomial directly
+    const direct_result = try DoryScheme.commitWithPoolAndHints(&srs, &joint, allocator, null);
+    defer allocator.free(direct_result.row_commitments);
+
+    // Combine hints homomorphically
+    const hints = [_][]const G1Point{
+        result_a.row_commitments,
+        result_b.row_commitments,
+        result_c.row_commitments,
+    };
+    const num_rows = direct_result.row_commitments.len;
+    const combined = try DoryScheme.combineRowCommitmentHints(&hints, &coeffs, num_rows, allocator, null);
+    defer allocator.free(combined);
+
+    // Row commitments must match element-wise
+    try std.testing.expectEqual(num_rows, combined.len);
+    for (0..num_rows) |r| {
+        const c = combined[r];
+        const d = direct_result.row_commitments[r];
+        if (c.infinity and d.infinity) continue;
+        try std.testing.expect(!c.infinity);
+        try std.testing.expect(!d.infinity);
+        try std.testing.expect(c.x.eql(d.x));
+        try std.testing.expect(c.y.eql(d.y));
+    }
+
+    // Also verify the final GT commitment matches
+    const combined_commitment = DoryScheme.rowCommitmentsToCommitment(&srs, combined, num_rows, null);
+    try std.testing.expect(combined_commitment.eql(direct_result.commitment));
+}
+
+test "combineRowCommitmentHints all-identity rows" {
+    const allocator = std.testing.allocator;
+    const DoryScheme = DoryCommitmentScheme(Fr);
+
+    var srs = try DoryScheme.setup(allocator, 4);
+    defer srs.deinit();
+
+    const k_chunk: usize = 4;
+    const trace_length: usize = 4;
+
+    // Both polynomials have all-null indices → all row commitments are identity
+    var indices_a = [_]?u8{ null, null, null, null };
+    var indices_b = [_]?u8{ null, null, null, null };
+
+    const result_a = try DoryScheme.commitOneHotWithPoolAndHints(&srs, &indices_a, k_chunk, trace_length, allocator, null);
+    defer allocator.free(result_a.row_commitments);
+    const result_b = try DoryScheme.commitOneHotWithPoolAndHints(&srs, &indices_b, k_chunk, trace_length, allocator, null);
+    defer allocator.free(result_b.row_commitments);
+
+    const coeffs = [_]Fr{ Fr.fromU64(5), Fr.fromU64(10) };
+    const hints = [_][]const G1Point{
+        result_a.row_commitments,
+        result_b.row_commitments,
+    };
+    const combined = try DoryScheme.combineRowCommitmentHints(&hints, &coeffs, result_a.row_commitments.len, allocator, null);
+    defer allocator.free(combined);
+
+    // All rows should be identity (infinity)
+    for (combined) |pt| {
+        try std.testing.expect(pt.infinity);
+    }
 }
 
 test "dory proof serialization" {

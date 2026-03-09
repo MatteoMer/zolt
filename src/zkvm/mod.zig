@@ -650,8 +650,7 @@ pub fn JoltProver(comptime F: type) type {
                 const oh_indices = try self.allocator.alloc(?u8, trace_length);
                 for (0..trace_length) |cycle| {
                     const addr = chunk_values[cycle].toU64();
-                    std.debug.assert(addr < k_chunk);
-                    oh_indices[cycle] = @intCast(addr);
+                    oh_indices[cycle] = if (addr < k_chunk) @intCast(addr) else null;
                 }
                 onehot_indices[onehot_idx] = oh_indices;
                 onehot_idx += 1;
@@ -670,8 +669,7 @@ pub fn JoltProver(comptime F: type) type {
                 const oh_indices = try self.allocator.alloc(?u8, trace_length);
                 for (0..trace_length) |cycle| {
                     const addr = chunk_values[cycle].toU64();
-                    std.debug.assert(addr < k_chunk);
-                    oh_indices[cycle] = @intCast(addr);
+                    oh_indices[cycle] = if (addr < k_chunk) @intCast(addr) else null;
                 }
                 onehot_indices[onehot_idx] = oh_indices;
                 onehot_idx += 1;
@@ -693,8 +691,7 @@ pub fn JoltProver(comptime F: type) type {
                 const oh_indices = try self.allocator.alloc(?u8, trace_length);
                 for (0..trace_length) |cycle| {
                     const addr = chunk_values[cycle].toU64();
-                    std.debug.assert(addr < k_chunk);
-                    oh_indices[cycle] = @intCast(addr);
+                    oh_indices[cycle] = if (addr < k_chunk) @intCast(addr) else null;
                 }
                 onehot_indices[onehot_idx] = oh_indices;
                 onehot_idx += 1;

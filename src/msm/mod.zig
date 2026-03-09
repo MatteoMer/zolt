@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../utils/thread_pool.zig").ThreadPool;
 
 pub const glv = @import("glv.zig");
+pub const batch_affine = @import("batch_affine.zig");
 
 /// BN254 curve parameter b = 3
 const BN254_B: u64 = 3;

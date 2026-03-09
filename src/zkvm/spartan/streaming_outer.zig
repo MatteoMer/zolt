@@ -615,48 +615,61 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 dbg("[STREAMING_OUTER UNISKIP] E_in[0] = {any}\n", .{E_in[0].toBytesBE()});
             }
 
-            // Compute extended_evals at each of the 9 target points
-            for (targets, 0..) |target_y, target_idx| {
-                var sum = F.zero();
+            // Compute extended_evals at each of the 9 target points (parallelized)
+            const FirstRoundCtx = struct {
+                targets: *const [DEGREE]i64,
+                extended_evals: *[DEGREE]F,
+                num_x_out_vals: usize,
+                num_x_in_vals: usize,
+                num_x_in_prime_bits: u6,
+                E_out: []const F,
+                E_in: []const F,
+                self_ptr: *const Self,
+            };
+            const firstRoundCompute = struct {
+                fn f(ctx: FirstRoundCtx, target_idx: usize) void {
+                    const target_y = ctx.targets[target_idx];
+                    var sum = F.zero();
 
-                // Iterate over all (x_out, x_in) pairs matching Jolt's par_fold_out_in
-                for (0..num_x_out_vals) |x_out| {
-                    const e_out = if (x_out < E_out.len) E_out[x_out] else F.zero();
+                    for (0..ctx.num_x_out_vals) |x_out| {
+                        const e_out = if (x_out < ctx.E_out.len) ctx.E_out[x_out] else F.zero();
 
-                    for (0..num_x_in_vals) |x_in| {
-                        const e_in = if (x_in < E_in.len) E_in[x_in] else F.zero();
-                        const eq_val = e_out.mul(e_in);
+                        for (0..ctx.num_x_in_vals) |x_in| {
+                            const e_in = if (x_in < ctx.E_in.len) ctx.E_in[x_in] else F.zero();
+                            const eq_val = e_out.mul(e_in);
 
-                        // Decode cycle index and group
-                        const x_in_prime = x_in >> 1;
-                        const cycle = (x_out << @intCast(num_x_in_prime_bits)) | x_in_prime;
-                        const group: u1 = @truncate(x_in & 1);
+                            const x_in_prime = x_in >> 1;
+                            const cycle = (x_out << ctx.num_x_in_prime_bits) | x_in_prime;
+                            const group: u1 = @truncate(x_in & 1);
 
-                        // Get witness for this cycle
-                        if (cycle < self.cycle_witnesses.len) {
-                            const witness = &self.cycle_witnesses[cycle];
-                            // Evaluate Az * Bz at this target Y for this group
-                            const az_bz = self.evaluateAzBzAtTargetY(witness, target_y, group);
-                            sum = sum.add(eq_val.mul(az_bz));
+                            if (cycle < ctx.self_ptr.cycle_witnesses.len) {
+                                const witness = &ctx.self_ptr.cycle_witnesses[cycle];
+                                const az_bz = ctx.self_ptr.evaluateAzBzAtTargetY(witness, target_y, group);
+                                sum = sum.add(eq_val.mul(az_bz));
+                            }
                         }
                     }
+
+                    ctx.extended_evals[target_idx] = sum;
                 }
+            }.f;
 
-                // DEBUG: Print extended_eval BEFORE R^2 scaling
-                if (target_idx < 3) {
-                    dbg("[STREAMING_OUTER UNISKIP] BEFORE R^2: extended_evals[{d}] (target_y={d}) = {any}\n", .{target_idx, target_y, sum.toBytesBE()});
-                }
+            const first_round_ctx = FirstRoundCtx{
+                .targets = &targets,
+                .extended_evals = &extended_evals,
+                .num_x_out_vals = num_x_out_vals,
+                .num_x_in_vals = num_x_in_vals,
+                .num_x_in_prime_bits = @intCast(num_x_in_prime_bits),
+                .E_out = E_out,
+                .E_in = E_in,
+                .self_ptr = self,
+            };
 
-                // No R^2 scaling needed. Zolt computes Σ eq * AzBz using native field
-                // arithmetic (Montgomery), which already produces the correct mathematical
-                // result. Jolt applies R^2 only to compensate for its integer/Montgomery
-                // mixed arithmetic pipeline (integer accumulation → montgomery_reduce → R^2).
-                // Both pipelines yield the same logical field value: Σ eq * AzBz.
-                extended_evals[target_idx] = sum;
-
-                // DEBUG: Print extended_eval AFTER R^2 scaling
-                if (target_idx < 3) {
-                    dbg("[STREAMING_OUTER UNISKIP] AFTER R^2:  extended_evals[{d}] (target_y={d}) = {any}\n", .{target_idx, target_y, extended_evals[target_idx].toBytesBE()});
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(DEGREE, first_round_ctx, firstRoundCompute);
+            } else {
+                for (0..DEGREE) |i| {
+                    firstRoundCompute(first_round_ctx, i);
                 }
             }
 
@@ -2089,63 +2102,97 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // window_size is always 1 for linear phase cycle rounds
             const window_bits: u6 = 1;
 
-            // Accumulators for multiquadratic polynomial
-            var t_00 = F.zero(); // t'(0)
-            var t_inf = F.zero(); // t'(∞)
+            // Accumulators for multiquadratic polynomial (parallelized over x_out)
+            const ReduceCtx = struct {
+                E_out: []const F,
+                E_in: []const F,
+                r_grid: *const ExpandingTable(F),
+                r_grid_len: usize,
+                head_in_bits: u6,
+                window_bits: u6,
+                num_r_bits: u6,
+                cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+                self_ptr: *const Self,
+            };
+            const reduceMap = struct {
+                fn f(ctx: ReduceCtx, start: usize, end: usize) [2]F {
+                    var local_t_00 = F.zero();
+                    var local_t_inf = F.zero();
 
-            // Iterate over the factorized index space: (x_out, x_in) × (x_val) × (r_idx)
-            var x_out_idx: usize = 0;
-            while (x_out_idx < E_out.len) : (x_out_idx += 1) {
-                const e_out_val = E_out[x_out_idx];
+                    var x_out_idx: usize = start;
+                    while (x_out_idx < end) : (x_out_idx += 1) {
+                        const e_out_val = ctx.E_out[x_out_idx];
 
-                var x_in_idx: usize = 0;
-                while (x_in_idx < E_in.len) : (x_in_idx += 1) {
-                    const e_in_val = E_in[x_in_idx];
-                    const eq_base = e_out_val.mul(e_in_val);
+                        var x_in_idx: usize = 0;
+                        while (x_in_idx < ctx.E_in.len) : (x_in_idx += 1) {
+                            const e_in_val = ctx.E_in[x_in_idx];
+                            const eq_base = e_out_val.mul(e_in_val);
 
-                    // Accumulate Az/Bz for x_val = 0 and x_val = 1
-                    var az_grid = [2]F{ F.zero(), F.zero() };
-                    var bz_grid = [2]F{ F.zero(), F.zero() };
+                            var az_grid = [2]F{ F.zero(), F.zero() };
+                            var bz_grid = [2]F{ F.zero(), F.zero() };
 
-                    // Compute base_idx following Jolt's structure
-                    const base_idx: usize = (x_out_idx << @intCast(head_in_bits + window_bits + num_r_bits)) |
-                        (x_in_idx << @intCast(window_bits + num_r_bits));
+                            const base_idx: usize = (x_out_idx << @intCast(ctx.head_in_bits + ctx.window_bits + ctx.num_r_bits)) |
+                                (x_in_idx << @intCast(ctx.window_bits + ctx.num_r_bits));
 
-                    // Iterate over x_val (window variable) and r_idx
-                    var x_val: usize = 0;
-                    while (x_val < 2) : (x_val += 1) {
-                        const x_val_shifted = x_val << num_r_bits;
+                            var x_val: usize = 0;
+                            while (x_val < 2) : (x_val += 1) {
+                                const x_val_shifted = x_val << ctx.num_r_bits;
 
-                        var r_idx: usize = 0;
-                        while (r_idx < r_grid_len) : (r_idx += 1) {
-                            const r_weight = r_grid.get(r_idx);
+                                var r_idx: usize = 0;
+                                while (r_idx < ctx.r_grid_len) : (r_idx += 1) {
+                                    const r_weight = ctx.r_grid.get(r_idx);
 
-                            // Compute full_idx, step_idx and selector
-                            // The LSB (selector) determines the constraint group!
-                            const full_idx = base_idx | x_val_shifted | r_idx;
-                            const step_idx = full_idx >> 1;
-                            const selector: usize = full_idx & 1;
+                                    const full_idx = base_idx | x_val_shifted | r_idx;
+                                    const step_idx = full_idx >> 1;
+                                    const selector: usize = full_idx & 1;
 
-                            // Get Az/Bz for this cycle using the selected constraint group
-                            if (step_idx < self.cycle_witnesses.len) {
-                                const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
-                                // Weight by r_grid and accumulate
-                                az_grid[x_val] = az_grid[x_val].add(r_weight.mul(result.az));
-                                bz_grid[x_val] = bz_grid[x_val].add(r_weight.mul(result.bz));
+                                    if (step_idx < ctx.cycle_witnesses.len) {
+                                        const result = ctx.self_ptr.computeCycleAzBzForGroup(&ctx.cycle_witnesses[step_idx], selector);
+                                        az_grid[x_val] = az_grid[x_val].add(r_weight.mul(result.az));
+                                        bz_grid[x_val] = bz_grid[x_val].add(r_weight.mul(result.bz));
+                                    }
+                                }
                             }
+
+                            const prod_0 = az_grid[0].mul(bz_grid[0]);
+                            const slope_az = az_grid[1].sub(az_grid[0]);
+                            const slope_bz = bz_grid[1].sub(bz_grid[0]);
+                            const prod_inf = slope_az.mul(slope_bz);
+
+                            local_t_00 = local_t_00.add(eq_base.mul(prod_0));
+                            local_t_inf = local_t_inf.add(eq_base.mul(prod_inf));
                         }
                     }
 
-                    // Multiquadratic: t'(0) and t'(∞)
-                    const prod_0 = az_grid[0].mul(bz_grid[0]);
-                    const slope_az = az_grid[1].sub(az_grid[0]);
-                    const slope_bz = bz_grid[1].sub(bz_grid[0]);
-                    const prod_inf = slope_az.mul(slope_bz);
-
-                    t_00 = t_00.add(eq_base.mul(prod_0));
-                    t_inf = t_inf.add(eq_base.mul(prod_inf));
+                    return [2]F{ local_t_00, local_t_inf };
                 }
-            }
+            }.f;
+            const reduceAdd = struct {
+                fn f(a: [2]F, b: [2]F) [2]F {
+                    return [2]F{ a[0].add(b[0]), a[1].add(b[1]) };
+                }
+            }.f;
+
+            const reduce_ctx = ReduceCtx{
+                .E_out = E_out,
+                .E_in = E_in,
+                .r_grid = &self.r_grid,
+                .r_grid_len = r_grid_len,
+                .head_in_bits = head_in_bits,
+                .window_bits = window_bits,
+                .num_r_bits = num_r_bits,
+                .cycle_witnesses = self.cycle_witnesses,
+                .self_ptr = self,
+            };
+
+            const identity = [2]F{ F.zero(), F.zero() };
+            const t_results = if (self.thread_pool) |tp|
+                tp.parallelReduce([2]F, E_out.len, identity, reduce_ctx, reduceMap, reduceAdd)
+            else
+                reduceMap(reduce_ctx, 0, E_out.len);
+
+            const t_00 = t_results[0];
+            const t_inf = t_results[1];
 
             // Use Gruen's method
             const previous_claim = self.current_claim;
@@ -2194,13 +2241,35 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 t_prime.bind(r);
             }
 
-            // 3. Bind Az/Bz polynomials LAST
+            // 3. Bind Az/Bz polynomials LAST (parallelized with join when both present)
             // ALL rounds bind Az/Bz polynomials (this is critical for next_window to work!)
-            if (self.az_poly) |*az| {
-                az.bindLow(r);
-            }
-            if (self.bz_poly) |*bz| {
-                bz.bindLow(r);
+            if (self.az_poly != null and self.bz_poly != null) {
+                const BindCtx = struct {
+                    poly: *poly_mod.DensePolynomial(F),
+                    r_val: F,
+                };
+                const bindFn = struct {
+                    fn f(ctx: BindCtx) void {
+                        ctx.poly.bindLow(ctx.r_val);
+                    }
+                }.f;
+
+                if (self.thread_pool) |tp| {
+                    _ = tp.join(
+                        void,
+                        void,
+                        BindCtx{ .poly = &(self.az_poly.?), .r_val = r },
+                        bindFn,
+                        BindCtx{ .poly = &(self.bz_poly.?), .r_val = r },
+                        bindFn,
+                    );
+                } else {
+                    self.az_poly.?.bindLow(r);
+                    self.bz_poly.?.bindLow(r);
+                }
+            } else {
+                if (self.az_poly) |*az| az.bindLow(r);
+                if (self.bz_poly) |*bz| bz.bindLow(r);
             }
 
             self.current_round += 1;

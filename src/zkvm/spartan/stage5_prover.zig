@@ -3877,20 +3877,45 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const current_len = prefix_size >> @intCast(cycle_round);
                                 const half_len = current_len / 2;
 
-                                // Bind P arrays: P'[j] = (1-r)*P[2j] + r*P[2j+1]
+                                // Bind P and Q arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
                                 // CRITICAL: Use mulHiBigIntU128 for F * Challenge
-                                for (0..half_len) |j| {
-                                    P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(P_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(P_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    P_val[j] = one_minus_r.mul(P_val[2 * j]).add(P_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                }
-
-                                // Bind Q arrays: Q'[j] = (1-r)*Q[2j] + r*Q[2j+1]
-                                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
-                                for (0..half_len) |j| {
-                                    Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(Q_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(Q_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(Q_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                // Parallelize across the 6 independent arrays
+                                if (self.thread_pool) |tp| {
+                                    const BindCtx = struct {
+                                        p_raf: []F, p_rw: []F, p_val: []F,
+                                        q_raf: []F, q_rw: []F, q_val: []F,
+                                        omr: F, chal_limbs: [4]u64, h: usize,
+                                    };
+                                    const bctx = BindCtx{ .p_raf = P_raf, .p_rw = P_rw, .p_val = P_val, .q_raf = Q_raf, .q_rw = Q_rw, .q_val = Q_val, .omr = one_minus_r, .chal_limbs = challenge.limbs, .h = half_len };
+                                    tp.parallelForForce(6, bctx, struct {
+                                        fn f(c: BindCtx, arr_idx: usize) void {
+                                            const arr = switch (arr_idx) {
+                                                0 => c.p_raf,
+                                                1 => c.p_rw,
+                                                2 => c.p_val,
+                                                3 => c.q_raf,
+                                                4 => c.q_rw,
+                                                5 => c.q_val,
+                                                else => unreachable,
+                                            };
+                                            for (0..c.h) |j| {
+                                                const lo = arr[2 * j];
+                                                const hi = arr[2 * j + 1];
+                                                arr[j] = c.omr.mul(lo).add(hi.mulHiBigIntU128(c.chal_limbs));
+                                            }
+                                        }
+                                    }.f);
+                                } else {
+                                    for (0..half_len) |j| {
+                                        P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(P_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(P_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        P_val[j] = one_minus_r.mul(P_val[2 * j]).add(P_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    }
+                                    for (0..half_len) |j| {
+                                        Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(Q_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(Q_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(Q_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    }
                                 }
 
                                 if (cycle_round < 3) {
@@ -3912,18 +3937,40 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const current_len = suffix_size >> @intCast(suffix_round);
                                 const half_len = current_len / 2;
 
-                                // Bind H_prime: H'[j] = (1-r)*H[2j] + r*H[2j+1]
+                                // Bind H_prime and eq_hi arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
                                 // CRITICAL: Use mulHiBigIntU128 for F * Challenge
-                                for (0..half_len) |j| {
-                                    H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(H_prime[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                }
-
-                                // Bind eq_hi arrays
-                                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
-                                for (0..half_len) |j| {
-                                    eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(eq_raf_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(eq_rw_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                // Parallelize across the 4 independent arrays
+                                if (self.thread_pool) |tp| {
+                                    const BindCtx2 = struct {
+                                        h_prime: []F, eq_raf: []F, eq_rw: []F, eq_val: []F,
+                                        omr: F, chal_limbs: [4]u64, h: usize,
+                                    };
+                                    const bctx2 = BindCtx2{ .h_prime = H_prime, .eq_raf = eq_raf_hi, .eq_rw = eq_rw_hi, .eq_val = eq_val_hi, .omr = one_minus_r, .chal_limbs = challenge.limbs, .h = half_len };
+                                    tp.parallelForForce(4, bctx2, struct {
+                                        fn f(c: BindCtx2, arr_idx: usize) void {
+                                            const arr = switch (arr_idx) {
+                                                0 => c.h_prime,
+                                                1 => c.eq_raf,
+                                                2 => c.eq_rw,
+                                                3 => c.eq_val,
+                                                else => unreachable,
+                                            };
+                                            for (0..c.h) |j| {
+                                                const lo = arr[2 * j];
+                                                const hi = arr[2 * j + 1];
+                                                arr[j] = c.omr.mul(lo).add(hi.mulHiBigIntU128(c.chal_limbs));
+                                            }
+                                        }
+                                    }.f);
+                                } else {
+                                    for (0..half_len) |j| {
+                                        H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(H_prime[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    }
+                                    for (0..half_len) |j| {
+                                        eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(eq_raf_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(eq_rw_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    }
                                 }
 
                                 dbg("[STAGE5 RAM_RA] Bound PhaseCycle2 round {} (suffix {}): challenge={x}, new_len={}\n", .{
@@ -6019,18 +6066,44 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const current_len = prefix_size >> @intCast(cycle_round);
                                 const half_len = current_len / 2;
 
-                                // Bind P arrays: P'[j] = (1-r)*P[2j] + r*P[2j+1]
-                                for (0..half_len) |j| {
-                                    P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(P_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(P_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    P_val[j] = one_minus_r.mul(P_val[2 * j]).add(P_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                }
-
-                                // Bind Q arrays: Q'[j] = (1-r)*Q[2j] + r*Q[2j+1]
-                                for (0..half_len) |j| {
-                                    Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(Q_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(Q_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(Q_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                // Bind P and Q arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
+                                // Parallelize across the 6 independent arrays
+                                if (self.thread_pool) |tp| {
+                                    const BindCtx = struct {
+                                        p_raf: []F, p_rw: []F, p_val: []F,
+                                        q_raf: []F, q_rw: []F, q_val: []F,
+                                        omr: F, chal_limbs: [4]u64, h: usize,
+                                    };
+                                    const bctx = BindCtx{ .p_raf = P_raf, .p_rw = P_rw, .p_val = P_val, .q_raf = Q_raf, .q_rw = Q_rw, .q_val = Q_val, .omr = one_minus_r, .chal_limbs = challenge.limbs, .h = half_len };
+                                    tp.parallelForForce(6, bctx, struct {
+                                        fn f(c: BindCtx, arr_idx: usize) void {
+                                            const arr = switch (arr_idx) {
+                                                0 => c.p_raf,
+                                                1 => c.p_rw,
+                                                2 => c.p_val,
+                                                3 => c.q_raf,
+                                                4 => c.q_rw,
+                                                5 => c.q_val,
+                                                else => unreachable,
+                                            };
+                                            for (0..c.h) |j| {
+                                                const lo = arr[2 * j];
+                                                const hi = arr[2 * j + 1];
+                                                arr[j] = c.omr.mul(lo).add(hi.mulHiBigIntU128(c.chal_limbs));
+                                            }
+                                        }
+                                    }.f);
+                                } else {
+                                    for (0..half_len) |j| {
+                                        P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(P_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(P_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        P_val[j] = one_minus_r.mul(P_val[2 * j]).add(P_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    }
+                                    for (0..half_len) |j| {
+                                        Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(Q_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(Q_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(Q_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    }
                                 }
 
                                 dbg("[STAGE5 CYCLE BIND R{}] Bound P/Q arrays: half_len={}\n", .{
@@ -6043,16 +6116,39 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const current_len = suffix_size >> @intCast(suffix_round);
                                 const half_len = current_len / 2;
 
-                                // Bind H_prime: H'[j] = (1-r)*H[2j] + r*H[2j+1]
-                                for (0..half_len) |j| {
-                                    H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(H_prime[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                }
-
-                                // Bind eq_hi arrays
-                                for (0..half_len) |j| {
-                                    eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(eq_raf_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(eq_rw_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                    eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                // Bind H_prime and eq_hi arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
+                                // Parallelize across the 4 independent arrays
+                                if (self.thread_pool) |tp| {
+                                    const BindCtx2 = struct {
+                                        h_prime: []F, eq_raf: []F, eq_rw: []F, eq_val: []F,
+                                        omr: F, chal_limbs: [4]u64, h: usize,
+                                    };
+                                    const bctx2 = BindCtx2{ .h_prime = H_prime, .eq_raf = eq_raf_hi, .eq_rw = eq_rw_hi, .eq_val = eq_val_hi, .omr = one_minus_r, .chal_limbs = challenge.limbs, .h = half_len };
+                                    tp.parallelForForce(4, bctx2, struct {
+                                        fn f(c: BindCtx2, arr_idx: usize) void {
+                                            const arr = switch (arr_idx) {
+                                                0 => c.h_prime,
+                                                1 => c.eq_raf,
+                                                2 => c.eq_rw,
+                                                3 => c.eq_val,
+                                                else => unreachable,
+                                            };
+                                            for (0..c.h) |j| {
+                                                const lo = arr[2 * j];
+                                                const hi = arr[2 * j + 1];
+                                                arr[j] = c.omr.mul(lo).add(hi.mulHiBigIntU128(c.chal_limbs));
+                                            }
+                                        }
+                                    }.f);
+                                } else {
+                                    for (0..half_len) |j| {
+                                        H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(H_prime[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    }
+                                    for (0..half_len) |j| {
+                                        eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(eq_raf_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(eq_rw_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    }
                                 }
 
                                 dbg("[STAGE5 CYCLE BIND R{}] Bound H'/eq_hi arrays: half_len={}\n", .{

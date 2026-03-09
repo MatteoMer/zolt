@@ -168,7 +168,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             dbg("  regs_val_input = {any}\n", .{regs_val_input.toBytesBE()[0..8]});
             dbg("  ram_ra_input = {any}\n", .{ram_ra_input.toBytesBE()[0..8]});
             dbg("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
-            {
+            if (comptime debug_verbose) {
                 const print = std.debug.print;
                 print("[S5 CLAIM DETAIL] rv_claim = {any}\n", .{rv_claim.toBytesBE()});
                 print("[S5 CLAIM DETAIL] left_op_claim = {any}\n", .{left_op_claim.toBytesBE()});
@@ -1893,7 +1893,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const batch2_inv = batch2.inverse().?; // Pre-compute for deriving Instance 2 from batched claim
 
             // DEBUG: Print initial claims
-            {
+            if (comptime debug_verbose) {
                 const print = std.debug.print;
                 print("[ZOLT INIT] lookups_input (LE) = {any}\n", .{lookups_input.toBytes()[0..16].*});
                 print("[ZOLT INIT] regs_scaled (LE) = {any}\n", .{regs_scaled.toBytes()[0..16].*});
@@ -3119,8 +3119,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
                     const eval_2_inst2 = read_checking_evals[1].add(raf_evals[1]);
 
-                    // ALWAYS-ON: Print Instance 2 eval_0 and eval_2 for comparison with Jolt prover
-                    if (round < 5 or (round >= 14 and round <= 17) or round == 127) {
+                    // Print Instance 2 eval_0 and eval_2 for comparison with Jolt prover
+                    if (comptime debug_verbose) if (round < 5 or (round >= 14 and round <= 17) or round == 127) {
                         const print = std.debug.print;
                         print("[ZOLT INST2 R{}] previous_claim = {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
                         print("[ZOLT INST2 R{}] eval_at_0 = {any}\n", .{ round, eval_0_inst2.toBytes()[0..16].* });
@@ -3135,11 +3135,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             raf_evals[0].toBytes()[0..16].*,
                             raf_evals[1].toBytes()[0..16].*,
                         });
-                    }
+                    };
 
                     // DEGREE-2 EXCESS CHECK: at R0 (all indices bit 127=0),
                     // each component should have eval_2 = -eval_0 (since eval_1 = 0)
-                    if (round == 0) {
+                    if (comptime debug_verbose) if (round == 0) {
                         const print = std.debug.print;
                         const neg_rc_e0 = F.zero().sub(read_checking_evals[0]);
                         const neg_raf_e0 = F.zero().sub(raf_evals[0]);
@@ -3162,7 +3162,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             neg_total_e0.toBytesBE()[16..32].*,
                             total_ok,
                         });
-                    }
+                    };
 
                     // (TARGETED DEBUG moved after eval_1 derivation below)
 
@@ -3213,7 +3213,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const eval_1_inst2 = lookups_claim.sub(eval_0_inst2);
                     const expected_eval_2 = eval_1_inst2.add(eval_1_inst2).sub(eval_0_inst2);
                     const eval_2_matches_ml = eval_2_inst2.eql(expected_eval_2);
-                    if (!eval_2_matches_ml) {
+                    if (comptime debug_verbose) if (!eval_2_matches_ml) {
                         const print = std.debug.print;
                         print("[MULTILINEAR BUG R{}] eval_2_inst2 != 2*eval_1 - eval_0!\n", .{round});
                         print("  actual eval_2   = {x}\n", .{eval_2_inst2.toBytesBE()});
@@ -3225,9 +3225,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         print("  read_checking[1] (e2) = {x}\n", .{read_checking_evals[1].toBytesBE()});
                         print("  raf[0] (e0) = {x}\n", .{raf_evals[0].toBytesBE()});
                         print("  raf[1] (e2) = {x}\n", .{raf_evals[1].toBytesBE()});
-                    }
+                    };
                     // LINEARITY CHECK per component at round 0
-                    if (round == 0) {
+                    if (comptime debug_verbose) if (round == 0) {
                         const print2 = std.debug.print;
                         // For read_checking: rc_0 + rc_1 should equal some claim
                         // rc_1 = eval_1_total - raf_1
@@ -3270,9 +3270,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Check if nonlinearity comes from rc or raf:
                         // If raf is linear and rc isn't: nonlin = rc_e2 - (2*rc_e1 - rc_e0) = rc_e2 - expected_rc_e2
                         // where expected_rc_e2 = expected_total_e2 - expected_raf_e2 = expected_total_e2 - raf_e2 (if raf linear)
-                    }
+                    };
                     // TARGETED DEBUG: Print Instance 2 values in LE format for Jolt comparison
-                    if (round < 4 or round == 7 or round == 8 or round == 15 or round == 16 or round == 127) {
+                    if (comptime debug_verbose) if (round < 4 or round == 7 or round == 8 or round == 15 or round == 16 or round == 127) {
                         const print = std.debug.print;
                         print("[ZOLT INST2 R{}] previous_claim = {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
                         print("[ZOLT INST2 R{}] eval_at_0 = {any}\n", .{ round, eval_0_inst2.toBytes()[0..16].* });
@@ -3280,7 +3280,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         print("[ZOLT INST2 R{}] eval_at_2 = {any}\n", .{ round, eval_2_inst2.toBytes()[0..16].* });
                         print("[ZOLT INST2 R{}] read_checking = [{any}, {any}]\n", .{ round, read_checking_evals[0].toBytes()[0..16].*, read_checking_evals[1].toBytes()[0..16].* });
                         print("[ZOLT INST2 R{}] raf = [{any}, {any}]\n", .{ round, raf_evals[0].toBytes()[0..16].*, raf_evals[1].toBytes()[0..16].* });
-                    }
+                    };
 
                     // BRUTE FORCE VERIFICATION: At round 0, compute the Instance 2 eval_0
                     if (comptime debug_verbose) {
@@ -3771,13 +3771,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const inst2_c1 = eval_1_inst2.sub(eval_0_inst2).sub(inst2_c2);
                     const inst2_at_r = inst2_c0.add(inst2_c1.mulHiBigIntU128(challenge.limbs)).add(inst2_c2.mul(r2));
 
-                    // ALWAYS-ON: Print Instance 2 poly coefficients (compare with Jolt prover)
-                    if (round < 5) {
+                    // Print Instance 2 poly coefficients (compare with Jolt prover)
+                    if (comptime debug_verbose) if (round < 5) {
                         const print = std.debug.print;
                         print("[ZOLT INST2 POLY R{}] c0={any}\n", .{ round, inst2_c0.toBytes()[0..16].* });
                         print("[ZOLT INST2 POLY R{}] c1={any}\n", .{ round, inst2_c1.toBytes()[0..16].* });
                         print("[ZOLT INST2 POLY R{}] c2={any}\n", .{ round, inst2_c2.toBytes()[0..16].* });
-                    }
+                    };
 
                     // Debug: show claim chain for first 3 rounds and last 3 address rounds
                     if (round < 3 or (round >= 125 and round < 128)) {
@@ -4171,7 +4171,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // DRIFT DEBUG: Compute direct sum after condensation to compare with lookups_claim
                         // At this point, lookups_eq_evals[j] has been condensed to include the expanding table contribution
                         // The sum should match lookups_claim (after polynomial evolution through previous round)
-                        {
+                        if (comptime debug_verbose) {
                             var brute_sum = F.zero();
                             for (0..T) |jj| {
                                 brute_sum = brute_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
@@ -4678,11 +4678,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
 
                         // ============================================================
-                        // ALWAYS-ON: Direct MLE verification for ALL tables
+                        // Direct MLE verification for ALL tables
                         // Computes table MLE directly from challenges and compares
                         // with prefix-suffix decomposition result
                         // ============================================================
-                        {
+                        if (comptime debug_verbose) {
                             const print = std.debug.print;
                             var any_mismatch = false;
 
@@ -6301,8 +6301,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             dbg("  batch1*inst1 (LE) = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
             dbg("  batch2*inst2 (LE) = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
 
-            // ALWAYS-ON: Print the chain values so we can compare with Jolt verifier
-            {
+            // Print the chain values so we can compare with Jolt verifier
+            if (comptime debug_verbose) {
                 const print = std.debug.print;
                 print("[ZOLT S5 CHAIN] inst0_claim FULL LE = {any}\n", .{regs_val_current_claim.toBytes()});
                 print("[ZOLT S5 CHAIN] inst1_claim FULL LE = {any}\n", .{ram_ra_current_claim.toBytes()});
@@ -6477,8 +6477,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
             const lookups_output_claim = lookups_current_scalar.mul(lookups_ra_product_bound).mul(lookups_combined_vals[0]);
 
-            // ALWAYS-ON: Compare polynomial chain output with expected output
-            {
+            // Compare polynomial chain output with expected output
+            if (comptime debug_verbose) {
                 const print = std.debug.print;
                 print("[S5 FINAL] lookups_claim (chain)      = {any}\n", .{lookups_claim.toBytes()});
                 print("[S5 FINAL] lookups_output_claim (exp) = {any}\n", .{lookups_output_claim.toBytes()});
@@ -6586,8 +6586,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 dbg("  The correct ra_claim should be the PRODUCT of the bound chunk values.\n", .{});
             }
 
-            // ALWAYS-ON: Print table index histogram for comparison with Jolt
-            {
+            // Print table index histogram for comparison with Jolt
+            if (comptime debug_verbose) {
                 const print = std.debug.print;
                 var table_counts: [42]usize = [_]usize{0} ** 42;
                 var no_table_count: usize = 0;
@@ -6629,8 +6629,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             //
             // We compute this by evaluating eq(r_cycle', j) for each j in [0, T)
             // where r_cycle' = reversed challenges (to get BIG_ENDIAN for eq)
-            {
-                // ALWAYS-ON: Verify eq sum and print per-cycle eq values for first 5 cycles
+            if (comptime debug_verbose) {
+                // Verify eq sum and print per-cycle eq values for first 5 cycles
                 const print = std.debug.print;
                 var eq_sum_dbg = F.zero();
                 for (0..T) |j| {
@@ -6684,7 +6684,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             const raf_claim = F.one().sub(computed_raf_flag).mul(left_op_eval.add(gamma_lookups_raf.mul(right_op_eval)))
                 .add(computed_raf_flag.mul(gamma_lookups_raf).mul(identity_eval));
-            {
+            if (comptime debug_verbose) {
                 const print = std.debug.print;
                 print("[ZOLT S5 INST2] raf_claim FULL LE = {any}\n", .{raf_claim.toBytes()});
             }
@@ -6694,14 +6694,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var val_claim = F.zero();
             for (0..num_lookup_tables) |i| {
                 val_claim = val_claim.add(table_flags[i].mul(stored_table_values[i]));
-                if (!table_flags[i].eql(F.zero())) {
+                if (comptime debug_verbose) if (!table_flags[i].eql(F.zero())) {
                     const print = std.debug.print;
                     print("[ZOLT S5 INST2] table[{}] val_eval={any} flag={any}\n", .{
                         i, stored_table_values[i].toBytes()[0..16].*, table_flags[i].toBytes()[0..16].*,
                     });
-                }
+                };
             }
-            {
+            if (comptime debug_verbose) {
                 const print = std.debug.print;
                 print("[ZOLT S5 INST2] val_claim FULL LE = {any}\n", .{val_claim.toBytes()});
                 print("[ZOLT S5 INST2] raf_flag FULL LE = {any}\n", .{computed_raf_flag.toBytes()});

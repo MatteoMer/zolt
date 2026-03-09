@@ -947,8 +947,8 @@ pub fn Stage3Prover(comptime F: type) type {
             for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
             dbg("}}\n", .{});
 
-            // ALWAYS-ON: Print transcript state and key claims for comparison with Jolt
-            {
+            if (comptime debug_verbose) {
+                // Print transcript state and key claims for comparison with Jolt
                 const std_io = @import("std");
                 std_io.debug.print("[ZOLT Stage3] Transcript state AFTER cache_openings: ", .{});
                 for (transcript.state[0..8]) |b| std_io.debug.print("{x:0>2} ", .{b});

@@ -38,6 +38,8 @@ const Stage5BatchedProver = spartan_mod.Stage5BatchedProver;
 const Stage6BatchedProver = spartan_mod.Stage6BatchedProver;
 const preprocessing = @import("preprocessing.zig");
 
+const debug_verbose = false;
+
 /// Direct Jolt-compatible 7-stage prover
 pub fn JoltProver(comptime F: type) type {
     return struct {
@@ -663,20 +665,24 @@ pub fn JoltProver(comptime F: type) type {
             // This happens BEFORE BatchedSumcheck::verify which also appends it.
             // flush_to_transcript: uni_skip opening claim
             transcript.appendScalar("opening_claim", uni_skip_claim);
-            std.debug.print("[ZOLT-PROVER] after_flush transcript_state = ", .{});
-            for (transcript.state[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-            std.debug.print(" round={}\n", .{transcript.n_rounds});
+            if (comptime debug_verbose) {
+                std.debug.print("[ZOLT-PROVER] after_flush transcript_state = ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print(" round={}\n", .{transcript.n_rounds});
+            }
 
             // BatchedSumcheck::verify: append input_claim then get batching coefficients
             transcript.appendScalar("sumcheck_claim", uni_skip_claim);
 
             // Get batching coefficient - advances transcript state AND provides scaling factor
             const batching_coeff = transcript.challengeScalarFull();
-            std.debug.print("[ZOLT-PROVER] input_claim (uni_skip_claim) = {any}\n", .{uni_skip_claim.toBytesBE()});
-            std.debug.print("[ZOLT-PROVER] batching_coeff = {any}\n", .{batching_coeff.toBytesBE()});
-            std.debug.print("[ZOLT-PROVER] transcript state: ", .{});
-            for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("round={}\n", .{transcript.n_rounds});
+            if (comptime debug_verbose) {
+                std.debug.print("[ZOLT-PROVER] input_claim (uni_skip_claim) = {any}\n", .{uni_skip_claim.toBytesBE()});
+                std.debug.print("[ZOLT-PROVER] batching_coeff = {any}\n", .{batching_coeff.toBytesBE()});
+                std.debug.print("[ZOLT-PROVER] transcript state: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("round={}\n", .{transcript.n_rounds});
+            }
 
             // Generate remaining rounds
             // In Jolt, stage1_sumcheck_proof contains num_rounds polynomials
@@ -689,7 +695,9 @@ pub fn JoltProver(comptime F: type) type {
 
             // Compute initial claim = uni_skip_claim * batching_coeff (for Jolt compatibility)
             const initial_claim = uni_skip_claim.mul(batching_coeff);
-            std.debug.print("[ZOLT-PROVER] batched_claim = {any}\n", .{initial_claim.toBytesBE()});
+            if (comptime debug_verbose) {
+                std.debug.print("[ZOLT-PROVER] batched_claim = {any}\n", .{initial_claim.toBytesBE()});
+            }
 
             // Generate all remaining round polynomials with transcript integration
             for (0..num_remaining_rounds) |_| {
@@ -1355,7 +1363,9 @@ pub fn JoltProver(comptime F: type) type {
                 try self.addSpartanOuterOpeningClaims(&jolt_proof.opening_claims);
             }
 
-            std.debug.print("    [STAGE-TIMING] Stage 1: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            if (comptime debug_verbose) {
+                std.debug.print("    [STAGE-TIMING] Stage 1: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            }
             stage_timer.reset();
 
             // Create UniSkip proof for Stage 2
@@ -1568,7 +1578,9 @@ pub fn JoltProver(comptime F: type) type {
             // [0] LeftInstructionInput, [1] RightInstructionInput, [2] OpFlags(Jump),
             // [3] OpFlags(WriteLookupOutputToRD), [4] LookupOutput, [5] InstructionFlags(Branch),
             // [6] NextIsNoop, [7] OpFlags(VirtualInstruction)
-            std.debug.print("[INSERT] LeftInstructionInput@ProdVirt = {any}\n", .{stage2_result.factor_evals[0].toBytesBE()});
+            if (comptime debug_verbose) {
+                std.debug.print("[INSERT] LeftInstructionInput@ProdVirt = {any}\n", .{stage2_result.factor_evals[0].toBytesBE()});
+            }
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanProductVirtualization } },
                 stage2_result.factor_evals[0], // LeftInstructionInput
@@ -1639,7 +1651,9 @@ pub fn JoltProver(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .RightLookupOperand, .sumcheck_id = .InstructionClaimReduction } },
                 stage2_result.instr_right_operand_claim,
             );
-            std.debug.print("[INSERT] LeftInstructionInput@InstrClaimRed = {any}\n", .{stage2_result.instr_left_instr_input_claim.toBytesBE()});
+            if (comptime debug_verbose) {
+                std.debug.print("[INSERT] LeftInstructionInput@InstrClaimRed = {any}\n", .{stage2_result.instr_left_instr_input_claim.toBytesBE()});
+            }
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .InstructionClaimReduction } },
                 stage2_result.instr_left_instr_input_claim,
@@ -1681,7 +1695,9 @@ pub fn JoltProver(comptime F: type) type {
             transcript.appendScalar("opening_claim", stage2_result.output_val_final_claim);
 
 
-            std.debug.print("    [STAGE-TIMING] Stage 2: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            if (comptime debug_verbose) {
+                std.debug.print("    [STAGE-TIMING] Stage 2: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            }
             stage_timer.reset();
 
             // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction
@@ -1823,7 +1839,9 @@ pub fn JoltProver(comptime F: type) type {
 
             // LookupOutput at InstructionClaimReduction was already added in Stage 2
 
-            std.debug.print("    [STAGE-TIMING] Stage 3: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            if (comptime debug_verbose) {
+                std.debug.print("    [STAGE-TIMING] Stage 3: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            }
             stage_timer.reset();
 
             // Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation
@@ -2333,7 +2351,9 @@ pub fn JoltProver(comptime F: type) type {
                 }
             } // end stage4_block
 
-            std.debug.print("    [STAGE-TIMING] Stage 4: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            if (comptime debug_verbose) {
+                std.debug.print("    [STAGE-TIMING] Stage 4: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            }
             stage_timer.reset();
 
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
@@ -2467,7 +2487,9 @@ pub fn JoltProver(comptime F: type) type {
                 // ALWAYS-ON: Print transcript state after Stage 5 cache_openings
             }
 
-            std.debug.print("    [STAGE-TIMING] Stage 5: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            if (comptime debug_verbose) {
+                std.debug.print("    [STAGE-TIMING] Stage 5: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            }
             stage_timer.reset();
 
             // Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction
@@ -2638,7 +2660,9 @@ pub fn JoltProver(comptime F: type) type {
             // (stage6_prover.zig lines 4055-4083)
             // Do NOT re-append them here.
 
-            std.debug.print("    [STAGE-TIMING] Stage 6: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            if (comptime debug_verbose) {
+                std.debug.print("    [STAGE-TIMING] Stage 6: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            }
             stage_timer.reset();
 
             // ====================================================================
@@ -3144,7 +3168,9 @@ pub fn JoltProver(comptime F: type) type {
 
             }
 
-            std.debug.print("    [STAGE-TIMING] Stage 7: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            if (comptime debug_verbose) {
+                std.debug.print("    [STAGE-TIMING] Stage 7: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            }
 
             return jolt_proof;
         }

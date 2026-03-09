@@ -524,23 +524,25 @@ pub fn proverMsgReadChecking(
     // Quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left
     const eval_2 = eval_2_right.add(eval_2_right).sub(eval_2_left);
 
-    // ALWAYS-ON: print per-table eval_0 and eval_2 at round 0 for Jolt comparison
-    if (round == 0) {
-        const print = std.debug.print;
-        for (0..NUM_TABLES) |t_idx| {
-            const e2l = eval_2_left_per_table[t_idx];
-            const e2r = eval_2_right_per_table[t_idx];
-            const e2_table = e2r.add(e2r).sub(e2l);
-            const e0_table = eval_0_per_table[t_idx];
-            if (!e0_table.eql(F.zero()) or !e2_table.eql(F.zero())) {
-                print("[RC R0] T{} e0={any} e2={any}\n", .{
-                    t_idx,
-                    e0_table.toBytes()[0..16].*,
-                    e2_table.toBytes()[0..16].*,
-                });
+    if (comptime debug_verbose) {
+        // Print per-table eval_0 and eval_2 at round 0 for Jolt comparison
+        if (round == 0) {
+            const print = std.debug.print;
+            for (0..NUM_TABLES) |t_idx| {
+                const e2l = eval_2_left_per_table[t_idx];
+                const e2r = eval_2_right_per_table[t_idx];
+                const e2_table = e2r.add(e2r).sub(e2l);
+                const e0_table = eval_0_per_table[t_idx];
+                if (!e0_table.eql(F.zero()) or !e2_table.eql(F.zero())) {
+                    print("[RC R0] T{} e0={any} e2={any}\n", .{
+                        t_idx,
+                        e0_table.toBytes()[0..16].*,
+                        e2_table.toBytes()[0..16].*,
+                    });
+                }
             }
+            print("[RC R0] TOTAL e0={any} e2={any}\n", .{ eval_0.toBytes()[0..16].*, eval_2.toBytes()[0..16].* });
         }
-        print("[RC R0] TOTAL e0={any} e2={any}\n", .{ eval_0.toBytes()[0..16].*, eval_2.toBytes()[0..16].* });
     }
 
     if (round == 0) {

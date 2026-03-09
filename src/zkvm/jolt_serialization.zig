@@ -328,8 +328,10 @@ pub fn ArkworksSerializer(comptime F: type) type {
                             });
                         }
                         // Debug LeftInstructionInput at SpartanProductVirtualization
-                        if (v.poly == .LeftInstructionInput) {
-                            std.debug.print("[SERIALIZE] LeftInstructionInput@{s} idx={d} = {any}\n", .{ @tagName(v.sumcheck_id), i, entry.claim.toBytesBE() });
+                        if (comptime debug_verbose) {
+                            if (v.poly == .LeftInstructionInput) {
+                                std.debug.print("[SERIALIZE] LeftInstructionInput@{s} idx={d} = {any}\n", .{ @tagName(v.sumcheck_id), i, entry.claim.toBytesBE() });
+                            }
                         }
                     },
                     .Committed => |c| {

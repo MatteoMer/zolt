@@ -583,7 +583,6 @@ pub fn JoltProver(comptime F: type) type {
                 for (witness_polys) |p| self.allocator.free(p);
                 self.allocator.free(witness_polys);
             }
-            var witness_idx: usize = 0;
 
             // Store one-hot index arrays for sparse polynomials
             const num_onehot = instruction_d + ram_d + bytecode_d;
@@ -607,62 +606,44 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             phase_timer.reset();
-            // RdInc: dense polynomial, trace_length entries
-            // CRITICAL: Must pad to k_chunk*trace_length for Dory commitment
-            // Jolt commits ALL polynomials using the same matrix layout (K*T sized),
-            // so dense polys must be padded to match the one-hot poly dimensions.
+            // Guard: k_chunk must fit in u8 for sparse one-hot index arrays
+            std.debug.assert(k_chunk <= 256);
+
+            // ===== Phase A: Build all polynomial data upfront (sequential) =====
+            // Polynomial construction is fast (simple field arithmetic over trace).
+            // The expensive part is the Dory commitment which we parallelize in Phase B.
+
+            // --- Dense polynomials (RdInc, RamInc) ---
+            // CRITICAL: Must pad to k_chunk*trace_length for Dory commitment.
+            // Jolt commits ALL polynomials using the same matrix layout (K*T sized).
             const rd_inc_poly_raw = try self.buildRdIncPolynomial(&emulator.trace, trace_length);
             defer self.allocator.free(rd_inc_poly_raw);
             const rd_inc_poly = try self.allocator.alloc(F, k_chunk * trace_length);
             @memset(rd_inc_poly, F.zero());
             @memcpy(rd_inc_poly[0..rd_inc_poly_raw.len], rd_inc_poly_raw);
-            witness_polys[witness_idx] = rd_inc_poly;
-            witness_idx += 1;
-            const rd_inc_result = try DoryScheme.commitWithPoolAndHints(&dory_srs, rd_inc_poly, self.allocator, self.thread_pool);
-            try all_commitments.append(self.allocator, rd_inc_result.commitment);
-            row_commitments_cache[rc_idx] = rd_inc_result.row_commitments;
-            rc_idx += 1;
+            witness_polys[0] = rd_inc_poly;
 
-            // RamInc: dense polynomial, trace_length entries
-            // CRITICAL: Must pad to k_chunk*trace_length (same as RdInc)
             const ram_inc_poly_raw = try self.buildRamIncPolynomial(&emulator.trace, trace_length);
             defer self.allocator.free(ram_inc_poly_raw);
             const ram_inc_poly = try self.allocator.alloc(F, k_chunk * trace_length);
             @memset(ram_inc_poly, F.zero());
             @memcpy(ram_inc_poly[0..ram_inc_poly_raw.len], ram_inc_poly_raw);
-            witness_polys[witness_idx] = ram_inc_poly;
-            witness_idx += 1;
-            const ram_inc_result = try DoryScheme.commitWithPoolAndHints(&dory_srs, ram_inc_poly, self.allocator, self.thread_pool);
-            try all_commitments.append(self.allocator, ram_inc_result.commitment);
-            row_commitments_cache[rc_idx] = ram_inc_result.row_commitments;
-            rc_idx += 1;
+            witness_polys[1] = ram_inc_poly;
 
-            // Guard: k_chunk must fit in u8 for sparse one-hot index arrays
-            std.debug.assert(k_chunk <= 256);
-
-            // InstructionRa[0..instruction_d-1]: one-hot, commit with projective accumulation
-            var idx: usize = 0;
-            while (idx < instruction_d) : (idx += 1) {
+            // --- One-hot index arrays (InstructionRa, RamRa, BytecodeRa) ---
+            for (0..instruction_d) |idx| {
                 const shift = log_k_chunk * (instruction_d - 1 - idx);
                 const chunk_values = try self.buildInstructionRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift);
                 defer self.allocator.free(chunk_values);
-                // Build sparse index array instead of dense K*T expansion
                 const oh_indices = try self.allocator.alloc(?u8, trace_length);
                 for (0..trace_length) |cycle| {
                     const addr = chunk_values[cycle].toU64();
                     oh_indices[cycle] = if (addr < k_chunk) @intCast(addr) else null;
                 }
-                onehot_indices[onehot_idx] = oh_indices;
-                onehot_idx += 1;
-                const oh_result = try DoryScheme.commitOneHotWithPoolAndHints(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool);
-                try all_commitments.append(self.allocator, oh_result.commitment);
-                row_commitments_cache[rc_idx] = oh_result.row_commitments;
-                rc_idx += 1;
+                onehot_indices[idx] = oh_indices;
             }
 
-            // RamRa[0..ram_d-1]: one-hot, commit with projective accumulation
-            idx = 0;
-            while (idx < ram_d) : (idx += 1) {
+            for (0..ram_d) |idx| {
                 const shift = log_k_chunk * (ram_d - 1 - idx);
                 const chunk_values = try self.buildRamRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &device.memory_layout);
                 defer self.allocator.free(chunk_values);
@@ -671,20 +652,13 @@ pub fn JoltProver(comptime F: type) type {
                     const addr = chunk_values[cycle].toU64();
                     oh_indices[cycle] = if (addr < k_chunk) @intCast(addr) else null;
                 }
-                onehot_indices[onehot_idx] = oh_indices;
-                onehot_idx += 1;
-                const oh_result = try DoryScheme.commitOneHotWithPoolAndHints(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool);
-                try all_commitments.append(self.allocator, oh_result.commitment);
-                row_commitments_cache[rc_idx] = oh_result.row_commitments;
-                rc_idx += 1;
+                onehot_indices[instruction_d + idx] = oh_indices;
             }
 
-            // BytecodeRa[0..bytecode_d-1]: one-hot, commit with projective accumulation
             var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address, null);
             defer bytecode_prep_for_ra.deinit();
 
-            idx = 0;
-            while (idx < bytecode_d) : (idx += 1) {
+            for (0..bytecode_d) |idx| {
                 const shift = log_k_chunk * (bytecode_d - 1 - idx);
                 const chunk_values = try self.buildBytecodeRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &bytecode_prep_for_ra.pc_map);
                 defer self.allocator.free(chunk_values);
@@ -693,13 +667,114 @@ pub fn JoltProver(comptime F: type) type {
                     const addr = chunk_values[cycle].toU64();
                     oh_indices[cycle] = if (addr < k_chunk) @intCast(addr) else null;
                 }
-                onehot_indices[onehot_idx] = oh_indices;
-                onehot_idx += 1;
-                const oh_result = try DoryScheme.commitOneHotWithPoolAndHints(&dory_srs, oh_indices, k_chunk, trace_length, self.allocator, self.thread_pool);
-                try all_commitments.append(self.allocator, oh_result.commitment);
-                row_commitments_cache[rc_idx] = oh_result.row_commitments;
-                rc_idx += 1;
+                onehot_indices[instruction_d + ram_d + idx] = oh_indices;
             }
+            onehot_idx = num_onehot; // all built
+
+            // ===== Phase B: Parallel Dory commits =====
+            // All polynomials are independent — commit them in parallel.
+            // Each commit is its own work item (parallelForEach) for optimal
+            // load balancing between heavyweight dense and lightweight one-hot commits.
+            // Inner commit functions receive the ThreadPool for internal parallelism
+            // (MSM, Miller loops). Nested waitAndWork provides work-stealing behavior.
+
+            // Pre-allocate output arrays (written by parallel workers at distinct indices)
+            const commitments_out = try self.allocator.alloc(GT, num_total_polys);
+            defer self.allocator.free(commitments_out);
+            @memset(commitments_out, GT.one()); // safe default for error cleanup
+
+            // Initialize row_commitments_cache entries to empty for safe error cleanup
+            for (row_commitments_cache) |*rc| rc.* = &[_]G1Point{};
+
+            // Atomic error flag for parallel workers
+            var parallel_error: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+            const CommitCtx = struct {
+                dory_srs: *const DoryScheme.SetupParams,
+                wp: []const []F,
+                oh: []const []?u8,
+                k_chunk: usize,
+                trace_length: usize,
+                num_dense: usize,
+                alloc: Allocator,
+                tp: ?*ThreadPool,
+                c_out: []GT,
+                rc_out: [][]G1Point,
+                err_flag: *std.atomic.Value(bool),
+            };
+
+            const commit_ctx = CommitCtx{
+                .dory_srs = &dory_srs,
+                .wp = witness_polys,
+                .oh = onehot_indices,
+                .k_chunk = k_chunk,
+                .trace_length = trace_length,
+                .num_dense = num_dense,
+                .alloc = self.allocator,
+                .tp = self.thread_pool,
+                .c_out = commitments_out,
+                .rc_out = row_commitments_cache,
+                .err_flag = &parallel_error,
+            };
+
+            const commitOnePoly = struct {
+                fn f(ctx: CommitCtx, poly_idx: usize) void {
+                    // Early exit if another worker already failed
+                    if (ctx.err_flag.load(.acquire)) return;
+
+                    if (poly_idx < ctx.num_dense) {
+                        // Dense commit (RdInc or RamInc)
+                        const r = DoryScheme.commitWithPoolAndHints(
+                            ctx.dory_srs,
+                            ctx.wp[poly_idx],
+                            ctx.alloc,
+                            ctx.tp,
+                        ) catch {
+                            ctx.err_flag.store(true, .release);
+                            return;
+                        };
+                        ctx.c_out[poly_idx] = r.commitment;
+                        ctx.rc_out[poly_idx] = r.row_commitments;
+                    } else {
+                        // One-hot commit
+                        const oh_idx = poly_idx - ctx.num_dense;
+                        const r = DoryScheme.commitOneHotWithPoolAndHints(
+                            ctx.dory_srs,
+                            ctx.oh[oh_idx],
+                            ctx.k_chunk,
+                            ctx.trace_length,
+                            ctx.alloc,
+                            ctx.tp,
+                        ) catch {
+                            ctx.err_flag.store(true, .release);
+                            return;
+                        };
+                        ctx.c_out[poly_idx] = r.commitment;
+                        ctx.rc_out[poly_idx] = r.row_commitments;
+                    }
+                }
+            }.f;
+
+            if (self.thread_pool) |tp| {
+                tp.parallelForEach(num_total_polys, commit_ctx, commitOnePoly);
+            } else {
+                for (0..num_total_polys) |i| commitOnePoly(commit_ctx, i);
+            }
+
+            // Check for errors from parallel workers
+            if (parallel_error.load(.acquire)) {
+                // Clean up any successfully allocated row commitments
+                for (row_commitments_cache) |rc| {
+                    if (rc.len > 0) self.allocator.free(rc);
+                }
+                return error.OutOfMemory;
+            }
+
+            // Copy commitments to the ordered list for transcript
+            for (commitments_out) |c| {
+                try all_commitments.append(self.allocator, c);
+            }
+            rc_idx = num_total_polys;
 
             // Store witness polynomials, one-hot indices, row commitments cache, and params in result
             result.witness_polys = witness_polys;

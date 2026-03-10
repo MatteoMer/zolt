@@ -132,17 +132,19 @@ pub fn Stage3Prover(comptime F: type) type {
             const trace_len = cycle_witnesses.len;
 
             // Debug: Check what witnesses we received
-            dbg("[STAGE3] generateStage3Proof: cycle_witnesses.len = {}\n", .{cycle_witnesses.len});
-            if (cycle_witnesses.len > 0) {
-                dbg("[STAGE3] generateStage3Proof: witness[0].PC (idx 6) = {any}\n", .{cycle_witnesses[0].values[6].toBytesBE()});
-                dbg("[STAGE3] generateStage3Proof: witness[0].UPC (idx 7) = {any}\n", .{cycle_witnesses[0].values[7].toBytesBE()});
+            if (comptime debug_verbose) {
+                dbg("[STAGE3] generateStage3Proof: cycle_witnesses.len = {}\n", .{cycle_witnesses.len});
+                if (cycle_witnesses.len > 0) {
+                    dbg("[STAGE3] generateStage3Proof: witness[0].PC (idx 6) = {any}\n", .{cycle_witnesses[0].values[6].toBytesBE()});
+                    dbg("[STAGE3] generateStage3Proof: witness[0].UPC (idx 7) = {any}\n", .{cycle_witnesses[0].values[7].toBytesBE()});
+                }
+
+                dbg("[STAGE3] Starting with {} rounds, trace_len={}\n", .{ num_rounds, trace_len });
+
+                // DEBUG: Print transcript state BEFORE gamma derivation
+                dbg("\n[ZOLT] ========== STAGE 3 BEGIN ==========\n", .{});
+                dbg("[ZOLT] STAGE3_PRE: transcript_state = {{ {any} }}\n", .{transcript.state[0..16]});
             }
-
-            dbg("[STAGE3] Starting with {} rounds, trace_len={}\n", .{ num_rounds, trace_len });
-
-            // DEBUG: Print transcript state BEFORE gamma derivation
-            dbg("\n[ZOLT] ========== STAGE 3 BEGIN ==========\n", .{});
-            dbg("[ZOLT] STAGE3_PRE: transcript_state = {{ {any} }}\n", .{transcript.state[0..16]});
 
             // Phase 1: Derive parameters (BEFORE BatchedSumcheck::verify)
             // NOTE: Stage 3 uses challenge_scalar (NOT challenge_scalar_optimized) which means
@@ -153,9 +155,11 @@ pub fn Stage3Prover(comptime F: type) type {
             defer self.allocator.free(shift_gamma_powers);
 
             // Debug: Print all 5 gamma powers in LE bytes format for comparison
-            dbg("[ZOLT] STAGE3_SHIFT: gamma_powers[0] = {{ {any} }}\n", .{shift_gamma_powers[0].toBytes()});
-            dbg("[ZOLT] STAGE3_SHIFT: gamma_powers[1] = {{ {any} }}\n", .{shift_gamma_powers[1].toBytes()});
-            dbg("[ZOLT] STAGE3_SHIFT: gamma_powers[4] = {{ {any} }}\n", .{shift_gamma_powers[4].toBytes()});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT] STAGE3_SHIFT: gamma_powers[0] = {{ {any} }}\n", .{shift_gamma_powers[0].toBytes()});
+                dbg("[ZOLT] STAGE3_SHIFT: gamma_powers[1] = {{ {any} }}\n", .{shift_gamma_powers[1].toBytes()});
+                dbg("[ZOLT] STAGE3_SHIFT: gamma_powers[4] = {{ {any} }}\n", .{shift_gamma_powers[4].toBytes()});
+            }
 
             // InstructionInputParams::new - derive 1 gamma
             const instr_gamma = transcript.challengeScalarFull();
@@ -168,21 +172,27 @@ pub fn Stage3Prover(comptime F: type) type {
                 opening_claims,
                 shift_gamma_powers,
             );
-            dbg("[ZOLT] STAGE3_PRE: input_claim[0] (Shift) = {{ {any} }}\n", .{shift_input_claim.toBytes()});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT] STAGE3_PRE: input_claim[0] (Shift) = {{ {any} }}\n", .{shift_input_claim.toBytes()});
+            }
 
             const instr_input_claim = self.computeInstructionInputClaim(
                 opening_claims,
                 instr_gamma,
                 instr_gamma,
             );
-            dbg("[ZOLT] STAGE3_PRE: input_claim[1] (InstrInput) = {{ {any} }}\n", .{instr_input_claim.toBytes()});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT] STAGE3_PRE: input_claim[1] (InstrInput) = {{ {any} }}\n", .{instr_input_claim.toBytes()});
+            }
 
             const reg_input_claim = self.computeRegistersInputClaim(
                 opening_claims,
                 reg_gamma,
                 reg_gamma_sqr,
             );
-            dbg("[ZOLT] STAGE3_PRE: input_claim[2] (Registers) = {{ {any} }}\n", .{reg_input_claim.toBytes()});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT] STAGE3_PRE: input_claim[2] (Registers) = {{ {any} }}\n", .{reg_input_claim.toBytes()});
+            }
 
             // Phase 2: BatchedSumcheck::verify protocol
 
@@ -197,7 +207,9 @@ pub fn Stage3Prover(comptime F: type) type {
             for (0..3) |i| {
                 batching_coeffs[i] = transcript.challengeScalarFull();
             }
-            dbg("[ZOLT] STAGE3_PRE: batching_coeff[0] = {{ {any} }}\n", .{batching_coeffs[0].toBytes()});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT] STAGE3_PRE: batching_coeff[0] = {{ {any} }}\n", .{batching_coeffs[0].toBytes()});
+            }
 
             // Compute the combined initial claim
             var combined_claim = shift_input_claim.mul(batching_coeffs[0]);
@@ -307,12 +319,14 @@ pub fn Stage3Prover(comptime F: type) type {
 
             // Run sumcheck rounds
             for (0..num_rounds) |round| {
-                dbg("\n[ZOLT] STAGE3_ROUND_{}: current_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
+                if (comptime debug_verbose) {
+                    dbg("\n[ZOLT] STAGE3_ROUND_{}: current_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
 
-                // Print current shift/reg claims at phase transitions
-                if (round == 3) {
-                    dbg("[ZOLT] PHASE2_START_CLAIM: current_shift_claim = {{ {any} }}\n", .{current_shift_claim.toBytes()});
-                    dbg("[ZOLT] PHASE2_START_CLAIM: current_reg_claim = {{ {any} }}\n", .{current_reg_claim.toBytes()});
+                    // Print current shift/reg claims at phase transitions
+                    if (round == 3) {
+                        dbg("[ZOLT] PHASE2_START_CLAIM: current_shift_claim = {{ {any} }}\n", .{current_shift_claim.toBytes()});
+                        dbg("[ZOLT] PHASE2_START_CLAIM: current_reg_claim = {{ {any} }}\n", .{current_reg_claim.toBytes()});
+                    }
                 }
 
                 // Compute round polynomial for each instance
@@ -357,66 +371,70 @@ pub fn Stage3Prover(comptime F: type) type {
                 const reg_evals = reg_prover.computeRoundEvals(current_reg_claim);
 
                 // DEBUG: After last round, manually check the formula
-                if (round == num_rounds - 1) {
-                    dbg("[ZOLT] LAST_ROUND: instr_evals = [p0={{ {any} }}, p1={{ {any} }}, p2={{ {any} }}, p3={{ {any} }}]\n", .{
-                        instr_evals[0].toBytes()[0..8],
-                        instr_evals[1].toBytes()[0..8],
-                        instr_evals[2].toBytes()[0..8],
-                        instr_evals[3].toBytes()[0..8],
-                    });
+                if (comptime debug_verbose) {
+                    if (round == num_rounds - 1) {
+                        dbg("[ZOLT] LAST_ROUND: instr_evals = [p0={{ {any} }}, p1={{ {any} }}, p2={{ {any} }}, p3={{ {any} }}]\n", .{
+                            instr_evals[0].toBytes()[0..8],
+                            instr_evals[1].toBytes()[0..8],
+                            instr_evals[2].toBytes()[0..8],
+                            instr_evals[3].toBytes()[0..8],
+                        });
 
-                    // Manually compute what the polynomial value should be at different points
-                    // The prover should have current_size = 2 at this point
-                    dbg("[ZOLT] LAST_ROUND: instr_prover.current_size = {}\n", .{instr_prover.current_size});
+                        // Manually compute what the polynomial value should be at different points
+                        // The prover should have current_size = 2 at this point
+                        dbg("[ZOLT] LAST_ROUND: instr_prover.current_size = {}\n", .{instr_prover.current_size});
 
-                    // Check the sumcheck invariant: p(0) + p(1) = previous_claim
-                    const p0_plus_p1 = instr_evals[0].add(instr_evals[1]);
-                    dbg("[ZOLT] LAST_ROUND: p0+p1 = {{ {any} }}\n", .{p0_plus_p1.toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: current_instr_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: sumcheck_invariant_ok = {}\n", .{p0_plus_p1.eql(current_instr_claim)});
+                        // Check the sumcheck invariant: p(0) + p(1) = previous_claim
+                        const p0_plus_p1 = instr_evals[0].add(instr_evals[1]);
+                        dbg("[ZOLT] LAST_ROUND: p0+p1 = {{ {any} }}\n", .{p0_plus_p1.toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: current_instr_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: sumcheck_invariant_ok = {}\n", .{p0_plus_p1.eql(current_instr_claim)});
 
-                    // Manually compute what f(0) and f(1) should be from the raw values
-                    // Before bind, current_size = 2, so we have values at indices 0 and 1
-                    const left_0 = instr_prover.left_is_rs1[0].mul(instr_prover.rs1_value[0])
-                        .add(instr_prover.left_is_pc[0].mul(instr_prover.unexpanded_pc[0]));
-                    const right_0 = instr_prover.right_is_rs2[0].mul(instr_prover.rs2_value[0])
-                        .add(instr_prover.right_is_imm[0].mul(instr_prover.imm[0]));
-                    const eq_weight_0 = instr_prover.eq_stage2[0];
-                    const f_0 = eq_weight_0.mul(right_0.add(instr_gamma.mul(left_0)));
+                        // Manually compute what f(0) and f(1) should be from the raw values
+                        // Before bind, current_size = 2, so we have values at indices 0 and 1
+                        const left_0 = instr_prover.left_is_rs1[0].mul(instr_prover.rs1_value[0])
+                            .add(instr_prover.left_is_pc[0].mul(instr_prover.unexpanded_pc[0]));
+                        const right_0 = instr_prover.right_is_rs2[0].mul(instr_prover.rs2_value[0])
+                            .add(instr_prover.right_is_imm[0].mul(instr_prover.imm[0]));
+                        const eq_weight_0 = instr_prover.eq_stage2[0];
+                        const f_0 = eq_weight_0.mul(right_0.add(instr_gamma.mul(left_0)));
 
-                    const left_1 = instr_prover.left_is_rs1[1].mul(instr_prover.rs1_value[1])
-                        .add(instr_prover.left_is_pc[1].mul(instr_prover.unexpanded_pc[1]));
-                    const right_1 = instr_prover.right_is_rs2[1].mul(instr_prover.rs2_value[1])
-                        .add(instr_prover.right_is_imm[1].mul(instr_prover.imm[1]));
-                    const eq_weight_1 = instr_prover.eq_stage2[1];
-                    const f_1 = eq_weight_1.mul(right_1.add(instr_gamma.mul(left_1)));
+                        const left_1 = instr_prover.left_is_rs1[1].mul(instr_prover.rs1_value[1])
+                            .add(instr_prover.left_is_pc[1].mul(instr_prover.unexpanded_pc[1]));
+                        const right_1 = instr_prover.right_is_rs2[1].mul(instr_prover.rs2_value[1])
+                            .add(instr_prover.right_is_imm[1].mul(instr_prover.imm[1]));
+                        const eq_weight_1 = instr_prover.eq_stage2[1];
+                        const f_1 = eq_weight_1.mul(right_1.add(instr_gamma.mul(left_1)));
 
-                    dbg("[ZOLT] LAST_ROUND: manual_f0 = {{ {any} }}\n", .{f_0.toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: manual_f1 = {{ {any} }}\n", .{f_1.toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: f0_match = {}, f1_match = {}\n", .{ f_0.eql(instr_evals[0]), f_1.eql(instr_evals[1]) });
+                        dbg("[ZOLT] LAST_ROUND: manual_f0 = {{ {any} }}\n", .{f_0.toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: manual_f1 = {{ {any} }}\n", .{f_1.toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: f0_match = {}, f1_match = {}\n", .{ f_0.eql(instr_evals[0]), f_1.eql(instr_evals[1]) });
 
-                    // Check actual witness values at index 1
-                    dbg("[ZOLT] LAST_ROUND: left_is_rs1[1] = {{ {any} }}\n", .{instr_prover.left_is_rs1[1].toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: rs1_value[1] = {{ {any} }}\n", .{instr_prover.rs1_value[1].toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: eq_outer[1] = {{ {any} }}\n", .{instr_prover.eq_stage2[1].toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: eq_product[1] = {{ {any} }}\n", .{instr_prover.eq_stage2[1].toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: eq_weight_1 = {{ {any} }}\n", .{eq_weight_1.toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: left_1 = {{ {any} }}\n", .{left_1.toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: right_1 = {{ {any} }}\n", .{right_1.toBytes()[0..8]});
+                        // Check actual witness values at index 1
+                        dbg("[ZOLT] LAST_ROUND: left_is_rs1[1] = {{ {any} }}\n", .{instr_prover.left_is_rs1[1].toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: rs1_value[1] = {{ {any} }}\n", .{instr_prover.rs1_value[1].toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: eq_outer[1] = {{ {any} }}\n", .{instr_prover.eq_stage2[1].toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: eq_product[1] = {{ {any} }}\n", .{instr_prover.eq_stage2[1].toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: eq_weight_1 = {{ {any} }}\n", .{eq_weight_1.toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: left_1 = {{ {any} }}\n", .{left_1.toBytes()[0..8]});
+                        dbg("[ZOLT] LAST_ROUND: right_1 = {{ {any} }}\n", .{right_1.toBytes()[0..8]});
+                    }
                 }
 
                 // Debug: Check individual prover invariants (ALL rounds)
-                {
-                    const shift_sum = shift_evals[0].add(shift_evals[1]);
-                    const instr_sum = instr_evals[0].add(instr_evals[1]);
-                    const reg_sum = reg_evals[0].add(reg_evals[1]);
-                    dbg("[ZOLT] STAGE3_ROUND_{}: shift_p0+p1 = {{ {any} }}, shift_claim = {{ {any} }}, match={}\n", .{ round, shift_sum.toBytes()[0..8], current_shift_claim.toBytes()[0..8], shift_sum.eql(current_shift_claim) });
-                    dbg("[ZOLT] STAGE3_ROUND_{}: instr_p0+p1 = {{ {any} }}, instr_claim = {{ {any} }}, match={}\n", .{ round, instr_sum.toBytes()[0..8], current_instr_claim.toBytes()[0..8], instr_sum.eql(current_instr_claim) });
-                    dbg("[ZOLT] STAGE3_ROUND_{}: reg_p0+p1 = {{ {any} }}, reg_claim = {{ {any} }}, match={}\n", .{ round, reg_sum.toBytes()[0..8], current_reg_claim.toBytes()[0..8], reg_sum.eql(current_reg_claim) });
-                    dbg("[ZOLT] STAGE3_ROUND_{}: shift_phase = {s}, reg_phase = {s}\n", .{ round, if (shift_prover.in_phase2) "PHASE2" else "PHASE1", if (reg_prover.in_phase2) "PHASE2" else "PHASE1" });
+                if (comptime debug_verbose) {
+                    {
+                        const shift_sum = shift_evals[0].add(shift_evals[1]);
+                        const instr_sum = instr_evals[0].add(instr_evals[1]);
+                        const reg_sum = reg_evals[0].add(reg_evals[1]);
+                        dbg("[ZOLT] STAGE3_ROUND_{}: shift_p0+p1 = {{ {any} }}, shift_claim = {{ {any} }}, match={}\n", .{ round, shift_sum.toBytes()[0..8], current_shift_claim.toBytes()[0..8], shift_sum.eql(current_shift_claim) });
+                        dbg("[ZOLT] STAGE3_ROUND_{}: instr_p0+p1 = {{ {any} }}, instr_claim = {{ {any} }}, match={}\n", .{ round, instr_sum.toBytes()[0..8], current_instr_claim.toBytes()[0..8], instr_sum.eql(current_instr_claim) });
+                        dbg("[ZOLT] STAGE3_ROUND_{}: reg_p0+p1 = {{ {any} }}, reg_claim = {{ {any} }}, match={}\n", .{ round, reg_sum.toBytes()[0..8], current_reg_claim.toBytes()[0..8], reg_sum.eql(current_reg_claim) });
+                        dbg("[ZOLT] STAGE3_ROUND_{}: shift_phase = {s}, reg_phase = {s}\n", .{ round, if (shift_prover.in_phase2) "PHASE2" else "PHASE1", if (reg_prover.in_phase2) "PHASE2" else "PHASE1" });
+                    }
+                    dbg("[ZOLT] STAGE3_ROUND_{}: shift_p0 = {{ {any} }}\n", .{ round, shift_evals[0].toBytes() });
+                    dbg("[ZOLT] STAGE3_ROUND_{}: shift_p1 = {{ {any} }}\n", .{ round, shift_evals[1].toBytes() });
                 }
-                dbg("[ZOLT] STAGE3_ROUND_{}: shift_p0 = {{ {any} }}\n", .{ round, shift_evals[0].toBytes() });
-                dbg("[ZOLT] STAGE3_ROUND_{}: shift_p1 = {{ {any} }}\n", .{ round, shift_evals[1].toBytes() });
 
                 // Combine round polynomials (all evaluated at 0, 1, 2, 3)
                 // batched_poly = coeff[0] * shift_poly + coeff[1] * instr_poly + coeff[2] * reg_poly
@@ -437,11 +455,13 @@ pub fn Stage3Prover(comptime F: type) type {
                 }
 
                 // Debug: Print evaluations
-                if (round < 3) {
-                    dbg("[ZOLT] STAGE3_ROUND_{}: p0 = {{ {any} }}\n", .{ round, combined_evals[0].toBytes() });
-                    dbg("[ZOLT] STAGE3_ROUND_{}: p1 = {{ {any} }}\n", .{ round, combined_evals[1].toBytes() });
-                    dbg("[ZOLT] STAGE3_ROUND_{}: p0+p1 = {{ {any} }}\n", .{ round, combined_evals[0].add(combined_evals[1]).toBytes() });
-                    dbg("[ZOLT] STAGE3_ROUND_{}: current_claim (should match p0+p1) = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
+                if (comptime debug_verbose) {
+                    if (round < 3) {
+                        dbg("[ZOLT] STAGE3_ROUND_{}: p0 = {{ {any} }}\n", .{ round, combined_evals[0].toBytes() });
+                        dbg("[ZOLT] STAGE3_ROUND_{}: p1 = {{ {any} }}\n", .{ round, combined_evals[1].toBytes() });
+                        dbg("[ZOLT] STAGE3_ROUND_{}: p0+p1 = {{ {any} }}\n", .{ round, combined_evals[0].add(combined_evals[1]).toBytes() });
+                        dbg("[ZOLT] STAGE3_ROUND_{}: current_claim (should match p0+p1) = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
+                    }
                 }
 
                 // Convert evaluations to coefficients
@@ -449,8 +469,10 @@ pub fn Stage3Prover(comptime F: type) type {
                 defer self.allocator.free(combined_coeffs);
 
                 // Debug: Print all coefficients including c1
-                if (round < 3) {
-                    dbg("[ZOLT] STAGE3_ROUND_{}: c1 = {{ {any} }}\n", .{ round, combined_coeffs[1].toBytes() });
+                if (comptime debug_verbose) {
+                    if (round < 3) {
+                        dbg("[ZOLT] STAGE3_ROUND_{}: c1 = {{ {any} }}\n", .{ round, combined_coeffs[1].toBytes() });
+                    }
                 }
 
                 // Compress: [c0, c2, c3] (c1 recovered from hint = combined_claim)
@@ -469,19 +491,25 @@ pub fn Stage3Prover(comptime F: type) type {
                 transcript.appendScalars("sumcheck_poly", compressed);
 
                 // Debug: Print compressed coefficients
-                dbg("[ZOLT] STAGE3_ROUND_{}: c0 = {{ {any} }}\n", .{ round, compressed[0].toBytes() });
-                dbg("[ZOLT] STAGE3_ROUND_{}: c2 = {{ {any} }}\n", .{ round, compressed[1].toBytes() });
-                dbg("[ZOLT] STAGE3_ROUND_{}: c3 = {{ {any} }}\n", .{ round, compressed[2].toBytes() });
+                if (comptime debug_verbose) {
+                    dbg("[ZOLT] STAGE3_ROUND_{}: c0 = {{ {any} }}\n", .{ round, compressed[0].toBytes() });
+                    dbg("[ZOLT] STAGE3_ROUND_{}: c2 = {{ {any} }}\n", .{ round, compressed[1].toBytes() });
+                    dbg("[ZOLT] STAGE3_ROUND_{}: c3 = {{ {any} }}\n", .{ round, compressed[2].toBytes() });
+                }
 
                 // Derive challenge
                 const r_j = transcript.challengeScalar();
                 challenges[round] = r_j;
 
-                dbg("[ZOLT] STAGE3_ROUND_{}: challenge = {{ {any} }}\n", .{ round, r_j.toBytes() });
+                if (comptime debug_verbose) {
+                    dbg("[ZOLT] STAGE3_ROUND_{}: challenge = {{ {any} }}\n", .{ round, r_j.toBytes() });
+                }
 
                 // Evaluate combined polynomial at r_j to get next claim
                 combined_claim = self.evaluatePolyAtPoint(combined_coeffs, r_j);
-                dbg("[ZOLT] STAGE3_ROUND_{}: next_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
+                if (comptime debug_verbose) {
+                    dbg("[ZOLT] STAGE3_ROUND_{}: next_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
+                }
 
                 // Update individual claims by evaluating their polynomials at r_j
                 const shift_coeffs = try self.evalsToCoeffs(&shift_evals, 2);
@@ -497,25 +525,27 @@ pub fn Stage3Prover(comptime F: type) type {
                 current_reg_claim = self.evaluatePolyAtPoint(reg_coeffs, r_j);
 
                 // DEBUG: Verify combined_claim equals batched sum of individual claims
-                if (round < 3) {
-                    // Test: evaluate combined poly at point 0 - should equal combined_evals[0]
-                    const test_p0 = self.evaluatePolyAtPoint(combined_coeffs, F.zero());
-                    const expect_p0 = combined_evals[0];
-                    dbg("[ZOLT] STAGE3_ROUND_{}: combined_poly(0) = {{ {any} }}, expect = {{ {any} }}, match={}\n", .{ round, test_p0.toBytes()[0..8], expect_p0.toBytes()[0..8], test_p0.eql(expect_p0) });
+                if (comptime debug_verbose) {
+                    if (round < 3) {
+                        // Test: evaluate combined poly at point 0 - should equal combined_evals[0]
+                        const test_p0 = self.evaluatePolyAtPoint(combined_coeffs, F.zero());
+                        const expect_p0 = combined_evals[0];
+                        dbg("[ZOLT] STAGE3_ROUND_{}: combined_poly(0) = {{ {any} }}, expect = {{ {any} }}, match={}\n", .{ round, test_p0.toBytes()[0..8], expect_p0.toBytes()[0..8], test_p0.eql(expect_p0) });
 
-                    // Direct sum check
-                    const direct_combined = batching_coeffs[0].mul(self.evaluatePolyAtPoint(shift_coeffs, r_j))
-                        .add(batching_coeffs[1].mul(self.evaluatePolyAtPoint(instr_coeffs, r_j)))
-                        .add(batching_coeffs[2].mul(self.evaluatePolyAtPoint(reg_coeffs, r_j)));
-                    dbg("[ZOLT] STAGE3_ROUND_{}: direct_combined = {{ {any} }}\n", .{ round, direct_combined.toBytes()[0..8] });
-                    dbg("[ZOLT] STAGE3_ROUND_{}: combined_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes()[0..8] });
+                        // Direct sum check
+                        const direct_combined = batching_coeffs[0].mul(self.evaluatePolyAtPoint(shift_coeffs, r_j))
+                            .add(batching_coeffs[1].mul(self.evaluatePolyAtPoint(instr_coeffs, r_j)))
+                            .add(batching_coeffs[2].mul(self.evaluatePolyAtPoint(reg_coeffs, r_j)));
+                        dbg("[ZOLT] STAGE3_ROUND_{}: direct_combined = {{ {any} }}\n", .{ round, direct_combined.toBytes()[0..8] });
+                        dbg("[ZOLT] STAGE3_ROUND_{}: combined_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes()[0..8] });
 
-                    const batched_sum = batching_coeffs[0].mul(current_shift_claim)
-                        .add(batching_coeffs[1].mul(current_instr_claim))
-                        .add(batching_coeffs[2].mul(current_reg_claim));
-                    dbg("[ZOLT] STAGE3_ROUND_{}: batched_sum = {{ {any} }}\n", .{ round, batched_sum.toBytes()[0..8] });
-                    if (!batched_sum.eql(combined_claim)) {
-                        dbg("[ZOLT] STAGE3_ROUND_{}: MISMATCH: batched_sum != combined_claim!\n", .{round});
+                        const batched_sum = batching_coeffs[0].mul(current_shift_claim)
+                            .add(batching_coeffs[1].mul(current_instr_claim))
+                            .add(batching_coeffs[2].mul(current_reg_claim));
+                        dbg("[ZOLT] STAGE3_ROUND_{}: batched_sum = {{ {any} }}\n", .{ round, batched_sum.toBytes()[0..8] });
+                        if (!batched_sum.eql(combined_claim)) {
+                            dbg("[ZOLT] STAGE3_ROUND_{}: MISMATCH: batched_sum != combined_claim!\n", .{round});
+                        }
                     }
                 }
 
@@ -581,10 +611,12 @@ pub fn Stage3Prover(comptime F: type) type {
                 }
             }
 
-            dbg("\n[ZOLT] STAGE3_FINAL: output_claim = {{ {any} }}\n", .{combined_claim.toBytes()});
+            if (comptime debug_verbose) {
+                dbg("\n[ZOLT] STAGE3_FINAL: output_claim = {{ {any} }}\n", .{combined_claim.toBytes()});
+            }
 
             // DEBUG: Compute expected_output_claim like verifier
-            {
+            if (comptime debug_verbose) {
                 // Get final opening claims from provers
                 const s_claims = shift_prover.finalClaims();
                 const i_claims = instr_prover.finalClaims();
@@ -723,7 +755,7 @@ pub fn Stage3Prover(comptime F: type) type {
             const reg_claims = reg_prover.finalClaims();
 
             // CRITICAL DIAGNOSTIC: Verify reg_claims match MLE at challenges
-            {
+            if (comptime debug_verbose) {
                 // Build eq(challenges, j) table
                 const eq_check = self.allocator.alloc(F, trace_len) catch unreachable;
                 defer self.allocator.free(eq_check);
@@ -839,102 +871,138 @@ pub fn Stage3Prover(comptime F: type) type {
             }
 
             // DEBUG: Print opening claims
-            dbg("\n[ZOLT] STAGE3_OPENING: Shift sumcheck claims:\n", .{});
-            dbg("[ZOLT] STAGE3_OPENING: unexpanded_pc = {{ {any} }}\n", .{shift_claims.unexpanded_pc.toBytes()});
-            dbg("[ZOLT] STAGE3_OPENING: pc = {{ {any} }}\n", .{shift_claims.pc.toBytes()});
-            dbg("[ZOLT] STAGE3_OPENING: is_noop = {{ {any} }}\n", .{shift_claims.is_noop.toBytes()});
+            if (comptime debug_verbose) {
+                dbg("\n[ZOLT] STAGE3_OPENING: Shift sumcheck claims:\n", .{});
+                dbg("[ZOLT] STAGE3_OPENING: unexpanded_pc = {{ {any} }}\n", .{shift_claims.unexpanded_pc.toBytes()});
+                dbg("[ZOLT] STAGE3_OPENING: pc = {{ {any} }}\n", .{shift_claims.pc.toBytes()});
+                dbg("[ZOLT] STAGE3_OPENING: is_noop = {{ {any} }}\n", .{shift_claims.is_noop.toBytes()});
+            }
 
             // Append opening claims to transcript (cache_openings)
             // ShiftSumcheck: 5 claims
-            dbg("\n[ZOLT cache_openings] ShiftSumcheck claims appended to transcript:\n", .{});
-            dbg("  [0] unexpanded_pc LE = {{ ", .{});
-            for (shift_claims.unexpanded_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("\n[ZOLT cache_openings] ShiftSumcheck claims appended to transcript:\n", .{});
+                dbg("  [0] unexpanded_pc LE = {{ ", .{});
+                for (shift_claims.unexpanded_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", shift_claims.unexpanded_pc);
 
-            dbg("  [1] pc LE = {{ ", .{});
-            for (shift_claims.pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [1] pc LE = {{ ", .{});
+                for (shift_claims.pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", shift_claims.pc);
 
-            dbg("  [2] is_virtual LE = {{ ", .{});
-            for (shift_claims.is_virtual.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [2] is_virtual LE = {{ ", .{});
+                for (shift_claims.is_virtual.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", shift_claims.is_virtual);
 
-            dbg("  [3] is_first_in_sequence LE = {{ ", .{});
-            for (shift_claims.is_first_in_sequence.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [3] is_first_in_sequence LE = {{ ", .{});
+                for (shift_claims.is_first_in_sequence.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", shift_claims.is_first_in_sequence);
 
-            dbg("  [4] is_noop LE = {{ ", .{});
-            for (shift_claims.is_noop.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [4] is_noop LE = {{ ", .{});
+                for (shift_claims.is_noop.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", shift_claims.is_noop);
 
             // InstructionInputSumcheck: 8 claims
-            dbg("[ZOLT cache_openings] InstructionInputVirtualization claims:\n", .{});
-            dbg("  [5] left_is_rs1 LE = {{ ", .{});
-            for (instr_claims.left_is_rs1.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT cache_openings] InstructionInputVirtualization claims:\n", .{});
+                dbg("  [5] left_is_rs1 LE = {{ ", .{});
+                for (instr_claims.left_is_rs1.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", instr_claims.left_is_rs1);
 
-            dbg("  [6] rs1_value LE = {{ ", .{});
-            for (instr_claims.rs1_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [6] rs1_value LE = {{ ", .{});
+                for (instr_claims.rs1_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", instr_claims.rs1_value);
 
-            dbg("  [7] left_is_pc LE = {{ ", .{});
-            for (instr_claims.left_is_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [7] left_is_pc LE = {{ ", .{});
+                for (instr_claims.left_is_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", instr_claims.left_is_pc);
 
-            dbg("  [8] unexpanded_pc LE = {{ ", .{});
-            for (instr_claims.unexpanded_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}} (ALIASED - same poly UnexpandedPC at same point as Shift)\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [8] unexpanded_pc LE = {{ ", .{});
+                for (instr_claims.unexpanded_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}} (ALIASED - same poly UnexpandedPC at same point as Shift)\n", .{});
+            }
             // ALIASED: UnexpandedPC already opened at same point by ShiftSumcheck — not flushed to transcript
 
-            dbg("  [9] right_is_rs2 LE = {{ ", .{});
-            for (instr_claims.right_is_rs2.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [9] right_is_rs2 LE = {{ ", .{});
+                for (instr_claims.right_is_rs2.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", instr_claims.right_is_rs2);
 
-            dbg("  [10] rs2_value LE = {{ ", .{});
-            for (instr_claims.rs2_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [10] rs2_value LE = {{ ", .{});
+                for (instr_claims.rs2_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", instr_claims.rs2_value);
 
-            dbg("  [11] right_is_imm LE = {{ ", .{});
-            for (instr_claims.right_is_imm.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [11] right_is_imm LE = {{ ", .{});
+                for (instr_claims.right_is_imm.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", instr_claims.right_is_imm);
 
-            dbg("  [12] imm LE = {{ ", .{});
-            for (instr_claims.imm.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [12] imm LE = {{ ", .{});
+                for (instr_claims.imm.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", instr_claims.imm);
 
             // RegistersClaimReduction: 3 claims
-            dbg("[ZOLT cache_openings] RegistersClaimReduction claims:\n", .{});
-            dbg("  [13] rd_write_value LE = {{ ", .{});
-            for (reg_claims.rd_write_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT cache_openings] RegistersClaimReduction claims:\n", .{});
+                dbg("  [13] rd_write_value LE = {{ ", .{});
+                for (reg_claims.rd_write_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}}\n", .{});
+            }
             transcript.appendScalar("opening_claim", reg_claims.rd_write_value);
 
-            dbg("  [14] rs1_value LE = {{ ", .{});
-            for (reg_claims.rs1_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}} (ALIASED - same poly Rs1Value at same point as InstrInput)\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [14] rs1_value LE = {{ ", .{});
+                for (reg_claims.rs1_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}} (ALIASED - same poly Rs1Value at same point as InstrInput)\n", .{});
+            }
             // ALIASED: Rs1Value already opened at same point by InstructionInputSumcheck — not flushed
 
-            dbg("  [15] rs2_value LE = {{ ", .{});
-            for (reg_claims.rs2_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}} (ALIASED - same poly Rs2Value at same point as InstrInput)\n", .{});
+            if (comptime debug_verbose) {
+                dbg("  [15] rs2_value LE = {{ ", .{});
+                for (reg_claims.rs2_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
+                dbg("}} (ALIASED - same poly Rs2Value at same point as InstrInput)\n", .{});
+            }
             // ALIASED: Rs2Value already opened at same point by InstructionInputSumcheck — not flushed
 
             // Print transcript state after cache_openings
-            dbg("[ZOLT cache_openings] Transcript state AFTER all 13 claims (3 aliased): {{ ", .{});
-            for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT cache_openings] Transcript state AFTER all 13 claims (3 aliased): {{ ", .{});
+                for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
+                dbg("}}\n", .{});
+            }
 
             if (comptime debug_verbose) {
                 // Print transcript state and key claims for comparison with Jolt
@@ -1025,15 +1093,17 @@ pub fn Stage3Prover(comptime F: type) type {
             const next_is_first = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsFirstInSequence, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const next_is_noop = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsNoop, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
 
-            dbg("[ZOLT] SHIFT_INPUT: next_unexpanded_pc = {{ {any} }}\n", .{next_unexpanded_pc.toBytes()});
-            dbg("[ZOLT] SHIFT_INPUT: next_pc = {{ {any} }}\n", .{next_pc.toBytes()});
-            dbg("[ZOLT] SHIFT_INPUT: next_is_virtual = {{ {any} }}\n", .{next_is_virtual.toBytes()});
-            dbg("[ZOLT] SHIFT_INPUT: next_is_first = {{ {any} }}\n", .{next_is_first.toBytes()});
-            dbg("[ZOLT] SHIFT_INPUT: next_is_noop = {{ {any} }}\n", .{next_is_noop.toBytes()});
-            dbg("[ZOLT] SHIFT_INPUT: gamma_powers[4] = {{ {any} }}\n", .{gamma_powers[4].toBytes()});
-            // Also verify the input claim is correctly computed
-            dbg("[ZOLT] SHIFT_INPUT: 1 - next_is_noop = {{ {any} }}\n", .{F.one().sub(next_is_noop).toBytes()});
-            dbg("[ZOLT] SHIFT_INPUT: gamma^4 * (1-noop) = {{ {any} }}\n", .{gamma_powers[4].mul(F.one().sub(next_is_noop)).toBytes()});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT] SHIFT_INPUT: next_unexpanded_pc = {{ {any} }}\n", .{next_unexpanded_pc.toBytes()});
+                dbg("[ZOLT] SHIFT_INPUT: next_pc = {{ {any} }}\n", .{next_pc.toBytes()});
+                dbg("[ZOLT] SHIFT_INPUT: next_is_virtual = {{ {any} }}\n", .{next_is_virtual.toBytes()});
+                dbg("[ZOLT] SHIFT_INPUT: next_is_first = {{ {any} }}\n", .{next_is_first.toBytes()});
+                dbg("[ZOLT] SHIFT_INPUT: next_is_noop = {{ {any} }}\n", .{next_is_noop.toBytes()});
+                dbg("[ZOLT] SHIFT_INPUT: gamma_powers[4] = {{ {any} }}\n", .{gamma_powers[4].toBytes()});
+                // Also verify the input claim is correctly computed
+                dbg("[ZOLT] SHIFT_INPUT: 1 - next_is_noop = {{ {any} }}\n", .{F.one().sub(next_is_noop).toBytes()});
+                dbg("[ZOLT] SHIFT_INPUT: gamma^4 * (1-noop) = {{ {any} }}\n", .{gamma_powers[4].mul(F.one().sub(next_is_noop)).toBytes()});
+            }
 
             var result = next_unexpanded_pc;
             result = result.add(gamma_powers[1].mul(next_pc));
@@ -1627,9 +1697,11 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
 
             // DEBUG: Verify sumcheck invariant p(0) + p(1) = previous_claim
-            const computed_sum = evals[0].add(evals[1]);
-            if (!computed_sum.eql(previous_claim)) {
-                dbg("[ZOLT] SHIFT INVARIANT FAIL: p(0)+p(1) = {{ {any} }}, expected = {{ {any} }}\n", .{ computed_sum.toBytes(), previous_claim.toBytes() });
+            if (comptime debug_verbose) {
+                const computed_sum = evals[0].add(evals[1]);
+                if (!computed_sum.eql(previous_claim)) {
+                    dbg("[ZOLT] SHIFT INVARIANT FAIL: p(0)+p(1) = {{ {any} }}, expected = {{ {any} }}\n", .{ computed_sum.toBytes(), previous_claim.toBytes() });
+                }
             }
 
             return evals;
@@ -1647,16 +1719,18 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             var evals: [2]F = .{ F.zero(), F.zero() };
 
             // Debug: Print arrays when they're size 2 (last Phase 2 round)
-            if (self.current_witness_size == 2) {
-                dbg("[ZOLT] SHIFT_LAST_ROUND: eq_outer[0] = {{ {any} }}\n", .{eq_outer[0].toBytes()});
-                dbg("[ZOLT] SHIFT_LAST_ROUND: eq_outer[1] = {{ {any} }}\n", .{eq_outer[1].toBytes()});
-                dbg("[ZOLT] SHIFT_LAST_ROUND: eq_prod[0] = {{ {any} }}\n", .{eq_prod[0].toBytes()});
-                dbg("[ZOLT] SHIFT_LAST_ROUND: eq_prod[1] = {{ {any} }}\n", .{eq_prod[1].toBytes()});
-                dbg("[ZOLT] SHIFT_LAST_ROUND: upc[0] = {{ {any} }}\n", .{self.unexpanded_pc[0].toBytes()});
-                dbg("[ZOLT] SHIFT_LAST_ROUND: upc[1] = {{ {any} }}\n", .{self.unexpanded_pc[1].toBytes()});
-                dbg("[ZOLT] SHIFT_LAST_ROUND: noop[0] = {{ {any} }}\n", .{self.is_noop[0].toBytes()});
-                dbg("[ZOLT] SHIFT_LAST_ROUND: noop[1] = {{ {any} }}\n", .{self.is_noop[1].toBytes()});
-                dbg("[ZOLT] SHIFT_LAST_ROUND: previous_claim = {{ {any} }}\n", .{previous_claim.toBytes()});
+            if (comptime debug_verbose) {
+                if (self.current_witness_size == 2) {
+                    dbg("[ZOLT] SHIFT_LAST_ROUND: eq_outer[0] = {{ {any} }}\n", .{eq_outer[0].toBytes()});
+                    dbg("[ZOLT] SHIFT_LAST_ROUND: eq_outer[1] = {{ {any} }}\n", .{eq_outer[1].toBytes()});
+                    dbg("[ZOLT] SHIFT_LAST_ROUND: eq_prod[0] = {{ {any} }}\n", .{eq_prod[0].toBytes()});
+                    dbg("[ZOLT] SHIFT_LAST_ROUND: eq_prod[1] = {{ {any} }}\n", .{eq_prod[1].toBytes()});
+                    dbg("[ZOLT] SHIFT_LAST_ROUND: upc[0] = {{ {any} }}\n", .{self.unexpanded_pc[0].toBytes()});
+                    dbg("[ZOLT] SHIFT_LAST_ROUND: upc[1] = {{ {any} }}\n", .{self.unexpanded_pc[1].toBytes()});
+                    dbg("[ZOLT] SHIFT_LAST_ROUND: noop[0] = {{ {any} }}\n", .{self.is_noop[0].toBytes()});
+                    dbg("[ZOLT] SHIFT_LAST_ROUND: noop[1] = {{ {any} }}\n", .{self.is_noop[1].toBytes()});
+                    dbg("[ZOLT] SHIFT_LAST_ROUND: previous_claim = {{ {any} }}\n", .{previous_claim.toBytes()});
+                }
             }
 
             for (0..half) |j| {
@@ -1705,23 +1779,25 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 evals[1] = evals[1].add(f_2);
 
                 // Debug: last round details
-                if (eq_outer.len == 2) {
-                    dbg("[ZOLT] SHIFT_LAST_ROUND: f(0) = {{ {any} }}\n", .{f_0.toBytes()});
-                    dbg("[ZOLT] SHIFT_LAST_ROUND: f(2) = {{ {any} }}\n", .{f_2.toBytes()});
+                if (comptime debug_verbose) {
+                    if (eq_outer.len == 2) {
+                        dbg("[ZOLT] SHIFT_LAST_ROUND: f(0) = {{ {any} }}\n", .{f_0.toBytes()});
+                        dbg("[ZOLT] SHIFT_LAST_ROUND: f(2) = {{ {any} }}\n", .{f_2.toBytes()});
 
-                    // Compute f(1) = eq_out_1 * val_1 + γ⁴*(1-noop_1)*eq_prod_1
-                    const val_1 = upc_1.add(self.gamma_powers[1].mul(pc_1))
-                        .add(self.gamma_powers[2].mul(virt_1))
-                        .add(self.gamma_powers[3].mul(first_1));
-                    const actual_f1 = eq_out_1.mul(val_1)
-                        .add(self.gamma_powers[4].mul(F.one().sub(noop_1)).mul(eq_prod_1));
-                    const derived_f1 = previous_claim.sub(f_0);
-                    dbg("[ZOLT] SHIFT_LAST_ROUND: actual_f(1) = {{ {any} }}\n", .{actual_f1.toBytes()});
-                    dbg("[ZOLT] SHIFT_LAST_ROUND: derived_f(1) = {{ {any} }}\n", .{derived_f1.toBytes()});
-                    dbg("[ZOLT] SHIFT_LAST_ROUND: f(1) match = {}\n", .{actual_f1.eql(derived_f1)});
-                    dbg("[ZOLT] SHIFT_LAST_ROUND: f(0)+actual_f(1) = {{ {any} }}\n", .{f_0.add(actual_f1).toBytes()});
-                    dbg("[ZOLT] SHIFT_LAST_ROUND: claim = {{ {any} }}\n", .{previous_claim.toBytes()});
-                    dbg("[ZOLT] SHIFT_LAST_ROUND: f(0)+actual_f(1)==claim: {}\n", .{f_0.add(actual_f1).eql(previous_claim)});
+                        // Compute f(1) = eq_out_1 * val_1 + γ⁴*(1-noop_1)*eq_prod_1
+                        const val_1 = upc_1.add(self.gamma_powers[1].mul(pc_1))
+                            .add(self.gamma_powers[2].mul(virt_1))
+                            .add(self.gamma_powers[3].mul(first_1));
+                        const actual_f1 = eq_out_1.mul(val_1)
+                            .add(self.gamma_powers[4].mul(F.one().sub(noop_1)).mul(eq_prod_1));
+                        const derived_f1 = previous_claim.sub(f_0);
+                        dbg("[ZOLT] SHIFT_LAST_ROUND: actual_f(1) = {{ {any} }}\n", .{actual_f1.toBytes()});
+                        dbg("[ZOLT] SHIFT_LAST_ROUND: derived_f(1) = {{ {any} }}\n", .{derived_f1.toBytes()});
+                        dbg("[ZOLT] SHIFT_LAST_ROUND: f(1) match = {}\n", .{actual_f1.eql(derived_f1)});
+                        dbg("[ZOLT] SHIFT_LAST_ROUND: f(0)+actual_f(1) = {{ {any} }}\n", .{f_0.add(actual_f1).toBytes()});
+                        dbg("[ZOLT] SHIFT_LAST_ROUND: claim = {{ {any} }}\n", .{previous_claim.toBytes()});
+                        dbg("[ZOLT] SHIFT_LAST_ROUND: f(0)+actual_f(1)==claim: {}\n", .{f_0.add(actual_f1).eql(previous_claim)});
+                    }
                 }
             }
 
@@ -1812,8 +1888,10 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const n_remaining_rounds = self.suffix_n_vars;
             const suffix_size: usize = @as(usize, 1) << @intCast(n_remaining_rounds);
 
-            dbg("\n[ZOLT] SHIFT_PHASE2_START: n_remaining_rounds={d}, suffix_size={d}\n", .{ n_remaining_rounds, suffix_size });
-            dbg("[ZOLT] SHIFT_PHASE2_START: r_prefix_be.len={d}\n", .{r_prefix_be.len});
+            if (comptime debug_verbose) {
+                dbg("\n[ZOLT] SHIFT_PHASE2_START: n_remaining_rounds={d}, suffix_size={d}\n", .{ n_remaining_rounds, suffix_size });
+                dbg("[ZOLT] SHIFT_PHASE2_START: r_prefix_be.len={d}\n", .{r_prefix_be.len});
+            }
 
             // =====================================================================
             // Step 1: Regenerate prefix-suffix decomposition from original r_outer/r_product
@@ -1854,17 +1932,19 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const prefix_1_eval_outer = evaluateMle(prefix_1_outer, r_prefix_le);
 
             // DEBUG: Print prefix evaluation details
-            dbg("[ZOLT] SHIFT_PREFIX: r_prefix_be[0] = {any}\n", .{r_prefix_be[0].toBytes()[0..8]});
-            dbg("[ZOLT] SHIFT_PREFIX: r_prefix_be[last] = {any}\n", .{r_prefix_be[r_prefix_be.len - 1].toBytes()[0..8]});
-            dbg("[ZOLT] SHIFT_PREFIX: prefix_0_eval_outer = {any}\n", .{prefix_0_eval_outer.toBytes()[0..8]});
-            dbg("[ZOLT] SHIFT_PREFIX: prefix_1_eval_outer = {any}\n", .{prefix_1_eval_outer.toBytes()[0..8]});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT] SHIFT_PREFIX: r_prefix_be[0] = {any}\n", .{r_prefix_be[0].toBytes()[0..8]});
+                dbg("[ZOLT] SHIFT_PREFIX: r_prefix_be[last] = {any}\n", .{r_prefix_be[r_prefix_be.len - 1].toBytes()[0..8]});
+                dbg("[ZOLT] SHIFT_PREFIX: prefix_0_eval_outer = {any}\n", .{prefix_0_eval_outer.toBytes()[0..8]});
+                dbg("[ZOLT] SHIFT_PREFIX: prefix_1_eval_outer = {any}\n", .{prefix_1_eval_outer.toBytes()[0..8]});
 
-            // DEBUG: Print r_outer_hi and r_outer_lo (the fixed points from Stage 1)
-            // Using BE for comparison with STAGE1_CHALLENGES output
-            dbg("[ZOLT] SHIFT_PREFIX: r_outer_hi[0] (BE) = {any}\n", .{r_outer_hi[0].toBytesBE()[0..8]});
-            dbg("[ZOLT] SHIFT_PREFIX: r_outer_hi[last] (BE) = {any}\n", .{r_outer_hi[r_outer_hi.len - 1].toBytesBE()[0..8]});
-            dbg("[ZOLT] SHIFT_PREFIX: r_outer_lo[0] (BE) = {any}\n", .{r_outer_lo[0].toBytesBE()[0..8]});
-            dbg("[ZOLT] SHIFT_PREFIX: r_outer_lo[last] (BE) = {any}\n", .{r_outer_lo[r_outer_lo.len - 1].toBytesBE()[0..8]});
+                // DEBUG: Print r_outer_hi and r_outer_lo (the fixed points from Stage 1)
+                // Using BE for comparison with STAGE1_CHALLENGES output
+                dbg("[ZOLT] SHIFT_PREFIX: r_outer_hi[0] (BE) = {any}\n", .{r_outer_hi[0].toBytesBE()[0..8]});
+                dbg("[ZOLT] SHIFT_PREFIX: r_outer_hi[last] (BE) = {any}\n", .{r_outer_hi[r_outer_hi.len - 1].toBytesBE()[0..8]});
+                dbg("[ZOLT] SHIFT_PREFIX: r_outer_lo[0] (BE) = {any}\n", .{r_outer_lo[0].toBytesBE()[0..8]});
+                dbg("[ZOLT] SHIFT_PREFIX: r_outer_lo[last] (BE) = {any}\n", .{r_outer_lo[r_outer_lo.len - 1].toBytesBE()[0..8]});
+            }
 
             // Regenerate suffix polynomials for r_outer
             // SUFFIX uses r_hi (Jolt convention)
@@ -1983,100 +2063,102 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
             self.current_witness_size = suffix_size;
 
-            dbg("[ZOLT] SHIFT_PHASE2_START: eq+1_outer[0] = {{ {any} }}\n", .{self.phase2_eq_plus_one_outer.?[0].toBytes()[0..8]});
-            dbg("[ZOLT] SHIFT_PHASE2_START: unexpanded_pc[0] = {{ {any} }}\n", .{self.unexpanded_pc[0].toBytes()[0..8]});
+            if (comptime debug_verbose) {
+                dbg("[ZOLT] SHIFT_PHASE2_START: eq+1_outer[0] = {{ {any} }}\n", .{self.phase2_eq_plus_one_outer.?[0].toBytes()[0..8]});
+                dbg("[ZOLT] SHIFT_PHASE2_START: unexpanded_pc[0] = {{ {any} }}\n", .{self.unexpanded_pc[0].toBytes()[0..8]});
 
-            // CRITICAL VERIFICATION: Compute Σ_j f(j) using Phase 2 data
-            // This should equal the current_shift_claim at the start of Phase 2
-            {
-                var phase2_total_sum = F.zero();
-                for (0..suffix_size) |j| {
-                    const eq_out = self.phase2_eq_plus_one_outer.?[j];
-                    const eq_prod = self.phase2_eq_plus_one_prod.?[j];
-                    const upc = self.unexpanded_pc[j];
-                    const pc_val = self.pc[j];
-                    const virt = self.is_virtual[j];
-                    const first = self.is_first_in_sequence[j];
-                    const noop = self.is_noop[j];
+                // CRITICAL VERIFICATION: Compute Σ_j f(j) using Phase 2 data
+                // This should equal the current_shift_claim at the start of Phase 2
+                {
+                    var phase2_total_sum = F.zero();
+                    for (0..suffix_size) |j| {
+                        const eq_out = self.phase2_eq_plus_one_outer.?[j];
+                        const eq_prod_v = self.phase2_eq_plus_one_prod.?[j];
+                        const upc = self.unexpanded_pc[j];
+                        const pc_val = self.pc[j];
+                        const virt = self.is_virtual[j];
+                        const first = self.is_first_in_sequence[j];
+                        const noop = self.is_noop[j];
 
-                    const val = upc.add(self.gamma_powers[1].mul(pc_val))
-                        .add(self.gamma_powers[2].mul(virt))
-                        .add(self.gamma_powers[3].mul(first));
-                    const term1 = eq_out.mul(val);
-                    const term2 = self.gamma_powers[4].mul(F.one().sub(noop)).mul(eq_prod);
-                    phase2_total_sum = phase2_total_sum.add(term1).add(term2);
-                }
-                dbg("[ZOLT] SHIFT_PHASE2_VERIFY: phase2_total_sum = {{ {any} }}\n", .{phase2_total_sum.toBytes()});
-                dbg("[ZOLT] SHIFT_PHASE2_VERIFY: (compare with current_shift_claim at Phase2 start)\n", .{});
-            }
-
-            // DEBUG: Verify eq+1_outer initialization by direct evaluation
-            {
-                // eq+1_outer[0] should equal eq+1(r_outer, (r_prefix_be, [0,0,...,0]))
-                // where [0,0,...,0] is all zeros (suffix_n_vars zeros)
-                // This is: prefix_0_eval * suffix_0[0] + prefix_1_eval * suffix_1[0]
-
-                // First, verify suffix_0[0] = eq(r_outer_hi, [0,...,0])
-                // eq([r0,r1,...], [0,0,...]) should be prod(1-ri)
-                var expected_suffix_0_at_0 = F.one();
-                for (r_outer_hi) |ri| {
-                    expected_suffix_0_at_0 = expected_suffix_0_at_0.mul(F.one().sub(ri));
-                }
-                dbg("[ZOLT] SHIFT_DEBUG: expected suffix_0[0] = {any}\n", .{expected_suffix_0_at_0.toBytes()[0..8]});
-                dbg("[ZOLT] SHIFT_DEBUG: actual suffix_0_outer[0] = {any}\n", .{suffix_0_outer[0].toBytes()[0..8]});
-
-                // eq+1([r0,r1,...], [0,0,...]) should be 0 (because y=0 is not a successor of any x >= 0)
-                // Actually no, eq+1(x, y) = 1 iff y = x+1
-                // For y=[0,...,0] (binary 0), we need x = -1 which doesn't exist in unsigned
-                // So eq+1(anything, [0,...,0]) = 0
-                dbg("[ZOLT] SHIFT_DEBUG: suffix_1_outer[0] should be ~0: {any}\n", .{suffix_1_outer[0].toBytes()[0..8]});
-
-                // CRITICAL TEST: Evaluate eq+1(r_outer, (r_prefix_be, [0,0,0,0])) directly
-                // and compare with phase2_eq_plus_one_outer[0]
-                //
-                // Construct full y = (r_prefix_be, zeros_4) in big-endian
-                // Wait no, the formula is eq+1(r_outer, (y_hi, y_lo)) where y_lo is bound first.
-                // At index j=0 (all zeros for suffix), y = (zeros_4, r_prefix_be)
-                // So full_y = (zeros_suffix, r_prefix_be) where zeros_suffix has suffix_n_vars zeros
-                const full_y = self.allocator.alloc(F, self.r_outer.len) catch unreachable;
-                defer self.allocator.free(full_y);
-
-                // Big-endian: first half = suffix = zeros (for j=0), second half = prefix = r_prefix_be
-                for (0..self.suffix_n_vars) |i| {
-                    full_y[i] = F.zero();
-                }
-                for (0..r_prefix_be.len) |i| {
-                    full_y[self.suffix_n_vars + i] = r_prefix_be[i];
+                        const val = upc.add(self.gamma_powers[1].mul(pc_val))
+                            .add(self.gamma_powers[2].mul(virt))
+                            .add(self.gamma_powers[3].mul(first));
+                        const term1 = eq_out.mul(val);
+                        const term2 = self.gamma_powers[4].mul(F.one().sub(noop)).mul(eq_prod_v);
+                        phase2_total_sum = phase2_total_sum.add(term1).add(term2);
+                    }
+                    dbg("[ZOLT] SHIFT_PHASE2_VERIFY: phase2_total_sum = {{ {any} }}\n", .{phase2_total_sum.toBytes()});
+                    dbg("[ZOLT] SHIFT_PHASE2_VERIFY: (compare with current_shift_claim at Phase2 start)\n", .{});
                 }
 
-                // Direct evaluation
-                const direct_eq_plus_one = poly_mod.EqPlusOnePolynomial(F).mle(self.r_outer, full_y);
-                dbg("[ZOLT] SHIFT_CRITICAL: direct eq+1(r_outer, (zeros, r_prefix)) = {any}\n", .{direct_eq_plus_one.toBytes()});
-                dbg("[ZOLT] SHIFT_CRITICAL: phase2_eq+1_outer[0] = {any}\n", .{self.phase2_eq_plus_one_outer.?[0].toBytes()});
-                dbg("[ZOLT] SHIFT_CRITICAL: match = {}\n", .{direct_eq_plus_one.eql(self.phase2_eq_plus_one_outer.?[0])});
+                // DEBUG: Verify eq+1_outer initialization by direct evaluation
+                {
+                    // eq+1_outer[0] should equal eq+1(r_outer, (r_prefix_be, [0,0,...,0]))
+                    // where [0,0,...,0] is all zeros (suffix_n_vars zeros)
+                    // This is: prefix_0_eval * suffix_0[0] + prefix_1_eval * suffix_1[0]
 
-                // Debug: check formula components
-                // phase2_eq+1_outer[0] = prefix_0_eval * suffix_0[0] + prefix_1_eval * suffix_1[0]
-                const expected_from_formula = prefix_0_eval_outer.mul(suffix_0_outer[0])
-                    .add(prefix_1_eval_outer.mul(suffix_1_outer[0]));
-                dbg("[ZOLT] SHIFT_CRITICAL: from_formula = {any}\n", .{expected_from_formula.toBytes()});
-                dbg("[ZOLT] SHIFT_CRITICAL: formula_match = {}\n", .{expected_from_formula.eql(self.phase2_eq_plus_one_outer.?[0])});
+                    // First, verify suffix_0[0] = eq(r_outer_hi, [0,...,0])
+                    // eq([r0,r1,...], [0,0,...]) should be prod(1-ri)
+                    var expected_suffix_0_at_0 = F.one();
+                    for (r_outer_hi) |ri| {
+                        expected_suffix_0_at_0 = expected_suffix_0_at_0.mul(F.one().sub(ri));
+                    }
+                    dbg("[ZOLT] SHIFT_DEBUG: expected suffix_0[0] = {any}\n", .{expected_suffix_0_at_0.toBytes()[0..8]});
+                    dbg("[ZOLT] SHIFT_DEBUG: actual suffix_0_outer[0] = {any}\n", .{suffix_0_outer[0].toBytes()[0..8]});
 
-                // Debug: prefix_0 and suffix_0 individually
-                // Direct eq+1(r_lo, y_lo) where y_lo = r_prefix_be
-                const direct_prefix_eval = poly_mod.EqPlusOnePolynomial(F).mle(r_outer_lo, r_prefix_be);
-                dbg("[ZOLT] SHIFT_CRITICAL: direct eq+1(r_lo, y_lo) = {any}\n", .{direct_prefix_eval.toBytes()});
-                dbg("[ZOLT] SHIFT_CRITICAL: prefix_0_eval_outer = {any}\n", .{prefix_0_eval_outer.toBytes()});
-                dbg("[ZOLT] SHIFT_CRITICAL: prefix_match = {}\n", .{direct_prefix_eval.eql(prefix_0_eval_outer)});
+                    // eq+1([r0,r1,...], [0,0,...]) should be 0 (because y=0 is not a successor of any x >= 0)
+                    // Actually no, eq+1(x, y) = 1 iff y = x+1
+                    // For y=[0,...,0] (binary 0), we need x = -1 which doesn't exist in unsigned
+                    // So eq+1(anything, [0,...,0]) = 0
+                    dbg("[ZOLT] SHIFT_DEBUG: suffix_1_outer[0] should be ~0: {any}\n", .{suffix_1_outer[0].toBytes()[0..8]});
 
-                // Direct eq(r_hi, y_hi) where y_hi = zeros
-                const zeros_hi = self.allocator.alloc(F, self.suffix_n_vars) catch unreachable;
-                defer self.allocator.free(zeros_hi);
-                @memset(zeros_hi, F.zero());
-                const direct_suffix_eval = poly_mod.EqPolynomial(F).mle(r_outer_hi, zeros_hi);
-                dbg("[ZOLT] SHIFT_CRITICAL: direct eq(r_hi, zeros) = {any}\n", .{direct_suffix_eval.toBytes()});
-                dbg("[ZOLT] SHIFT_CRITICAL: suffix_0[0] = {any}\n", .{suffix_0_outer[0].toBytes()});
-                dbg("[ZOLT] SHIFT_CRITICAL: suffix_match = {}\n", .{direct_suffix_eval.eql(suffix_0_outer[0])});
+                    // CRITICAL TEST: Evaluate eq+1(r_outer, (r_prefix_be, [0,0,0,0])) directly
+                    // and compare with phase2_eq_plus_one_outer[0]
+                    //
+                    // Construct full y = (r_prefix_be, zeros_4) in big-endian
+                    // Wait no, the formula is eq+1(r_outer, (y_hi, y_lo)) where y_lo is bound first.
+                    // At index j=0 (all zeros for suffix), y = (zeros_4, r_prefix_be)
+                    // So full_y = (zeros_suffix, r_prefix_be) where zeros_suffix has suffix_n_vars zeros
+                    const full_y = self.allocator.alloc(F, self.r_outer.len) catch unreachable;
+                    defer self.allocator.free(full_y);
+
+                    // Big-endian: first half = suffix = zeros (for j=0), second half = prefix = r_prefix_be
+                    for (0..self.suffix_n_vars) |i| {
+                        full_y[i] = F.zero();
+                    }
+                    for (0..r_prefix_be.len) |i| {
+                        full_y[self.suffix_n_vars + i] = r_prefix_be[i];
+                    }
+
+                    // Direct evaluation
+                    const direct_eq_plus_one = poly_mod.EqPlusOnePolynomial(F).mle(self.r_outer, full_y);
+                    dbg("[ZOLT] SHIFT_CRITICAL: direct eq+1(r_outer, (zeros, r_prefix)) = {any}\n", .{direct_eq_plus_one.toBytes()});
+                    dbg("[ZOLT] SHIFT_CRITICAL: phase2_eq+1_outer[0] = {any}\n", .{self.phase2_eq_plus_one_outer.?[0].toBytes()});
+                    dbg("[ZOLT] SHIFT_CRITICAL: match = {}\n", .{direct_eq_plus_one.eql(self.phase2_eq_plus_one_outer.?[0])});
+
+                    // Debug: check formula components
+                    // phase2_eq+1_outer[0] = prefix_0_eval * suffix_0[0] + prefix_1_eval * suffix_1[0]
+                    const expected_from_formula = prefix_0_eval_outer.mul(suffix_0_outer[0])
+                        .add(prefix_1_eval_outer.mul(suffix_1_outer[0]));
+                    dbg("[ZOLT] SHIFT_CRITICAL: from_formula = {any}\n", .{expected_from_formula.toBytes()});
+                    dbg("[ZOLT] SHIFT_CRITICAL: formula_match = {}\n", .{expected_from_formula.eql(self.phase2_eq_plus_one_outer.?[0])});
+
+                    // Debug: prefix_0 and suffix_0 individually
+                    // Direct eq+1(r_lo, y_lo) where y_lo = r_prefix_be
+                    const direct_prefix_eval = poly_mod.EqPlusOnePolynomial(F).mle(r_outer_lo, r_prefix_be);
+                    dbg("[ZOLT] SHIFT_CRITICAL: direct eq+1(r_lo, y_lo) = {any}\n", .{direct_prefix_eval.toBytes()});
+                    dbg("[ZOLT] SHIFT_CRITICAL: prefix_0_eval_outer = {any}\n", .{prefix_0_eval_outer.toBytes()});
+                    dbg("[ZOLT] SHIFT_CRITICAL: prefix_match = {}\n", .{direct_prefix_eval.eql(prefix_0_eval_outer)});
+
+                    // Direct eq(r_hi, y_hi) where y_hi = zeros
+                    const zeros_hi = self.allocator.alloc(F, self.suffix_n_vars) catch unreachable;
+                    defer self.allocator.free(zeros_hi);
+                    @memset(zeros_hi, F.zero());
+                    const direct_suffix_eval = poly_mod.EqPolynomial(F).mle(r_outer_hi, zeros_hi);
+                    dbg("[ZOLT] SHIFT_CRITICAL: direct eq(r_hi, zeros) = {any}\n", .{direct_suffix_eval.toBytes()});
+                    dbg("[ZOLT] SHIFT_CRITICAL: suffix_0[0] = {any}\n", .{suffix_0_outer[0].toBytes()});
+                    dbg("[ZOLT] SHIFT_CRITICAL: suffix_match = {}\n", .{direct_suffix_eval.eql(suffix_0_outer[0])});
+                }
             }
         }
 
@@ -2086,10 +2168,12 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const new_size = self.current_witness_size / 2;
 
             // Debug: print current state before binding
-            if (self.current_witness_size <= 16) {
-                dbg("[ZOLT] SHIFT_BIND: size={}, r_j={any}\n", .{ self.current_witness_size, r_j.toBytes()[0..8] });
-                if (self.phase2_eq_plus_one_outer) |eq| {
-                    dbg("[ZOLT] SHIFT_BIND: eq+1_outer[0]={any}, eq+1_outer[1]={any}\n", .{ eq[0].toBytes()[0..8], eq[1].toBytes()[0..8] });
+            if (comptime debug_verbose) {
+                if (self.current_witness_size <= 16) {
+                    dbg("[ZOLT] SHIFT_BIND: size={}, r_j={any}\n", .{ self.current_witness_size, r_j.toBytes()[0..8] });
+                    if (self.phase2_eq_plus_one_outer) |eq| {
+                        dbg("[ZOLT] SHIFT_BIND: eq+1_outer[0]={any}, eq+1_outer[1]={any}\n", .{ eq[0].toBytes()[0..8], eq[1].toBytes()[0..8] });
+                    }
                 }
             }
 
@@ -2100,10 +2184,12 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 self.is_first_in_sequence[i] = self.is_first_in_sequence[2 * i].add(r_j.mul(self.is_first_in_sequence[2 * i + 1].sub(self.is_first_in_sequence[2 * i])));
 
                 // Debug after last binding
-                if (new_size == 1 and self.phase2_eq_plus_one_outer != null) {
-                    const eq = self.phase2_eq_plus_one_outer.?;
-                    const new_val = eq[0].add(r_j.mul(eq[1].sub(eq[0])));
-                    dbg("[ZOLT] SHIFT_BIND_FINAL: new eq+1_outer[0]={any}\n", .{new_val.toBytes()});
+                if (comptime debug_verbose) {
+                    if (new_size == 1 and self.phase2_eq_plus_one_outer != null) {
+                        const eq_dbg = self.phase2_eq_plus_one_outer.?;
+                        const new_val = eq_dbg[0].add(r_j.mul(eq_dbg[1].sub(eq_dbg[0])));
+                        dbg("[ZOLT] SHIFT_BIND_FINAL: new eq+1_outer[0]={any}\n", .{new_val.toBytes()});
+                    }
                 }
                 self.is_noop[i] = self.is_noop[2 * i].add(r_j.mul(self.is_noop[2 * i + 1].sub(self.is_noop[2 * i])));
 
@@ -2594,7 +2680,9 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             @memset(Q, F.zero());
 
             // Debug: Print first few R1CS witness values
-            dbg("[STAGE3] RegistersClaimReduction: trace_len={}, prefix_size={}, suffix_size={}, padded_size={}\n", .{ trace_len, prefix_size, suffix_size, padded_size });
+            if (comptime debug_verbose) {
+                dbg("[STAGE3] RegistersClaimReduction: trace_len={}, prefix_size={}, suffix_size={}, padded_size={}\n", .{ trace_len, prefix_size, suffix_size, padded_size });
+            }
 
             for (0..prefix_size) |x_lo| {
                 var q_acc = F.zero();
@@ -2609,36 +2697,38 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                     const rs2 = witness[R1CSInputIndex.Rs2Value.toIndex()];
 
                     // Debug: Print first few cycles
-                    if (x < 5) {
-                        // Extract raw u64 values for comparison with Stage 4
-                        const rd_limbs = rd.toBytes();
-                        const rd_u64: u64 = @as(u64, rd_limbs[0]) |
-                            (@as(u64, rd_limbs[1]) << 8) |
-                            (@as(u64, rd_limbs[2]) << 16) |
-                            (@as(u64, rd_limbs[3]) << 24) |
-                            (@as(u64, rd_limbs[4]) << 32) |
-                            (@as(u64, rd_limbs[5]) << 40) |
-                            (@as(u64, rd_limbs[6]) << 48) |
-                            (@as(u64, rd_limbs[7]) << 56);
-                        const rs1_limbs = rs1.toBytes();
-                        const rs1_u64: u64 = @as(u64, rs1_limbs[0]) |
-                            (@as(u64, rs1_limbs[1]) << 8) |
-                            (@as(u64, rs1_limbs[2]) << 16) |
-                            (@as(u64, rs1_limbs[3]) << 24) |
-                            (@as(u64, rs1_limbs[4]) << 32) |
-                            (@as(u64, rs1_limbs[5]) << 40) |
-                            (@as(u64, rs1_limbs[6]) << 48) |
-                            (@as(u64, rs1_limbs[7]) << 56);
-                        const rs2_limbs = rs2.toBytes();
-                        const rs2_u64: u64 = @as(u64, rs2_limbs[0]) |
-                            (@as(u64, rs2_limbs[1]) << 8) |
-                            (@as(u64, rs2_limbs[2]) << 16) |
-                            (@as(u64, rs2_limbs[3]) << 24) |
-                            (@as(u64, rs2_limbs[4]) << 32) |
-                            (@as(u64, rs2_limbs[5]) << 40) |
-                            (@as(u64, rs2_limbs[6]) << 48) |
-                            (@as(u64, rs2_limbs[7]) << 56);
-                        dbg("[STAGE3] Cycle {}: rd_wv={}, rs1_v={}, rs2_v={}\n", .{ x, rd_u64, rs1_u64, rs2_u64 });
+                    if (comptime debug_verbose) {
+                        if (x < 5) {
+                            // Extract raw u64 values for comparison with Stage 4
+                            const rd_limbs = rd.toBytes();
+                            const rd_u64: u64 = @as(u64, rd_limbs[0]) |
+                                (@as(u64, rd_limbs[1]) << 8) |
+                                (@as(u64, rd_limbs[2]) << 16) |
+                                (@as(u64, rd_limbs[3]) << 24) |
+                                (@as(u64, rd_limbs[4]) << 32) |
+                                (@as(u64, rd_limbs[5]) << 40) |
+                                (@as(u64, rd_limbs[6]) << 48) |
+                                (@as(u64, rd_limbs[7]) << 56);
+                            const rs1_limbs = rs1.toBytes();
+                            const rs1_u64: u64 = @as(u64, rs1_limbs[0]) |
+                                (@as(u64, rs1_limbs[1]) << 8) |
+                                (@as(u64, rs1_limbs[2]) << 16) |
+                                (@as(u64, rs1_limbs[3]) << 24) |
+                                (@as(u64, rs1_limbs[4]) << 32) |
+                                (@as(u64, rs1_limbs[5]) << 40) |
+                                (@as(u64, rs1_limbs[6]) << 48) |
+                                (@as(u64, rs1_limbs[7]) << 56);
+                            const rs2_limbs = rs2.toBytes();
+                            const rs2_u64: u64 = @as(u64, rs2_limbs[0]) |
+                                (@as(u64, rs2_limbs[1]) << 8) |
+                                (@as(u64, rs2_limbs[2]) << 16) |
+                                (@as(u64, rs2_limbs[3]) << 24) |
+                                (@as(u64, rs2_limbs[4]) << 32) |
+                                (@as(u64, rs2_limbs[5]) << 40) |
+                                (@as(u64, rs2_limbs[6]) << 48) |
+                                (@as(u64, rs2_limbs[7]) << 56);
+                            dbg("[STAGE3] Cycle {}: rd_wv={}, rs1_v={}, rs2_v={}\n", .{ x, rd_u64, rs1_u64, rs2_u64 });
+                        }
                     }
 
                     // Store witness values

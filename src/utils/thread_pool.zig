@@ -78,6 +78,30 @@ pub const ThreadPool = struct {
         self.pool.waitAndWork(&wg);
     }
 
+    /// Fine-grained parallel for: submits each index as its own work item.
+    /// Unlike parallelForForce which chunks items, this gives optimal dynamic
+    /// load balancing for small numbers of heavyweight, heterogeneous tasks.
+    /// Use parallelForForce for large N with uniform items.
+    pub fn parallelForEach(
+        self: *ThreadPool,
+        len: usize,
+        context: anytype,
+        comptime func: fn (@TypeOf(context), usize) void,
+    ) void {
+        if (len <= 1) {
+            for (0..len) |i| func(context, i);
+            return;
+        }
+
+        var wg: std.Thread.WaitGroup = .{};
+
+        for (0..len) |i| {
+            self.pool.spawnWg(&wg, func, .{ context, i });
+        }
+
+        self.pool.waitAndWork(&wg);
+    }
+
     /// Parallel for: apply `func(context, index)` for each index in 0..len.
     /// Each invocation is independent and may run on any thread.
     pub fn parallelFor(
@@ -390,6 +414,26 @@ test "ThreadPool: join" {
 
     try std.testing.expectEqual(@as(u64, 84), result[0]);
     try std.testing.expectEqual(@as(u64, 17), result[1]);
+}
+
+test "ThreadPool: parallelForEach basic" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    const n = 37; // simulate ~37 polynomial commits
+    var data: [n]u64 = undefined;
+    for (0..n) |i| data[i] = 0;
+
+    const Context = struct { data: *[n]u64 };
+    tp.parallelForEach(n, Context{ .data = &data }, struct {
+        fn run(c: Context, i: usize) void {
+            c.data[i] = @intCast(i + 1);
+        }
+    }.run);
+
+    for (0..n) |i| {
+        try std.testing.expectEqual(@as(u64, i + 1), data[i]);
+    }
 }
 
 test "ThreadPool: small work runs sequentially" {

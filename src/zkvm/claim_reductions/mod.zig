@@ -136,7 +136,8 @@ pub fn InstructionLookupsClaimReductionSumcheckVerifier(comptime _: type) type {
     };
 }
 
-/// Placeholder for future RAM RA claim reduction prover
+/// RamRaClaimReduction prover — implemented inline in stage5_prover.zig
+/// (cycle-only sumcheck with P/Q prefix-suffix optimization)
 pub fn RamRaClaimReductionSumcheckProver(comptime _: type) type {
     return struct {
         const Self = @This();
@@ -153,7 +154,7 @@ pub fn RamRaClaimReductionSumcheckProver(comptime _: type) type {
     };
 }
 
-/// Placeholder for future RAM RA claim reduction verifier
+/// RamRaClaimReduction verifier — implemented inline in stage5_prover.zig
 pub fn RamRaClaimReductionSumcheckVerifier(comptime _: type) type {
     return struct {
         const Self = @This();

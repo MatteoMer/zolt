@@ -2,7 +2,7 @@
 //!
 //! Stage 5 is a batched sumcheck with 3 instances:
 //! 1. RegistersValEvaluation: 8 rounds (log_T)
-//! 2. RamRaClaimReduction: 24 rounds (log_K + log_T)
+//! 2. RamRaClaimReduction: 8 rounds (log_T, cycle-only)
 //! 3. LookupsReadRaf: 136 rounds (LOOKUPS_LOG_K + log_T)
 //!
 //! The batched sumcheck combines instances with different round counts.
@@ -105,14 +105,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             transcript: *Blake2bTranscript(F),
             opening_claims: *OpeningClaims(F),
             n_cycle_vars: usize,
-            log_ram_k: usize,
+            _: usize, // log_ram_k (unused: cycle-only reduction)
             gamma_ram_ra: F,
             gamma_lookups_raf: F,
             lookups_ra_virtual_log_k_chunk: usize,
         ) !Stage5Result(F) {
             // Instance configurations
             const regs_val_num_rounds = n_cycle_vars; // 8 rounds
-            const ram_ra_num_rounds = log_ram_k + n_cycle_vars; // 24 rounds
+            const ram_ra_num_rounds = n_cycle_vars; // 8 rounds (cycle-only, matches upstream)
             const lookups_num_rounds = LOOKUPS_LOG_K + n_cycle_vars; // 136 rounds
             const max_num_rounds = lookups_num_rounds;
 
@@ -6832,75 +6832,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // ============================================================
-            // COMPUTE ram_ra_claim FROM RAM TRACE
+            // COMPUTE ram_ra_claim FROM SUMCHECK STATE
             // ============================================================
-            // The RamRaClaimReduction sumcheck proves:
-            //   Σ_{k,c} eq_combined(k,c) * ra(k,c) = input_claim
-            // where ra(k,c) = 1 iff address at cycle c equals k.
-            //
-            // After the sumcheck binds all variables, we get:
-            //   ram_ra_claim = ra(r_address_reduced, r_cycle_reduced)
-            // This equals the sum of eq(addr, r_addr) * eq(cycle, r_cycle)
-            // over all (addr, cycle) pairs in the RAM trace.
-            //
-            // For RamRaClaimReduction (Instance 1, cycle-only: 8 rounds):
-            // - Address: FIXED from opening claims (r_address_raf), NOT from sumcheck challenges
-            // - Cycle challenges: challenges[128..135] (8 values, reversed to BE)
-            // Upstream cache_openings: opening_point = [r_address, reversed(sumcheck_challenges)]
-            const ram_ra_start = max_num_rounds - ram_ra_num_rounds; // 136 - 8 = 128
-            const ram_cycle_challenges = challenges[ram_ra_start .. ram_ra_start + ram_ra_num_rounds];
-
-            // r_address is already in BIG_ENDIAN from opening claims
-            const r_ram_addr_be = r_address_raf;
-
-            // Reverse cycle challenges to get big-endian order
-            var r_ram_cycle_be = try self.allocator.alloc(F, n_cycle_vars);
-            defer self.allocator.free(r_ram_cycle_be);
-            for (0..n_cycle_vars) |i| {
-                r_ram_cycle_be[i] = ram_cycle_challenges[n_cycle_vars - 1 - i];
-            }
-
-            // Compute ram_ra_claim = Σ_{(addr, cycle) in RAM_trace} eq(addr, r_addr) * eq(cycle, r_cycle)
-            // Use the dedicated MemoryTrace which tracks actual RAM accesses (including synthetic termination writes)
-            var ram_ra_claim = F.zero();
-            if (memory_trace) |mem_trace| {
-                dbg("[STAGE5 RAM_RA] Using MemoryTrace with {} accesses\n", .{mem_trace.accesses.items.len});
-                for (mem_trace.accesses.items) |access| {
-                    // Only consider WRITE operations for ra claim
-                    // (Jolt's RAM trace records both reads and writes, but ra represents where values changed)
-                    if (access.op == .Write) {
-                        const raw_addr = access.address;
-                        const cycle = access.timestamp;
-
-                        // Remap address to polynomial index space using memory_layout
-                        const addr: u64 = if (memory_layout) |ml|
-                            ml.remapAddress(raw_addr) orelse 0
-                        else
-                            raw_addr & (@as(u64, K) - 1);
-
-                        // Compute eq(addr, r_ram_addr_be) for the address
-                        // Address is log_ram_k bits (16 bits = 65536 addresses)
-                        const eq_addr = computeEqAtIndex(r_ram_addr_be, @intCast(addr));
-
-                        // Compute eq(cycle, r_ram_cycle_be) for the cycle
-                        const eq_cycle = computeEqAtIndex(r_ram_cycle_be, @intCast(cycle));
-
-                        // Accumulate: ra(k,c) = 1 for this (addr, cycle) pair
-                        ram_ra_claim = ram_ra_claim.add(eq_addr.mul(eq_cycle));
-
-                        dbg("[STAGE5 RAM_RA] WRITE raw_addr=0x{x}, remapped_addr={}, cycle={}, eq_addr={x}, eq_cycle={x}\n", .{
-                            raw_addr,
-                            addr,
-                            cycle,
-                            eq_addr.toBytesBE()[24..32].*,
-                            eq_cycle.toBytesBE()[24..32].*,
-                        });
-                    }
-                }
-            } else {
-                dbg("[STAGE5 RAM_RA] No memory_trace available, ram_ra_claim = 0\n", .{});
-            }
-            dbg("[STAGE5 RAM_RA] Computed ram_ra_claim = {x}\n", .{ram_ra_claim.toBytesBE()});
+            // After the RamRaClaimReduction sumcheck binds all cycle variables,
+            // H_prime[0] holds the final evaluation of the ra polynomial at the
+            // opening point [r_address, r_cycle_reduced].
+            // This matches upstream's state.H_prime.final_sumcheck_claim().
+            const ram_ra_claim = H_prime[0];
+            dbg("[STAGE5 RAM_RA] ram_ra_claim = H_prime[0] = {x}\n", .{ram_ra_claim.toBytesBE()});
 
             return Stage5Result(F){
                 .challenges = challenges,

@@ -298,6 +298,188 @@ fn fieldFromI64(comptime F: type, val: i64) F {
     }
 }
 
+/// Convert i32 to field element (handling negatives)
+pub fn fieldFromI32(comptime F: type, val: i32) F {
+    if (val >= 0) {
+        return F.fromU64(@intCast(val));
+    } else if (val == -1) {
+        return F.zero().sub(F.one());
+    } else {
+        return F.zero().sub(F.fromU64(@intCast(-val)));
+    }
+}
+
+// ============================================================================
+// Fast integer-based Az evaluation
+// ============================================================================
+
+/// Read a boolean witness flag as i8 (0 or 1)
+/// Uses Montgomery-form comparison (cheap 4-limb equality check)
+fn witnessBool(comptime F: type, witness: []const F, comptime idx: R1CSInputIndex) i8 {
+    return if (witness[comptime idx.toIndex()].eql(F.zero())) @as(i8, 0) else @as(i8, 1);
+}
+
+/// Compute first-group Az guard values as small integers.
+/// All values are guaranteed to be in [-3, 3].
+///
+/// This avoids all field arithmetic by reading boolean flags directly.
+/// Each guard matches the corresponding constraint's condition LC.
+pub fn computeAzFirstGroupInt(comptime F: type, witness: []const F) [FIRST_GROUP_SIZE]i8 {
+    const load = witnessBool(F, witness, .FlagLoad);
+    const store = witnessBool(F, witness, .FlagStore);
+    const add = witnessBool(F, witness, .FlagAddOperands);
+    const sub_op = witnessBool(F, witness, .FlagSubtractOperands);
+    const mul = witnessBool(F, witness, .FlagMultiplyOperands);
+    const assert_flag = witnessBool(F, witness, .FlagAssert);
+    const should_jump = witnessBool(F, witness, .ShouldJump);
+    const vi = witnessBool(F, witness, .FlagVirtualInstruction);
+    const is_last = witnessBool(F, witness, .FlagIsLastInSequence);
+    const next_is_virtual = witnessBool(F, witness, .NextIsVirtual);
+    const next_is_first = witnessBool(F, witness, .NextIsFirstInSequence);
+
+    return .{
+        1 - load - store, // FG0: Constraint 1 = 1 - Load - Store
+        load, // FG1: Constraint 2 = Load
+        load, // FG2: Constraint 3 = Load
+        store, // FG3: Constraint 4 = Store
+        add + sub_op + mul, // FG4: Constraint 5 = Add + Sub + Mul
+        1 - add - sub_op - mul, // FG5: Constraint 6 = 1 - Add - Sub - Mul
+        assert_flag, // FG6: Constraint 11 = Assert
+        should_jump, // FG7: Constraint 14 = ShouldJump
+        vi - is_last, // FG8: Constraint 17 = VI - IsLast
+        next_is_virtual - next_is_first, // FG9: Constraint 18 = NextIsVirtual - NextIsFirst
+    };
+}
+
+/// Compute second-group Az guard values as small integers.
+/// All values are guaranteed to be in [-4, 3].
+pub fn computeAzSecondGroupInt(comptime F: type, witness: []const F) [SECOND_GROUP_SIZE]i8 {
+    const load = witnessBool(F, witness, .FlagLoad);
+    const store = witnessBool(F, witness, .FlagStore);
+    const add = witnessBool(F, witness, .FlagAddOperands);
+    const sub_op = witnessBool(F, witness, .FlagSubtractOperands);
+    const mul = witnessBool(F, witness, .FlagMultiplyOperands);
+    const advice = witnessBool(F, witness, .FlagAdvice);
+    const write_lookup = witnessBool(F, witness, .FlagWriteLookupOutputToRD);
+    const jump = witnessBool(F, witness, .FlagJump);
+    const should_branch = witnessBool(F, witness, .ShouldBranch);
+
+    return .{
+        load + store, // SG0: Constraint 0 = Load + Store
+        add, // SG1: Constraint 7 = AddOperands
+        sub_op, // SG2: Constraint 8 = SubtractOperands
+        mul, // SG3: Constraint 9 = MultiplyOperands
+        1 - add - sub_op - mul - advice, // SG4: Constraint 10 = 1 - Add - Sub - Mul - Advice
+        write_lookup, // SG5: Constraint 12 = WriteLookupOutputToRD
+        jump, // SG6: Constraint 13 = Jump
+        should_branch, // SG7: Constraint 15 = ShouldBranch
+        1 - should_branch - jump, // SG8: Constraint 16 = 1 - ShouldBranch - Jump
+    };
+}
+
+/// Compute first-group Bz (left - right) values directly from witness fields.
+/// Avoids LC.evaluate overhead (i128ToField conversions, etc.).
+///
+/// Each entry is `constraint.left - constraint.right` computed directly.
+pub fn computeBzFirstGroupDirect(comptime F: type, witness: []const F) [FIRST_GROUP_SIZE]F {
+    const I = R1CSInputIndex;
+    return .{
+        // FG0: Constraint 1: left=RamAddress, right=0
+        witness[comptime I.RamAddress.toIndex()],
+        // FG1: Constraint 2: left=RamReadValue, right=RamWriteValue
+        witness[comptime I.RamReadValue.toIndex()].sub(witness[comptime I.RamWriteValue.toIndex()]),
+        // FG2: Constraint 3: left=RamReadValue, right=RdWriteValue
+        witness[comptime I.RamReadValue.toIndex()].sub(witness[comptime I.RdWriteValue.toIndex()]),
+        // FG3: Constraint 4: left=Rs2Value, right=RamWriteValue
+        witness[comptime I.Rs2Value.toIndex()].sub(witness[comptime I.RamWriteValue.toIndex()]),
+        // FG4: Constraint 5: left=LeftLookupOperand, right=0
+        witness[comptime I.LeftLookupOperand.toIndex()],
+        // FG5: Constraint 6: left=LeftLookupOperand, right=LeftInstructionInput
+        witness[comptime I.LeftLookupOperand.toIndex()].sub(witness[comptime I.LeftInstructionInput.toIndex()]),
+        // FG6: Constraint 11: left=LookupOutput, right=1
+        witness[comptime I.LookupOutput.toIndex()].sub(F.one()),
+        // FG7: Constraint 14: left=NextUnexpandedPC, right=LookupOutput
+        witness[comptime I.NextUnexpandedPC.toIndex()].sub(witness[comptime I.LookupOutput.toIndex()]),
+        // FG8: Constraint 17: left=NextPC, right=PC+1
+        witness[comptime I.NextPC.toIndex()].sub(witness[comptime I.PC.toIndex()]).sub(F.one()),
+        // FG9: Constraint 18: left=1, right=DoNotUpdateUnexpandedPC
+        F.one().sub(witness[comptime I.FlagDoNotUpdateUnexpandedPC.toIndex()]),
+    };
+}
+
+/// Compute second-group Bz (left - right) values directly from witness fields.
+/// The `two_pow_64` parameter must be F representing 2^64 (precomputed by caller).
+pub fn computeBzSecondGroupDirect(comptime F: type, witness: []const F, two_pow_64: F) [SECOND_GROUP_SIZE]F {
+    const I = R1CSInputIndex;
+    const two = F.one().add(F.one());
+    const four = two.add(two);
+
+    return .{
+        // SG0: Constraint 0: left=RamAddress, right=Rs1Value + Imm
+        witness[comptime I.RamAddress.toIndex()].sub(witness[comptime I.Rs1Value.toIndex()]).sub(witness[comptime I.Imm.toIndex()]),
+        // SG1: Constraint 7: left=RightLookupOperand, right=LeftInput + RightInput
+        witness[comptime I.RightLookupOperand.toIndex()].sub(witness[comptime I.LeftInstructionInput.toIndex()]).sub(witness[comptime I.RightInstructionInput.toIndex()]),
+        // SG2: Constraint 8: left=RightLookupOperand, right=LeftInput - RightInput + 2^64
+        witness[comptime I.RightLookupOperand.toIndex()].sub(witness[comptime I.LeftInstructionInput.toIndex()]).add(witness[comptime I.RightInstructionInput.toIndex()]).sub(two_pow_64),
+        // SG3: Constraint 9: left=RightLookupOperand, right=Product
+        witness[comptime I.RightLookupOperand.toIndex()].sub(witness[comptime I.Product.toIndex()]),
+        // SG4: Constraint 10: left=RightLookupOperand, right=RightInstructionInput
+        witness[comptime I.RightLookupOperand.toIndex()].sub(witness[comptime I.RightInstructionInput.toIndex()]),
+        // SG5: Constraint 12: left=RdWriteValue, right=LookupOutput
+        witness[comptime I.RdWriteValue.toIndex()].sub(witness[comptime I.LookupOutput.toIndex()]),
+        // SG6: Constraint 13: left=RdWriteValue, right=UnexpandedPC + 4 - 2*IsCompressed
+        witness[comptime I.RdWriteValue.toIndex()].sub(witness[comptime I.UnexpandedPC.toIndex()]).sub(four).add(two.mul(witness[comptime I.FlagIsCompressed.toIndex()])),
+        // SG7: Constraint 15: left=NextUnexpandedPC, right=UnexpandedPC + Imm
+        witness[comptime I.NextUnexpandedPC.toIndex()].sub(witness[comptime I.UnexpandedPC.toIndex()]).sub(witness[comptime I.Imm.toIndex()]),
+        // SG8: Constraint 16: left=NextUnexpandedPC, right=UnexpandedPC + 4 - 4*DoNotUpdate - 2*IsCompressed
+        witness[comptime I.NextUnexpandedPC.toIndex()].sub(witness[comptime I.UnexpandedPC.toIndex()]).sub(four).add(four.mul(witness[comptime I.FlagDoNotUpdateUnexpandedPC.toIndex()])).add(two.mul(witness[comptime I.FlagIsCompressed.toIndex()])),
+    };
+}
+
+/// Interpolate Az*Bz at a target point from base group values.
+///
+/// Given integer Az guards and field Bz magnitudes at the 10 base domain points,
+/// uses COEFFS_PER_J to interpolate to target point j, then multiplies.
+///
+/// Returns Az(Y_j) * Bz(Y_j) as a field element.
+pub fn interpolateAzBzProduct(
+    comptime F: type,
+    az_int: []const i8,
+    bz_field: []const F,
+    coeffs: []const i32,
+    group_size: usize,
+) F {
+    // Compute Az(Y_j) as integer: Σ coeffs[i] * az_int[i]
+    var az_j: i32 = 0;
+    for (0..group_size) |i| {
+        az_j += coeffs[i] * @as(i32, az_int[i]);
+    }
+
+    // Early exit if guard is zero
+    if (az_j == 0) return F.zero();
+
+    // Convert Az to field
+    const az_f = fieldFromI32(F, az_j);
+
+    // Compute Bz(Y_j) as field: Σ coeffs[i] * bz_field[i]
+    var bz_f = F.zero();
+    for (0..group_size) |i| {
+        const c = coeffs[i];
+        if (c == 0) continue;
+        if (c == 1) {
+            bz_f = bz_f.add(bz_field[i]);
+        } else if (c == -1) {
+            bz_f = bz_f.sub(bz_field[i]);
+        } else if (c > 0) {
+            bz_f = bz_f.add(F.fromU64(@intCast(c)).mul(bz_field[i]));
+        } else {
+            bz_f = bz_f.sub(F.fromU64(@intCast(-c)).mul(bz_field[i]));
+        }
+    }
+
+    return az_f.mul(bz_f);
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -403,4 +585,111 @@ test "field from i64" {
     const neg3 = fieldFromI64(F, -3);
     const expected = F.zero().sub(F.fromU64(3));
     try std.testing.expect(neg3.eql(expected));
+}
+
+test "fast Az int matches field Az for LOAD instruction" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
+    witness[R1CSInputIndex.FlagLoad.toIndex()] = F.one();
+
+    // Compare field-based Az with integer-based Az
+    const az_field = AzFirstGroup(F).fromWitness(&witness);
+    const az_int = computeAzFirstGroupInt(F, &witness);
+
+    for (0..FIRST_GROUP_SIZE) |i| {
+        const expected_field = fieldFromI64(F, @intCast(az_int[i]));
+        try std.testing.expect(az_field.values[i].eql(expected_field));
+    }
+}
+
+test "fast Az int matches field Az for ADD instruction" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
+    witness[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+
+    const az_field = AzFirstGroup(F).fromWitness(&witness);
+    const az_int = computeAzFirstGroupInt(F, &witness);
+
+    for (0..FIRST_GROUP_SIZE) |i| {
+        const expected_field = fieldFromI64(F, @intCast(az_int[i]));
+        try std.testing.expect(az_field.values[i].eql(expected_field));
+    }
+}
+
+test "fast Bz direct matches field Bz for first group" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
+    witness[R1CSInputIndex.FlagLoad.toIndex()] = F.one();
+    witness[R1CSInputIndex.RamAddress.toIndex()] = F.fromU64(1000);
+    witness[R1CSInputIndex.RamReadValue.toIndex()] = F.fromU64(42);
+    witness[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(42);
+    witness[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(42);
+    witness[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.fromU64(7);
+    witness[R1CSInputIndex.LeftInstructionInput.toIndex()] = F.fromU64(5);
+    witness[R1CSInputIndex.LookupOutput.toIndex()] = F.fromU64(1);
+    witness[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(104);
+    witness[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(11);
+    witness[R1CSInputIndex.PC.toIndex()] = F.fromU64(10);
+
+    // Compare field-based Bz with direct Bz
+    const bz_field = BzFirstGroup(F).fromWitness(&witness);
+    const bz_direct = computeBzFirstGroupDirect(F, &witness);
+
+    for (0..FIRST_GROUP_SIZE) |i| {
+        try std.testing.expect(bz_field.values[i].eql(bz_direct[i]));
+    }
+}
+
+test "fast second-group Az int matches field Az" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
+    witness[R1CSInputIndex.FlagLoad.toIndex()] = F.one();
+    witness[R1CSInputIndex.FlagAddOperands.toIndex()] = F.zero();
+    witness[R1CSInputIndex.ShouldBranch.toIndex()] = F.zero();
+
+    const az_field = AzSecondGroup(F).fromWitness(&witness);
+    const az_int = computeAzSecondGroupInt(F, &witness);
+
+    for (0..SECOND_GROUP_SIZE) |i| {
+        const expected_field = fieldFromI64(F, @intCast(az_int[i]));
+        try std.testing.expect(az_field.values[i].eql(expected_field));
+    }
+}
+
+test "fast second-group Bz direct matches field Bz" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    // Build 2^64 field element for the test
+    var bytes: [16]u8 = undefined;
+    std.mem.writeInt(u128, &bytes, 0x10000000000000000, .little);
+    const two_pow_64 = F.fromBytes(&bytes);
+
+    var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
+    witness[R1CSInputIndex.RamAddress.toIndex()] = F.fromU64(1000);
+    witness[R1CSInputIndex.Rs1Value.toIndex()] = F.fromU64(900);
+    witness[R1CSInputIndex.Imm.toIndex()] = F.fromU64(100);
+    witness[R1CSInputIndex.LeftInstructionInput.toIndex()] = F.fromU64(50);
+    witness[R1CSInputIndex.RightInstructionInput.toIndex()] = F.fromU64(30);
+    witness[R1CSInputIndex.RightLookupOperand.toIndex()] = F.fromU64(80);
+    witness[R1CSInputIndex.Product.toIndex()] = F.fromU64(1500);
+    witness[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(200);
+    witness[R1CSInputIndex.LookupOutput.toIndex()] = F.fromU64(200);
+    witness[R1CSInputIndex.UnexpandedPC.toIndex()] = F.fromU64(100);
+    witness[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(104);
+
+    const bz_field = BzSecondGroup(F).fromWitness(&witness);
+    const bz_direct = computeBzSecondGroupDirect(F, &witness, two_pow_64);
+
+    for (0..SECOND_GROUP_SIZE) |i| {
+        try std.testing.expect(bz_field.values[i].eql(bz_direct[i]));
+    }
 }

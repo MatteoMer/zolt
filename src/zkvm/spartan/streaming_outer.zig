@@ -35,6 +35,7 @@ const Allocator = std.mem.Allocator;
 
 const constraints = @import("../r1cs/constraints.zig");
 const univariate_skip = @import("../r1cs/univariate_skip.zig");
+const evaluators = @import("../r1cs/evaluators.zig");
 const jolt_types = @import("../jolt_types.zig");
 const poly_mod = @import("../../poly/mod.zig");
 const multiquadratic = @import("../../poly/multiquadratic.zig");
@@ -115,6 +116,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// Used for computing (t'(0), t'(∞)) projections in compute_t_evals.
         /// Matches Jolt's OuterSharedState.t_prime_poly
         t_prime_poly: ?MultiquadraticPolynomial(F),
+
+        /// Cached 2^64 field element (for second-group Bz direct evaluation)
+        two_pow_64_cached: F,
 
         /// Allocator
         allocator: Allocator,
@@ -206,6 +210,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const full_tau = try allocator.alloc(F, tau.len);
             @memcpy(full_tau, tau);
 
+            // Precompute 2^64 as field element for fast Bz evaluation
+            const two_pow_64_cached = blk_2p64: {
+                var bytes: [16]u8 = undefined;
+                std.mem.writeInt(u128, &bytes, 0x10000000000000000, .little);
+                break :blk_2p64 F.fromBytes(&bytes);
+            };
+
             return Self{
                 .cycle_witnesses = cycle_witnesses,
                 .num_cycle_vars = num_cycle_vars,
@@ -219,6 +230,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .r_grid = r_grid,
                 .tau_high = tau_high,
                 .full_tau = full_tau,
+                .two_pow_64_cached = two_pow_64_cached,
                 .az_poly = null,
                 .bz_poly = null,
                 .t_prime_poly = null,
@@ -308,6 +320,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // This matches Jolt's round_zero loop: for i in 0..E_out.len*E_in.len
             const total_pairs = num_x_out_vals * num_x_in_vals;
 
+            // Precompute 2^64 field element for second-group Bz
+            const two_pow_64_mat = blk_2p64m: {
+                var bytes: [16]u8 = undefined;
+                std.mem.writeInt(u128, &bytes, 0x10000000000000000, .little);
+                break :blk_2p64m F.fromBytes(&bytes);
+            };
+
             const MatCtx = struct {
                 cycle_witnesses: []const constraints.R1CSCycleInputs(F),
                 lagrange_evals_r0: *const [FIRST_GROUP_SIZE]F,
@@ -315,6 +334,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 bz_evals: []F,
                 num_x_in_vals: usize,
                 grid_size: usize,
+                two_pow_64: F,
             };
 
             const mat_ctx = MatCtx{
@@ -324,6 +344,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .bz_evals = bz_evals,
                 .num_x_in_vals = num_x_in_vals,
                 .grid_size = grid_size,
+                .two_pow_64 = two_pow_64_mat,
             };
 
             const materializeOnePair = struct {
@@ -338,34 +359,48 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         const time_step_idx = full_idx >> 1;
 
                         if (time_step_idx < ctx.cycle_witnesses.len) {
-                            const witness = &ctx.cycle_witnesses[time_step_idx];
+                            const witness = ctx.cycle_witnesses[time_step_idx].asSlice();
+
+                            // First group: integer Az + direct Bz
+                            const az_int_fg = evaluators.computeAzFirstGroupInt(F, witness);
+                            const bz_field_fg = evaluators.computeBzFirstGroupDirect(F, witness);
 
                             var az0 = F.zero();
                             var bz0 = F.zero();
                             for (0..FIRST_GROUP_SIZE) |t| {
-                                const constraint_idx = constraints.FIRST_GROUP_INDICES[t];
-                                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                                const left = constraint.left.evaluate(F, witness.asSlice());
-                                const right = constraint.right.evaluate(F, witness.asSlice());
-                                const magnitude = left.sub(right);
                                 const w = ctx.lagrange_evals_r0[t];
-                                az0 = az0.add(w.mul(condition));
-                                bz0 = bz0.add(w.mul(magnitude));
+                                const az_i = az_int_fg[t];
+                                if (az_i != 0) {
+                                    if (az_i == 1) {
+                                        az0 = az0.add(w);
+                                    } else if (az_i == -1) {
+                                        az0 = az0.sub(w);
+                                    } else {
+                                        az0 = az0.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
+                                    }
+                                }
+                                bz0 = bz0.add(w.mul(bz_field_fg[t]));
                             }
+
+                            // Second group: integer Az + direct Bz
+                            const az_int_sg = evaluators.computeAzSecondGroupInt(F, witness);
+                            const bz_field_sg = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
 
                             var az1 = F.zero();
                             var bz1 = F.zero();
                             for (0..@min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE)) |t| {
-                                const constraint_idx = constraints.SECOND_GROUP_INDICES[t];
-                                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                                const left = constraint.left.evaluate(F, witness.asSlice());
-                                const right = constraint.right.evaluate(F, witness.asSlice());
-                                const magnitude = left.sub(right);
                                 const w = ctx.lagrange_evals_r0[t];
-                                az1 = az1.add(w.mul(condition));
-                                bz1 = bz1.add(w.mul(magnitude));
+                                const az_i = az_int_sg[t];
+                                if (az_i != 0) {
+                                    if (az_i == 1) {
+                                        az1 = az1.add(w);
+                                    } else if (az_i == -1) {
+                                        az1 = az1.sub(w);
+                                    } else {
+                                        az1 = az1.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
+                                    }
+                                }
+                                bz1 = bz1.add(w.mul(bz_field_sg[t]));
                             }
 
                             const base_idx = ctx.grid_size * i;
@@ -583,95 +618,123 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const E_in = try self.buildEqTable(self.full_tau[m .. self.full_tau.len - 1]);
             defer self.allocator.free(E_in);
 
-            // DEBUG: Compare mul vs mulHiBigIntU128 for first tau with non-trivial base
-            if (m > 1) {
-                const t0 = self.full_tau[0];
-                const t1 = self.full_tau[1];
-                // Use t0 as base, multiply by t1 both ways
-                const test_mul = t0.mul(t1);
-                const test_hi = t0.mulHiBigIntU128(t1.limbs);
-                dbg("[MUL_CMP] t0 = [{x}, {x}, {x}, {x}]\n", .{t0.limbs[0], t0.limbs[1], t0.limbs[2], t0.limbs[3]});
-                dbg("[MUL_CMP] t1 = [{x}, {x}, {x}, {x}]\n", .{t1.limbs[0], t1.limbs[1], t1.limbs[2], t1.limbs[3]});
-                dbg("[MUL_CMP] t0.mul(t1) = [{x}, {x}, {x}, {x}]\n", .{test_mul.limbs[0], test_mul.limbs[1], test_mul.limbs[2], test_mul.limbs[3]});
-                dbg("[MUL_CMP] t0.mulHi(t1) = [{x}, {x}, {x}, {x}]\n", .{test_hi.limbs[0], test_hi.limbs[1], test_hi.limbs[2], test_hi.limbs[3]});
-                dbg("[MUL_CMP] equal? {}\n", .{test_mul.eql(test_hi)});
-                // Also test: fromU64(7).mul(t1) vs fromU64(7).mulHi(t1)
-                const base7 = F.fromU64(7);
-                const mul7 = base7.mul(t1);
-                const hi7 = base7.mulHiBigIntU128(t1.limbs);
-                dbg("[MUL_CMP] 7.mul(t1) = [{x}, {x}, {x}, {x}]\n", .{mul7.limbs[0], mul7.limbs[1], mul7.limbs[2], mul7.limbs[3]});
-                dbg("[MUL_CMP] 7.mulHi(t1) = [{x}, {x}, {x}, {x}]\n", .{hi7.limbs[0], hi7.limbs[1], hi7.limbs[2], hi7.limbs[3]});
-                dbg("[MUL_CMP] 7 equal? {}\n", .{mul7.eql(hi7)});
-            }
+            // Compute extended_evals at all 9 target points simultaneously.
+            // Instead of parallelizing over targets (9 items, each doing N_out × N_in work),
+            // we parallelize over x_out (typically 256 items), computing Az/Bz base values
+            // once per cycle and reusing them for all 9 targets.
 
-            // DEBUG: Print split parameters
-            dbg("[STREAMING_OUTER UNISKIP] tau.len={d}, m={d}, wprime_len={d}\n", .{self.full_tau.len, m, wprime_len});
-            dbg("[STREAMING_OUTER UNISKIP] num_x_out_bits={d}, num_x_in_bits={d}, num_x_in_prime_bits={d}\n", .{num_x_out_bits, num_x_in_bits, num_x_in_prime_bits});
-            dbg("[STREAMING_OUTER UNISKIP] E_out.len={d}, E_in.len={d}\n", .{E_out.len, E_in.len});
-            if (E_out.len > 0) {
-                dbg("[STREAMING_OUTER UNISKIP] E_out[0] = {any}\n", .{E_out[0].toBytesBE()});
-            }
-            if (E_in.len > 0) {
-                dbg("[STREAMING_OUTER UNISKIP] E_in[0] = {any}\n", .{E_in[0].toBytesBE()});
-            }
+            // Precompute 2^64 field element for second-group Bz
+            const two_pow_64 = blk_2p64: {
+                var bytes: [16]u8 = undefined;
+                std.mem.writeInt(u128, &bytes, 0x10000000000000000, .little);
+                break :blk_2p64 F.fromBytes(&bytes);
+            };
 
-            // Compute extended_evals at each of the 9 target points (parallelized)
             const FirstRoundCtx = struct {
-                targets: *const [DEGREE]i64,
-                extended_evals: *[DEGREE]F,
-                num_x_out_vals: usize,
                 num_x_in_vals: usize,
                 num_x_in_prime_bits: u6,
                 E_out: []const F,
                 E_in: []const F,
-                self_ptr: *const Self,
+                cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+                two_pow_64: F,
             };
-            const firstRoundCompute = struct {
-                fn f(ctx: FirstRoundCtx, target_idx: usize) void {
-                    const target_y = ctx.targets[target_idx];
-                    var sum = F.zero();
 
-                    for (0..ctx.num_x_out_vals) |x_out| {
+            const firstRoundMapReduce = struct {
+                fn map(ctx: FirstRoundCtx, start: usize, end: usize) [DEGREE]F {
+                    var accum: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+
+                    for (start..end) |x_out| {
                         const e_out = if (x_out < ctx.E_out.len) ctx.E_out[x_out] else F.zero();
+                        if (e_out.eql(F.zero())) continue;
+
+                        var inner: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
 
                         for (0..ctx.num_x_in_vals) |x_in| {
                             const e_in = if (x_in < ctx.E_in.len) ctx.E_in[x_in] else F.zero();
-                            const eq_val = e_out.mul(e_in);
 
                             const x_in_prime = x_in >> 1;
                             const cycle = (x_out << ctx.num_x_in_prime_bits) | x_in_prime;
                             const group: u1 = @truncate(x_in & 1);
 
-                            if (cycle < ctx.self_ptr.cycle_witnesses.len) {
-                                const witness = &ctx.self_ptr.cycle_witnesses[cycle];
-                                const az_bz = ctx.self_ptr.evaluateAzBzAtTargetY(witness, target_y, group);
-                                sum = sum.add(eq_val.mul(az_bz));
+                            if (cycle < ctx.cycle_witnesses.len) {
+                                const witness = ctx.cycle_witnesses[cycle].asSlice();
+
+                                // Compute Az/Bz base values ONCE for this cycle+group
+                                if (group == 0) {
+                                    const az_int = evaluators.computeAzFirstGroupInt(F, witness);
+                                    const bz_field = evaluators.computeBzFirstGroupDirect(F, witness);
+
+                                    inline for (0..DEGREE) |j| {
+                                        const product = evaluators.interpolateAzBzProduct(
+                                            F,
+                                            &az_int,
+                                            &bz_field,
+                                            &univariate_skip.COEFFS_PER_J[j],
+                                            FIRST_GROUP_SIZE,
+                                        );
+                                        inner[j] = inner[j].add(e_in.mul(product));
+                                    }
+                                } else {
+                                    const az_int = evaluators.computeAzSecondGroupInt(F, witness);
+                                    const bz_field = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
+
+                                    inline for (0..DEGREE) |j| {
+                                        const product = evaluators.interpolateAzBzProduct(
+                                            F,
+                                            &az_int,
+                                            &bz_field,
+                                            &univariate_skip.COEFFS_PER_J[j],
+                                            SECOND_GROUP_SIZE,
+                                        );
+                                        inner[j] = inner[j].add(e_in.mul(product));
+                                    }
+                                }
                             }
+                        }
+
+                        // Weight inner accumulator by e_out
+                        inline for (0..DEGREE) |j| {
+                            accum[j] = accum[j].add(e_out.mul(inner[j]));
                         }
                     }
 
-                    ctx.extended_evals[target_idx] = sum;
+                    return accum;
                 }
-            }.f;
+
+                fn reduce(a: [DEGREE]F, b: [DEGREE]F) [DEGREE]F {
+                    var result: [DEGREE]F = undefined;
+                    inline for (0..DEGREE) |i| {
+                        result[i] = a[i].add(b[i]);
+                    }
+                    return result;
+                }
+            };
 
             const first_round_ctx = FirstRoundCtx{
-                .targets = &targets,
-                .extended_evals = &extended_evals,
-                .num_x_out_vals = num_x_out_vals,
                 .num_x_in_vals = num_x_in_vals,
                 .num_x_in_prime_bits = @intCast(num_x_in_prime_bits),
                 .E_out = E_out,
                 .E_in = E_in,
-                .self_ptr = self,
+                .cycle_witnesses = self.cycle_witnesses,
+                .two_pow_64 = two_pow_64,
             };
 
-            if (self.thread_pool) |tp| {
-                tp.parallelForForce(DEGREE, first_round_ctx, firstRoundCompute);
-            } else {
-                for (0..DEGREE) |i| {
-                    firstRoundCompute(first_round_ctx, i);
-                }
-            }
+            const identity: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+
+            const target_sums = if (self.thread_pool) |tp|
+                tp.parallelReduceForce(
+                    [DEGREE]F,
+                    num_x_out_vals,
+                    identity,
+                    first_round_ctx,
+                    firstRoundMapReduce.map,
+                    firstRoundMapReduce.reduce,
+                )
+            else
+                firstRoundMapReduce.map(first_round_ctx, 0, num_x_out_vals);
+
+            // Map target sums to extended_evals
+            extended_evals = target_sums;
 
             // Step 2: Build t1_vals array (19 entries)
             // Base window {-4,...,5} gets zeros, extended points get their evals
@@ -684,94 +747,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 t1_vals[pos] = extended_evals[idx];
             }
 
-            // DEBUG: Directly evaluate t1(r0) via 19-point Lagrange interpolation
-            // and compare with brute-force direct computation
-            {
-                // Get r0 from proof_converter (stored in... hmm, not available here)
-                // Instead, evaluate t1 at a test point to verify interpolation
-                // Actually, we need r0. Let me print t1_vals[4] which is ext_eval(-5)
-                dbg("[T1_DEBUG] t1_vals[4] (Y=-5) = {any}\n", .{t1_vals[4].toBytesBE()});
-                dbg("[T1_DEBUG] t1_vals[9] (Y=0, base) = {any}\n", .{t1_vals[9].toBytesBE()});
-
-                // Also print ALL non-zero t1_vals
-                for (0..EXTENDED_SIZE) |tidx| {
-                    if (!t1_vals[tidx].eql(F.zero())) {
-                        const ty: i64 = @as(i64, @intCast(tidx)) - @as(i64, DEGREE);
-                        dbg("[T1_DEBUG] t1_vals[{d}] (Y={d}) = {any}\n", .{tidx, ty, t1_vals[tidx].toBytesBE()});
-                    }
-                }
-            }
-
             // Step 3-5: Interpolate and multiply with Lagrange kernel
             return self.buildUniSkipPolynomial(&t1_vals);
-        }
-
-        /// Evaluate Az * Bz at a specific target Y coordinate for a group
-        /// Target Y is one of the extended points: {-5, 6, -6, 7, -7, 8, -8, 9, -9}
-        ///
-        /// IMPORTANT: Uses Jolt's guard-routing pattern where each constraint's
-        /// COEFFS_PER_J coefficient is routed to EITHER Az or Bz based on the
-        /// runtime guard (condition) value:
-        ///   - If condition != 0: coefficient added to Az (guard is "active")
-        ///   - If condition == 0: coefficient * diff added to Bz
-        ///
-        /// This ensures AzBz(base_point) = 0 by construction (not just for valid witnesses),
-        /// which is critical for the UniSkip polynomial interpolation.
-        fn evaluateAzBzAtTargetY(
-            self: *const Self,
-            witness: *const constraints.R1CSCycleInputs(F),
-            target_y: i64,
-            group: u1,
-        ) F {
-            _ = self;
-
-            // Select group-specific parameters
-            const group_size: usize = if (group == 0) FIRST_GROUP_SIZE else SECOND_GROUP_SIZE;
-            const group_indices = if (group == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
-
-            // Use precomputed Lagrange coefficients to extrapolate to target_y
-            const targets = univariate_skip.UNISKIP_TARGETS;
-            var target_j: ?usize = null;
-            for (targets, 0..) |t, j| {
-                if (t == target_y) {
-                    target_j = j;
-                    break;
-                }
-            }
-
-            if (target_j) |j| {
-                const coeffs = univariate_skip.COEFFS_PER_J[j];
-
-                // Standard Az/Bz computation:
-                //   Az(x,Y) = Σ_i L_i(Y) * condition_i(x)
-                //   Bz(x,Y) = Σ_i L_i(Y) * (left_i(x) - right_i(x))
-                // where L_i(Y) = coeffs[i] (precomputed integer Lagrange weights)
-                var az_y = F.zero();
-                var bz_y = F.zero();
-
-                for (0..group_size) |i| {
-                    const c = coeffs[i];
-                    if (c == 0) continue;
-
-                    const c_field = if (c > 0)
-                        F.fromU64(@intCast(c))
-                    else
-                        F.zero().sub(F.fromU64(@intCast(-c)));
-
-                    const constraint_idx = group_indices[i];
-                    const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                    const cond = constraint.condition.evaluate(F, witness.asSlice());
-                    const diff = constraint.left.evaluate(F, witness.asSlice())
-                        .sub(constraint.right.evaluate(F, witness.asSlice()));
-
-                    az_y = az_y.add(c_field.mul(cond));
-                    bz_y = bz_y.add(c_field.mul(diff));
-                }
-
-                return az_y.mul(bz_y);
-            }
-
-            return F.zero();
         }
 
         /// Build the UniSkip polynomial s1(Y) = L(τ_high, Y) · t1(Y)
@@ -825,46 +802,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     s1_coeffs[i + j] = s1_coeffs[i + j].add(lagrange_coeffs[i].mul(t1_coeffs[j]));
                 }
             }
-
-            // DEBUG: Verify t1 polynomial at ALL 19 domain points
-            {
-                var interp_mismatches: usize = 0;
-                for (0..EXTENDED_SIZE) |pidx| {
-                    const py: i64 = @as(i64, @intCast(pidx)) - @as(i64, DEGREE);
-                    const py_field = if (py >= 0) F.fromU64(@intCast(py)) else F.zero().sub(F.fromU64(@intCast(-py)));
-                    // Horner evaluation
-                    var tv = t1_coeffs[EXTENDED_SIZE - 1];
-                    var kk: usize = EXTENDED_SIZE - 1;
-                    while (kk > 0) {
-                        kk -= 1;
-                        tv = tv.mul(py_field).add(t1_coeffs[kk]);
-                    }
-                    if (!tv.eql(t1_vals[pidx])) {
-                        interp_mismatches += 1;
-                        if (interp_mismatches <= 3) {
-                            dbg("[INTERP_CHECK] t1 MISMATCH at Y={d}: from_coeffs={any} expected={any}\n", .{ py, tv.toBytesBE(), t1_vals[pidx].toBytesBE() });
-                        }
-                    }
-                }
-                dbg("[INTERP_CHECK] t1 polynomial: {d}/{d} domain points match\n", .{ EXTENDED_SIZE - interp_mismatches, EXTENDED_SIZE });
-            }
-
-            // DEBUG: Verify sum over base domain is zero
-            // sum = Σ_j s1_coeffs[j] * power_sums[j]
-            const power_sums = univariate_skip.computePowerSums(DOMAIN_SIZE, FIRST_ROUND_NUM_COEFFS);
-            var sum_check = F.zero();
-            for (0..FIRST_ROUND_NUM_COEFFS) |j| {
-                const ps = power_sums[j];
-                if (ps != 0) {
-                    const ps_field = if (ps >= 0)
-                        F.fromU64(@intCast(@as(u64, @intCast(ps))))
-                    else
-                        F.zero().sub(F.fromU64(@intCast(@as(u64, @intCast(-ps)))));
-                    sum_check = sum_check.add(s1_coeffs[j].mul(ps_field));
-                }
-            }
-            dbg("[STREAMING_OUTER UNISKIP] Sum check over base domain: {any}\n", .{sum_check.toBytesBE()});
-            dbg("[STREAMING_OUTER UNISKIP] Sum check is zero: {}\n", .{sum_check.eql(F.zero())});
 
             return s1_coeffs;
         }
@@ -1797,30 +1734,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
             witness: *const constraints.R1CSCycleInputs(F),
             group: usize, // 0 = first group, 1 = second group
         ) F {
-            var az_sum = F.zero();
-            var bz_sum = F.zero();
-
-            const group_size = if (group == 0) FIRST_GROUP_SIZE else @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
-            const group_indices = if (group == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
-
-            // Sum over group constraints weighted by Lagrange basis
-            for (0..group_size) |i| {
-                const constraint_idx = group_indices[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
-
-                // Weighted sum for Az (conditions)
-                az_sum = az_sum.add(self.lagrange_evals_r0[i].mul(condition));
-
-                // Weighted sum for Bz (magnitudes)
-                bz_sum = bz_sum.add(self.lagrange_evals_r0[i].mul(magnitude));
-            }
-
-            // Return the PRODUCT of the sums
-            return az_sum.mul(bz_sum);
+            const result = self.computeCycleAzBzForGroup(witness, group);
+            return result.az.mul(result.bz);
         }
 
         /// Compute separate Az and Bz for a single cycle for a given constraint group
@@ -1832,29 +1747,48 @@ pub fn StreamingOuterProver(comptime F: type) type {
             witness: *const constraints.R1CSCycleInputs(F),
             group: usize, // 0 = first group, 1 = second group
         ) struct { az: F, bz: F } {
-            var az_sum = F.zero();
-            var bz_sum = F.zero();
+            const ws = witness.asSlice();
 
-            const group_size = if (group == 0) FIRST_GROUP_SIZE else @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
-            const group_indices = if (group == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
+            if (group == 0) {
+                const az_int = evaluators.computeAzFirstGroupInt(F, ws);
+                const bz_field = evaluators.computeBzFirstGroupDirect(F, ws);
 
-            // Sum over group constraints weighted by Lagrange basis
-            for (0..group_size) |i| {
-                const constraint_idx = group_indices[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
+                var az_sum = F.zero();
+                var bz_sum = F.zero();
+                for (0..FIRST_GROUP_SIZE) |i| {
+                    const w = self.lagrange_evals_r0[i];
+                    const az_i = az_int[i];
+                    if (az_i == 1) {
+                        az_sum = az_sum.add(w);
+                    } else if (az_i == -1) {
+                        az_sum = az_sum.sub(w);
+                    } else if (az_i != 0) {
+                        az_sum = az_sum.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
+                    }
+                    bz_sum = bz_sum.add(w.mul(bz_field[i]));
+                }
+                return .{ .az = az_sum, .bz = bz_sum };
+            } else {
+                const az_int = evaluators.computeAzSecondGroupInt(F, ws);
+                const bz_field = evaluators.computeBzSecondGroupDirect(F, ws, self.two_pow_64_cached);
 
-                // Weighted sum for Az (conditions)
-                az_sum = az_sum.add(self.lagrange_evals_r0[i].mul(condition));
-
-                // Weighted sum for Bz (magnitudes)
-                bz_sum = bz_sum.add(self.lagrange_evals_r0[i].mul(magnitude));
+                const g2_size = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+                var az_sum = F.zero();
+                var bz_sum = F.zero();
+                for (0..g2_size) |i| {
+                    const w = self.lagrange_evals_r0[i];
+                    const az_i = az_int[i];
+                    if (az_i == 1) {
+                        az_sum = az_sum.add(w);
+                    } else if (az_i == -1) {
+                        az_sum = az_sum.sub(w);
+                    } else if (az_i != 0) {
+                        az_sum = az_sum.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
+                    }
+                    bz_sum = bz_sum.add(w.mul(bz_field[i]));
+                }
+                return .{ .az = az_sum, .bz = bz_sum };
             }
-
-            return .{ .az = az_sum, .bz = bz_sum };
         }
 
         /// Compute combined Az * Bz for a single cycle using bound r_stream value
@@ -1868,40 +1802,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
             witness: *const constraints.R1CSCycleInputs(F),
             r_stream: F,
         ) F {
-            // Compute Az and Bz for both groups
-            var az_g0 = F.zero();
-            var bz_g0 = F.zero();
-            var az_g1 = F.zero();
-            var bz_g1 = F.zero();
+            const result_g0 = self.computeCycleAzBzForGroup(witness, 0);
+            const result_g1 = self.computeCycleAzBzForGroup(witness, 1);
 
-            // Group 0
-            for (0..FIRST_GROUP_SIZE) |i| {
-                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
-                az_g0 = az_g0.add(self.lagrange_evals_r0[i].mul(condition));
-                bz_g0 = bz_g0.add(self.lagrange_evals_r0[i].mul(magnitude));
-            }
-
-            // Group 1
-            const g2_size = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
-            for (0..g2_size) |i| {
-                const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
-                az_g1 = az_g1.add(self.lagrange_evals_r0[i].mul(condition));
-                bz_g1 = bz_g1.add(self.lagrange_evals_r0[i].mul(magnitude));
-            }
-
-            // Combine using r_stream: final = g0 + r_stream * (g1 - g0)
-            const az_final = az_g0.add(r_stream.mul(az_g1.sub(az_g0)));
-            const bz_final = bz_g0.add(r_stream.mul(bz_g1.sub(bz_g0)));
+            const az_final = result_g0.az.add(r_stream.mul(result_g1.az.sub(result_g0.az)));
+            const bz_final = result_g0.bz.add(r_stream.mul(result_g1.bz.sub(result_g0.bz)));
 
             return az_final.mul(bz_final);
         }
@@ -1923,45 +1828,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
             self: *const Self,
             witness: *const constraints.R1CSCycleInputs(F),
         ) struct { prod_0: F, prod_inf: F } {
-            // Compute Az and Bz for both groups
-            var az_g0 = F.zero();
-            var bz_g0 = F.zero();
-            var az_g1 = F.zero();
-            var bz_g1 = F.zero();
+            const result_g0 = self.computeCycleAzBzForGroup(witness, 0);
+            const result_g1 = self.computeCycleAzBzForGroup(witness, 1);
 
-            // Group 0
-            for (0..FIRST_GROUP_SIZE) |i| {
-                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
-                az_g0 = az_g0.add(self.lagrange_evals_r0[i].mul(condition));
-                bz_g0 = bz_g0.add(self.lagrange_evals_r0[i].mul(magnitude));
-            }
-
-            // Group 1
-            const g2_size = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
-            for (0..g2_size) |i| {
-                const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
-                az_g1 = az_g1.add(self.lagrange_evals_r0[i].mul(condition));
-                bz_g1 = bz_g1.add(self.lagrange_evals_r0[i].mul(magnitude));
-            }
-
-            // Multiquadratic values:
-            // prod_0 = Az_g0 * Bz_g0 (at position 0)
-            // slope_az = Az_g1 - Az_g0
-            // slope_bz = Bz_g1 - Bz_g0
-            // prod_inf = slope_az * slope_bz (product of slopes)
-            const prod_0 = az_g0.mul(bz_g0);
-            const slope_az = az_g1.sub(az_g0);
-            const slope_bz = bz_g1.sub(bz_g0);
+            const prod_0 = result_g0.az.mul(result_g0.bz);
+            const slope_az = result_g1.az.sub(result_g0.az);
+            const slope_bz = result_g1.bz.sub(result_g0.bz);
             const prod_inf = slope_az.mul(slope_bz);
 
             return .{ .prod_0 = prod_0, .prod_inf = prod_inf };
@@ -1975,38 +1847,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
             self: *const Self,
             witness: *const constraints.R1CSCycleInputs(F),
         ) struct { az_g0: F, az_g1: F, bz_g0: F, bz_g1: F } {
-            // Compute Az and Bz for both groups
-            var az_g0 = F.zero();
-            var bz_g0 = F.zero();
-            var az_g1 = F.zero();
-            var bz_g1 = F.zero();
-
-            // Group 0
-            for (0..FIRST_GROUP_SIZE) |i| {
-                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
-                az_g0 = az_g0.add(self.lagrange_evals_r0[i].mul(condition));
-                bz_g0 = bz_g0.add(self.lagrange_evals_r0[i].mul(magnitude));
-            }
-
-            // Group 1
-            const g2_size = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
-            for (0..g2_size) |i| {
-                const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
-                az_g1 = az_g1.add(self.lagrange_evals_r0[i].mul(condition));
-                bz_g1 = bz_g1.add(self.lagrange_evals_r0[i].mul(magnitude));
-            }
-
-            return .{ .az_g0 = az_g0, .az_g1 = az_g1, .bz_g0 = bz_g0, .bz_g1 = bz_g1 };
+            const result_g0 = self.computeCycleAzBzForGroup(witness, 0);
+            const result_g1 = self.computeCycleAzBzForGroup(witness, 1);
+            return .{ .az_g0 = result_g0.az, .az_g1 = result_g1.az, .bz_g0 = result_g0.bz, .bz_g1 = result_g1.bz };
         }
 
         /// Compute Az and Bz separately for a single cycle (combined groups)
@@ -2019,41 +1862,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
             witness: *const constraints.R1CSCycleInputs(F),
             r_stream: F,
         ) struct { az: F, bz: F } {
-            // Compute Az and Bz for both groups
-            var az_g0 = F.zero();
-            var bz_g0 = F.zero();
-            var az_g1 = F.zero();
-            var bz_g1 = F.zero();
-
-            // Group 0
-            for (0..FIRST_GROUP_SIZE) |i| {
-                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
-                az_g0 = az_g0.add(self.lagrange_evals_r0[i].mul(condition));
-                bz_g0 = bz_g0.add(self.lagrange_evals_r0[i].mul(magnitude));
-            }
-
-            // Group 1
-            const g2_size = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
-            for (0..g2_size) |i| {
-                const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const condition = constraint.condition.evaluate(F, witness.asSlice());
-                const left = constraint.left.evaluate(F, witness.asSlice());
-                const right = constraint.right.evaluate(F, witness.asSlice());
-                const magnitude = left.sub(right);
-                az_g1 = az_g1.add(self.lagrange_evals_r0[i].mul(condition));
-                bz_g1 = bz_g1.add(self.lagrange_evals_r0[i].mul(magnitude));
-            }
-
-            // Combine using r_stream: final = g0 + r_stream * (g1 - g0)
-            const az_final = az_g0.add(r_stream.mul(az_g1.sub(az_g0)));
-            const bz_final = bz_g0.add(r_stream.mul(bz_g1.sub(bz_g0)));
-
+            const v = self.computeCycleAzBzValues(witness);
+            const az_final = v.az_g0.add(r_stream.mul(v.az_g1.sub(v.az_g0)));
+            const bz_final = v.bz_g0.add(r_stream.mul(v.bz_g1.sub(v.bz_g0)));
             return .{ .az = az_final, .bz = bz_final };
         }
 

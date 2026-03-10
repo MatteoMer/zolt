@@ -730,6 +730,7 @@ pub fn JoltProver(comptime F: type) type {
                             ctx.alloc,
                             ctx.tp,
                         ) catch {
+                            // Only OOM is possible; propagated as OutOfMemory below
                             ctx.err_flag.store(true, .release);
                             return;
                         };
@@ -746,6 +747,7 @@ pub fn JoltProver(comptime F: type) type {
                             ctx.alloc,
                             ctx.tp,
                         ) catch {
+                            // Only OOM is possible; propagated as OutOfMemory below
                             ctx.err_flag.store(true, .release);
                             return;
                         };

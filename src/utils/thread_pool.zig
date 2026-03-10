@@ -93,17 +93,10 @@ pub const ThreadPool = struct {
             return;
         }
 
-        const Ctx = @TypeOf(context);
         var wg: std.Thread.WaitGroup = .{};
 
-        const Helper = struct {
-            fn itemWorker(ctx: Ctx, i: usize) void {
-                func(ctx, i);
-            }
-        };
-
         for (0..len) |i| {
-            self.pool.spawnWg(&wg, Helper.itemWorker, .{ context, i });
+            self.pool.spawnWg(&wg, func, .{ context, i });
         }
 
         self.pool.waitAndWork(&wg);

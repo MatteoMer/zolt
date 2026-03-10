@@ -2024,40 +2024,66 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const v1_r_end = @min(n2 + g2_size, current_len);
                 const v2_r_end = @min(n2 + g1_size, current_len);
 
-                const PairCtx = struct {
-                    g1_a: []const G1Point, g2_a: []const G2Point,
-                    g1_b: []const G1Point, g2_b: []const G2Point,
-                };
+                var d1_left: GT = undefined;
+                var d1_right: GT = undefined;
+                var d2_left: GT = undefined;
+                var d2_right: GT = undefined;
 
-                const d1_d2_left: struct { GT, GT } = if (tp) |pool| blk: {
-                    break :blk pool.join(
-                        GT, GT,
-                        PairCtx{ .g1_a = v1_work[0..g2_size], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[0..g1_size] },
-                        struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_a, ctx.g2_a, null); } }.f,
-                        PairCtx{ .g1_a = v1_work[0..g2_size], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[0..g1_size] },
-                        struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_b, ctx.g2_b, null); } }.f,
-                    );
-                } else .{
-                    multiPairG1G2WithPool(v1_work[0..g2_size], params.g2_vec[0..g2_size], null),
-                    multiPairG1G2WithPool(params.g1_vec[0..g1_size], v2_work[0..g1_size], null),
-                };
-                const d1_left = d1_d2_left[0];
-                const d2_left = d1_d2_left[1];
+                if (round == 0) {
+                    // First-round optimization: v2_work[i] = g2_vec[0] * v_vec[i]
+                    // So multiPair(g1[0..n], v2[0..n]) = e(MSM(g1[0..n], v_vec[0..n]), g2_vec[0])
+                    std.debug.assert(v_vec.len >= current_len);
+                    const g2_fin = params.g2_vec[0];
+                    d1_left = if (params.g2_prepared) |prep|
+                        multiPairG1G2Prepared(v1_work[0..g2_size], prep[0..g2_size], tp)
+                    else
+                        multiPairG1G2WithPool(v1_work[0..g2_size], params.g2_vec[0..g2_size], tp);
+                    d1_right = if (params.g2_prepared) |prep|
+                        multiPairG1G2Prepared(v1_work[n2..v1_r_end], prep[0..g2_size], tp)
+                    else
+                        multiPairG1G2WithPool(v1_work[n2..v1_r_end], params.g2_vec[0..g2_size], tp);
+                    const sum_left = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..g1_size], v_vec[0..g1_size], tp);
+                    const sum_right = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..g1_size], v_vec[n2..v2_r_end], tp);
+                    const sum_left_fp = G1PointFp{ .x = sum_left.x, .y = sum_left.y, .infinity = sum_left.infinity };
+                    const sum_right_fp = G1PointFp{ .x = sum_right.x, .y = sum_right.y, .infinity = sum_right.infinity };
+                    d2_left = pairing.pairingFp(sum_left_fp, g2_fin);
+                    d2_right = pairing.pairingFp(sum_right_fp, g2_fin);
+                } else {
+                    const PairCtx = struct {
+                        g1_a: []const G1Point, g2_a: []const G2Point,
+                        g1_b: []const G1Point, g2_b: []const G2Point,
+                    };
 
-                const d1_d2_right: struct { GT, GT } = if (tp) |pool| blk: {
-                    break :blk pool.join(
-                        GT, GT,
-                        PairCtx{ .g1_a = v1_work[n2..v1_r_end], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[n2..v2_r_end] },
-                        struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_a, ctx.g2_a, null); } }.f,
-                        PairCtx{ .g1_a = v1_work[n2..v1_r_end], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[n2..v2_r_end] },
-                        struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_b, ctx.g2_b, null); } }.f,
-                    );
-                } else .{
-                    multiPairG1G2WithPool(v1_work[n2..v1_r_end], params.g2_vec[0..g2_size], null),
-                    multiPairG1G2WithPool(params.g1_vec[0..g1_size], v2_work[n2..v2_r_end], null),
-                };
-                const d1_right = d1_d2_right[0];
-                const d2_right = d1_d2_right[1];
+                    const d1_d2_left: struct { GT, GT } = if (tp) |pool| blk: {
+                        break :blk pool.join(
+                            GT, GT,
+                            PairCtx{ .g1_a = v1_work[0..g2_size], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[0..g1_size] },
+                            struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_a, ctx.g2_a, null); } }.f,
+                            PairCtx{ .g1_a = v1_work[0..g2_size], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[0..g1_size] },
+                            struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_b, ctx.g2_b, null); } }.f,
+                        );
+                    } else .{
+                        multiPairG1G2WithPool(v1_work[0..g2_size], params.g2_vec[0..g2_size], null),
+                        multiPairG1G2WithPool(params.g1_vec[0..g1_size], v2_work[0..g1_size], null),
+                    };
+                    d1_left = d1_d2_left[0];
+                    d2_left = d1_d2_left[1];
+
+                    const d1_d2_right: struct { GT, GT } = if (tp) |pool| blk: {
+                        break :blk pool.join(
+                            GT, GT,
+                            PairCtx{ .g1_a = v1_work[n2..v1_r_end], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[n2..v2_r_end] },
+                            struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_a, ctx.g2_a, null); } }.f,
+                            PairCtx{ .g1_a = v1_work[n2..v1_r_end], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[n2..v2_r_end] },
+                            struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_b, ctx.g2_b, null); } }.f,
+                        );
+                    } else .{
+                        multiPairG1G2WithPool(v1_work[n2..v1_r_end], params.g2_vec[0..g2_size], null),
+                        multiPairG1G2WithPool(params.g1_vec[0..g1_size], v2_work[n2..v2_r_end], null),
+                    };
+                    d1_right = d1_d2_right[0];
+                    d2_right = d1_d2_right[1];
+                }
 
                 // E1_beta = MSM(g1_vec[0..current_col_len], s2_work[0..current_col_len])
                 const e1_beta = msm.MSM(F, Fp).computeWithPool(
@@ -2489,8 +2515,19 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     multiPairG1G2Prepared(v1_work[n2..current_len], prep[0..n2], tp)
                 else
                     multiPairG1G2WithPool(v1_work[n2..current_len], params.g2_vec[0..n2], tp);
-                const d2_left = multiPairG1G2WithPool(params.g1_vec[0..n2], v2_work[0..n2], tp);
-                const d2_right = multiPairG1G2WithPool(params.g1_vec[0..n2], v2_work[n2..current_len], tp);
+                const d2_left, const d2_right = if (round == 0) blk: {
+                    // First-round optimization: v2_work[i] = g2_fin * v_vec[i]
+                    // So multiPair(g1[0..n2], v2[0..n2]) = e(MSM(g1[0..n2], v_vec[0..n2]), g2_fin)
+                    std.debug.assert(v_vec.len >= current_len);
+                    const sum_left = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], tp);
+                    const sum_right = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], tp);
+                    const sum_left_fp = G1PointFp{ .x = sum_left.x, .y = sum_left.y, .infinity = sum_left.infinity };
+                    const sum_right_fp = G1PointFp{ .x = sum_right.x, .y = sum_right.y, .infinity = sum_right.infinity };
+                    break :blk .{ pairing.pairingFp(sum_left_fp, g2_fin), pairing.pairingFp(sum_right_fp, g2_fin) };
+                } else .{
+                    multiPairG1G2WithPool(params.g1_vec[0..n2], v2_work[0..n2], tp),
+                    multiPairG1G2WithPool(params.g1_vec[0..n2], v2_work[n2..current_len], tp),
+                };
                 const e1_beta = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..current_len], s2_work[0..current_len], tp);
                 const e2_beta = msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len], tp);
 

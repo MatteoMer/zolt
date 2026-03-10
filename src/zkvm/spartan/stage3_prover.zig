@@ -245,65 +245,59 @@ pub fn Stage3Prover(comptime F: type) type {
             instr_prover.thread_pool = self.thread_pool;
             defer instr_prover.deinit();
 
-            // DEBUG: Check initial witness values and compute initial sum
-            dbg("\n[ZOLT] INSTR_INIT: trace_len = {}, prover.current_size = {}\n", .{ trace_len, instr_prover.current_size });
-            // Compute the full sum to verify it equals input_claim
-            var full_sum = F.zero();
-            var left_sum = F.zero();
-            var right_sum = F.zero();
-            for (0..trace_len) |i| {
-                const left_i = instr_prover.left_is_rs1[i].mul(instr_prover.rs1_value[i])
-                    .add(instr_prover.left_is_pc[i].mul(instr_prover.unexpanded_pc[i]));
-                const right_i = instr_prover.right_is_rs2[i].mul(instr_prover.rs2_value[i])
-                    .add(instr_prover.right_is_imm[i].mul(instr_prover.imm[i]));
-                const eq_weight_i = instr_prover.eq_stage2[i];
-                full_sum = full_sum.add(eq_weight_i.mul(right_i.add(instr_gamma.mul(left_i))));
+            if (comptime debug_verbose) {
+                // DEBUG: Check initial witness values and compute initial sum
+                dbg("\n[ZOLT] INSTR_INIT: trace_len = {}, prover.current_size = {}\n", .{ trace_len, instr_prover.current_size });
+                var full_sum = F.zero();
+                var left_sum = F.zero();
+                var right_sum = F.zero();
+                for (0..trace_len) |i| {
+                    const left_i = instr_prover.left_is_rs1[i].mul(instr_prover.rs1_value[i])
+                        .add(instr_prover.left_is_pc[i].mul(instr_prover.unexpanded_pc[i]));
+                    const right_i = instr_prover.right_is_rs2[i].mul(instr_prover.rs2_value[i])
+                        .add(instr_prover.right_is_imm[i].mul(instr_prover.imm[i]));
+                    const eq_weight_i = instr_prover.eq_stage2[i];
+                    full_sum = full_sum.add(eq_weight_i.mul(right_i.add(instr_gamma.mul(left_i))));
+                    left_sum = left_sum.add(instr_prover.eq_stage2[i].mul(left_i));
+                    right_sum = right_sum.add(instr_prover.eq_stage2[i].mul(right_i));
+                }
+                dbg("[ZOLT] INSTR_INIT: full_sum = {{ {any} }}\n", .{full_sum.toBytes()[0..8]});
+                dbg("[ZOLT] INSTR_INIT: instr_input_claim = {{ {any} }}\n", .{instr_input_claim.toBytes()[0..8]});
+                dbg("[ZOLT] INSTR_INIT: sum_equals_claim = {}\n", .{full_sum.eql(instr_input_claim)});
 
-                // Also compute eq-weighted sums of left and right separately for each stage
-                left_sum = left_sum.add(instr_prover.eq_stage2[i].mul(left_i));
-                right_sum = right_sum.add(instr_prover.eq_stage2[i].mul(right_i));
-            }
-            dbg("[ZOLT] INSTR_INIT: full_sum = {{ {any} }}\n", .{full_sum.toBytes()[0..8]});
-            dbg("[ZOLT] INSTR_INIT: instr_input_claim = {{ {any} }}\n", .{instr_input_claim.toBytes()[0..8]});
-            dbg("[ZOLT] INSTR_INIT: sum_equals_claim = {}\n", .{full_sum.eql(instr_input_claim)});
+                const left_1_from_openings = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+                const right_1_from_openings = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+                dbg("[ZOLT] INSTR_INIT: eq_weighted_left_sum = {{ {any} }}\n", .{left_sum.toBytes()[0..8]});
+                dbg("[ZOLT] INSTR_INIT: left_1_from_openings = {{ {any} }}\n", .{left_1_from_openings.toBytes()[0..8]});
+                dbg("[ZOLT] INSTR_INIT: left_match = {}\n", .{left_sum.eql(left_1_from_openings)});
+                dbg("[ZOLT] INSTR_INIT: eq_weighted_right_sum = {{ {any} }}\n", .{right_sum.toBytes()[0..8]});
+                dbg("[ZOLT] INSTR_INIT: right_1_from_openings = {{ {any} }}\n", .{right_1_from_openings.toBytes()[0..8]});
+                dbg("[ZOLT] INSTR_INIT: right_match = {}\n", .{right_sum.eql(right_1_from_openings)});
 
-            // The eq-weighted left_sum should equal left_1 from opening claims
-            // left_1 = LeftInstructionInput evaluated at r_outer
-            const left_1_from_openings = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const right_1_from_openings = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            dbg("[ZOLT] INSTR_INIT: eq_weighted_left_sum = {{ {any} }}\n", .{left_sum.toBytes()[0..8]});
-            dbg("[ZOLT] INSTR_INIT: left_1_from_openings = {{ {any} }}\n", .{left_1_from_openings.toBytes()[0..8]});
-            dbg("[ZOLT] INSTR_INIT: left_match = {}\n", .{left_sum.eql(left_1_from_openings)});
-            dbg("[ZOLT] INSTR_INIT: eq_weighted_right_sum = {{ {any} }}\n", .{right_sum.toBytes()[0..8]});
-            dbg("[ZOLT] INSTR_INIT: right_1_from_openings = {{ {any} }}\n", .{right_1_from_openings.toBytes()[0..8]});
-            dbg("[ZOLT] INSTR_INIT: right_match = {}\n", .{right_sum.eql(right_1_from_openings)});
-
-            // Debug: find mismatches
-            {
-                var mismatch_count: usize = 0;
-                for (0..trace_len) |idx| {
-                    const right_computed = instr_prover.right_is_rs2[idx].mul(instr_prover.rs2_value[idx])
-                        .add(instr_prover.right_is_imm[idx].mul(instr_prover.imm[idx]));
-                    const right_from_witness = if (idx < cycle_witnesses.len)
-                        cycle_witnesses[idx].values[R1CSInputIndex.RightInstructionInput.toIndex()]
-                    else
-                        F.zero();
-                    if (!right_computed.eql(right_from_witness)) {
-                        mismatch_count += 1;
-                        if (mismatch_count <= 5) {
-                            dbg("[ZOLT] INSTR_INIT: MISMATCH at cycle {}: computed = {{ {any} }}, witness = {{ {any} }}\n", .{ idx, right_computed.toBytes()[0..8], right_from_witness.toBytes()[0..8] });
-                            dbg("[ZOLT]   right_is_rs2 = {{ {any} }}, rs2 = {{ {any} }}\n", .{ instr_prover.right_is_rs2[idx].toBytes()[0..8], instr_prover.rs2_value[idx].toBytes()[0..8] });
-                            dbg("[ZOLT]   right_is_imm = {{ {any} }}, imm = {{ {any} }}\n", .{ instr_prover.right_is_imm[idx].toBytes()[0..8], instr_prover.imm[idx].toBytes()[0..8] });
-                            // Also print the instruction for this cycle
-                            if (idx < cycle_witnesses.len) {
-                                const instr = cycle_witnesses[idx].values[R1CSInputIndex.Product.toIndex()]; // Using Product as proxy (need actual instruction)
-                                _ = instr;
-                                // Get opcode from witness if available
+                {
+                    var mismatch_count: usize = 0;
+                    for (0..trace_len) |idx| {
+                        const right_computed = instr_prover.right_is_rs2[idx].mul(instr_prover.rs2_value[idx])
+                            .add(instr_prover.right_is_imm[idx].mul(instr_prover.imm[idx]));
+                        const right_from_witness = if (idx < cycle_witnesses.len)
+                            cycle_witnesses[idx].values[R1CSInputIndex.RightInstructionInput.toIndex()]
+                        else
+                            F.zero();
+                        if (!right_computed.eql(right_from_witness)) {
+                            mismatch_count += 1;
+                            if (mismatch_count <= 5) {
+                                dbg("[ZOLT] INSTR_INIT: MISMATCH at cycle {}: computed = {{ {any} }}, witness = {{ {any} }}\n", .{ idx, right_computed.toBytes()[0..8], right_from_witness.toBytes()[0..8] });
+                                dbg("[ZOLT]   right_is_rs2 = {{ {any} }}, rs2 = {{ {any} }}\n", .{ instr_prover.right_is_rs2[idx].toBytes()[0..8], instr_prover.rs2_value[idx].toBytes()[0..8] });
+                                dbg("[ZOLT]   right_is_imm = {{ {any} }}, imm = {{ {any} }}\n", .{ instr_prover.right_is_imm[idx].toBytes()[0..8], instr_prover.imm[idx].toBytes()[0..8] });
+                                if (idx < cycle_witnesses.len) {
+                                    const instr = cycle_witnesses[idx].values[R1CSInputIndex.Product.toIndex()];
+                                    _ = instr;
+                                }
                             }
                         }
                     }
+                    dbg("[ZOLT] INSTR_INIT: right mismatch_count = {} / {}\n", .{ mismatch_count, trace_len });
                 }
-                dbg("[ZOLT] INSTR_INIT: right mismatch_count = {} / {}\n", .{ mismatch_count, trace_len });
             }
 
             // Track current claims for each instance
@@ -328,34 +322,35 @@ pub fn Stage3Prover(comptime F: type) type {
                 // InstructionInputSumcheck: degree 3
                 const instr_evals = instr_prover.computeRoundEvals(current_instr_claim);
 
-                // DEBUG: Verify instr_evals at round 0
-                if (round == 0) {
-                    // Manually compute p(0) and p(1) sums
-                    var manual_p0 = F.zero();
-                    var manual_p1 = F.zero();
-                    const half = instr_prover.current_size / 2;
-                    for (0..half) |j| {
-                        const left_0 = instr_prover.left_is_rs1[2 * j].mul(instr_prover.rs1_value[2 * j])
-                            .add(instr_prover.left_is_pc[2 * j].mul(instr_prover.unexpanded_pc[2 * j]));
-                        const right_0 = instr_prover.right_is_rs2[2 * j].mul(instr_prover.rs2_value[2 * j])
-                            .add(instr_prover.right_is_imm[2 * j].mul(instr_prover.imm[2 * j]));
-                        const eq_w_0 = instr_prover.eq_stage2[2 * j];
-                        manual_p0 = manual_p0.add(eq_w_0.mul(right_0.add(instr_gamma.mul(left_0))));
+                if (comptime debug_verbose) {
+                    // DEBUG: Verify instr_evals at round 0
+                    if (round == 0) {
+                        var manual_p0 = F.zero();
+                        var manual_p1 = F.zero();
+                        const half = instr_prover.current_size / 2;
+                        for (0..half) |j| {
+                            const left_0 = instr_prover.left_is_rs1[2 * j].mul(instr_prover.rs1_value[2 * j])
+                                .add(instr_prover.left_is_pc[2 * j].mul(instr_prover.unexpanded_pc[2 * j]));
+                            const right_0 = instr_prover.right_is_rs2[2 * j].mul(instr_prover.rs2_value[2 * j])
+                                .add(instr_prover.right_is_imm[2 * j].mul(instr_prover.imm[2 * j]));
+                            const eq_w_0 = instr_prover.eq_stage2[2 * j];
+                            manual_p0 = manual_p0.add(eq_w_0.mul(right_0.add(instr_gamma.mul(left_0))));
 
-                        const left_1 = instr_prover.left_is_rs1[2 * j + 1].mul(instr_prover.rs1_value[2 * j + 1])
-                            .add(instr_prover.left_is_pc[2 * j + 1].mul(instr_prover.unexpanded_pc[2 * j + 1]));
-                        const right_1 = instr_prover.right_is_rs2[2 * j + 1].mul(instr_prover.rs2_value[2 * j + 1])
-                            .add(instr_prover.right_is_imm[2 * j + 1].mul(instr_prover.imm[2 * j + 1]));
-                        const eq_w_1 = instr_prover.eq_stage2[2 * j + 1];
-                        manual_p1 = manual_p1.add(eq_w_1.mul(right_1.add(instr_gamma.mul(left_1))));
+                            const left_1 = instr_prover.left_is_rs1[2 * j + 1].mul(instr_prover.rs1_value[2 * j + 1])
+                                .add(instr_prover.left_is_pc[2 * j + 1].mul(instr_prover.unexpanded_pc[2 * j + 1]));
+                            const right_1 = instr_prover.right_is_rs2[2 * j + 1].mul(instr_prover.rs2_value[2 * j + 1])
+                                .add(instr_prover.right_is_imm[2 * j + 1].mul(instr_prover.imm[2 * j + 1]));
+                            const eq_w_1 = instr_prover.eq_stage2[2 * j + 1];
+                            manual_p1 = manual_p1.add(eq_w_1.mul(right_1.add(instr_gamma.mul(left_1))));
+                        }
+                        dbg("[ZOLT] ROUND0_VERIFY: manual_p0 = {{ {any} }}\n", .{manual_p0.toBytes()[0..8]});
+                        dbg("[ZOLT] ROUND0_VERIFY: instr_evals[0] = {{ {any} }}\n", .{instr_evals[0].toBytes()[0..8]});
+                        dbg("[ZOLT] ROUND0_VERIFY: p0_match = {}\n", .{manual_p0.eql(instr_evals[0])});
+                        dbg("[ZOLT] ROUND0_VERIFY: manual_p1 = {{ {any} }}\n", .{manual_p1.toBytes()[0..8]});
+                        dbg("[ZOLT] ROUND0_VERIFY: derived p1 = {{ {any} }}\n", .{instr_evals[1].toBytes()[0..8]});
+                        dbg("[ZOLT] ROUND0_VERIFY: p0+p1 = {{ {any} }}\n", .{manual_p0.add(manual_p1).toBytes()[0..8]});
+                        dbg("[ZOLT] ROUND0_VERIFY: input_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()[0..8]});
                     }
-                    dbg("[ZOLT] ROUND0_VERIFY: manual_p0 = {{ {any} }}\n", .{manual_p0.toBytes()[0..8]});
-                    dbg("[ZOLT] ROUND0_VERIFY: instr_evals[0] = {{ {any} }}\n", .{instr_evals[0].toBytes()[0..8]});
-                    dbg("[ZOLT] ROUND0_VERIFY: p0_match = {}\n", .{manual_p0.eql(instr_evals[0])});
-                    dbg("[ZOLT] ROUND0_VERIFY: manual_p1 = {{ {any} }}\n", .{manual_p1.toBytes()[0..8]});
-                    dbg("[ZOLT] ROUND0_VERIFY: derived p1 = {{ {any} }}\n", .{instr_evals[1].toBytes()[0..8]});
-                    dbg("[ZOLT] ROUND0_VERIFY: p0+p1 = {{ {any} }}\n", .{manual_p0.add(manual_p1).toBytes()[0..8]});
-                    dbg("[ZOLT] ROUND0_VERIFY: input_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()[0..8]});
                 }
 
                 // RegistersClaimReduction: degree 2
@@ -529,39 +524,34 @@ pub fn Stage3Prover(comptime F: type) type {
                 instr_prover.bind(r_j);
                 reg_prover.bind(r_j);
 
-                // DEBUG: Verify shift prover's accumulated claim after each Phase 2 bind
-                if (shift_prover.in_phase2 and round < num_rounds - 1) {
-                    const shift_ws = shift_prover.current_witness_size;
-                    var shift_total = F.zero();
-                    for (0..shift_ws) |j| {
-                        const eq_out = shift_prover.phase2_eq_plus_one_outer.?[j];
-                        const eq_prod_val = shift_prover.phase2_eq_plus_one_prod.?[j];
-                        const upc = shift_prover.unexpanded_pc[j];
-                        const pc_val = shift_prover.pc[j];
-                        const virt = shift_prover.is_virtual[j];
-                        const first = shift_prover.is_first_in_sequence[j];
-                        const noop = shift_prover.is_noop[j];
-                        const val = upc.add(shift_prover.gamma_powers[1].mul(pc_val))
-                            .add(shift_prover.gamma_powers[2].mul(virt))
-                            .add(shift_prover.gamma_powers[3].mul(first));
-                        const term1 = eq_out.mul(val);
-                        const term2 = shift_prover.gamma_powers[4].mul(F.one().sub(noop)).mul(eq_prod_val);
-                        shift_total = shift_total.add(term1).add(term2);
+                if (comptime debug_verbose) {
+                    // DEBUG: Verify shift prover's accumulated claim after each Phase 2 bind
+                    if (shift_prover.in_phase2 and round < num_rounds - 1) {
+                        const shift_ws = shift_prover.current_witness_size;
+                        var shift_total = F.zero();
+                        for (0..shift_ws) |j| {
+                            const eq_out = shift_prover.phase2_eq_plus_one_outer.?[j];
+                            const eq_prod_val = shift_prover.phase2_eq_plus_one_prod.?[j];
+                            const upc_v = shift_prover.unexpanded_pc[j];
+                            const pc_val = shift_prover.pc[j];
+                            const virt = shift_prover.is_virtual[j];
+                            const first = shift_prover.is_first_in_sequence[j];
+                            const noop = shift_prover.is_noop[j];
+                            const val = upc_v.add(shift_prover.gamma_powers[1].mul(pc_val))
+                                .add(shift_prover.gamma_powers[2].mul(virt))
+                                .add(shift_prover.gamma_powers[3].mul(first));
+                            const term1 = eq_out.mul(val);
+                            const term2 = shift_prover.gamma_powers[4].mul(F.one().sub(noop)).mul(eq_prod_val);
+                            shift_total = shift_total.add(term1).add(term2);
+                        }
+                        const shift_verify_match = shift_total.eql(current_shift_claim);
+                        dbg("[ZOLT] SHIFT_PHASE2_VERIFY_ROUND_{}: total_sum = {{ {any} }}, claim = {{ {any} }}, match={}\n", .{ round, shift_total.toBytes()[0..8], current_shift_claim.toBytes()[0..8], shift_verify_match });
                     }
-                    const shift_verify_match = shift_total.eql(current_shift_claim);
-                    dbg("[ZOLT] SHIFT_PHASE2_VERIFY_ROUND_{}: total_sum = {{ {any} }}, claim = {{ {any} }}, match={}\n", .{ round, shift_total.toBytes()[0..8], current_shift_claim.toBytes()[0..8], shift_verify_match });
-                }
 
-                // DEBUG: Track nonzero count and verify sumcheck invariant after each bind
-                {
-                    // Verify sumcheck invariant: does the actual f(0) + f(1) sum match?
-                    // At this point we've just bound with r_j, so current_size is halved
-                    // Let's check the NEXT round's invariant by computing f(0) and f(1) from the new bound values
+                    // DEBUG: Track nonzero count and verify sumcheck invariant after each bind
                     if (round < num_rounds - 1) {
-                        // After binding, current_size is halved
                         const next_half = instr_prover.current_size / 2;
                         if (next_half > 0) {
-                            // Compute f(0) sum over the next round's indices
                             var f0_sum = F.zero();
                             var f1_sum = F.zero();
                             for (0..next_half) |j| {
@@ -582,7 +572,6 @@ pub fn Stage3Prover(comptime F: type) type {
                                 f1_sum = f1_sum.add(contrib_1);
                             }
                             const total_sum = f0_sum.add(f1_sum);
-                            // Compare with the updated current_instr_claim (which was just set to p(r_j))
                             const matches = total_sum.eql(current_instr_claim);
                             if (round >= 5 or !matches) {
                                 dbg("[ZOLT] VERIFY_ROUND_{}: actual_f0+f1 = {{ {any} }}, current_instr_claim = {{ {any} }}, match={}\n", .{ round + 1, total_sum.toBytes()[0..8], current_instr_claim.toBytes()[0..8], matches });
@@ -1359,182 +1348,184 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 Q_1_prod[x_lo] = q_1_prod_acc.mul(gamma_powers[4]);
             }
 
-            // DEBUG: Print initial witness MLE values
-            dbg("\n[ZOLT] SHIFT_INIT: trace_len={d}, prefix_size={d}, suffix_size={d}\n", .{ trace_len, prefix_size, suffix_size });
-            dbg("[ZOLT] SHIFT_INIT: unexpanded_pc[0..4] = ", .{});
-            for (0..@min(4, trace_len)) |i| {
-                dbg("{any} ", .{unexpanded_pc[i].toBytes()[0..8]});
-            }
-            dbg("\n", .{});
+            if (comptime debug_verbose) {
+                // DEBUG: Print initial witness MLE values
+                dbg("\n[ZOLT] SHIFT_INIT: trace_len={d}, prefix_size={d}, suffix_size={d}\n", .{ trace_len, prefix_size, suffix_size });
+                dbg("[ZOLT] SHIFT_INIT: unexpanded_pc[0..4] = ", .{});
+                for (0..@min(4, trace_len)) |i| {
+                    dbg("{any} ", .{unexpanded_pc[i].toBytes()[0..8]});
+                }
+                dbg("\n", .{});
 
-            // DEBUG: Print last cycle's Next values (should be 0 for last cycle)
-            const last_idx = trace_len - 1;
-            const last_witness = &cycle_witnesses[last_idx].values;
-            dbg("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextUPC = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextUnexpandedPC.toIndex()].toBytes()[0..8] });
-            dbg("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextPC = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextPC.toIndex()].toBytes()[0..8] });
-            dbg("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextIsVirtual = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextIsVirtual.toIndex()].toBytes()[0..8] });
-            dbg("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextIsFirst = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextIsFirstInSequence.toIndex()].toBytes()[0..8] });
+                // DEBUG: Print last cycle's Next values (should be 0 for last cycle)
+                const last_idx = trace_len - 1;
+                const last_witness = &cycle_witnesses[last_idx].values;
+                dbg("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextUPC = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextUnexpandedPC.toIndex()].toBytes()[0..8] });
+                dbg("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextPC = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextPC.toIndex()].toBytes()[0..8] });
+                dbg("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextIsVirtual = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextIsVirtual.toIndex()].toBytes()[0..8] });
+                dbg("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextIsFirst = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextIsFirstInSequence.toIndex()].toBytes()[0..8] });
 
-            // DEBUG: Verify NextUPC[j] = UPC[j+1] relationship for all j
-            var next_shift_mismatch_count: usize = 0;
-            for (0..trace_len - 1) |check_j| {
-                const next_upc_j = cycle_witnesses[check_j].values[R1CSInputIndex.NextUnexpandedPC.toIndex()];
-                const upc_j_plus_1 = cycle_witnesses[check_j + 1].values[R1CSInputIndex.UnexpandedPC.toIndex()];
-                if (!next_upc_j.eql(upc_j_plus_1)) {
-                    if (next_shift_mismatch_count < 5) {
-                        dbg("[ZOLT] SHIFT_INIT: MISMATCH NextUPC[{}] != UPC[{}]: {any} != {any}\n", .{ check_j, check_j + 1, next_upc_j.toBytes()[0..8], upc_j_plus_1.toBytes()[0..8] });
+                // DEBUG: Verify NextUPC[j] = UPC[j+1] relationship for all j
+                var next_shift_mismatch_count: usize = 0;
+                for (0..trace_len - 1) |check_j| {
+                    const next_upc_j = cycle_witnesses[check_j].values[R1CSInputIndex.NextUnexpandedPC.toIndex()];
+                    const upc_j_plus_1 = cycle_witnesses[check_j + 1].values[R1CSInputIndex.UnexpandedPC.toIndex()];
+                    if (!next_upc_j.eql(upc_j_plus_1)) {
+                        if (next_shift_mismatch_count < 5) {
+                            dbg("[ZOLT] SHIFT_INIT: MISMATCH NextUPC[{}] != UPC[{}]: {any} != {any}\n", .{ check_j, check_j + 1, next_upc_j.toBytes()[0..8], upc_j_plus_1.toBytes()[0..8] });
+                        }
+                        next_shift_mismatch_count += 1;
                     }
-                    next_shift_mismatch_count += 1;
                 }
-            }
-            if (next_shift_mismatch_count > 0) {
-                dbg("[ZOLT] SHIFT_INIT: Found {} mismatches in NextUPC[j] = UPC[j+1] relationship!\n", .{next_shift_mismatch_count});
-            } else {
-                dbg("[ZOLT] SHIFT_INIT: NextUPC[j] = UPC[j+1] verified for all {} cycles\n", .{trace_len - 1});
-            }
-
-            // DEBUG: Verify grand sum = Σ P[j]*Q[j]
-            var grand_sum = F.zero();
-            for (0..prefix_size) |j| {
-                grand_sum = grand_sum.add(P_0_outer[j].mul(Q_0_outer[j]));
-                grand_sum = grand_sum.add(P_1_outer[j].mul(Q_1_outer[j]));
-                grand_sum = grand_sum.add(P_0_prod[j].mul(Q_0_prod[j]));
-                grand_sum = grand_sum.add(P_1_prod[j].mul(Q_1_prod[j]));
-            }
-            dbg("[ZOLT] SHIFT_INIT: grand_sum(P*Q) = {{ {any} }}\n", .{grand_sum.toBytes()});
-
-            // DEBUG: Compute direct sum without prefix-suffix optimization
-            // sum = Σ_j eq+1(r_outer, j) * [upc(j) + γ*pc(j) + γ²*virt(j) + γ³*first(j)]
-            //     + γ⁴ * Σ_j eq+1(r_prod, j) * (1 - noop(j))
-            var direct_sum = F.zero();
-            const j_bits = try allocator.alloc(F, n_vars);
-            defer allocator.free(j_bits);
-            for (0..trace_len) |j| {
-                // Convert j to BIG_ENDIAN bits
-                for (0..n_vars) |k| {
-                    const bit_pos: u6 = @intCast(n_vars - 1 - k);
-                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+                if (next_shift_mismatch_count > 0) {
+                    dbg("[ZOLT] SHIFT_INIT: Found {} mismatches in NextUPC[j] = UPC[j+1] relationship!\n", .{next_shift_mismatch_count});
+                } else {
+                    dbg("[ZOLT] SHIFT_INIT: NextUPC[j] = UPC[j+1] verified for all {} cycles\n", .{trace_len - 1});
                 }
 
-                const eq_plus_one_outer = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
-                const eq_plus_one_prod = poly_mod.EqPlusOnePolynomial(F).mle(r_product, j_bits);
+                // DEBUG: Verify grand sum = Σ P[j]*Q[j]
+                var grand_sum = F.zero();
+                for (0..prefix_size) |j| {
+                    grand_sum = grand_sum.add(P_0_outer[j].mul(Q_0_outer[j]));
+                    grand_sum = grand_sum.add(P_1_outer[j].mul(Q_1_outer[j]));
+                    grand_sum = grand_sum.add(P_0_prod[j].mul(Q_0_prod[j]));
+                    grand_sum = grand_sum.add(P_1_prod[j].mul(Q_1_prod[j]));
+                }
+                dbg("[ZOLT] SHIFT_INIT: grand_sum(P*Q) = {{ {any} }}\n", .{grand_sum.toBytes()});
 
-                const witness = &cycle_witnesses[j].values;
-                const upc = witness[R1CSInputIndex.UnexpandedPC.toIndex()];
-                const pc_val = witness[R1CSInputIndex.PC.toIndex()];
-                const virt = witness[R1CSInputIndex.FlagVirtualInstruction.toIndex()];
-                const first = witness[R1CSInputIndex.FlagIsFirstInSequence.toIndex()];
-                const noop = witness[R1CSInputIndex.FlagIsNoop.toIndex()];
+                // DEBUG: Compute direct sum without prefix-suffix optimization
+                // sum = Σ_j eq+1(r_outer, j) * [upc(j) + γ*pc(j) + γ²*virt(j) + γ³*first(j)]
+                //     + γ⁴ * Σ_j eq+1(r_prod, j) * (1 - noop(j))
+                var direct_sum = F.zero();
+                const j_bits = try allocator.alloc(F, n_vars);
+                defer allocator.free(j_bits);
+                for (0..trace_len) |j| {
+                    // Convert j to BIG_ENDIAN bits
+                    for (0..n_vars) |k| {
+                        const bit_pos: u6 = @intCast(n_vars - 1 - k);
+                        j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+                    }
 
-                var v = upc;
-                v = v.add(gamma_powers[1].mul(pc_val));
-                v = v.add(gamma_powers[2].mul(virt));
-                v = v.add(gamma_powers[3].mul(first));
+                    const eq_plus_one_outer = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
+                    const eq_plus_one_prod = poly_mod.EqPlusOnePolynomial(F).mle(r_product, j_bits);
 
-                direct_sum = direct_sum.add(eq_plus_one_outer.mul(v));
-                direct_sum = direct_sum.add(gamma_powers[4].mul(eq_plus_one_prod).mul(F.one().sub(noop)));
-            }
-            dbg("[ZOLT] SHIFT_INIT: direct_sum = {{ {any} }}\n", .{direct_sum.toBytes()});
+                    const witness = &cycle_witnesses[j].values;
+                    const upc = witness[R1CSInputIndex.UnexpandedPC.toIndex()];
+                    const pc_val = witness[R1CSInputIndex.PC.toIndex()];
+                    const virt = witness[R1CSInputIndex.FlagVirtualInstruction.toIndex()];
+                    const first = witness[R1CSInputIndex.FlagIsFirstInSequence.toIndex()];
+                    const noop = witness[R1CSInputIndex.FlagIsNoop.toIndex()];
 
-            // DEBUG: Compute what the input_claim should be based on "Next" polynomial evaluations
-            // This uses the SAME witness but reads from NextUnexpandedPC, NextPC, etc. with EQ weighting
-            var next_sum = F.zero();
-            for (0..trace_len) |jj| {
-                // Convert jj to BIG_ENDIAN bits
-                for (0..n_vars) |k| {
-                    const bit_pos: u6 = @intCast(n_vars - 1 - k);
-                    j_bits[k] = if ((jj >> bit_pos) & 1 == 1) F.one() else F.zero();
+                    var v = upc;
+                    v = v.add(gamma_powers[1].mul(pc_val));
+                    v = v.add(gamma_powers[2].mul(virt));
+                    v = v.add(gamma_powers[3].mul(first));
+
+                    direct_sum = direct_sum.add(eq_plus_one_outer.mul(v));
+                    direct_sum = direct_sum.add(gamma_powers[4].mul(eq_plus_one_prod).mul(F.one().sub(noop)));
+                }
+                dbg("[ZOLT] SHIFT_INIT: direct_sum = {{ {any} }}\n", .{direct_sum.toBytes()});
+
+                // DEBUG: Compute what the input_claim should be based on "Next" polynomial evaluations
+                // This uses the SAME witness but reads from NextUnexpandedPC, NextPC, etc. with EQ weighting
+                var next_sum = F.zero();
+                for (0..trace_len) |jj| {
+                    // Convert jj to BIG_ENDIAN bits
+                    for (0..n_vars) |k| {
+                        const bit_pos: u6 = @intCast(n_vars - 1 - k);
+                        j_bits[k] = if ((jj >> bit_pos) & 1 == 1) F.one() else F.zero();
+                    }
+
+                    const eq_outer = poly_mod.EqPolynomial(F).mle(r_outer, j_bits);
+                    const eq_prod = poly_mod.EqPolynomial(F).mle(r_product, j_bits);
+
+                    const witness = &cycle_witnesses[jj].values;
+                    const next_upc = witness[R1CSInputIndex.NextUnexpandedPC.toIndex()];
+                    const next_pc = witness[R1CSInputIndex.NextPC.toIndex()];
+                    const next_virt = witness[R1CSInputIndex.NextIsVirtual.toIndex()];
+                    const next_first = witness[R1CSInputIndex.NextIsFirstInSequence.toIndex()];
+                    const next_noop = witness[R1CSInputIndex.FlagIsNoop.toIndex()]; // FlagIsNoop is the "NextIsNoop" from product virtualization
+
+                    var next_v = next_upc;
+                    next_v = next_v.add(gamma_powers[1].mul(next_pc));
+                    next_v = next_v.add(gamma_powers[2].mul(next_virt));
+                    next_v = next_v.add(gamma_powers[3].mul(next_first));
+
+                    next_sum = next_sum.add(eq_outer.mul(next_v));
+                    next_sum = next_sum.add(gamma_powers[4].mul(eq_prod).mul(F.one().sub(next_noop)));
+                }
+                dbg("[ZOLT] SHIFT_INIT: next_sum (using Next polys with eq) = {{ {any} }}\n", .{next_sum.toBytes()});
+
+                // DEBUG: Compute the difference and the expected boundary term
+                const diff = next_sum.sub(direct_sum);
+                dbg("[ZOLT] SHIFT_INIT: next_sum - direct_sum = {{ {any} }}\n", .{diff.toBytes()});
+
+                // The boundary term should be eq(r, N-1) * (batched Next values at index N-1)
+                // This is the term that's in next_sum but not in direct_sum
+
+                // Also compare next_sum to input_claim - if r_outer is correct, they should match
+                // (Assuming the opening claims were computed at r_outer)
+                dbg("[ZOLT] SHIFT_INIT: r_outer[0] = {{ {any} }}\n", .{r_outer[0].toBytes()[0..8]});
+                dbg("[ZOLT] SHIFT_INIT: r_outer[last] = {{ {any} }}\n", .{r_outer[r_outer.len - 1].toBytes()[0..8]});
+
+                // DEBUG: Verify the relationship Next[j] = Current[j+1]
+                dbg("[ZOLT] SHIFT_INIT: Checking Next[j] = Current[j+1] relationship:\n", .{});
+                for (0..@min(5, trace_len - 1)) |test_j| {
+                    _ = cycle_witnesses[test_j].values[R1CSInputIndex.UnexpandedPC.toIndex()]; // Current j
+                    const next_upc_j = cycle_witnesses[test_j].values[R1CSInputIndex.NextUnexpandedPC.toIndex()];
+                    const curr_upc_j1 = cycle_witnesses[test_j + 1].values[R1CSInputIndex.UnexpandedPC.toIndex()];
+                    dbg("  j={d}: NextUPC[j]={any}, UPC[j+1]={any}, match={}\n", .{
+                        test_j,
+                        next_upc_j.toBytes()[0..8],
+                        curr_upc_j1.toBytes()[0..8],
+                        next_upc_j.eql(curr_upc_j1),
+                    });
                 }
 
-                const eq_outer = poly_mod.EqPolynomial(F).mle(r_outer, j_bits);
-                const eq_prod = poly_mod.EqPolynomial(F).mle(r_product, j_bits);
+                // DEBUG: Verify eq(r, k-1) = eq+1(r, k) relationship and boundary behavior
+                dbg("[ZOLT] SHIFT_INIT: Verifying eq(r, k-1) = eq+1(r, k):\n", .{});
 
-                const witness = &cycle_witnesses[jj].values;
-                const next_upc = witness[R1CSInputIndex.NextUnexpandedPC.toIndex()];
-                const next_pc = witness[R1CSInputIndex.NextPC.toIndex()];
-                const next_virt = witness[R1CSInputIndex.NextIsVirtual.toIndex()];
-                const next_first = witness[R1CSInputIndex.NextIsFirstInSequence.toIndex()];
-                const next_noop = witness[R1CSInputIndex.FlagIsNoop.toIndex()]; // FlagIsNoop is the "NextIsNoop" from product virtualization
+                // Check eq+1(r, 0) - this is the boundary case
+                @memset(j_bits, F.zero()); // j = 0 in bits
+                const eq_plus_one_at_0 = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
+                dbg("  eq+1(r, 0) = {any} (should be ~0 unless r=max)\n", .{eq_plus_one_at_0.toBytes()[0..8]});
 
-                var next_v = next_upc;
-                next_v = next_v.add(gamma_powers[1].mul(next_pc));
-                next_v = next_v.add(gamma_powers[2].mul(next_virt));
-                next_v = next_v.add(gamma_powers[3].mul(next_first));
-
-                next_sum = next_sum.add(eq_outer.mul(next_v));
-                next_sum = next_sum.add(gamma_powers[4].mul(eq_prod).mul(F.one().sub(next_noop)));
-            }
-            dbg("[ZOLT] SHIFT_INIT: next_sum (using Next polys with eq) = {{ {any} }}\n", .{next_sum.toBytes()});
-
-            // DEBUG: Compute the difference and the expected boundary term
-            const diff = next_sum.sub(direct_sum);
-            dbg("[ZOLT] SHIFT_INIT: next_sum - direct_sum = {{ {any} }}\n", .{diff.toBytes()});
-
-            // The boundary term should be eq(r, N-1) * (batched Next values at index N-1)
-            // This is the term that's in next_sum but not in direct_sum
-
-            // Also compare next_sum to input_claim - if r_outer is correct, they should match
-            // (Assuming the opening claims were computed at r_outer)
-            dbg("[ZOLT] SHIFT_INIT: r_outer[0] = {{ {any} }}\n", .{r_outer[0].toBytes()[0..8]});
-            dbg("[ZOLT] SHIFT_INIT: r_outer[last] = {{ {any} }}\n", .{r_outer[r_outer.len - 1].toBytes()[0..8]});
-
-            // DEBUG: Verify the relationship Next[j] = Current[j+1]
-            dbg("[ZOLT] SHIFT_INIT: Checking Next[j] = Current[j+1] relationship:\n", .{});
-            for (0..@min(5, trace_len - 1)) |test_j| {
-                _ = cycle_witnesses[test_j].values[R1CSInputIndex.UnexpandedPC.toIndex()]; // Current j
-                const next_upc_j = cycle_witnesses[test_j].values[R1CSInputIndex.NextUnexpandedPC.toIndex()];
-                const curr_upc_j1 = cycle_witnesses[test_j + 1].values[R1CSInputIndex.UnexpandedPC.toIndex()];
-                dbg("  j={d}: NextUPC[j]={any}, UPC[j+1]={any}, match={}\n", .{
-                    test_j,
-                    next_upc_j.toBytes()[0..8],
-                    curr_upc_j1.toBytes()[0..8],
-                    next_upc_j.eql(curr_upc_j1),
-                });
-            }
-
-            // DEBUG: Verify eq(r, k-1) = eq+1(r, k) relationship and boundary behavior
-            dbg("[ZOLT] SHIFT_INIT: Verifying eq(r, k-1) = eq+1(r, k):\n", .{});
-
-            // Check eq+1(r, 0) - this is the boundary case
-            @memset(j_bits, F.zero()); // j = 0 in bits
-            const eq_plus_one_at_0 = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
-            dbg("  eq+1(r, 0) = {any} (should be ~0 unless r=max)\n", .{eq_plus_one_at_0.toBytes()[0..8]});
-
-            // Check eq+1(r, N-1) where N = trace_len - this is also a boundary case
-            const n_minus_1 = trace_len - 1;
-            for (0..n_vars) |bit_idx| {
-                const bit_pos: u6 = @intCast(n_vars - 1 - bit_idx);
-                j_bits[bit_idx] = if ((n_minus_1 >> bit_pos) & 1 == 1) F.one() else F.zero();
-            }
-            const eq_plus_one_at_n_minus_1 = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
-            dbg("  eq+1(r, N-1={d}) = {any} (should be 0 by design)\n", .{ n_minus_1, eq_plus_one_at_n_minus_1.toBytes()[0..8] });
-
-            // Check eq(r, N-1) for comparison
-            const eq_at_n_minus_1 = poly_mod.EqPolynomial(F).mle(r_outer, j_bits);
-            dbg("  eq(r, N-1={d}) = {any}\n", .{ n_minus_1, eq_at_n_minus_1.toBytes()[0..8] });
-
-            for (1..@min(5, trace_len)) |k| {
-                // Compute eq(r_outer, k-1)
+                // Check eq+1(r, N-1) where N = trace_len - this is also a boundary case
+                const n_minus_1 = trace_len - 1;
                 for (0..n_vars) |bit_idx| {
                     const bit_pos: u6 = @intCast(n_vars - 1 - bit_idx);
-                    j_bits[bit_idx] = if (((k - 1) >> bit_pos) & 1 == 1) F.one() else F.zero();
+                    j_bits[bit_idx] = if ((n_minus_1 >> bit_pos) & 1 == 1) F.one() else F.zero();
                 }
-                const eq_k_minus_1 = poly_mod.EqPolynomial(F).mle(r_outer, j_bits);
+                const eq_plus_one_at_n_minus_1 = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
+                dbg("  eq+1(r, N-1={d}) = {any} (should be 0 by design)\n", .{ n_minus_1, eq_plus_one_at_n_minus_1.toBytes()[0..8] });
 
-                // Compute eq+1(r_outer, k)
-                for (0..n_vars) |bit_idx| {
-                    const bit_pos: u6 = @intCast(n_vars - 1 - bit_idx);
-                    j_bits[bit_idx] = if ((k >> bit_pos) & 1 == 1) F.one() else F.zero();
+                // Check eq(r, N-1) for comparison
+                const eq_at_n_minus_1 = poly_mod.EqPolynomial(F).mle(r_outer, j_bits);
+                dbg("  eq(r, N-1={d}) = {any}\n", .{ n_minus_1, eq_at_n_minus_1.toBytes()[0..8] });
+
+                for (1..@min(5, trace_len)) |k| {
+                    // Compute eq(r_outer, k-1)
+                    for (0..n_vars) |bit_idx| {
+                        const bit_pos: u6 = @intCast(n_vars - 1 - bit_idx);
+                        j_bits[bit_idx] = if (((k - 1) >> bit_pos) & 1 == 1) F.one() else F.zero();
+                    }
+                    const eq_k_minus_1 = poly_mod.EqPolynomial(F).mle(r_outer, j_bits);
+
+                    // Compute eq+1(r_outer, k)
+                    for (0..n_vars) |bit_idx| {
+                        const bit_pos: u6 = @intCast(n_vars - 1 - bit_idx);
+                        j_bits[bit_idx] = if ((k >> bit_pos) & 1 == 1) F.one() else F.zero();
+                    }
+                    const eq_plus_one_k = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
+
+                    const match_ = eq_k_minus_1.eql(eq_plus_one_k);
+                    dbg("  k={d}: eq(r,k-1)={any}, eq+1(r,k)={any}, match={}\n", .{
+                        k,
+                        eq_k_minus_1.toBytes()[0..8],
+                        eq_plus_one_k.toBytes()[0..8],
+                        match_,
+                    });
                 }
-                const eq_plus_one_k = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
-
-                const match = eq_k_minus_1.eql(eq_plus_one_k);
-                dbg("  k={d}: eq(r,k-1)={any}, eq+1(r,k)={any}, match={}\n", .{
-                    k,
-                    eq_k_minus_1.toBytes()[0..8],
-                    eq_plus_one_k.toBytes()[0..8],
-                    match,
-                });
             }
 
             return Self{

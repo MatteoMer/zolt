@@ -427,6 +427,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
             self.allocator.free(az_evals);
             self.allocator.free(bz_evals);
 
+            // Allocate scratch buffers for parallel binding (double-buffer technique)
+            if (self.thread_pool != null) {
+                self.az_poly.?.scratch = try self.allocator.alloc(F, poly_size);
+                self.bz_poly.?.scratch = try self.allocator.alloc(F, poly_size);
+            }
+
             // DEBUG: Print first few materialized Az*Bz products
             if (self.az_poly != null and self.bz_poly != null) {
                 const az_dbg = &(self.az_poly.?);
@@ -463,69 +469,111 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             const num_xin_bits: u6 = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
 
-            // Allocate result array
+            const total_pairs = E_out.len * E_in.len;
+            const az_bound_len = az_poly.boundLen();
+
+            const BuildCtx = struct {
+                az_evals: []const F,
+                bz_evals: []const F,
+                E_out: []const F,
+                E_in: []const F,
+                num_xin_bits: u6,
+                grid_size: usize,
+                three_pow_dim: usize,
+                az_bound_len: usize,
+                window_size_val: usize,
+            };
+
+            const build_ctx = BuildCtx{
+                .az_evals = az_poly.evaluations,
+                .bz_evals = bz_poly.evaluations,
+                .E_out = E_out,
+                .E_in = E_in,
+                .num_xin_bits = num_xin_bits,
+                .grid_size = grid_size,
+                .three_pow_dim = three_pow_dim,
+                .az_bound_len = az_bound_len,
+                .window_size_val = window_size,
+            };
+
+            const mapFn = struct {
+                fn f(ctx: BuildCtx, start: usize, end: usize) [3]F {
+                    var local_ans = [3]F{ F.zero(), F.zero(), F.zero() };
+                    // Stack-allocate scratch buffers (window_size=1: grid_size=2, three_pow_dim=3)
+                    std.debug.assert(ctx.grid_size == 2 and ctx.three_pow_dim == 3);
+                    var az_grid: [2]F = undefined;
+                    var bz_grid: [2]F = undefined;
+                    var buff_a: [3]F = undefined;
+                    var buff_b: [3]F = undefined;
+
+                    var pair_idx = start;
+                    while (pair_idx < end) : (pair_idx += 1) {
+                        const x_out = pair_idx / ctx.E_in.len;
+                        const x_in = pair_idx % ctx.E_in.len;
+                        const i = (x_out << ctx.num_xin_bits) | x_in;
+
+                        // Extract az and bz values for this pair
+                        for (0..ctx.grid_size) |j| {
+                            const index = ctx.grid_size * i + j;
+                            if (index < ctx.az_bound_len) {
+                                az_grid[j] = ctx.az_evals[index];
+                                bz_grid[j] = ctx.bz_evals[index];
+                            } else {
+                                az_grid[j] = F.zero();
+                                bz_grid[j] = F.zero();
+                            }
+                        }
+
+                        // Expand linear grids to multiquadratic
+                        @memset(&buff_a, F.zero());
+                        @memset(&buff_b, F.zero());
+
+                        // Copy boolean evaluations to ternary positions
+                        for (0..ctx.grid_size) |linear_idx| {
+                            var ternary_idx: usize = 0;
+                            var pow3_factor: usize = 1;
+                            var idx = linear_idx;
+                            for (0..ctx.window_size_val) |_| {
+                                const bit = idx & 1;
+                                ternary_idx += bit * pow3_factor;
+                                pow3_factor *= 3;
+                                idx >>= 1;
+                            }
+                            buff_a[ternary_idx] = az_grid[linear_idx];
+                            buff_b[ternary_idx] = bz_grid[linear_idx];
+                        }
+
+                        // Expand to include infinity values: f(∞) = f(1) - f(0)
+                        multiquadratic.expandGrid(F, ctx.window_size_val, &buff_a);
+                        multiquadratic.expandGrid(F, ctx.window_size_val, &buff_b);
+
+                        // Accumulate Az * Bz * E_out * E_in
+                        const eq_weight = ctx.E_out[x_out].mul(ctx.E_in[x_in]);
+                        for (0..ctx.three_pow_dim) |idx| {
+                            local_ans[idx] = local_ans[idx].add(buff_a[idx].mul(buff_b[idx]).mul(eq_weight));
+                        }
+                    }
+                    return local_ans;
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: [3]F, b: [3]F) [3]F {
+                    return [3]F{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]) };
+                }
+            }.f;
+
+            const identity = [3]F{ F.zero(), F.zero(), F.zero() };
+            const ans_result = if (self.thread_pool) |tp|
+                tp.parallelReduce([3]F, total_pairs, identity, build_ctx, mapFn, reduceFn)
+            else
+                mapFn(build_ctx, 0, total_pairs);
+
+            // Convert [3]F to allocated slice for MultiquadraticPolynomial
             var ans = try self.allocator.alloc(F, three_pow_dim);
             errdefer self.allocator.free(ans);
-            @memset(ans, F.zero());
-
-            // Allocate temporary buffers for multiquadratic expansion
-            var az_grid = try self.allocator.alloc(F, grid_size);
-            defer self.allocator.free(az_grid);
-            var bz_grid = try self.allocator.alloc(F, grid_size);
-            defer self.allocator.free(bz_grid);
-            var buff_a = try self.allocator.alloc(F, three_pow_dim);
-            defer self.allocator.free(buff_a);
-            var buff_b = try self.allocator.alloc(F, three_pow_dim);
-            defer self.allocator.free(buff_b);
-
-            // For each (x_out, x_in) pair
-            for (0..E_out.len) |x_out| {
-                for (0..E_in.len) |x_in| {
-                    const i = (x_out << num_xin_bits) | x_in;
-
-                    // Extract az and bz values for this pair
-                    for (0..grid_size) |j| {
-                        const index = grid_size * i + j;
-                        if (index < az_poly.boundLen()) {
-                            az_grid[j] = az_poly.evaluations[index];
-                            bz_grid[j] = bz_poly.evaluations[index];
-                        } else {
-                            az_grid[j] = F.zero();
-                            bz_grid[j] = F.zero();
-                        }
-                    }
-
-                    // Expand linear grids to multiquadratic
-                    // For window_size = 1: buff[0] = grid[0], buff[1] = grid[1], buff[2] = grid[1] - grid[0]
-                    @memset(buff_a, F.zero());
-                    @memset(buff_b, F.zero());
-
-                    // Copy boolean evaluations to ternary positions
-                    for (0..grid_size) |linear_idx| {
-                        // Map linear index to ternary index (bits stay in {0,1})
-                        var ternary_idx: usize = 0;
-                        var pow3_factor: usize = 1;
-                        var idx = linear_idx;
-                        for (0..window_size) |_| {
-                            const bit = idx & 1;
-                            ternary_idx += bit * pow3_factor;
-                            pow3_factor *= 3;
-                            idx >>= 1;
-                        }
-                        buff_a[ternary_idx] = az_grid[linear_idx];
-                        buff_b[ternary_idx] = bz_grid[linear_idx];
-                    }
-
-                    // Expand to include infinity values: f(∞) = f(1) - f(0)
-                    multiquadratic.expandGrid(F, window_size, buff_a);
-                    multiquadratic.expandGrid(F, window_size, buff_b);
-
-                    // Accumulate Az * Bz * E_out * E_in
-                    const eq_weight = E_out[x_out].mul(E_in[x_in]);
-                    for (0..three_pow_dim) |idx| {
-                        ans[idx] = ans[idx].add(buff_a[idx].mul(buff_b[idx]).mul(eq_weight));
-                    }
-                }
+            for (0..three_pow_dim) |idx| {
+                ans[idx] = ans_result[idx];
             }
 
             // Create the MultiquadraticPolynomial
@@ -1281,8 +1329,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
             }
 
             // DEBUG: Print all Lagrange weights
-            for (0..FIRST_GROUP_SIZE) |i| {
-                dbg("[ZOLT] computeLagrangeEvalsAtR0: w[{d}] = {any}\n", .{ i, self.lagrange_evals_r0[i].toBytesBE() });
+            if (comptime debug_verbose) {
+                for (0..FIRST_GROUP_SIZE) |i| {
+                    dbg("[ZOLT] computeLagrangeEvalsAtR0: w[{d}] = {any}\n", .{ i, self.lagrange_evals_r0[i].toBytesBE() });
+                }
             }
         }
 
@@ -1348,6 +1398,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 //
                 // Use E_out and E_in factored representation for the "head" part,
                 // and sum over the window variable separately.
+                if (comptime debug_verbose) {
                 if (self.az_poly != null and self.bz_poly != null) {
                     const az_p = &(self.az_poly.?);
                     const bz_p = &(self.bz_poly.?);
@@ -1447,9 +1498,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         }
                     }
                 }
+                } // end if (comptime debug_verbose) for BRUTE_FORCE2
 
                 // DEBUG3: Compute sum using UniSkip's factorization but with materialized Az/Bz
                 // This isolates whether the issue is in eq tables or Az/Bz values
+                if (comptime debug_verbose) {
                 if (self.az_poly != null and self.bz_poly != null) {
                     const az_p3 = &(self.az_poly.?);
                     const bz_p3 = &(self.bz_poly.?);
@@ -1683,6 +1736,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         }
                     }
                 }
+                } // end if (comptime debug_verbose) for DEBUG3+DEBUG5+DEBUG6+DEBUG4
             }
 
             // Use t_prime_poly for all rounds (linear-only schedule)
@@ -2052,28 +2106,14 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 t_prime.bind(r);
             }
 
-            // 3. Bind Az/Bz polynomials LAST (parallelized with join when both present)
+            // 3. Bind Az/Bz polynomials LAST
             // ALL rounds bind Az/Bz polynomials (this is critical for next_window to work!)
             if (self.az_poly != null and self.bz_poly != null) {
-                const BindCtx = struct {
-                    poly: *poly_mod.DensePolynomial(F),
-                    r_val: F,
-                };
-                const bindFn = struct {
-                    fn f(ctx: BindCtx) void {
-                        ctx.poly.bindLow(ctx.r_val);
-                    }
-                }.f;
-
                 if (self.thread_pool) |tp| {
-                    _ = tp.join(
-                        void,
-                        void,
-                        BindCtx{ .poly = &(self.az_poly.?), .r_val = r },
-                        bindFn,
-                        BindCtx{ .poly = &(self.bz_poly.?), .r_val = r },
-                        bindFn,
-                    );
+                    // Each bindLowParallel uses all threads internally (parallelForForce).
+                    // Sequential calls are better than join(2 threads) for large polynomials.
+                    self.az_poly.?.bindLowParallel(r, tp);
+                    self.bz_poly.?.bindLowParallel(r, tp);
                 } else {
                     self.az_poly.?.bindLow(r);
                     self.bz_poly.?.bindLow(r);

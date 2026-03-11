@@ -1767,6 +1767,7 @@ pub fn condenseUEvals(
     lookup_indices: []const u128,
     phase: usize,
     phases: usize,
+    tp: ?*ThreadPool,
 ) void {
     const log_m = LOG_K / phases;
     const m_mask: u128 = (@as(u128, 1) << @intCast(log_m)) - 1;
@@ -1774,26 +1775,43 @@ pub fn condenseUEvals(
     // Number of suffix bits remaining after this phase
     const suffix_bits = (phases - phase) * log_m;
 
-    var max_k_bound: u128 = 0;
-    for (lookup_indices, 0..) |k, j| {
-        // Extract the bound prefix (the bits that have been bound in previous phases)
-        const prefix = k >> @intCast(suffix_bits);
-        const k_prefix_raw = prefix & m_mask;
+    if (tp) |pool| {
+        const Ctx = struct {
+            u_ev: []F,
+            v_ptr: *const ExpandingTable(F),
+            indices: []const u128,
+            s_bits: usize,
+            mask: u128,
+        };
+        const ctx = Ctx{
+            .u_ev = u_evals,
+            .v_ptr = v,
+            .indices = lookup_indices,
+            .s_bits = suffix_bits,
+            .mask = m_mask,
+        };
+        pool.parallelForForce(u_evals.len, ctx, struct {
+            fn f(c: Ctx, j: usize) void {
+                const k = c.indices[j];
+                const prefix = k >> @intCast(c.s_bits);
+                const k_bound: usize = @intCast(prefix & c.mask);
+                c.u_ev[j] = c.u_ev[j].mul(c.v_ptr.get(k_bound));
+            }
+        }.f);
+    } else {
+        for (lookup_indices, 0..) |k, j| {
+            const prefix = k >> @intCast(suffix_bits);
+            const k_prefix_raw = prefix & m_mask;
+            const k_bound = k_prefix_raw;
 
-        // NOTE: Jolt uses the prefix bits directly without reversal
-        // The expanding table indexing in Jolt appears to match this convention
-        const k_bound = k_prefix_raw;
-
-        if (k_bound > max_k_bound) max_k_bound = k_bound;
-
-        // Multiply by the expanding table value
-        if (k_bound >= v.getLen()) {
-            dbg("[CONDENSE] ERROR: k_bound={} >= v.len={} at j={}, phase={}, suffix_bits={}, k=0x{x:0>32}\n", .{ k_bound, v.getLen(), j, phase, suffix_bits, k });
-            @panic("k_bound out of range");
+            if (k_bound >= v.getLen()) {
+                dbg("[CONDENSE] ERROR: k_bound={} >= v.len={} at j={}, phase={}, suffix_bits={}, k=0x{x:0>32}\n", .{ k_bound, v.getLen(), j, phase, suffix_bits, k });
+                @panic("k_bound out of range");
+            }
+            u_evals[j] = u_evals[j].mul(v.get(@intCast(k_bound)));
         }
-        u_evals[j] = u_evals[j].mul(v.get(@intCast(k_bound)));
     }
-    dbg("[CONDENSE] phase={}, suffix_bits={}, max_k_bound={}\n", .{ phase, suffix_bits, max_k_bound });
+    dbg("[CONDENSE] phase={}, suffix_bits={}, max_k_bound={}\n", .{ phase, suffix_bits, 0 });
 }
 
 // ============================================================================

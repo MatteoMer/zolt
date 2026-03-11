@@ -2831,6 +2831,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // where w[i] = r_reduction[n-1-i] (original challenge) and c = sumcheck challenge
             var lookups_current_scalar = F.one();
 
+            // Split-eq tables for cycle rounds: factored eq polynomial
+            // E_in covers r_reduction[0..m_in], E_out covers r_reduction[m_in..n_cycle_vars-1]
+            // eq_prefix(j) = E_out[j >> m_in] * E_in[j & ((1 << m_in) - 1)]
+            // Initialized lazily at the start of the first cycle round.
+            const MAX_SPLIT_EQ_SIZE = 1 << 10; // supports up to n_cycle_vars=21 (split ~10/11)
+            var split_eq_E_in: [MAX_SPLIT_EQ_SIZE]F = undefined;
+            var split_eq_E_out: [MAX_SPLIT_EQ_SIZE]F = undefined;
+            var split_eq_m_in: usize = 0; // number of variables in E_in
+            var split_eq_E_in_len: usize = 0;
+            var split_eq_E_out_len: usize = 0;
+            var split_eq_initialized = false;
+
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
 
@@ -4341,7 +4353,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Condense u_evals (lookups_eq_evals) using the expanding table from the previous phase
                         // This is the CRITICAL step that was missing!
                         // u_evals[j] *= v[prev_phase][k_bound] where k_bound = prefix & m_mask
-                        condenseUEvals(F, lookups_eq_evals, &expanding_tables[prev_phase], lookup_indices_u128, current_phase, num_phases);
+                        condenseUEvals(F, lookups_eq_evals, &expanding_tables[prev_phase], lookup_indices_u128, current_phase, num_phases, self.thread_pool);
                         if (comptime debug_verbose) {
                             dbg("[STAGE5] Phase {} condense done, now calling initPhase...\n", .{current_phase});
                         }
@@ -4435,14 +4447,45 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
-                    for (0..T) |j| {
-                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
-                        const factor = if (bit == 0) one_minus_r else challenge;
-                        lookups_ra_weights[j] = lookups_ra_weights[j].mul(factor);
-                        if (comptime debug_verbose) bf_weights[j] = bf_weights[j].mul(factor);
+                    if (self.thread_pool) |tp| {
+                        const RaWeightCtx = struct {
+                            ra_weights: []F,
+                            chunk_weights: ?[]F,
+                            indices_lo: []const u64,
+                            indices_hi: []const u64,
+                            bit_idx: usize,
+                            omr: F,
+                            chal: F,
+                        };
+                        const rwctx = RaWeightCtx{
+                            .ra_weights = lookups_ra_weights,
+                            .chunk_weights = if (chunk_idx < ra_num_chunks) ra_chunk_weights[chunk_idx] else null,
+                            .indices_lo = lookups_indices_lo,
+                            .indices_hi = lookups_indices_hi,
+                            .bit_idx = bit_index,
+                            .omr = one_minus_r,
+                            .chal = challenge,
+                        };
+                        tp.parallelForForce(T, rwctx, struct {
+                            fn f(c: RaWeightCtx, j: usize) void {
+                                const bit = getBit128(c.indices_lo[j], c.indices_hi[j], c.bit_idx);
+                                const factor = if (bit == 0) c.omr else c.chal;
+                                c.ra_weights[j] = c.ra_weights[j].mul(factor);
+                                if (c.chunk_weights) |cw| {
+                                    cw[j] = cw[j].mul(factor);
+                                }
+                            }
+                        }.f);
+                    } else {
+                        for (0..T) |j| {
+                            const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
+                            const factor = if (bit == 0) one_minus_r else challenge;
+                            lookups_ra_weights[j] = lookups_ra_weights[j].mul(factor);
+                            if (comptime debug_verbose) bf_weights[j] = bf_weights[j].mul(factor);
 
-                        if (chunk_idx < ra_num_chunks) {
-                            ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
+                            if (chunk_idx < ra_num_chunks) {
+                                ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
+                            }
                         }
                     }
 
@@ -4655,27 +4698,46 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // without lookup tables (NOOPs, padding). The table_val is only
                         // added when cycle.lookup_table() returns Some(table). But the
                         // RAF contribution is ALWAYS added based on is_interleaved_operands.
-                        for (0..T) |j| {
-                            var val = F.zero();
-
-                            // Add table value if this cycle has a table
-                            const t_idx_j = cycle_table_indices[j];
-                            if (t_idx_j >= 0) {
-                                const ti: usize = @intCast(t_idx_j);
-                                if (ti < NUM_TABLES) {
-                                    val = stored_table_values[ti];
+                        {
+                            const RematCtx = struct {
+                                combined: []F,
+                                t_indices: []const i8,
+                                is_identity: []const bool,
+                                table_vals: *const [MAX_LOOKUP_TABLES]F,
+                                raf_il: F,
+                                raf_id: F,
+                            };
+                            const rctx = RematCtx{
+                                .combined = lookups_combined_vals,
+                                .t_indices = cycle_table_indices,
+                                .is_identity = cycle_is_identity_path,
+                                .table_vals = &stored_table_values,
+                                .raf_il = raf_interleaved,
+                                .raf_id = raf_identity,
+                            };
+                            const rematFn = struct {
+                                fn f(c: RematCtx, j: usize) void {
+                                    var val = F.zero();
+                                    const t_idx_j = c.t_indices[j];
+                                    if (t_idx_j >= 0) {
+                                        const ti: usize = @intCast(t_idx_j);
+                                        if (ti < NUM_TABLES) {
+                                            val = c.table_vals[ti];
+                                        }
+                                    }
+                                    if (!c.is_identity[j]) {
+                                        val = val.add(c.raf_il);
+                                    } else {
+                                        val = val.add(c.raf_id);
+                                    }
+                                    c.combined[j] = val;
                                 }
-                            }
-
-                            // ALWAYS add RAF contribution (matches Jolt's init_log_t_rounds)
-                            const is_interleaved_j = !cycle_is_identity_path[j];
-                            if (is_interleaved_j) {
-                                val = val.add(raf_interleaved);
+                            }.f;
+                            if (self.thread_pool) |tp| {
+                                tp.parallelForForce(T, rctx, rematFn);
                             } else {
-                                val = val.add(raf_identity);
+                                for (0..T) |j| rematFn(rctx, j);
                             }
-
-                            lookups_combined_vals[j] = val;
                         }
                         if (comptime debug_verbose) {
                             dbg("[STAGE5 REMAT] combined_vals rematerialized for {} cycles\n", .{T});
@@ -5186,33 +5248,46 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // IMPORTANT: Jolt always adds the RAF contribution regardless of whether
                         // there's a lookup table. The table value is only added IF there's a table.
                         // See: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:682-698
-                        for (0..T) |j| {
-                            // Start with zero
-                            var combined_val = F.zero();
-
-                            // Add lookup table value if this cycle has a table
-                            // (padding cycles have table_idx < 0, so no table contribution)
-                            const table_idx = cycle_table_indices[j];
-                            if (table_idx >= 0) {
-                                const t_idx: usize = @intCast(table_idx);
-                                if (t_idx < NUM_TABLES) {
-                                    combined_val = combined_val.add(table_values[t_idx]);
+                        {
+                            const RematCtx2 = struct {
+                                combined: []F,
+                                t_indices: []const i8,
+                                is_identity: []const bool,
+                                table_vals: *const [NUM_TABLES]F,
+                                raf_il: F,
+                                raf_id: F,
+                            };
+                            const rctx2 = RematCtx2{
+                                .combined = lookups_combined_vals,
+                                .t_indices = cycle_table_indices,
+                                .is_identity = cycle_is_identity_path,
+                                .table_vals = &table_values,
+                                .raf_il = raf_interleaved,
+                                .raf_id = raf_identity,
+                            };
+                            const rematFn2 = struct {
+                                fn f(c: RematCtx2, j: usize) void {
+                                    var val = F.zero();
+                                    const tidx = c.t_indices[j];
+                                    if (tidx >= 0) {
+                                        const ti: usize = @intCast(tidx);
+                                        if (ti < NUM_TABLES) {
+                                            val = c.table_vals[ti];
+                                        }
+                                    }
+                                    if (!c.is_identity[j]) {
+                                        val = val.add(c.raf_il);
+                                    } else {
+                                        val = val.add(c.raf_id);
+                                    }
+                                    c.combined[j] = val;
                                 }
-                            }
-
-                            // ALWAYS add RAF contribution (regardless of table)
-                            // This applies to ALL cycles including padding (NoOp) cycles.
-                            // In Jolt, NoOp cycles have is_interleaved_operands = true and
-                            // receive raf_interleaved. Padding cycles in Zolt have
-                            // cycle_is_identity_path = false (interleaved), matching Jolt.
-                            const is_interleaved = !cycle_is_identity_path[j];
-                            if (is_interleaved) {
-                                combined_val = combined_val.add(raf_interleaved);
+                            }.f;
+                            if (self.thread_pool) |tp| {
+                                tp.parallelForForce(T, rctx2, rematFn2);
                             } else {
-                                combined_val = combined_val.add(raf_identity);
+                                for (0..T) |j| rematFn2(rctx2, j);
                             }
-
-                            lookups_combined_vals[j] = combined_val;
                         }
 
                         // Debug: print first 5 rematerialized values
@@ -6038,6 +6113,47 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
+                    // Initialize split-eq tables on first cycle round
+                    if (!split_eq_initialized) {
+                        // remaining_vars for first cycle round = n_cycle_vars - 1
+                        // j = (x_out << m_in) | x_in
+                        // In BIG ENDIAN r_reduction: high bits of j map to r_reduction[0..m_out],
+                        // low bits of j map to r_reduction[m_out..m_out+m_in]
+                        const init_vars = n_cycle_vars - 1;
+                        split_eq_m_in = init_vars / 2;
+                        const m_out = init_vars - split_eq_m_in;
+                        split_eq_E_in_len = @as(usize, 1) << @intCast(split_eq_m_in);
+                        split_eq_E_out_len = @as(usize, 1) << @intCast(m_out);
+                        std.debug.assert(split_eq_E_in_len <= MAX_SPLIT_EQ_SIZE);
+                        std.debug.assert(split_eq_E_out_len <= MAX_SPLIT_EQ_SIZE);
+
+                        // Build E_out from r_reduction[0..m_out] (covers HIGH bits of j)
+                        split_eq_E_out[0] = F.one();
+                        for (0..m_out) |i| {
+                            const ri = r_reduction[i];
+                            const len = @as(usize, 1) << @intCast(i);
+                            var j2: usize = len;
+                            while (j2 > 0) {
+                                j2 -= 1;
+                                split_eq_E_out[2 * j2 + 1] = split_eq_E_out[j2].mul(ri);
+                                split_eq_E_out[2 * j2] = split_eq_E_out[j2].sub(split_eq_E_out[2 * j2 + 1]);
+                            }
+                        }
+                        // Build E_in from r_reduction[m_out..m_out+m_in] (covers LOW bits of j)
+                        split_eq_E_in[0] = F.one();
+                        for (0..split_eq_m_in) |i| {
+                            const ri = r_reduction[m_out + i];
+                            const len = @as(usize, 1) << @intCast(i);
+                            var j2: usize = len;
+                            while (j2 > 0) {
+                                j2 -= 1;
+                                split_eq_E_in[2 * j2 + 1] = split_eq_E_in[j2].mul(ri);
+                                split_eq_E_in[2 * j2] = split_eq_E_in[j2].sub(split_eq_E_in[2 * j2 + 1]);
+                            }
+                        }
+                        split_eq_initialized = true;
+                    }
+
                     // CRITICAL: current_half_size is the number of pairs we iterate over
                     // At round k, we have T/2^(k+1) pairs to process
                     const current_half_size = T >> @intCast(lookups_round + 1);
@@ -6045,70 +6161,65 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Get r_round for this cycle variable (LowToHigh binding: last element first)
                     const r_round = r_reduction[n_cycle_vars - 1 - lookups_round];
 
-                    // Accumulate sum of 9-factor products
-                    // sum_evals contains g(1), g(2), ..., g(8), g(∞) where g(X) is the polynomial
-                    // BEFORE multiplying by eq(X, r_round). finishMlesProductSumFromEvals will
-                    // recover g(0) using the claim, then multiply by eq(X, r_round).
-                    var sum_evals: [9]F = [_]F{F.zero()} ** 9;
-
-                    for (0..current_half_size) |j| {
-                        // Build the 9 linear polynomial pairs for this j
-                        // Each pair is (p(0), p(1)) for the linear polynomial
-                        var pairs: [9][2]F = undefined;
-
-                        // Factor 0: eq_prefix * combined_val (WITHOUT current round's eq factor)
-                        //
-                        // CRITICAL FIX: Compute eq_prefix directly from r_reduction, excluding
-                        // the current round's variable. This avoids the stride indexing issues.
-                        //
-                        // eq_prefix(j) = eq(j, r_reduction[0:n-1-lookups_round])
-                        // where r_reduction[0:n-1-k] means all variables EXCEPT the last k+1.
-                        //
-                        // For LowToHigh binding with n=8 cycle vars:
-                        // - Round 0: use r_reduction[0..7] (all 8 vars), current = r_reduction[7]
-                        // - Round 1: use r_reduction[0..6] (first 7 vars), current = r_reduction[6]
-                        // - Round k: use r_reduction[0..n-1-k], current = r_reduction[n-1-k]
-                        //
-                        // The remaining_vars after round k is: n - k - 1
-                        // eq_prefix(j) for j in 0..current_half_size uses bits of j in [0, remaining_vars)
-                        const remaining_vars = n_cycle_vars - lookups_round - 1;
-                        const eq_prefix = computeEqAtIndexPartial(r_reduction, j, remaining_vars);
-
-                        // Debug: for first cycle round, first few j values
-                        if (lookups_round == 0 and j < 3) {
-                            if (comptime debug_verbose) {
-                                dbg("[CYCLE R0 DEBUG] j={}, remaining_vars={}, eq_prefix={x}\n", .{
-                                    j,
-                                    remaining_vars,
-                                    eq_prefix.toBytesBE()[16..32].*,
-                                });
-                                dbg("  combined_vals[{}]={x}, combined_vals[{}]={x}\n", .{
-                                    2 * j,
-                                    lookups_combined_vals[2 * j].toBytesBE()[16..32].*,
-                                    2 * j + 1,
-                                    lookups_combined_vals[2 * j + 1].toBytesBE()[16..32].*,
-                                });
+                    // Accumulate sum of 9-factor products via parallelReduce with split-eq
+                    // eq_prefix(j) = E_out[j >> m_in] * E_in[j & (E_in_len-1)]
+                    const remaining_vars = n_cycle_vars - lookups_round - 1;
+                    _ = remaining_vars;
+                    var sum_evals: [9]F = blk: {
+                        const EvalCtx = struct {
+                            combined: []const F,
+                            chunks: *const [MAX_RA_CHUNKS][]F,
+                            e_in: [*]const F,
+                            e_out: [*]const F,
+                            e_in_mask: usize, // e_in_len - 1
+                            e_in_shift: u6, // log2(e_in_len)
+                            n_chunks: usize,
+                        };
+                        const e_in_shift: u6 = @intCast(@ctz(split_eq_E_in_len));
+                        const ectx = EvalCtx{
+                            .combined = lookups_combined_vals,
+                            .chunks = &ra_chunk_weights,
+                            .e_in = &split_eq_E_in,
+                            .e_out = &split_eq_E_out,
+                            .e_in_mask = split_eq_E_in_len - 1,
+                            .e_in_shift = e_in_shift,
+                            .n_chunks = ra_num_chunks,
+                        };
+                        const identity = [_]F{F.zero()} ** 9;
+                        const mapFn = struct {
+                            fn f(c: EvalCtx, start: usize, end: usize) [9]F {
+                                var acc = [_]F{F.zero()} ** 9;
+                                for (start..end) |j| {
+                                    var pairs: [9][2]F = undefined;
+                                    const x_in = j & c.e_in_mask;
+                                    const x_out = j >> c.e_in_shift;
+                                    const eq_prefix = c.e_out[x_out].mul(c.e_in[x_in]);
+                                    pairs[0][0] = eq_prefix.mul(c.combined[2 * j]);
+                                    pairs[0][1] = eq_prefix.mul(c.combined[2 * j + 1]);
+                                    for (0..c.n_chunks) |ci| {
+                                        pairs[ci + 1][0] = c.chunks[ci][2 * j];
+                                        pairs[ci + 1][1] = c.chunks[ci][2 * j + 1];
+                                    }
+                                    const prod_evals = UniPoly(F).evalLinearProd9(pairs);
+                                    for (0..9) |k| {
+                                        acc[k] = acc[k].add(prod_evals[k]);
+                                    }
+                                }
+                                return acc;
                             }
+                        }.f;
+                        const reduceFn = struct {
+                            fn f(a: [9]F, b: [9]F) [9]F {
+                                var r: [9]F = undefined;
+                                for (0..9) |k| r[k] = a[k].add(b[k]);
+                                return r;
+                            }
+                        }.f;
+                        if (self.thread_pool) |tp| {
+                            break :blk tp.parallelReduce([9]F, current_half_size, identity, ectx, mapFn, reduceFn);
                         }
-
-                        // combined_vals IS bound (standard MLE binding), so use sequential access
-                        pairs[0][0] = eq_prefix.mul(lookups_combined_vals[2 * j]);
-                        pairs[0][1] = eq_prefix.mul(lookups_combined_vals[2 * j + 1]);
-
-                        // Factors 1-8: 8 ra_chunk polynomials (also bound, sequential access)
-                        for (0..ra_num_chunks) |c| {
-                            pairs[c + 1][0] = ra_chunk_weights[c][2 * j];
-                            pairs[c + 1][1] = ra_chunk_weights[c][2 * j + 1];
-                        }
-
-                        // Evaluate product at [1, 2, ..., 8, ∞]
-                        const prod_evals = UniPoly(F).evalLinearProd9(pairs);
-
-                        // Accumulate into sum_evals
-                        for (0..9) |k| {
-                            sum_evals[k] = sum_evals[k].add(prod_evals[k]);
-                        }
-                    }
+                        break :blk mapFn(ectx, 0, current_half_size);
+                    };
 
                     // CRITICAL FIX: Multiply sum_evals by lookups_current_scalar
                     // This matches Jolt's GruenSplitEqPolynomial behavior where current_scalar
@@ -6581,26 +6692,71 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // CRITICAL: Do NOT bind eq_evals - keep them as original eq(j, r_reduction)
                     // Only bind combined_vals (standard MLE binding)
                     // This matches Jolt's GruenSplitEqPolynomial where E_in/E_out are not modified
-                    bindSinglePolynomial(lookups_combined_vals, lookups_round, challenge, self.thread_pool);
+                    // Bind combined_vals + all ra_chunk_weights in parallel across arrays
+                    if (self.thread_pool) |tp| {
+                        const BindArraysCtx = struct {
+                            combined: []F,
+                            chunks: *[MAX_RA_CHUNKS][]F,
+                            n_chunks: usize,
+                            lround: usize,
+                            chal: F,
+                        };
+                        const bactx = BindArraysCtx{
+                            .combined = lookups_combined_vals,
+                            .chunks = &ra_chunk_weights,
+                            .n_chunks = ra_num_chunks,
+                            .lround = lookups_round,
+                            .chal = challenge,
+                        };
+                        tp.parallelForForce(ra_num_chunks + 1, bactx, struct {
+                            fn f(c: BindArraysCtx, arr_idx: usize) void {
+                                const poly = if (arr_idx == 0) c.combined else c.chunks[arr_idx - 1];
+                                const n = poly.len >> @intCast(c.lround);
+                                const half = n / 2;
+                                if (half == 0) return;
+                                const omr = F.one().sub(c.chal);
+                                for (0..half) |i| {
+                                    poly[i] = omr.mul(poly[2 * i]).add(c.chal.mul(poly[2 * i + 1]));
+                                }
+                                for (half..n) |i| {
+                                    poly[i] = F.zero();
+                                }
+                            }
+                        }.f);
+                    } else {
+                        bindSinglePolynomial(lookups_combined_vals, lookups_round, challenge, self.thread_pool);
+                        for (0..ra_num_chunks) |chunk_idx| {
+                            bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge, self.thread_pool);
+                        }
+                    }
 
                     // CRITICAL FIX: Update lookups_current_scalar with eq(w_i, challenge)
-                    // This matches Jolt's GruenSplitEqPolynomial.bind() which accumulates:
-                    //   current_scalar *= eq(w[current_index-1], r)
-                    // where w is the original r_reduction (NOT modified by sumcheck challenges)
-                    // and r is the sumcheck challenge.
-                    //
                     // Formula: eq(w, r) = 1 - w - r + 2*w*r
-                    //
-                    // For MontU128Challenge arithmetic:
-                    // - F.one().sub(challenge) gives (1 - r) as F
-                    // - w_i.mulHiBigIntU128(challenge.limbs) gives w*r as F
                     const w_i = r_reduction[n_cycle_vars - 1 - lookups_round];
                     const prod_w_r = w_i.mulHiBigIntU128(challenge.limbs); // w * r
-                    // eq(w, r) = 1 - w - r + 2*w*r = (1 - r) - w + 2*w*r = (1 - r) + w*(2r - 1)
-                    // But simpler: eq(w, r) = 1 - w - r + 2*w*r
                     const one_minus_r_scalar = F.one().sub(challenge); // (1 - r) as F
                     const eq_factor = one_minus_r_scalar.sub(w_i).add(prod_w_r).add(prod_w_r); // 1 - r - w + 2*w*r
                     lookups_current_scalar = lookups_current_scalar.mul(eq_factor);
+
+                    // Halve split-eq tables: remove the variable being bound from remaining eq.
+                    // LowToHigh binding removes the LAST r_reduction var = LSB of eq index.
+                    // In the expansion, bit 0 of E_in index maps to r_reduction[m_out+m_in-1].
+                    // To marginalize over bit 0: new[k] = old[2*k] + old[2*k+1]
+                    // E_in is halved first (covers the LSB side), then E_out.
+                    if (split_eq_E_in_len > 1) {
+                        const new_len = split_eq_E_in_len / 2;
+                        for (0..new_len) |k| {
+                            split_eq_E_in[k] = split_eq_E_in[2 * k].add(split_eq_E_in[2 * k + 1]);
+                        }
+                        split_eq_E_in_len = new_len;
+                    } else if (split_eq_E_out_len > 1) {
+                        // E_in is exhausted. Now halve E_out (remove its LSB = bit 0).
+                        const new_len = split_eq_E_out_len / 2;
+                        for (0..new_len) |k| {
+                            split_eq_E_out[k] = split_eq_E_out[2 * k].add(split_eq_E_out[2 * k + 1]);
+                        }
+                        split_eq_E_out_len = new_len;
+                    }
 
                     // Debug: print current_scalar update
                     if (lookups_round < 3 or lookups_round >= n_cycle_vars - 1) {
@@ -6613,11 +6769,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             dbg("  eq_factor = {x}\n", .{ eq_factor.toBytesBE()[16..32].* });
                             dbg("  current_scalar = {x}\n", .{ lookups_current_scalar.toBytesBE()[16..32].* });
                         }
-                    }
-
-                    // Bind the per-chunk ra weights
-                    for (0..ra_num_chunks) |chunk_idx| {
-                        bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge, self.thread_pool);
                     }
                     // Debug: show ra_chunk values before/after binding
                     if (lookups_round == 0) {

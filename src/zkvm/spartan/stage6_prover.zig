@@ -15,6 +15,10 @@ const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
+
+// Maximum evaluation points for parallelReduce accumulator.
+// Covers all sub-provers: LookupsRa (M+2 ≤ 10), RamRa (d+2 ≤ 6), BytecodeReadRaf (d+2 ≤ 4).
+const MAX_RA_EVALS = 16;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -1867,30 +1871,73 @@ fn RamRaVirtualProver(comptime F: type) type {
         pub fn computeRoundPoly(self: *Self, allocator: Allocator) ![]F {
             const half = self.current_len / 2;
             const n_evals = self.d + 2;
-            var evals = try allocator.alloc(F, n_evals);
-            @memset(evals, F.zero());
 
-            for (0..half) |j| {
-                const eq0 = self.eq[2 * j];
-                const eq1 = self.eq[2 * j + 1];
-                const eq_delta = eq1.sub(eq0);
-
-                // Evaluate at all finite points [0, 1, ..., d+1] (Vandermonde format)
-                for (0..n_evals) |pt_idx| {
-                    const x = F.fromU64(@intCast(pt_idx));
-                    var product = F.one();
-
-                    for (0..self.d) |i| {
-                        const v0 = self.ra_bound[i][2 * j];
-                        const v1 = self.ra_bound[i][2 * j + 1];
-                        product = product.mul(v0.add(x.mul(v1.sub(v0))));
-                    }
-                    product = product.mul(eq0.add(x.mul(eq_delta)));
-
-                    evals[pt_idx] = evals[pt_idx].add(product);
-                }
+            // Precompute x_vals
+            var x_vals: [MAX_RA_EVALS]F = undefined;
+            for (0..n_evals) |i| {
+                x_vals[i] = F.fromU64(@intCast(i));
             }
 
+            const Ctx = struct {
+                ra_bound: [][]F,
+                eq: []F,
+                d: usize,
+                n_evals: usize,
+                x_vals: [MAX_RA_EVALS]F,
+            };
+            const ctx = Ctx{
+                .ra_bound = self.ra_bound,
+                .eq = self.eq,
+                .d = self.d,
+                .n_evals = n_evals,
+                .x_vals = x_vals,
+            };
+
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
+                    var acc: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
+                    for (start..end) |j| {
+                        const eq0 = c.eq[2 * j];
+                        const eq1 = c.eq[2 * j + 1];
+                        const eq_delta = eq1.sub(eq0);
+
+                        for (0..c.n_evals) |pt_idx| {
+                            const x = c.x_vals[pt_idx];
+                            var product = F.one();
+
+                            for (0..c.d) |i| {
+                                const v0 = c.ra_bound[i][2 * j];
+                                const v1 = c.ra_bound[i][2 * j + 1];
+                                product = product.mul(v0.add(x.mul(v1.sub(v0))));
+                            }
+                            product = product.mul(eq0.add(x.mul(eq_delta)));
+
+                            acc[pt_idx] = acc[pt_idx].add(product);
+                        }
+                    }
+                    return acc;
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: [MAX_RA_EVALS]F, b: [MAX_RA_EVALS]F) [MAX_RA_EVALS]F {
+                    var r: [MAX_RA_EVALS]F = undefined;
+                    for (0..MAX_RA_EVALS) |i| {
+                        r[i] = a[i].add(b[i]);
+                    }
+                    return r;
+                }
+            }.f;
+
+            const result = if (self.pool) |pool|
+                pool.parallelReduce([MAX_RA_EVALS]F, half, .{F.zero()} ** MAX_RA_EVALS, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
+
+            var evals = try allocator.alloc(F, n_evals);
+            for (0..n_evals) |i| {
+                evals[i] = result[i];
+            }
             return evals;
         }
 
@@ -2447,15 +2494,38 @@ fn BooleanityProver(comptime F: type) type {
             } else {
                 // Phase 2: bind cycle variable, halve H tables and eq_cycle
                 const half = self.phase2_len / 2;
-                if (self.H) |ht| {
-                    for (0..self.N) |i| {
-                        for (0..half) |j| {
-                            ht[i][j] = ht[i][2 * j].add(r.mul(ht[i][2 * j + 1].sub(ht[i][2 * j])));
+
+                const bindOne = struct {
+                    fn f(arr: []F, h: usize, challenge: F) void {
+                        for (0..h) |j| {
+                            arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
                         }
                     }
-                }
-                for (0..half) |j| {
-                    self.eq_cycle[j] = self.eq_cycle[2 * j].add(r.mul(self.eq_cycle[2 * j + 1].sub(self.eq_cycle[2 * j])));
+                }.f;
+
+                if (self.H) |ht| {
+                    if (self.pool) |pool| {
+                        // N+1 independent arrays: N H tables + 1 eq_cycle
+                        const total = self.N + 1;
+                        const Ctx2 = struct { ht: [][]F, eq_cycle: []F, n: usize, half: usize, challenge: F };
+                        const ctx2 = Ctx2{ .ht = ht, .eq_cycle = self.eq_cycle, .n = self.N, .half = half, .challenge = r };
+                        pool.parallelForForce(total, ctx2, struct {
+                            fn f2(c: Ctx2, idx: usize) void {
+                                if (idx < c.n) {
+                                    bindOne(c.ht[idx], c.half, c.challenge);
+                                } else {
+                                    bindOne(c.eq_cycle, c.half, c.challenge);
+                                }
+                            }
+                        }.f2);
+                    } else {
+                        for (0..self.N) |i| {
+                            bindOne(ht[i], half, r);
+                        }
+                        bindOne(self.eq_cycle, half, r);
+                    }
+                } else {
+                    bindOne(self.eq_cycle, half, r);
                 }
                 self.phase2_len = half;
             }
@@ -2880,36 +2950,81 @@ fn LookupsRaVirtualProver(comptime F: type) type {
         pub fn computeRoundPoly(self: *Self, allocator: Allocator) ![]F {
             const half = self.current_len / 2;
             const n_evals = self.M + 2;
-            var evals = try allocator.alloc(F, n_evals);
-            @memset(evals, F.zero());
 
-            for (0..half) |j| {
-                const eq0 = self.eq[2 * j];
-                const eq1 = self.eq[2 * j + 1];
-                const eq_delta = eq1.sub(eq0);
-
-                // Evaluate at all finite points [0, 1, ..., M+1] (Vandermonde format)
-                for (0..n_evals) |pt_idx| {
-                    const x = F.fromU64(@intCast(pt_idx));
-                    var virtual_sum = F.zero();
-
-                    for (0..self.N) |v| {
-                        var product = F.one();
-
-                        for (0..self.M) |m| {
-                            const idx = v * self.M + m;
-                            const v0 = self.ra_bound[idx][2 * j];
-                            const v1 = self.ra_bound[idx][2 * j + 1];
-                            product = product.mul(v0.add(x.mul(v1.sub(v0))));
-                        }
-
-                        virtual_sum = virtual_sum.add(product);
-                    }
-
-                    evals[pt_idx] = evals[pt_idx].add(eq0.add(x.mul(eq_delta)).mul(virtual_sum));
-                }
+            // Precompute x_vals
+            var x_vals: [MAX_RA_EVALS]F = undefined;
+            for (0..n_evals) |i| {
+                x_vals[i] = F.fromU64(@intCast(i));
             }
 
+            const Ctx = struct {
+                ra_bound: [][]F,
+                eq: []F,
+                M: usize,
+                N: usize,
+                n_evals: usize,
+                x_vals: [MAX_RA_EVALS]F,
+            };
+            const ctx = Ctx{
+                .ra_bound = self.ra_bound,
+                .eq = self.eq,
+                .M = self.M,
+                .N = self.N,
+                .n_evals = n_evals,
+                .x_vals = x_vals,
+            };
+
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
+                    var acc: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
+                    for (start..end) |j| {
+                        const eq0 = c.eq[2 * j];
+                        const eq1 = c.eq[2 * j + 1];
+                        const eq_delta = eq1.sub(eq0);
+
+                        for (0..c.n_evals) |pt_idx| {
+                            const x = c.x_vals[pt_idx];
+                            var virtual_sum = F.zero();
+
+                            for (0..c.N) |v| {
+                                var product = F.one();
+
+                                for (0..c.M) |m| {
+                                    const idx = v * c.M + m;
+                                    const v0 = c.ra_bound[idx][2 * j];
+                                    const v1 = c.ra_bound[idx][2 * j + 1];
+                                    product = product.mul(v0.add(x.mul(v1.sub(v0))));
+                                }
+
+                                virtual_sum = virtual_sum.add(product);
+                            }
+
+                            acc[pt_idx] = acc[pt_idx].add(eq0.add(x.mul(eq_delta)).mul(virtual_sum));
+                        }
+                    }
+                    return acc;
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: [MAX_RA_EVALS]F, b: [MAX_RA_EVALS]F) [MAX_RA_EVALS]F {
+                    var r: [MAX_RA_EVALS]F = undefined;
+                    for (0..MAX_RA_EVALS) |i| {
+                        r[i] = a[i].add(b[i]);
+                    }
+                    return r;
+                }
+            }.f;
+
+            const result = if (self.pool) |pool|
+                pool.parallelReduce([MAX_RA_EVALS]F, half, .{F.zero()} ** MAX_RA_EVALS, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
+
+            var evals = try allocator.alloc(F, n_evals);
+            for (0..n_evals) |i| {
+                evals[i] = result[i];
+            }
             return evals;
         }
 
@@ -3970,31 +4085,75 @@ fn BytecodeReadRafProver(comptime F: type) type {
         pub fn computeRoundPolyPhase2(self: *Self, allocator: Allocator) ![]F {
             const half = self.current_len / 2;
             const combined = self.combined.?;
+            const ra_chunks = self.ra_chunks.?;
             const n_evals = self.bytecode_d + 2;
-            var evals = try allocator.alloc(F, n_evals);
-            @memset(evals, F.zero());
 
-            for (0..half) |c| {
-                const val0 = combined[2 * c];
-                const val1 = combined[2 * c + 1];
-                const val_delta = val1.sub(val0);
-
-                // Evaluate at all finite points [0, 1, ..., bytecode_d+1] (Vandermonde format)
-                for (0..n_evals) |pt_idx| {
-                    const x = F.fromU64(@intCast(pt_idx));
-                    var ra_product = F.one();
-
-                    for (0..self.bytecode_d) |i| {
-                        const r0 = self.ra_chunks.?[i][2 * c];
-                        const r1 = self.ra_chunks.?[i][2 * c + 1];
-                        ra_product = ra_product.mul(r0.add(x.mul(r1.sub(r0))));
-                    }
-                    ra_product = ra_product.mul(val0.add(x.mul(val_delta)));
-
-                    evals[pt_idx] = evals[pt_idx].add(ra_product);
-                }
+            // Precompute x_vals
+            var x_vals: [MAX_RA_EVALS]F = undefined;
+            for (0..n_evals) |i| {
+                x_vals[i] = F.fromU64(@intCast(i));
             }
 
+            const Ctx = struct {
+                ra_chunks: [][]F,
+                combined: []F,
+                bytecode_d: usize,
+                n_evals: usize,
+                x_vals: [MAX_RA_EVALS]F,
+            };
+            const ctx = Ctx{
+                .ra_chunks = ra_chunks,
+                .combined = combined,
+                .bytecode_d = self.bytecode_d,
+                .n_evals = n_evals,
+                .x_vals = x_vals,
+            };
+
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
+                    var acc: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
+                    for (start..end) |j| {
+                        const val0 = c.combined[2 * j];
+                        const val1 = c.combined[2 * j + 1];
+                        const val_delta = val1.sub(val0);
+
+                        for (0..c.n_evals) |pt_idx| {
+                            const x = c.x_vals[pt_idx];
+                            var ra_product = F.one();
+
+                            for (0..c.bytecode_d) |i| {
+                                const r0 = c.ra_chunks[i][2 * j];
+                                const r1 = c.ra_chunks[i][2 * j + 1];
+                                ra_product = ra_product.mul(r0.add(x.mul(r1.sub(r0))));
+                            }
+                            ra_product = ra_product.mul(val0.add(x.mul(val_delta)));
+
+                            acc[pt_idx] = acc[pt_idx].add(ra_product);
+                        }
+                    }
+                    return acc;
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: [MAX_RA_EVALS]F, b: [MAX_RA_EVALS]F) [MAX_RA_EVALS]F {
+                    var r: [MAX_RA_EVALS]F = undefined;
+                    for (0..MAX_RA_EVALS) |i| {
+                        r[i] = a[i].add(b[i]);
+                    }
+                    return r;
+                }
+            }.f;
+
+            const result = if (self.pool) |pool|
+                pool.parallelReduce([MAX_RA_EVALS]F, half, .{F.zero()} ** MAX_RA_EVALS, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
+
+            var evals = try allocator.alloc(F, n_evals);
+            for (0..n_evals) |i| {
+                evals[i] = result[i];
+            }
             return evals;
         }
 

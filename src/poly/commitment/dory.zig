@@ -826,6 +826,110 @@ fn multiPairG1G2Prepared(g1_vec: []const G1Point, g2_prep: []const G2Prepared, t
     return pairing.finalExponentiation(miller_acc);
 }
 
+/// A group of G1/G2 point slices for batched multi-pairing.
+pub const PairGroup = struct {
+    g1: []const G1Point,
+    g2: []const G2Point,
+};
+
+/// Compute N independent multi-pairings in a single parallelReduceForce call,
+/// sharing thread pool parallelism across all groups instead of running them sequentially.
+/// Falls back to sequential per-group multiPairG1G2WithPool when tp is null.
+pub fn multiPairBatched(comptime N: comptime_int, groups: [N]PairGroup, tp: ?*ThreadPool) [N]GT {
+    // Compute prefix sums of pair counts
+    var offsets: [N + 1]usize = undefined;
+    offsets[0] = 0;
+    inline for (0..N) |g| {
+        offsets[g + 1] = offsets[g] + @min(groups[g].g1.len, groups[g].g2.len);
+    }
+    const total = offsets[N];
+
+    // Fallback: sequential per-group
+    if (total == 0 or tp == null) {
+        var results: [N]GT = undefined;
+        inline for (0..N) |g| {
+            results[g] = multiPairG1G2WithPool(groups[g].g1, groups[g].g2, null);
+        }
+        return results;
+    }
+
+    const Ctx = struct {
+        groups: [N]PairGroup,
+        offsets: [N + 1]usize,
+    };
+    const ctx = Ctx{ .groups = groups, .offsets = offsets };
+
+    const mapFn = struct {
+        fn map(c: Ctx, start: usize, end: usize) [N]pairing.Fp12 {
+            var accs: [N]pairing.Fp12 = undefined;
+            inline for (0..N) |g| {
+                accs[g] = pairing.Fp12.one();
+            }
+            for (start..end) |idx| {
+                // Find which group this index belongs to (N is small, ≤4)
+                var group_idx: usize = 0;
+                for (0..N) |g| {
+                    if (idx < c.offsets[g + 1]) {
+                        group_idx = g;
+                        break;
+                    }
+                }
+                const local_idx = idx - c.offsets[group_idx];
+                const g1_pt = c.groups[group_idx].g1[local_idx];
+                const g2_pt = c.groups[group_idx].g2[local_idx];
+                if (g1_pt.infinity or g2_pt.infinity) continue;
+                const g1_fp = G1PointFp{
+                    .x = g1_pt.x,
+                    .y = g1_pt.y,
+                    .infinity = false,
+                };
+                const ml = pairing.millerLoopArkworks(g1_fp, g2_pt);
+                accs[group_idx] = accs[group_idx].mul(ml);
+            }
+            return accs;
+        }
+    }.map;
+
+    const reduceFn = struct {
+        fn reduce(a: [N]pairing.Fp12, b: [N]pairing.Fp12) [N]pairing.Fp12 {
+            var result: [N]pairing.Fp12 = undefined;
+            inline for (0..N) |g| {
+                result[g] = a[g].mul(b[g]);
+            }
+            return result;
+        }
+    }.reduce;
+
+    var identity: [N]pairing.Fp12 = undefined;
+    inline for (0..N) |g| {
+        identity[g] = pairing.Fp12.one();
+    }
+
+    const miller_accs = tp.?.parallelReduceForce(
+        [N]pairing.Fp12, total, identity, ctx, mapFn, reduceFn,
+    );
+
+    // Final exponentiations — run in parallel via parallelForForce
+    const FinalExpCtx = struct {
+        accs: *const [N]pairing.Fp12,
+        results: *[N]GT,
+    };
+    var results: [N]GT = undefined;
+    const fe_ctx = FinalExpCtx{ .accs = &miller_accs, .results = &results };
+
+    tp.?.parallelForForce(N, fe_ctx, struct {
+        fn f(c: FinalExpCtx, i: usize) void {
+            if (c.accs[i].eql(pairing.Fp12.one())) {
+                c.results[i] = GT.one();
+            } else {
+                c.results[i] = pairing.finalExponentiation(c.accs[i]);
+            }
+        }
+    }.f);
+
+    return results;
+}
+
 /// MSM for G2 points using Pippenger's bucket method with wNAF.
 /// For small inputs (< 8), falls back to naive GLV scalar mul.
 fn msmG2(comptime F: type, g2_vec: []const G2Point, scalars: []const F, tp: ?*ThreadPool) G2Point {
@@ -2049,40 +2153,16 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     d2_left = pairing.pairingFp(sum_left_fp, g2_fin);
                     d2_right = pairing.pairingFp(sum_right_fp, g2_fin);
                 } else {
-                    const PairCtx = struct {
-                        g1_a: []const G1Point, g2_a: []const G2Point,
-                        g1_b: []const G1Point, g2_b: []const G2Point,
-                    };
-
-                    const d1_d2_left: struct { GT, GT } = if (tp) |pool| blk: {
-                        break :blk pool.join(
-                            GT, GT,
-                            PairCtx{ .g1_a = v1_work[0..g2_size], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[0..g1_size] },
-                            struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_a, ctx.g2_a, null); } }.f,
-                            PairCtx{ .g1_a = v1_work[0..g2_size], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[0..g1_size] },
-                            struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_b, ctx.g2_b, null); } }.f,
-                        );
-                    } else .{
-                        multiPairG1G2WithPool(v1_work[0..g2_size], params.g2_vec[0..g2_size], null),
-                        multiPairG1G2WithPool(params.g1_vec[0..g1_size], v2_work[0..g1_size], null),
-                    };
-                    d1_left = d1_d2_left[0];
-                    d2_left = d1_d2_left[1];
-
-                    const d1_d2_right: struct { GT, GT } = if (tp) |pool| blk: {
-                        break :blk pool.join(
-                            GT, GT,
-                            PairCtx{ .g1_a = v1_work[n2..v1_r_end], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[n2..v2_r_end] },
-                            struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_a, ctx.g2_a, null); } }.f,
-                            PairCtx{ .g1_a = v1_work[n2..v1_r_end], .g2_a = params.g2_vec[0..g2_size], .g1_b = params.g1_vec[0..g1_size], .g2_b = v2_work[n2..v2_r_end] },
-                            struct { fn f(ctx: PairCtx) GT { return multiPairG1G2WithPool(ctx.g1_b, ctx.g2_b, null); } }.f,
-                        );
-                    } else .{
-                        multiPairG1G2WithPool(v1_work[n2..v1_r_end], params.g2_vec[0..g2_size], null),
-                        multiPairG1G2WithPool(params.g1_vec[0..g1_size], v2_work[n2..v2_r_end], null),
-                    };
-                    d1_right = d1_d2_right[0];
-                    d2_right = d1_d2_right[1];
+                    const batch = multiPairBatched(4, .{
+                        PairGroup{ .g1 = v1_work[0..g2_size], .g2 = params.g2_vec[0..g2_size] }, // D1L
+                        PairGroup{ .g1 = params.g1_vec[0..g1_size], .g2 = v2_work[0..g1_size] }, // D2L
+                        PairGroup{ .g1 = v1_work[n2..v1_r_end], .g2 = params.g2_vec[0..g2_size] }, // D1R
+                        PairGroup{ .g1 = params.g1_vec[0..g1_size], .g2 = v2_work[n2..v2_r_end] }, // D2R
+                    }, tp);
+                    d1_left = batch[0];
+                    d2_left = batch[1];
+                    d1_right = batch[2];
+                    d2_right = batch[3];
                 }
 
                 // E1_beta = MSM(g1_vec[0..current_col_len], s2_work[0..current_col_len])
@@ -2162,25 +2242,12 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const v2_r_half_end = @min(n2 + v2_half, current_len);
                 const v1_r_half_end = @min(n2 + v1_half, current_len);
 
-                const PairCtx2 = struct {
-                    g1_a: []const G1Point, g2_a: []const G2Point,
-                    g1_b: []const G1Point, g2_b: []const G2Point,
-                };
-
-                const c_results: struct { GT, GT } = if (tp) |pool| blk: {
-                    break :blk pool.join(
-                        GT, GT,
-                        PairCtx2{ .g1_a = v1_work[0..v1_half], .g2_a = v2_work[n2..v2_r_half_end], .g1_b = v1_work[n2..v1_r_half_end], .g2_b = v2_work[0..v2_half] },
-                        struct { fn f(ctx: PairCtx2) GT { return multiPairG1G2WithPool(ctx.g1_a, ctx.g2_a, null); } }.f,
-                        PairCtx2{ .g1_a = v1_work[0..v1_half], .g2_a = v2_work[n2..v2_r_half_end], .g1_b = v1_work[n2..v1_r_half_end], .g2_b = v2_work[0..v2_half] },
-                        struct { fn f(ctx: PairCtx2) GT { return multiPairG1G2WithPool(ctx.g1_b, ctx.g2_b, null); } }.f,
-                    );
-                } else .{
-                    multiPairG1G2WithPool(v1_work[0..v1_half], v2_work[n2..v2_r_half_end], null),
-                    multiPairG1G2WithPool(v1_work[n2..v1_r_half_end], v2_work[0..v2_half], null),
-                };
-                const c_plus = c_results[0];
-                const c_minus = c_results[1];
+                const c_batch = multiPairBatched(2, .{
+                    PairGroup{ .g1 = v1_work[0..v1_half], .g2 = v2_work[n2..v2_r_half_end] }, // C+
+                    PairGroup{ .g1 = v1_work[n2..v1_r_half_end], .g2 = v2_work[0..v2_half] }, // C-
+                }, tp);
+                const c_plus = c_batch[0];
+                const c_minus = c_batch[1];
 
                 // E1+ = MSM(v1_l, s2_r)
                 // E1- = MSM(v1_r, s2_l)
@@ -2447,11 +2514,36 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             };
             const v2_work = try allocator.alloc(G2Point, vec_len);
             defer allocator.free(v2_work);
-            for (0..vec_len) |i| {
-                if (i < v_vec.len) {
-                    v2_work[i] = glv.glvScalarMulG2WithBases(g2_fin_glv_bases, v_vec[i]).toAffine();
-                } else {
-                    v2_work[i] = G2Point.identity();
+            if (tp) |pool| {
+                const V2Ctx = struct {
+                    v2: []G2Point,
+                    v_vec: []const F,
+                    bases: *const [4]G2Point,
+                    v_vec_len: usize,
+                };
+                var g2_fin_glv_bases_copy = g2_fin_glv_bases;
+                const v2_ctx = V2Ctx{
+                    .v2 = v2_work,
+                    .v_vec = v_vec,
+                    .bases = &g2_fin_glv_bases_copy,
+                    .v_vec_len = v_vec.len,
+                };
+                pool.parallelForForce(vec_len, v2_ctx, struct {
+                    fn f(cx: V2Ctx, i: usize) void {
+                        if (i < cx.v_vec_len) {
+                            cx.v2[i] = glv.glvScalarMulG2WithBases(cx.bases.*, cx.v_vec[i]).toAffine();
+                        } else {
+                            cx.v2[i] = G2Point.identity();
+                        }
+                    }
+                }.f);
+            } else {
+                for (0..vec_len) |i| {
+                    if (i < v_vec.len) {
+                        v2_work[i] = glv.glvScalarMulG2WithBases(g2_fin_glv_bases, v_vec[i]).toAffine();
+                    } else {
+                        v2_work[i] = G2Point.identity();
+                    }
                 }
             }
 
@@ -2524,12 +2616,48 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     const sum_left_fp = G1PointFp{ .x = sum_left.x, .y = sum_left.y, .infinity = sum_left.infinity };
                     const sum_right_fp = G1PointFp{ .x = sum_right.x, .y = sum_right.y, .infinity = sum_right.infinity };
                     break :blk .{ pairing.pairingFp(sum_left_fp, g2_fin), pairing.pairingFp(sum_right_fp, g2_fin) };
-                } else .{
-                    multiPairG1G2WithPool(params.g1_vec[0..n2], v2_work[0..n2], tp),
-                    multiPairG1G2WithPool(params.g1_vec[0..n2], v2_work[n2..current_len], tp),
+                } else blk: {
+                    const d2_batch = multiPairBatched(2, .{
+                        PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_work[0..n2] },
+                        PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_work[n2..current_len] },
+                    }, tp);
+                    break :blk .{ d2_batch[0], d2_batch[1] };
                 };
-                const e1_beta = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..current_len], s2_work[0..current_len], tp);
-                const e2_beta = msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len], tp);
+                const e1_beta, const e2_beta = if (tp) |pool| blk: {
+                    const EBetaCtx = struct {
+                        g1: []const G1Point,
+                        g2: []const G2Point,
+                        s1: []const F,
+                        s2: []const F,
+                        len: usize,
+                    };
+                    const eb_ctx = EBetaCtx{
+                        .g1 = params.g1_vec,
+                        .g2 = params.g2_vec,
+                        .s1 = s1_work,
+                        .s2 = s2_work,
+                        .len = current_len,
+                    };
+                    break :blk pool.join(
+                        G1Point,
+                        G2Point,
+                        eb_ctx,
+                        struct {
+                            fn f(cx: EBetaCtx) G1Point {
+                                return msm.MSM(F, Fp).computeWithPool(cx.g1[0..cx.len], cx.s2[0..cx.len], null);
+                            }
+                        }.f,
+                        eb_ctx,
+                        struct {
+                            fn f(cx: EBetaCtx) G2Point {
+                                return msmG2(F, cx.g2[0..cx.len], cx.s1[0..cx.len], null);
+                            }
+                        }.f,
+                    );
+                } else .{
+                    msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..current_len], s2_work[0..current_len], null),
+                    msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len], null),
+                };
 
                 // Debug: write e2_beta for each round to /tmp for validation
                 if (comptime debug_verbose) {
@@ -2617,12 +2745,68 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 }
 
                 // Compute second reduce message
-                const c_plus = multiPairG1G2WithPool(v1_work[0..n2], v2_work[n2..current_len], tp);
-                const c_minus = multiPairG1G2WithPool(v1_work[n2..current_len], v2_work[0..n2], tp);
-                const e1_plus = msm.MSM(F, Fp).computeWithPool(v1_work[0..n2], s2_work[n2..current_len], tp);
-                const e1_minus = msm.MSM(F, Fp).computeWithPool(v1_work[n2..current_len], s2_work[0..n2], tp);
-                const e2_plus = msmG2(F, v2_work[n2..current_len], s1_work[0..n2], tp);
-                const e2_minus = msmG2(F, v2_work[0..n2], s1_work[n2..current_len], tp);
+                const c_batch = multiPairBatched(2, .{
+                    PairGroup{ .g1 = v1_work[0..n2], .g2 = v2_work[n2..current_len] },
+                    PairGroup{ .g1 = v1_work[n2..current_len], .g2 = v2_work[0..n2] },
+                }, tp);
+                const c_plus = c_batch[0];
+                const c_minus = c_batch[1];
+                const e1_plus, const e1_minus = if (tp) |pool| blk: {
+                    const E1Ctx = struct {
+                        v1: []const G1Point,
+                        s2: []const F,
+                        n2: usize,
+                        current_len: usize,
+                    };
+                    const e1_ctx = E1Ctx{ .v1 = v1_work, .s2 = s2_work, .n2 = n2, .current_len = current_len };
+                    break :blk pool.join(
+                        G1Point,
+                        G1Point,
+                        e1_ctx,
+                        struct {
+                            fn f(cx: E1Ctx) G1Point {
+                                return msm.MSM(F, Fp).computeWithPool(cx.v1[0..cx.n2], cx.s2[cx.n2..cx.current_len], null);
+                            }
+                        }.f,
+                        e1_ctx,
+                        struct {
+                            fn f(cx: E1Ctx) G1Point {
+                                return msm.MSM(F, Fp).computeWithPool(cx.v1[cx.n2..cx.current_len], cx.s2[0..cx.n2], null);
+                            }
+                        }.f,
+                    );
+                } else .{
+                    msm.MSM(F, Fp).computeWithPool(v1_work[0..n2], s2_work[n2..current_len], null),
+                    msm.MSM(F, Fp).computeWithPool(v1_work[n2..current_len], s2_work[0..n2], null),
+                };
+                const e2_plus, const e2_minus = if (tp) |pool| blk: {
+                    const E2Ctx = struct {
+                        v2: []const G2Point,
+                        s1: []const F,
+                        n2: usize,
+                        current_len: usize,
+                    };
+                    const e2_ctx = E2Ctx{ .v2 = v2_work, .s1 = s1_work, .n2 = n2, .current_len = current_len };
+                    break :blk pool.join(
+                        G2Point,
+                        G2Point,
+                        e2_ctx,
+                        struct {
+                            fn f(cx: E2Ctx) G2Point {
+                                return msmG2(F, cx.v2[cx.n2..cx.current_len], cx.s1[0..cx.n2], null);
+                            }
+                        }.f,
+                        e2_ctx,
+                        struct {
+                            fn f(cx: E2Ctx) G2Point {
+                                return msmG2(F, cx.v2[0..cx.n2], cx.s1[cx.n2..cx.current_len], null);
+                            }
+                        }.f,
+                    );
+                } else .{
+                    msmG2(F, v2_work[n2..current_len], s1_work[0..n2], null),
+                    msmG2(F, v2_work[0..n2], s1_work[n2..current_len], null),
+                };
 
                 second_messages[round] = SecondReduceMessage{
                     .c_plus = c_plus,
@@ -2713,12 +2897,46 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             // Compute final message: E₁ = v₁ + γ·s₁·h₁, E₂ = v₂ + γ⁻¹·s₂·h₂
             const gamma_s1 = gamma.mul(s1_work[0]);
-            const scaled_h1 = glv.glvScalarMulG1(params.h1, gamma_s1).toAffine();
-            const final_e1 = v1_work[0].add(scaled_h1);
-
             const gamma_inv_s2 = gamma_inv.mul(s2_work[0]);
-            const scaled_h2 = glv.glvScalarMulG2(params.h2, gamma_inv_s2).toAffine();
-            const final_e2 = v2_work[0].add(scaled_h2);
+
+            const final_e1, const final_e2 = if (tp) |pool| blk: {
+                const FinalCtx = struct {
+                    h1: G1Point,
+                    h2: G2Point,
+                    gs1: F,
+                    gis2: F,
+                    v1_0: G1Point,
+                    v2_0: G2Point,
+                };
+                const fc = FinalCtx{
+                    .h1 = params.h1,
+                    .h2 = params.h2,
+                    .gs1 = gamma_s1,
+                    .gis2 = gamma_inv_s2,
+                    .v1_0 = v1_work[0],
+                    .v2_0 = v2_work[0],
+                };
+                break :blk pool.join(
+                    G1Point,
+                    G2Point,
+                    fc,
+                    struct {
+                        fn f(cx: FinalCtx) G1Point {
+                            return cx.v1_0.add(glv.glvScalarMulG1(cx.h1, cx.gs1).toAffine());
+                        }
+                    }.f,
+                    fc,
+                    struct {
+                        fn f(cx: FinalCtx) G2Point {
+                            return glv.glvScalarMulG2(cx.h2, cx.gis2).addAffine(cx.v2_0).toAffine();
+                        }
+                    }.f,
+                );
+            } else blk: {
+                const scaled_h1 = glv.glvScalarMulG1(params.h1, gamma_s1).toAffine();
+                const scaled_h2 = glv.glvScalarMulG2(params.h2, gamma_inv_s2).toAffine();
+                break :blk .{ v1_work[0].add(scaled_h1), v2_work[0].add(scaled_h2) };
+            };
 
             const final_message = ScalarProductMessage{
                 .e1 = final_e1,

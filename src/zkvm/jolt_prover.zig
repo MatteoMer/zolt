@@ -39,6 +39,7 @@ const Stage6BatchedProver = spartan_mod.Stage6BatchedProver;
 const preprocessing = @import("preprocessing.zig");
 
 const debug_verbose = false;
+const stage_timing_enabled = false;
 
 /// Direct Jolt-compatible 7-stage prover
 pub fn JoltProver(comptime F: type) type {
@@ -1363,7 +1364,7 @@ pub fn JoltProver(comptime F: type) type {
                 try self.addSpartanOuterOpeningClaims(&jolt_proof.opening_claims);
             }
 
-            if (comptime debug_verbose) {
+            if (comptime stage_timing_enabled) {
                 std.debug.print("    [STAGE-TIMING] Stage 1: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
             }
             stage_timer.reset();
@@ -1695,7 +1696,7 @@ pub fn JoltProver(comptime F: type) type {
             transcript.appendScalar("opening_claim", stage2_result.output_val_final_claim);
 
 
-            if (comptime debug_verbose) {
+            if (comptime stage_timing_enabled) {
                 std.debug.print("    [STAGE-TIMING] Stage 2: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
             }
             stage_timer.reset();
@@ -1839,7 +1840,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // LookupOutput at InstructionClaimReduction was already added in Stage 2
 
-            if (comptime debug_verbose) {
+            if (comptime stage_timing_enabled) {
                 std.debug.print("    [STAGE-TIMING] Stage 3: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
             }
             stage_timer.reset();
@@ -2351,7 +2352,7 @@ pub fn JoltProver(comptime F: type) type {
                 }
             } // end stage4_block
 
-            if (comptime debug_verbose) {
+            if (comptime stage_timing_enabled) {
                 std.debug.print("    [STAGE-TIMING] Stage 4: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
             }
             stage_timer.reset();
@@ -2487,7 +2488,7 @@ pub fn JoltProver(comptime F: type) type {
                 // ALWAYS-ON: Print transcript state after Stage 5 cache_openings
             }
 
-            if (comptime debug_verbose) {
+            if (comptime stage_timing_enabled) {
                 std.debug.print("    [STAGE-TIMING] Stage 5: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
             }
             stage_timer.reset();
@@ -2660,7 +2661,7 @@ pub fn JoltProver(comptime F: type) type {
             // (stage6_prover.zig lines 4055-4083)
             // Do NOT re-append them here.
 
-            if (comptime debug_verbose) {
+            if (comptime stage_timing_enabled) {
                 std.debug.print("    [STAGE-TIMING] Stage 6: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
             }
             stage_timer.reset();
@@ -3168,7 +3169,7 @@ pub fn JoltProver(comptime F: type) type {
 
             }
 
-            if (comptime debug_verbose) {
+            if (comptime stage_timing_enabled) {
                 std.debug.print("    [STAGE-TIMING] Stage 7: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
             }
 

@@ -342,6 +342,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Initialize memory config
             // Use memory_size = 32768 to match Jolt fibonacci example
+            var overall_timer = std.time.Timer.start() catch unreachable;
             var config = common.MemoryConfig{
                 .program_size = program_bytecode.len,
                 .heap_size = 32768,
@@ -473,6 +474,8 @@ pub fn JoltProver(comptime F: type) type {
                 max_poly_size, log_size, (log_size + 1) / 2, log_size - (log_size + 1) / 2,
             });
 
+            if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] Tracing + witness gen: {d:.1} ms\n", .{@as(f64, @floatFromInt(overall_timer.read())) / 1_000_000.0});
+
             // Load SRS from file if path provided (for Jolt compatibility)
             // Otherwise generate SRS deterministically (may not match Jolt exactly)
             var phase_timer = std.time.Timer.start() catch unreachable;
@@ -484,7 +487,7 @@ pub fn JoltProver(comptime F: type) type {
             // Precompute G2 Miller loop coefficients for fast pairings
             dory_srs.initPreparedCache(self.thread_pool);
             const srs_time = phase_timer.read();
-            if (comptime debug_verbose) std.debug.print("  [TIMING] SRS setup: {d:.1} ms\n", .{@as(f64, @floatFromInt(srs_time)) / 1_000_000.0});
+            if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] SRS setup: {d:.1} ms\n", .{@as(f64, @floatFromInt(srs_time)) / 1_000_000.0});
 
             dbg("[SRS] Loaded: g1_vec={}, g2_vec={}\n", .{dory_srs.g1_vec.len, dory_srs.g2_vec.len});
 
@@ -788,7 +791,8 @@ pub fn JoltProver(comptime F: type) type {
             result.log_k_chunk = log_k_chunk;
 
             const commit_time = phase_timer.read();
-            if (comptime debug_verbose) std.debug.print("  [TIMING] Dory commits: {d:.1} ms ({} commitments)\n", .{ @as(f64, @floatFromInt(commit_time)) / 1_000_000.0, all_commitments.items.len });
+            if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] Dory commits: {d:.1} ms ({} commitments)\n", .{ @as(f64, @floatFromInt(commit_time)) / 1_000_000.0, all_commitments.items.len });
+            phase_timer.reset();
             dbg("[DORY] All {} commitments computed.\n", .{all_commitments.items.len});
             // Debug: print first 3 commitment bytes
             for (0..@min(3, all_commitments.items.len)) |ci| {
@@ -859,6 +863,7 @@ pub fn JoltProver(comptime F: type) type {
             defer bytecode_prep_dory.deinit();
 
             // Convert to Jolt-compatible format with transcript integration
+            if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] Pre-prove setup: {d:.1} ms\n", .{@as(f64, @floatFromInt(phase_timer.read())) / 1_000_000.0});
             phase_timer.reset();
             result.proof = try converter.proveWithTranscript(
                 commitment_types.PolyCommitment,
@@ -1155,6 +1160,8 @@ pub fn JoltProver(comptime F: type) type {
                     }
                 }
                 dbg("[STAGE8] Starting Dory opening proof (total_poly_size={}, num_claims={})...\n", .{ total_poly_size, num_claims });
+                if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] Stage 8 prep (hints+poly): {d:.1} ms\n", .{@as(f64, @floatFromInt(phase_timer.read())) / 1_000_000.0});
+                phase_timer.reset();
                 const dory_proof = try DoryScheme.openWithTranscript(
                     &dory_srs,
                     joint_poly,
@@ -1168,7 +1175,7 @@ pub fn JoltProver(comptime F: type) type {
                 result.dory_opening_proof = dory_proof;
                 result.opening_point = opening_point;
                 const stage8_time = phase_timer.read();
-                if (comptime debug_verbose) std.debug.print("  [TIMING] Stage 8 (Dory opening): {d:.1} ms\n", .{@as(f64, @floatFromInt(stage8_time)) / 1_000_000.0});
+                if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] Stage 8 (Dory opening): {d:.1} ms\n", .{@as(f64, @floatFromInt(stage8_time)) / 1_000_000.0});
 
                 dbg("[STAGE8] Dory proof: nu={}, sigma={}, first_messages={}, second_messages={}\n", .{
                     dory_proof.nu, dory_proof.sigma,

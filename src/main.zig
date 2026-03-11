@@ -291,10 +291,10 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
     // Initialize prover
     std.debug.print("\n[1/2] Initializing prover...\n", .{});
 
-    var thread_pool = try zolt.utils.ThreadPool.init(allocator);
+    const thread_pool = try zolt.utils.ThreadPool.init(allocator);
     defer thread_pool.deinit();
 
-    var prover_inst = zolt.zkvm.JoltProver(BN254Scalar).initWithThreadPool(allocator, &thread_pool);
+    var prover_inst = zolt.zkvm.JoltProver(BN254Scalar).initWithThreadPool(allocator, thread_pool);
 
     // Generate Jolt-compatible proof with Dory commitments
     std.debug.print("\n[2/2] Generating proof...\n", .{});
@@ -412,7 +412,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
         };
         defer srs.deinit();
 
-        var verifier_setup = preprocessing.DoryVerifierSetup.fromSRS(allocator, &srs, &thread_pool) catch |err| {
+        var verifier_setup = preprocessing.DoryVerifierSetup.fromSRS(allocator, &srs, thread_pool) catch |err| {
             std.debug.print("  Error creating verifier setup: {s}\n", .{@errorName(err)});
             return err;
         };

@@ -1783,25 +1783,17 @@ pub const DoryVerifierSetup = struct {
                 //   Δ₁R[k] = e(Γ₁[2^(k-1)..2^k], Γ₂[..2^(k-1)])
                 //   Δ₂R[k] = e(Γ₁[..2^(k-1)], Γ₂[2^(k-1)..2^k])
                 //   cross  = e(Γ₁[2^(k-1)..2^k], Γ₂[2^(k-1)..2^k])
-                // Use join() for first two, compute third on main thread after.
-                const MPCtx = struct { g1: []const G1Point, g2: []const G2Point };
-                if (tp) |pool| {
-                    const pair_results = pool.join(
-                        GT, GT,
-                        MPCtx{ .g1 = g1_second_half, .g2 = g2_first_half },
-                        struct { fn f(ctx: MPCtx) GT { return multiPair(ctx.g1, ctx.g2, null); } }.f,
-                        MPCtx{ .g1 = g1_first_half, .g2 = g2_second_half },
-                        struct { fn f(ctx: MPCtx) GT { return multiPair(ctx.g1, ctx.g2, null); } }.f,
-                    );
-                    try delta_1r.append(allocator, pair_results[0]);
-                    try delta_2r.append(allocator, pair_results[1]);
-                } else {
-                    try delta_1r.append(allocator, multiPair(g1_second_half, g2_first_half, null));
-                    try delta_2r.append(allocator, multiPair(g1_first_half, g2_second_half, null));
-                }
+                // Batch all 3 independent multi-pairings into one parallelReduceForce call.
+                const batch = dory.multiPairBatched(3, .{
+                    dory.PairGroup{ .g1 = g1_second_half, .g2 = g2_first_half }, // delta_1r
+                    dory.PairGroup{ .g1 = g1_first_half, .g2 = g2_second_half }, // delta_2r
+                    dory.PairGroup{ .g1 = g1_second_half, .g2 = g2_second_half }, // cross
+                }, tp);
+                try delta_1r.append(allocator, batch[0]);
+                try delta_2r.append(allocator, batch[1]);
 
-                // χ[k] = χ[k-1] * e(Γ₁[2^(k-1)..2^k], Γ₂[2^(k-1)..2^k])
-                const chi_k = chi.items[k - 1].mul(multiPair(g1_second_half, g2_second_half, tp));
+                // χ[k] = χ[k-1] * cross
+                const chi_k = chi.items[k - 1].mul(batch[2]);
                 try chi.append(allocator, chi_k);
             }
         }

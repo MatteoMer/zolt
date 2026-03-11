@@ -37,6 +37,8 @@ pub fn DensePolynomial(comptime F: type) type {
         num_vars: usize,
         /// Allocator used for this polynomial
         allocator: Allocator,
+        /// Pre-allocated scratch buffer for parallel bind (double-buffer technique)
+        scratch: ?[]F = null,
 
         /// Create a new polynomial from evaluations
         pub fn init(allocator: Allocator, evaluations: []const F) !Self {
@@ -68,6 +70,7 @@ pub fn DensePolynomial(comptime F: type) type {
 
         /// Free the polynomial
         pub fn deinit(self: *Self) void {
+            if (self.scratch) |s| self.allocator.free(s);
             self.allocator.free(self.evaluations);
         }
 
@@ -178,6 +181,34 @@ pub fn DensePolynomial(comptime F: type) type {
                 self.evaluations[i] = low.add(value.mul(high.sub(low)));
             }
 
+            self.num_vars -= 1;
+        }
+
+        /// Bind the last (lowest index) variable to a value - parallel double-buffer
+        /// Uses scratch buffer to avoid data races: reads from evaluations, writes to scratch,
+        /// then swaps pointers. Requires scratch buffer to be pre-allocated.
+        pub fn bindLowParallel(self: *Self, value: F, tp: *@import("../utils/thread_pool.zig").ThreadPool) void {
+            const new_size = self.evaluations.len / 2;
+            const scratch = self.scratch orelse {
+                self.bindLow(value); // fallback to sequential
+                return;
+            };
+
+            const Ctx = struct { src: []const F, dst: []F, r: F };
+            tp.parallelForForce(new_size, Ctx{ .src = self.evaluations, .dst = scratch, .r = value },
+                struct {
+                    fn f(ctx: Ctx, i: usize) void {
+                        const low = ctx.src[2 * i];
+                        const high = ctx.src[2 * i + 1];
+                        ctx.dst[i] = low.add(ctx.r.mul(high.sub(low)));
+                    }
+                }.f,
+            );
+
+            // Swap evaluations and scratch (pointer swap, O(1))
+            const tmp = self.evaluations;
+            self.evaluations = scratch;
+            self.scratch = tmp;
             self.num_vars -= 1;
         }
 

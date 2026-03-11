@@ -5639,12 +5639,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             dbg("[STAGE5 CYCLE] Reinitializing lookups_eq_evals for cycle rounds\n", .{});
                         }
                         buildFullEqTable(r_reduction, lookups_eq_evals[0..T]);
-                        // Debug: verify sum = 1
-                        var eq_sum_verify = F.zero();
-                        for (0..T) |j| {
-                            eq_sum_verify = eq_sum_verify.add(lookups_eq_evals[j]);
-                        }
                         if (comptime debug_verbose) {
+                            // Debug: verify sum = 1
+                            var eq_sum_verify = F.zero();
+                            for (0..T) |j| {
+                                eq_sum_verify = eq_sum_verify.add(lookups_eq_evals[j]);
+                            }
                             dbg("[STAGE5 CYCLE] eq_sum after reinit = {x} (should be 1)\n", .{eq_sum_verify.toBytesBE()[16..32].*});
                             dbg("[STAGE5 CYCLE] reinit eq_evals[0] = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
                             dbg("[STAGE5 CYCLE] reinit eq_evals[1] = {x}\n", .{lookups_eq_evals[1].toBytesBE()[16..32].*});
@@ -5829,18 +5829,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
 
-                        // Also compute the FULL sum with both: using accumulated ra and using materialized ra
-                        // This tells us which one is correct
-                        var sum_with_material = F.zero();
-                        for (0..T) |j| {
-                            const eq_j = computeEqAtIndex(r_reduction, j);
-                            var ra_material = F.one();
-                            for (0..ra_num_chunks) |c| {
-                                ra_material = ra_material.mul(ra_chunk_weights[c][j]);
-                            }
-                            sum_with_material = sum_with_material.add(eq_j.mul(ra_material).mul(lookups_combined_vals[j]));
-                        }
                         if (comptime debug_verbose) {
+                            // Compute the FULL sum with materialized ra for verification
+                            var sum_with_material = F.zero();
+                            for (0..T) |j| {
+                                const eq_j = computeEqAtIndex(r_reduction, j);
+                                var ra_material = F.one();
+                                for (0..ra_num_chunks) |c| {
+                                    ra_material = ra_material.mul(ra_chunk_weights[c][j]);
+                                }
+                                sum_with_material = sum_with_material.add(eq_j.mul(ra_material).mul(lookups_combined_vals[j]));
+                            }
                             dbg("[RA_COMPARE] sum_with_material = {x}\n", .{sum_with_material.toBytesBE()[16..32].*});
                             dbg("[RA_COMPARE] lookups_claim     = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                             dbg("[RA_COMPARE] material==claim: {}\n", .{sum_with_material.eql(lookups_claim)});
@@ -5858,7 +5857,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // DEBUG: Verify RA computation directly
                         // Compute eq(lookup_index(0), r_addr) directly from challenges
                         // and compare with Π_c ra_chunk_c(0)
-                        {
+                        if (comptime debug_verbose) {
                             const k_lo_0 = lookups_indices_lo[0];
                             const k_hi_0 = lookups_indices_hi[0];
                             var direct_eq = F.one();
@@ -5882,7 +5881,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // DEBUG: Compute combined_val(0) directly from table MLE
                         // combined_val(0) should be table_value(r_addr) + raf(r_addr)
                         // where raf(r_addr) depends on identity/interleaved path
-                        {
+                        if (comptime debug_verbose) {
                             // For cycle 0: what table is it?
                             const t_idx_0 = cycle_table_indices[0];
                             const is_id_0 = cycle_is_identity_path[0];
@@ -5930,7 +5929,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // DEBUG: DIRECT brute-force claim computation
                         // Compute Σ_j eq(j, r_red) * eq(K(j), r_addr) * cv_remat(j)
                         // using per-bit eq computation (NOT expanding tables)
-                        {
+                        if (comptime debug_verbose) {
                             var direct_bf_sum = F.zero();
                             // We don't store initial cv, so skip that check
                             var mismatch_count: usize = 0;
@@ -7255,37 +7254,35 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     print("[ZOLT EQ DEBUG]   r_cycle_prime_be[{}] limbs = [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ i, r_cycle_prime_be[i].limbs[0], r_cycle_prime_be[i].limbs[1], r_cycle_prime_be[i].limbs[2], r_cycle_prime_be[i].limbs[3] });
                 }
             }
+            // Build eq(r_cycle', j) table for all j using O(T) doubling technique
+            // instead of O(T * n_cycle_vars) per-element computation
+            buildFullEqTable(r_cycle_prime_be, lookups_eq_evals[0..T]);
+
             // Include ALL T cycles (including NOOPs and padding) in table flags and raf flag.
             // This matches Jolt where all cycles contribute to opening claims.
+            var computed_raf_flag = F.zero();
             for (0..T) |j| {
-                const eq_j = computeEqAtIndex(r_cycle_prime_be, j);
+                const eq_j = lookups_eq_evals[j];
 
                 // Accumulate into appropriate table flag
                 const table_idx = cycle_table_indices[j];
                 if (table_idx >= 0 and @as(usize, @intCast(table_idx)) < num_lookup_tables) {
                     table_flags[@intCast(table_idx)] = table_flags[@intCast(table_idx)].add(eq_j);
                 }
+
+                // Accumulate raf_flag for identity path cycles
+                if (cycle_is_identity_path[j]) {
+                    computed_raf_flag = computed_raf_flag.add(eq_j);
+                }
             }
 
             // Debug: print non-zero table flags
             if (comptime debug_verbose) {
                 dbg("[STAGE5 LOOKUPS] Non-zero table flags (FULL LE):\n", .{});
-            }
-            for (0..num_lookup_tables) |i| {
-                if (!table_flags[i].eql(F.zero())) {
-                    if (comptime debug_verbose) {
+                for (0..num_lookup_tables) |i| {
+                    if (!table_flags[i].eql(F.zero())) {
                         dbg("  table_flags[{}] = {any}\n", .{ i, table_flags[i].toBytes() });
                     }
-                }
-            }
-
-            // Compute raf_flag = Σ_{j: identity_path} eq(r_cycle', j)
-            // Include ALL T cycles (NOOPs and padding are identity path)
-            var computed_raf_flag = F.zero();
-            for (0..T) |j| {
-                if (cycle_is_identity_path[j]) {
-                    const eq_j = computeEqAtIndex(r_cycle_prime_be, j);
-                    computed_raf_flag = computed_raf_flag.add(eq_j);
                 }
             }
             if (comptime debug_verbose) {

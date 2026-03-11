@@ -327,6 +327,61 @@ pub fn EqPolynomial(comptime F: type) type {
             return result;
         }
 
+        /// Compute eq evaluations with optional parallel inner loops.
+        /// Same as evalsSliceWithScaling but parallelizes large levels via ThreadPool.
+        pub fn evalsSliceWithScalingParallel(comptime FieldType: type, allocator: Allocator, r: []const FieldType, scaling_factor: ?FieldType, pool: ?*@import("../utils/thread_pool.zig").ThreadPool) ![]FieldType {
+            const n = r.len;
+            if (n == 0) {
+                const result = try allocator.alloc(FieldType, 1);
+                result[0] = scaling_factor orelse FieldType.one();
+                return result;
+            }
+
+            const final_size = @as(usize, 1) << @as(u6, @intCast(n));
+            const result = try allocator.alloc(FieldType, final_size);
+
+            @memset(result, FieldType.zero());
+            result[0] = scaling_factor orelse FieldType.one();
+
+            // BE convention: iterate r in reverse
+            var size: usize = 1;
+            var j: usize = n;
+            while (j > 0) {
+                j -= 1;
+                const r_j = r[j];
+
+                if (pool != null and size >= 256) {
+                    const TP = @import("../utils/thread_pool.zig").ThreadPool;
+                    const Ctx = struct {
+                        res: []FieldType,
+                        rj: FieldType,
+                        sz: usize,
+                    };
+                    const ctx = Ctx{ .res = result, .rj = r_j, .sz = size };
+                    const p: *TP = pool.?;
+                    p.parallelForForce(size, ctx, struct {
+                        fn f(c: Ctx, i: usize) void {
+                            const x = c.res[i];
+                            const y = x.mul(c.rj);
+                            c.res[i + c.sz] = y;
+                            c.res[i] = x.sub(y);
+                        }
+                    }.f);
+                } else {
+                    for (0..size) |i| {
+                        const x = result[i];
+                        const y = x.mul(r_j);
+                        result[i + size] = y;
+                        result[i] = x.sub(y);
+                    }
+                }
+
+                size *= 2;
+            }
+
+            return result;
+        }
+
         /// Bind the first variable and reduce polynomial size in-place
         /// After binding n variables, evals() will return 2^(original_len - n) values
         pub fn bind(self: *Self, value: F) void {

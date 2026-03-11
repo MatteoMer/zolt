@@ -1272,10 +1272,29 @@ pub fn JoltProver(comptime F: type) type {
             @memcpy(padded_witnesses[0..cycle_witnesses.len], cycle_witnesses);
 
             // Fill padded cycles with NoOp witness values
-            for (cycle_witnesses.len..trace_length) |i| {
-                padded_witnesses[i] = r1cs.R1CSCycleInputs(F).init(); // All zeros
-                padded_witnesses[i].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
-                padded_witnesses[i].values[r1cs.R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+            {
+                const pad_len = trace_length - cycle_witnesses.len;
+                const pad_start = cycle_witnesses.len;
+                if (self.thread_pool != null and pad_len >= 256) {
+                    const PadCtx = struct {
+                        pw: []r1cs.R1CSCycleInputs(F),
+                        start: usize,
+                    };
+                    self.thread_pool.?.parallelFor(pad_len, PadCtx{ .pw = padded_witnesses, .start = pad_start }, struct {
+                        fn f(ctx: PadCtx, idx: usize) void {
+                            const i = ctx.start + idx;
+                            ctx.pw[i] = r1cs.R1CSCycleInputs(F).init();
+                            ctx.pw[i].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
+                            ctx.pw[i].values[r1cs.R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                        }
+                    }.f);
+                } else {
+                    for (pad_start..trace_length) |i| {
+                        padded_witnesses[i] = r1cs.R1CSCycleInputs(F).init();
+                        padded_witnesses[i].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
+                        padded_witnesses[i].values[r1cs.R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                    }
+                }
             }
 
 
@@ -2832,7 +2851,7 @@ pub fn JoltProver(comptime F: type) type {
                 for (0..s6_n_cycle_vars) |i| {
                     r_cycle_le[i] = s6_challenges[s6_bool_start + s6_log_k_chunk + i];
                 }
-                const eq_cycle = try stage6_mod.computeEqTable(F, self.allocator, r_cycle_le, s6_n_cycle_vars);
+                const eq_cycle = try stage6_mod.computeEqTableParallel(F, self.allocator, r_cycle_le, s6_n_cycle_vars, self.thread_pool);
                 defer self.allocator.free(eq_cycle);
 
                 // Compute G_i polynomials: G_i(k) = Σ_j eq(r_cycle, j) · (addr_chunk_i(j) == k ? 1 : 0)
@@ -2913,7 +2932,7 @@ pub fn JoltProver(comptime F: type) type {
                 for (0..s6_log_k_chunk) |i| {
                     r_addr_bool_le[i] = r_addr_bool_be[s6_log_k_chunk - 1 - i];
                 }
-                var eq_bool = try stage6_mod.computeEqTable(F, self.allocator, r_addr_bool_le, s6_log_k_chunk);
+                var eq_bool = try stage6_mod.computeEqTableParallel(F, self.allocator, r_addr_bool_le, s6_log_k_chunk, self.thread_pool);
                 defer self.allocator.free(eq_bool);
 
                 var eq_virt = try self.allocator.alloc([]F, N);
@@ -2927,7 +2946,7 @@ pub fn JoltProver(comptime F: type) type {
                     for (0..s6_log_k_chunk) |ci| {
                         r_virt_le[ci] = r_addr_virt[i][s6_log_k_chunk - 1 - ci];
                     }
-                    eq_virt[i] = try stage6_mod.computeEqTable(F, self.allocator, r_virt_le, s6_log_k_chunk);
+                    eq_virt[i] = try stage6_mod.computeEqTableParallel(F, self.allocator, r_virt_le, s6_log_k_chunk, self.thread_pool);
                     self.allocator.free(r_virt_le);
                 }
 

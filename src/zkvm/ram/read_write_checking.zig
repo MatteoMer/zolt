@@ -344,7 +344,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             }
 
             // Sort entries by (cycle, address) for cycle-major ordering
-            std.mem.sort(Entry, entries.items, {}, struct {
+            // Use unstable sort (pdq) — no duplicate (cycle, address) pairs exist
+            std.mem.sortUnstable(Entry, entries.items, {}, struct {
                 fn lessThan(_: void, a: Entry, b: Entry) bool {
                     if (a.cycle != b.cycle) return a.cycle < b.cycle;
                     return a.address < b.address;
@@ -354,10 +355,10 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
 
             // Initialize eq polynomial evaluations: eq(r_cycle, j) for each cycle j
             // r_cycle is in BIG_ENDIAN order (MSB first, as stored in tau)
-            const eq_evals = try allocator.alloc(F, T);
-            for (0..T) |j| {
-                eq_evals[j] = computeEqBigEndian(F, params.r_cycle, j, params.log_t);
-            }
+            // Use O(T) table construction instead of O(T·logT) per-element computation
+            const poly_mod = @import("../../poly/mod.zig");
+            const EqPoly = poly_mod.EqPolynomial(F);
+            const eq_evals = try EqPoly.evalsSliceWithScaling(F, allocator, params.r_cycle, null);
 
             const challenges_list = std.ArrayListUnmanaged(F){};
 
@@ -373,8 +374,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
             }
 
-            // VERIFY: Check initial sum = Σ eq[j] * ra(k,j) * (val(k,j) + gamma*(val(k,j) + inc[j]))
-            {
+            // VERIFY: Check initial sum (debug only — O(N) + O(T) allocation)
+            if (comptime debug_verbose) {
                 var verify_init_sum = F.zero();
                 for (entries.items) |ve| {
                     const eq_j = if (ve.cycle < T) eq_evals[ve.cycle] else F.zero();
@@ -385,31 +386,25 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 dbg("[RWC INIT VERIFY] initial_claim = {any}\n", .{initial_claim.toBytesBE()});
                 dbg("[RWC INIT VERIFY] sum_of_entries = {any}\n", .{verify_init_sum.toBytesBE()});
                 dbg("[RWC INIT VERIFY] match = {}\n", .{verify_init_sum.eql(initial_claim)});
-                // Also compute rv_claim and wv_claim separately
                 var rv_sum = F.zero();
                 var wv_sum = F.zero();
                 for (entries.items) |ve| {
                     const eq_j = if (ve.cycle < T) eq_evals[ve.cycle] else F.zero();
                     const inc_j = if (ve.cycle < T) inc[ve.cycle] else F.zero();
-                    // rv = Σ eq * ra * val
                     rv_sum = rv_sum.add(eq_j.mul(ve.ra_coeff).mul(ve.val_coeff));
-                    // wv = Σ eq * ra * (val + inc)
                     wv_sum = wv_sum.add(eq_j.mul(ve.ra_coeff).mul(ve.val_coeff.add(inc_j)));
                 }
                 dbg("[RWC INIT VERIFY] rv_sum = {any}\n", .{rv_sum.toBytesBE()});
                 dbg("[RWC INIT VERIFY] wv_sum = {any}\n", .{wv_sum.toBytesBE()});
                 dbg("[RWC INIT VERIFY] rv + gamma*wv = {any}\n", .{rv_sum.add(params.gamma.mul(wv_sum)).toBytesBE()});
-                // Also compute what initial_claim SHOULD be using a different eq convention
-                // Try LITTLE_ENDIAN eq
-                const poly_mod = @import("../../poly/mod.zig");
-                const EqPoly = poly_mod.EqPolynomial(F);
-                const eq_le_evals = try EqPoly.evalsSliceWithScaling(F, allocator, params.r_cycle, null);
+                const poly_mod_dbg = @import("../../poly/mod.zig");
+                const EqPolyDbg = poly_mod_dbg.EqPolynomial(F);
+                const eq_le_evals = try EqPolyDbg.evalsSliceWithScaling(F, allocator, params.r_cycle, null);
                 defer allocator.free(eq_le_evals);
                 const eq_le_54 = if (54 < eq_le_evals.len) eq_le_evals[54] else F.zero();
                 dbg("[RWC INIT VERIFY] eq_BE[54] = {any}\n", .{eq_evals[54].toBytesBE()});
                 dbg("[RWC INIT VERIFY] eq_LE[54] (EqPoly) = {any}\n", .{eq_le_54.toBytesBE()});
-                // Compute with LE eq
-                const sum_le = eq_le_54.mul(params.gamma); // rv=0, wv=eq*1, total=gamma*eq
+                const sum_le = eq_le_54.mul(params.gamma);
                 dbg("[RWC INIT VERIFY] gamma*eq_LE[54] = {any}\n", .{sum_le.toBytesBE()});
             }
 
@@ -607,7 +602,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // Convert to AddressMajor at start of Phase 2
             if (addr_round == 0) {
                 // Sort entries by (address, cycle) for AddressMajor ordering
-                std.mem.sort(Entry, self.entries.items, {}, struct {
+                // Use unstable sort (pdq) — no duplicate (address, cycle) pairs exist
+                std.mem.sortUnstable(Entry, self.entries.items, {}, struct {
                     fn lessThan(_: void, a: Entry, b: Entry) bool {
                         if (a.address != b.address) return a.address < b.address;
                         return a.cycle < b.cycle;

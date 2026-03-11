@@ -1439,6 +1439,7 @@ fn IncClaimReductionProver(comptime F: type) type {
             r_cycle_stage4: []const F,
             s_cycle_stage4: []const F,
             s_cycle_stage5: []const F,
+            pool: ?*ThreadPool,
         ) !Self {
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
@@ -1446,25 +1447,14 @@ fn IncClaimReductionProver(comptime F: type) type {
             var ram_inc_arr = try allocator.alloc(F, T);
             var rd_inc_arr = try allocator.alloc(F, T);
 
-            // Track register values across cycles - MUST match Stage 4 gruen prover:
-            // - Use step.rd_index (supports virtual registers 0-127)
-            // - Use step.rd_written flag (not opcode-based detection)
-            // - Track all 128 registers (K=128)
-            const K_INC = 128; // Must match Stage 4's K
-            var register_values: [K_INC]u64 = [_]u64{0} ** K_INC;
-
+            // Uses TraceStep pre-recorded rd_pre_value — no sequential register tracking needed.
+            // Must match Stage 4 gruen prover's inc_poly computation exactly.
             for (0..T) |j| {
                 const step = trace.steps.items[j];
 
-                // RdInc: must match Stage 4 gruen prover's inc_poly computation exactly.
-                // Skip rd=0: in upstream Jolt, x0 is hardwired to 0 so inc is always 0.
-                // Stage 4 also skips rd=0 in inc_poly.
+                // RdInc: skip rd=0 (x0 hardwired to 0, inc always 0)
                 if (!step.is_noop and step.rd_written and step.rd_index != 0) {
-                    const rd = step.rd_index;
-                    const pre_value = register_values[rd];
-                    const post_value = step.rd_value;
-                    rd_inc_arr[j] = F.fromU64(post_value).sub(F.fromU64(pre_value));
-                    register_values[rd] = post_value;
+                    rd_inc_arr[j] = F.fromU64(step.rd_value).sub(F.fromU64(step.rd_pre_value));
                 } else {
                     rd_inc_arr[j] = F.zero();
                 }
@@ -1484,19 +1474,19 @@ fn IncClaimReductionProver(comptime F: type) type {
             defer allocator.free(rev_buf);
 
             for (0..n_vars) |i| rev_buf[i] = r_cycle_stage2[n_vars - 1 - i];
-            const eq_stage2 = try computeEqTable(F, allocator, rev_buf, n_vars);
+            const eq_stage2 = try computeEqTableParallel(F, allocator, rev_buf, n_vars, pool);
             defer allocator.free(eq_stage2);
 
             for (0..n_vars) |i| rev_buf[i] = r_cycle_stage4[n_vars - 1 - i];
-            const eq_stage4 = try computeEqTable(F, allocator, rev_buf, n_vars);
+            const eq_stage4 = try computeEqTableParallel(F, allocator, rev_buf, n_vars, pool);
             defer allocator.free(eq_stage4);
 
             for (0..n_vars) |i| rev_buf[i] = s_cycle_stage4[n_vars - 1 - i];
-            const eq_s4 = try computeEqTable(F, allocator, rev_buf, n_vars);
+            const eq_s4 = try computeEqTableParallel(F, allocator, rev_buf, n_vars, pool);
             defer allocator.free(eq_s4);
 
             for (0..n_vars) |i| rev_buf[i] = s_cycle_stage5[n_vars - 1 - i];
-            const eq_s5 = try computeEqTable(F, allocator, rev_buf, n_vars);
+            const eq_s5 = try computeEqTableParallel(F, allocator, rev_buf, n_vars, pool);
             defer allocator.free(eq_s5);
 
             var eq_ram_arr = try allocator.alloc(F, T);
@@ -1515,6 +1505,7 @@ fn IncClaimReductionProver(comptime F: type) type {
                 .gamma_sqr = gamma.mul(gamma),
                 .current_len = T,
                 .allocator = allocator,
+                .pool = pool,
             };
         }
 
@@ -1647,6 +1638,7 @@ fn HammingBooleanityProver(comptime F: type) type {
             allocator: Allocator,
             trace: *const ExecutionTrace,
             r_cycle: []const F,
+            pool: ?*ThreadPool,
         ) !Self {
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
@@ -1665,13 +1657,14 @@ fn HammingBooleanityProver(comptime F: type) type {
             var r_cycle_rev = try allocator.alloc(F, n_vars);
             defer allocator.free(r_cycle_rev);
             for (0..n_vars) |i| r_cycle_rev[i] = r_cycle[n_vars - 1 - i];
-            const eq_arr = try computeEqTable(F, allocator, r_cycle_rev, n_vars);
+            const eq_arr = try computeEqTableParallel(F, allocator, r_cycle_rev, n_vars, pool);
 
             return Self{
                 .H = H_arr,
                 .eq = eq_arr,
                 .current_len = T,
                 .allocator = allocator,
+                .pool = pool,
             };
         }
 
@@ -1796,6 +1789,7 @@ fn RamRaVirtualProver(comptime F: type) type {
             d: usize,
             memory_layout: *const jolt_device.MemoryLayout,
             log_k_chunk: usize,
+            init_pool: ?*ThreadPool,
         ) !Self {
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
@@ -1811,6 +1805,7 @@ fn RamRaVirtualProver(comptime F: type) type {
                 ra_bound_arr[i] = try allocator.alloc(F, T);
 
                 // r_addr_chunks[i] is in BE order; reverse for LE computeEqTable
+                // Small table (chunk-sized), no parallelism needed
                 var r_chunk_rev = try allocator.alloc(F, log_k_chunk);
                 defer allocator.free(r_chunk_rev);
                 for (0..log_k_chunk) |ci| r_chunk_rev[ci] = r_addr_chunks[i][log_k_chunk - 1 - ci];
@@ -1848,7 +1843,7 @@ fn RamRaVirtualProver(comptime F: type) type {
             var r_cycle_rev = try allocator.alloc(F, n_vars);
             defer allocator.free(r_cycle_rev);
             for (0..n_vars) |i| r_cycle_rev[i] = r_cycle[n_vars - 1 - i];
-            const eq_arr = try computeEqTable(F, allocator, r_cycle_rev, n_vars);
+            const eq_arr = try computeEqTableParallel(F, allocator, r_cycle_rev, n_vars, init_pool);
 
             return Self{
                 .ra_bound = ra_bound_arr,
@@ -1856,6 +1851,7 @@ fn RamRaVirtualProver(comptime F: type) type {
                 .d = d,
                 .current_len = T,
                 .allocator = allocator,
+                .pool = init_pool,
             };
         }
 
@@ -2757,6 +2753,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             N: usize,
             log_k_chunk: usize,
             instruction_d: usize,
+            init_pool: ?*ThreadPool,
         ) !Self {
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
@@ -2851,7 +2848,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             var r_cycle_rev = try allocator.alloc(F, n_vars);
             defer allocator.free(r_cycle_rev);
             for (0..n_vars) |i| r_cycle_rev[i] = r_cycle[n_vars - 1 - i];
-            const eq_arr = try computeEqTable(F, allocator, r_cycle_rev, n_vars);
+            const eq_arr = try computeEqTableParallel(F, allocator, r_cycle_rev, n_vars, init_pool);
 
             // Verify: sum over all cycles should equal the input claim
             {
@@ -2936,6 +2933,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 .total_committed = total_committed,
                 .current_len = T,
                 .allocator = allocator,
+                .pool = init_pool,
             };
         }
 
@@ -3152,6 +3150,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
             stage_r_cycles: [5][]const F,
             int_poly: []F,
             external_stage_claims: [5]F, // From opening claims: claim_per_stage[s]
+            init_pool: ?*ThreadPool,
         ) !Self {
             const bytecode_K: usize = @as(usize, 1) << @intCast(bytecode_log_k);
             const T: usize = @as(usize, 1) << @intCast(n_cycle_vars);
@@ -3171,7 +3170,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 for (0..n_cycle_vars) |i| {
                     r_cycle_rev[i] = stage_r_cycles[s][n_cycle_vars - 1 - i];
                 }
-                const eq_table = try computeEqTable(F, allocator, r_cycle_rev, n_cycle_vars);
+                const eq_table = try computeEqTableParallel(F, allocator, r_cycle_rev, n_cycle_vars, init_pool);
                 defer allocator.free(eq_table);
 
                 // F_s[k] = Sum_{c: PC(c)=k} eq(r_cycle_s, c)
@@ -3524,6 +3523,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 .val_polys = val_polys,
                 .int_poly = int_poly,
                 .allocator = allocator,
+                .pool = init_pool,
             };
         }
 
@@ -3746,7 +3746,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
             // Jolt's verifier reverses challenges (normalize_opening_point) before evaluate,
             // so r[0] = LSB challenge maps to bit 0 of coefficient index.
             // We must do the same: use r_address_be (reversed) for the eq table.
-            const eq_addr = try computeEqTable(F, self.allocator, r_address_be, self.bytecode_log_k);
+            const eq_addr = try computeEqTableParallel(F, self.allocator, r_address_be, self.bytecode_log_k, self.pool);
             defer self.allocator.free(eq_addr);
 
             // Debug: eq_addr entries (ALWAYS ON, full 32 bytes)
@@ -3943,7 +3943,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 for (0..self.n_cycle_vars) |i| {
                     r_cycle_rev[i] = self.stage_r_cycles[s][self.n_cycle_vars - 1 - i];
                 }
-                eq_per_stage[s] = try computeEqTable(F, self.allocator, r_cycle_rev, self.n_cycle_vars);
+                eq_per_stage[s] = try computeEqTableParallel(F, self.allocator, r_cycle_rev, self.n_cycle_vars, self.pool);
             }
 
             // Compute combined[c] = Sum_s bound_vals[s] * eq_s(c)
@@ -4585,8 +4585,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 self.allocator, trace, inc_gamma,
                 r_cycle_inc_ram_rwc, r_cycle_inc_ram_val,
                 r_cycle_bc4_regs_rwc, r_cycle_bc5_regs_val,
+                self.thread_pool,
             );
-            inc_prover.pool = self.thread_pool;
             defer inc_prover.deinit();
 
             // Direct comparison: Stage 6 rd_inc vs Stage 4 inc_poly
@@ -4688,16 +4688,16 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // Instance 1: HammingBooleanity (degree 3)
             var hamming_prover = try HammingBooleanityProver(F).init(
                 self.allocator, trace, r_cycle_bc1_spartan_outer,
+                self.thread_pool,
             );
-            hamming_prover.pool = self.thread_pool;
             defer hamming_prover.deinit();
 
             // Instance 3: RamRaVirtual (degree ram_d+1)
             var ram_ra_prover = try RamRaVirtualProver(F).init(
                 self.allocator, trace, ram_ra_r_cycle,
                 ram_ra_addr_chunks, ram_d, memory_layout, log_k_chunk,
+                self.thread_pool,
             );
-            ram_ra_prover.pool = self.thread_pool;
             defer ram_ra_prover.deinit();
 
             // Instance 4: LookupsRaVirtual (degree n_committed_per_virtual+1)
@@ -4706,8 +4706,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 lookups_ra_addr_chunks, lookups_ra_gamma_powers,
                 n_committed_per_virtual, n_virtual_ra_polys,
                 log_k_chunk, instruction_d,
+                self.thread_pool,
             );
-            lookups_ra_prover.pool = self.thread_pool;
             defer lookups_ra_prover.deinit();
 
             // Instance 2: Booleanity (degree 3, two-phase)
@@ -4770,7 +4770,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // After Phase 2 halving with LowToHigh binding, the final eq value equals
                 // eq(challenges, r_cycle_BE) = eq(challenges, rev(r_cycle_LE)), matching
                 // Jolt's verifier which computes combined_r_cycle = rev(r_cycle_LE).
-                const eq_cycle_bool_phase2 = try computeEqTable(F, self.allocator, lookups_ra_r_cycle, n_cycle_vars);
+                const eq_cycle_bool_phase2 = try computeEqTableParallel(F, self.allocator, lookups_ra_r_cycle, n_cycle_vars, self.thread_pool);
                 // eq_cycle_bool_phase2 is NOT deferred - shared with BooleanityProver
 
                 // Build G tables: G_i[k] = Σ_j eq(r_cycle_fixed, j) * [chunk_i(j) == k]
@@ -5139,7 +5139,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var r_cycle_rev = try self.allocator.alloc(F, n_vars);
                 defer self.allocator.free(r_cycle_rev);
                 for (0..n_vars) |i| r_cycle_rev[i] = r_cycle_bc1_spartan_outer[n_vars - 1 - i];
-                const eq_table_s1 = try computeEqTable(F, self.allocator, r_cycle_rev, n_vars);
+                const eq_table_s1 = try computeEqTableParallel(F, self.allocator, r_cycle_rev, n_vars, self.thread_pool);
                 defer self.allocator.free(eq_table_s1);
 
                 // Compute F_s[k] = Σ_{c:PC(c)=k} eq(r_cycle, c) for Stage 1
@@ -5267,7 +5267,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var r_cycle_rev2 = try self.allocator.alloc(F, n_vars);
                 defer self.allocator.free(r_cycle_rev2);
                 for (0..n_vars) |i| r_cycle_rev2[i] = r_cycle_bc2_product_virt[n_vars - 1 - i];
-                const eq_table_s2 = try computeEqTable(F, self.allocator, r_cycle_rev2, n_vars);
+                const eq_table_s2 = try computeEqTableParallel(F, self.allocator, r_cycle_rev2, n_vars, self.thread_pool);
                 defer self.allocator.free(eq_table_s2);
 
                 // Compute per-field sums: Σ_c eq(r_cycle_2, c) * witness_field[c]
@@ -5353,7 +5353,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var r_cycle_rev4 = try self.allocator.alloc(F, n_vars);
                 defer self.allocator.free(r_cycle_rev4);
                 for (0..n_vars) |i| r_cycle_rev4[i] = r_cycle_bc4_regs_rwc[n_vars - 1 - i];
-                const eq_table_s4 = try computeEqTable(F, self.allocator, r_cycle_rev4, n_vars);
+                const eq_table_s4 = try computeEqTableParallel(F, self.allocator, r_cycle_rev4, n_vars, self.thread_pool);
                 defer self.allocator.free(eq_table_s4);
 
                 // For each field (rd, rs1, rs2), compute Σ_k F_s[k] * eq(entry[k].reg, r_register_4)
@@ -5643,7 +5643,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var r_cycle_rev5 = try self.allocator.alloc(F, n_vars);
                 defer self.allocator.free(r_cycle_rev5);
                 for (0..n_vars) |i| r_cycle_rev5[i] = r_cycle_bc5_regs_val[n_vars - 1 - i];
-                const eq_table_s5 = try computeEqTable(F, self.allocator, r_cycle_rev5, n_vars);
+                const eq_table_s5 = try computeEqTableParallel(F, self.allocator, r_cycle_rev5, n_vars, self.thread_pool);
                 defer self.allocator.free(eq_table_s5);
 
                 var F_s5 = try self.allocator.alloc(F, bytecode_K);
@@ -5812,8 +5812,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 },
                 bytecode_int_poly,
                 bcraf_per_stage_claims,
+                self.thread_pool,
             );
-            bytecode_prover.pool = self.thread_pool;
             defer bytecode_prover.deinit();
 
             // Debug: Compare prover's initial BytecodeReadRaf claim with opening-claims-derived claim
@@ -7603,6 +7603,12 @@ fn addFixedEvalsToCombibed(comptime F: type, combined_evals: []F, polys: []const
 /// Compute eq polynomial table: eq(r, j) for all j in [0, 2^n_vars)
 /// r is in BIG_ENDIAN order (r[0] is the most significant variable)
 pub fn computeEqTable(comptime F: type, allocator: Allocator, r: []const F, n_vars: usize) ![]F {
+    return computeEqTableParallel(F, allocator, r, n_vars, null);
+}
+
+/// Compute eq polynomial table with optional parallel inner loops.
+/// Same as computeEqTable but parallelizes large levels via ThreadPool.
+pub fn computeEqTableParallel(comptime F: type, allocator: Allocator, r: []const F, n_vars: usize, pool: ?*ThreadPool) ![]F {
     const size: usize = @as(usize, 1) << @intCast(n_vars);
     var table = try allocator.alloc(F, size);
 
@@ -7610,14 +7616,34 @@ pub fn computeEqTable(comptime F: type, allocator: Allocator, r: []const F, n_va
 
     for (0..n_vars) |i| {
         const r_i = r[i];
-        const one_minus_r = F.one().sub(r_i);
         const cur_size: usize = @as(usize, 1) << @intCast(i);
 
-        var j: usize = cur_size;
-        while (j > 0) {
-            j -= 1;
-            table[j + cur_size] = table[j].mul(r_i);
-            table[j] = table[j].mul(one_minus_r);
+        if (pool != null and cur_size >= 256) {
+            // Parallel: forward iteration, writes to disjoint halves [0..cur_size) and [cur_size..2*cur_size)
+            const Ctx = struct {
+                tbl: []F,
+                ri: F,
+                cs: usize,
+            };
+            const ctx = Ctx{ .tbl = table, .ri = r_i, .cs = cur_size };
+            pool.?.parallelForForce(cur_size, ctx, struct {
+                fn f(c: Ctx, j: usize) void {
+                    const x = c.tbl[j];
+                    const y = x.mul(c.ri);
+                    c.tbl[j + c.cs] = y;
+                    c.tbl[j] = x.sub(y);
+                }
+            }.f);
+        } else {
+            // Sequential: backward iteration (original)
+            var j: usize = cur_size;
+            while (j > 0) {
+                j -= 1;
+                const x = table[j];
+                const y = x.mul(r_i);
+                table[j + cur_size] = y;
+                table[j] = x.sub(y);
+            }
         }
     }
 

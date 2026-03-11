@@ -160,23 +160,17 @@ pub fn Stage4GruenProver(comptime F: type) type {
             const gamma_sq = gamma.mul(gamma);
 
             // Build sparse matrix from trace
-            var sparse_lookup = try SparseRegsLookup.fromTrace(allocator, trace, gamma);
+            var sparse_lookup = try SparseRegsLookup.fromTrace(allocator, trace, gamma, null);
             errdefer sparse_lookup.deinit();
 
             // Build dense inc_poly from trace
+            // Uses TraceStep pre-recorded rd_pre_value — no sequential register tracking needed
             const inc_poly = try allocator.alloc(F, T);
             @memset(inc_poly, F.zero());
-            {
-                var register_values: [K]u64 = [_]u64{0} ** K;
-                for (trace.steps.items, 0..) |step, cycle| {
-                    if (step.is_noop) continue;
-                    if (step.rd_written and step.rd_index != 0) {
-                        const rd = step.rd_index;
-                        const pre_value = register_values[rd];
-                        const post_value = step.rd_value;
-                        inc_poly[cycle] = F.fromU64(post_value).sub(F.fromU64(pre_value));
-                        register_values[rd] = post_value;
-                    }
+            for (trace.steps.items, 0..) |step, cycle| {
+                if (step.is_noop) continue;
+                if (step.rd_written and step.rd_index != 0) {
+                    inc_poly[cycle] = F.fromU64(step.rd_value).sub(F.fromU64(step.rd_pre_value));
                 }
             }
 

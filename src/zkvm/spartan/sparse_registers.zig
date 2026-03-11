@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 const one_hot = @import("one_hot_coeffs.zig");
 const OneHotCoeffLookupTable = one_hot.OneHotCoeffLookupTable;
 const LookupTableIndex = one_hot.LookupTableIndex;
@@ -354,23 +355,38 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
 
         // ---- Construction from trace (only for use_lookups=true) ----
 
-        pub fn fromTrace(allocator: Allocator, trace: *const ExecutionTrace, gamma: F) !Self {
+        pub fn fromTrace(allocator: Allocator, trace: *const ExecutionTrace, gamma: F, pool: ?*ThreadPool) !Self {
             if (!use_lookups) @compileError("fromTrace only for use_lookups=true");
 
             const trace_len = trace.steps.items.len;
             const T = std.math.ceilPowerOfTwo(usize, trace_len) catch trace_len;
 
-            // Pass 1: count entries per cycle
+            // Pass 1: count entries per cycle (parallelizable — each step independent)
             const counts = try allocator.alloc(u8, T);
             defer allocator.free(counts);
             @memset(counts, 0);
 
-            for (trace.steps.items, 0..) |step, j| {
-                if (step.is_noop) continue;
-                counts[j] = entryCountForStep(step);
+            if (pool != null and trace_len >= 256) {
+                const CountCtx = struct {
+                    steps: []const TraceStep,
+                    cnts: []u8,
+                };
+                pool.?.parallelFor(trace_len, CountCtx{ .steps = trace.steps.items, .cnts = counts }, struct {
+                    fn f(ctx: CountCtx, j: usize) void {
+                        const step = ctx.steps[j];
+                        if (!step.is_noop) {
+                            ctx.cnts[j] = entryCountForStep(step);
+                        }
+                    }
+                }.f);
+            } else {
+                for (trace.steps.items, 0..) |step, j| {
+                    if (step.is_noop) continue;
+                    counts[j] = entryCountForStep(step);
+                }
             }
 
-            // Prefix sum for offsets
+            // Prefix sum for offsets (sequential — O(T) additions on u8, negligible)
             var total: usize = 0;
             const offsets = try allocator.alloc(usize, T + 1);
             defer allocator.free(offsets);
@@ -380,30 +396,47 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
                 offsets[j + 1] = total;
             }
 
-            // Pass 2: fill entries
+            // Pass 2: fill entries (parallelizable — each cycle writes to disjoint slices)
+            // Uses TraceStep pre-recorded values (rs1_value, rs2_value, rd_pre_value)
+            // instead of tracking register_values across cycles.
             const entries = try allocator.alloc(Entry, total);
 
-            // Track register values across cycles
-            var register_values: [K]u64 = [_]u64{0} ** K;
-
-            for (0..T) |j| {
-                if (j >= trace_len) continue;
-                const step = trace.steps.items[j];
-
-                const out = entries[offsets[j]..offsets[j + 1]];
-                if (!step.is_noop and out.len > 0) {
-                    fillEntriesForStep(@intCast(j), step, &register_values, out);
-                }
-
-                // Update register values (must happen after filling, for prev_val)
-                if (!step.is_noop and step.rd_written) {
-                    register_values[step.rd_index] = step.rd_value;
+            if (pool != null and trace_len >= 256) {
+                const FillCtx = struct {
+                    steps: []const TraceStep,
+                    ents: []Entry,
+                    offs: []const usize,
+                    tlen: usize,
+                };
+                pool.?.parallelFor(T, FillCtx{
+                    .steps = trace.steps.items,
+                    .ents = entries,
+                    .offs = offsets,
+                    .tlen = trace_len,
+                }, struct {
+                    fn f(ctx: FillCtx, j: usize) void {
+                        if (j >= ctx.tlen) return;
+                        const step = ctx.steps[j];
+                        const out = ctx.ents[ctx.offs[j]..ctx.offs[j + 1]];
+                        if (!step.is_noop and out.len > 0) {
+                            fillEntriesForStepIndependent(@intCast(j), step, out);
+                        }
+                    }
+                }.f);
+            } else {
+                for (0..T) |j| {
+                    if (j >= trace_len) continue;
+                    const step = trace.steps.items[j];
+                    const out = entries[offsets[j]..offsets[j + 1]];
+                    if (!step.is_noop and out.len > 0) {
+                        fillEntriesForStepIndependent(@intCast(j), step, out);
+                    }
                 }
             }
 
-            // Sort entries by (row, col) - should already be sorted since we fill in order
-            // but entries within a cycle might not be sorted by col
-            std.sort.block(Entry, entries, {}, struct {
+            // Sort entries by (row, col) - nearly sorted (filled in cycle order),
+            // pdq detects this and runs near-O(N)
+            std.sort.pdq(Entry, entries, {}, struct {
                 fn cmp(_: void, a: Entry, b: Entry) bool {
                     if (a.row != b.row) return a.row < b.row;
                     return a.col < b.col;
@@ -529,6 +562,90 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
                 }
                 if (!merged_rd) {
                     const pre_val = reg_vals[rd];
+                    out[len] = .{
+                        .row = row,
+                        .col = rd,
+                        .prev_val = pre_val,
+                        .next_val = step.rd_value,
+                        .val_coeff = F.fromU64(pre_val),
+                        .ra_coeff = if (use_lookups) LookupTableIndex.zero() else F.zero(),
+                        .wa_coeff = if (use_lookups) LookupTableIndex.fromU16(1) else F.one(),
+                    };
+                    len += 1;
+                }
+            }
+
+            std.debug.assert(len == out.len);
+
+            // Sort by col (len <= 3, manual bubble sort)
+            if (len == 2 and out[0].col > out[1].col) {
+                std.mem.swap(Entry, &out[0], &out[1]);
+            } else if (len == 3) {
+                if (out[0].col > out[1].col) std.mem.swap(Entry, &out[0], &out[1]);
+                if (out[1].col > out[2].col) std.mem.swap(Entry, &out[1], &out[2]);
+                if (out[0].col > out[1].col) std.mem.swap(Entry, &out[0], &out[1]);
+            }
+        }
+
+        /// Fill entries for a single step using TraceStep pre-recorded values.
+        /// No external register_values array needed — reads rs1_value, rs2_value,
+        /// rd_pre_value directly from the step. Safe for parallel use.
+        fn fillEntriesForStepIndependent(row: u32, step: TraceStep, out: []Entry) void {
+            var len: usize = 0;
+
+            if (step.rs1_read) {
+                const rs1 = step.rs1_index;
+                const val = step.rs1_value;
+                out[len] = .{
+                    .row = row,
+                    .col = rs1,
+                    .prev_val = val,
+                    .next_val = val,
+                    .val_coeff = F.fromU64(val),
+                    .ra_coeff = LookupTableIndex.fromU16(1), // gamma
+                    .wa_coeff = LookupTableIndex.zero(),
+                };
+                len += 1;
+            }
+
+            if (step.rs2_read) {
+                var merged = false;
+                for (out[0..len]) |*e| {
+                    if (e.col == step.rs2_index) {
+                        e.ra_coeff = LookupTableIndex.fromU16(3); // gamma + gamma^2
+                        merged = true;
+                        break;
+                    }
+                }
+                if (!merged) {
+                    const rs2 = step.rs2_index;
+                    const val = step.rs2_value;
+                    out[len] = .{
+                        .row = row,
+                        .col = rs2,
+                        .prev_val = val,
+                        .next_val = val,
+                        .val_coeff = F.fromU64(val),
+                        .ra_coeff = LookupTableIndex.fromU16(2), // gamma^2
+                        .wa_coeff = LookupTableIndex.zero(),
+                    };
+                    len += 1;
+                }
+            }
+
+            if (step.rd_written) {
+                const rd = step.rd_index;
+                var merged_rd = false;
+                for (out[0..len]) |*e| {
+                    if (e.col == rd) {
+                        e.wa_coeff = LookupTableIndex.fromU16(1);
+                        e.next_val = step.rd_value;
+                        merged_rd = true;
+                        break;
+                    }
+                }
+                if (!merged_rd) {
+                    const pre_val = step.rd_pre_value;
                     out[len] = .{
                         .row = row,
                         .col = rd,
@@ -837,7 +954,8 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
             }
 
             // Sort by (col, row) for address-major order
-            std.sort.block(AMEntry, am_entries, {}, struct {
+            // pdq has smaller constants than block sort and no auxiliary allocation
+            std.sort.pdq(AMEntry, am_entries, {}, struct {
                 fn cmp(_: void, a: AMEntry, b: AMEntry) bool {
                     if (a.col != b.col) return a.col < b.col;
                     return a.row < b.row;

@@ -1,6 +1,6 @@
-//! Lasso Prover for Instruction Lookup Arguments
+//! Shout Prover for Instruction Lookup Arguments
 //!
-//! This module implements the Lasso prover for proving instruction lookups
+//! This module implements the Shout prover for proving instruction lookups
 //! in the Jolt zkVM. The prover handles the Read + RAF (Read-Access-Flag)
 //! sumcheck protocol that verifies all instruction lookups are valid.
 //!
@@ -41,8 +41,8 @@ const PrefixSuffixDecomposition = prefix_suffix.PrefixSuffixDecomposition;
 const PrefixRegistry = prefix_suffix.PrefixRegistry;
 const SplitEqPolynomial = split_eq.SplitEqPolynomial;
 
-/// Parameters for the Lasso sumcheck protocol
-pub fn LassoParams(comptime F: type) type {
+/// Parameters for the Shout sumcheck protocol
+pub fn ShoutParams(comptime F: type) type {
     return struct {
         const Self = @This();
 
@@ -85,8 +85,8 @@ pub fn LassoParams(comptime F: type) type {
     };
 }
 
-/// Lasso sumcheck prover state
-pub fn LassoProver(comptime F: type) type {
+/// Shout sumcheck prover state
+pub fn ShoutProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
@@ -105,7 +105,7 @@ pub fn LassoProver(comptime F: type) type {
         /// Prefix registry for caching
         prefix_registry: PrefixRegistry(F),
         /// Protocol parameters
-        params: LassoParams(F),
+        params: ShoutParams(F),
         /// Current round (0-indexed)
         round: usize,
         /// Current phase for prefix-suffix
@@ -124,12 +124,12 @@ pub fn LassoProver(comptime F: type) type {
         /// Effective length of eq_evals (shrinks by half each cycle round)
         eq_evals_len: usize,
 
-        /// Initialize the Lasso prover
+        /// Initialize the Shout prover
         pub fn init(
             allocator: Allocator,
             lookup_indices: []const u128,
             lookup_tables: []const usize,
-            params: LassoParams(F),
+            params: ShoutParams(F),
         ) !Self {
             // Use log_T from params (which matches r_reduction.len) not from lookup count
             // This ensures consistency with the reduction point provided
@@ -238,8 +238,8 @@ pub fn LassoProver(comptime F: type) type {
         /// - The polynomial encodes the partial sums for variable i
         pub fn computeRoundPolynomial(self: *Self) !poly.UniPoly(F) {
             const is_addr = self.isAddressPhase();
-            dbg("\n[LASSO PROVER] computeRoundPolynomial round={d} phase={s}\n", .{ self.round, if (is_addr) "address" else "cycle" });
-            dbg("[LASSO PROVER] current_claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
+            dbg("\n[SHOUT PROVER] computeRoundPolynomial round={d} phase={s}\n", .{ self.round, if (is_addr) "address" else "cycle" });
+            dbg("[SHOUT PROVER] current_claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
 
             const result = if (is_addr)
                 try self.computeAddressRoundPoly()
@@ -247,9 +247,9 @@ pub fn LassoProver(comptime F: type) type {
                 try self.computeCycleRoundPoly();
 
             // Print the computed polynomial
-            dbg("[LASSO PROVER] round_poly coeffs:\n", .{});
+            dbg("[SHOUT PROVER] round_poly coeffs:\n", .{});
             for (result.coeffs, 0..) |c, i| {
-                dbg("[LASSO PROVER]   c[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, c.limbs[3], c.limbs[2], c.limbs[1], c.limbs[0] });
+                dbg("[SHOUT PROVER]   c[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, c.limbs[3], c.limbs[2], c.limbs[1], c.limbs[0] });
             }
 
             // Verify sumcheck constraint
@@ -259,11 +259,11 @@ pub fn LassoProver(comptime F: type) type {
             const p0 = c0;
             const p1 = c0.add(c1).add(c2);
             const sum = p0.add(p1);
-            dbg("[LASSO PROVER] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p0.limbs[3], p0.limbs[2], p0.limbs[1], p0.limbs[0] });
-            dbg("[LASSO PROVER] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p1.limbs[3], p1.limbs[2], p1.limbs[1], p1.limbs[0] });
-            dbg("[LASSO PROVER] p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
-            dbg("[LASSO PROVER] claim     = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
-            dbg("[LASSO PROVER] sumcheck_ok = {}\n", .{sum.eql(self.current_claim)});
+            dbg("[SHOUT PROVER] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p0.limbs[3], p0.limbs[2], p0.limbs[1], p0.limbs[0] });
+            dbg("[SHOUT PROVER] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p1.limbs[3], p1.limbs[2], p1.limbs[1], p1.limbs[0] });
+            dbg("[SHOUT PROVER] p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
+            dbg("[SHOUT PROVER] claim     = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
+            dbg("[SHOUT PROVER] sumcheck_ok = {}\n", .{sum.eql(self.current_claim)});
 
             return result;
         }
@@ -372,9 +372,9 @@ pub fn LassoProver(comptime F: type) type {
         /// the binding of this variable.
         pub fn receiveChallenge(self: *Self, challenge: F) !void {
             const is_addr = self.isAddressPhase();
-            dbg("\n[LASSO PROVER] receiveChallenge round={d} phase={s}\n", .{ self.round, if (is_addr) "address" else "cycle" });
-            dbg("[LASSO PROVER] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
-            dbg("[LASSO PROVER] current_claim (before) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
+            dbg("\n[SHOUT PROVER] receiveChallenge round={d} phase={s}\n", .{ self.round, if (is_addr) "address" else "cycle" });
+            dbg("[SHOUT PROVER] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
+            dbg("[SHOUT PROVER] current_claim (before) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
 
             // Record the challenge
             self.challenges[self.challenges_len] = challenge;
@@ -387,7 +387,7 @@ pub fn LassoProver(comptime F: type) type {
                 const round_bit = self.round;
                 const one_minus_r = F.one().sub(challenge);
 
-                dbg("[LASSO PROVER] Address phase: binding bit {d}\n", .{round_bit});
+                dbg("[SHOUT PROVER] Address phase: binding bit {d}\n", .{round_bit});
 
                 for (self.lookup_indices, 0..) |idx, j| {
                     const bit = (idx >> @intCast(round_bit)) & 1;
@@ -419,11 +419,11 @@ pub fn LassoProver(comptime F: type) type {
                 // Cycle phase: bind the cycle variable
                 // Fold the eq_evals array in half
                 const num_cycles = self.eq_evals_len;
-                dbg("[LASSO PROVER] Cycle phase: eq_evals_len={d}\n", .{num_cycles});
+                dbg("[SHOUT PROVER] Cycle phase: eq_evals_len={d}\n", .{num_cycles});
 
                 if (num_cycles <= 1) {
                     // No more folding possible
-                    dbg("[LASSO PROVER] No more folding possible\n", .{});
+                    dbg("[SHOUT PROVER] No more folding possible\n", .{});
                     self.round += 1;
                     return;
                 }
@@ -457,7 +457,7 @@ pub fn LassoProver(comptime F: type) type {
                 }
             }
 
-            dbg("[LASSO PROVER] current_claim (after) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
+            dbg("[SHOUT PROVER] current_claim (after) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
             self.round += 1;
         }
 
@@ -475,8 +475,8 @@ pub fn LassoProver(comptime F: type) type {
     };
 }
 
-/// Lasso proof structure
-pub fn LassoProof(comptime F: type) type {
+/// Shout proof structure
+pub fn ShoutProof(comptime F: type) type {
     return struct {
         const Self = @This();
 
@@ -498,15 +498,15 @@ pub fn LassoProof(comptime F: type) type {
     };
 }
 
-/// Run the Lasso prover protocol
-pub fn runLassoProver(
+/// Run the Shout prover protocol
+pub fn runShoutProver(
     comptime F: type,
     allocator: Allocator,
     lookup_indices: []const u128,
     lookup_tables: []const usize,
-    params: LassoParams(F),
-) !LassoProof(F) {
-    var prover = try LassoProver(F).init(allocator, lookup_indices, lookup_tables, params);
+    params: ShoutParams(F),
+) !ShoutProof(F) {
+    var prover = try ShoutProver(F).init(allocator, lookup_indices, lookup_tables, params);
     defer prover.deinit();
 
     const total_rounds = params.log_K + params.log_T;
@@ -532,7 +532,7 @@ pub fn runLassoProver(
     const challenges = try allocator.alloc(F, prover.challenges_len);
     @memcpy(challenges, prover.getChallenges());
 
-    return LassoProof(F){
+    return ShoutProof(F){
         .round_polys = round_polys,
         .final_eval = final_eval,
         .challenges = challenges,
@@ -557,7 +557,7 @@ fn deriveChallenge(comptime F: type, round_poly: poly.UniPoly(F), round: usize) 
     return F.fromU64(hash);
 }
 
-test "lasso prover basic" {
+test "shout prover basic" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -571,14 +571,14 @@ test "lasso prover basic" {
         F.fromU64(3),
     };
 
-    const params = LassoParams(F).init(
+    const params = ShoutParams(F).init(
         F.fromU64(5), // gamma
         2, // log_T (4 cycles)
         3, // log_K (8 table entries)
         &r_reduction,
     );
 
-    var prover = try LassoProver(F).init(
+    var prover = try ShoutProver(F).init(
         allocator,
         &lookup_indices,
         &lookup_tables,
@@ -592,7 +592,7 @@ test "lasso prover basic" {
     try std.testing.expect(!prover.isComplete());
 }
 
-test "lasso prover rounds" {
+test "shout prover rounds" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -604,14 +604,14 @@ test "lasso prover rounds" {
         F.fromU64(3),
     };
 
-    const params = LassoParams(F).init(
+    const params = ShoutParams(F).init(
         F.fromU64(5),
         2, // log_T
         3, // log_K
         &r_reduction,
     );
 
-    var prover = try LassoProver(F).init(
+    var prover = try ShoutProver(F).init(
         allocator,
         &lookup_indices,
         &lookup_tables,
@@ -633,7 +633,7 @@ test "lasso prover rounds" {
     try std.testing.expectEqual(@as(usize, 1), prover.round);
 }
 
-test "lasso prover claim tracking" {
+test "shout prover claim tracking" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -647,14 +647,14 @@ test "lasso prover claim tracking" {
         F.fromU64(3),
     };
 
-    const params = LassoParams(F).init(
+    const params = ShoutParams(F).init(
         F.fromU64(5), // gamma
         2, // log_T (4 cycles)
         3, // log_K (8 table entries)
         &r_reduction,
     );
 
-    var prover = try LassoProver(F).init(
+    var prover = try ShoutProver(F).init(
         allocator,
         &lookup_indices,
         &lookup_tables,

@@ -1,6 +1,6 @@
-//! Integration Tests for Lasso Lookup Arguments
+//! Integration Tests for Shout Lookup Arguments
 //!
-//! These tests verify that the Lasso prover and verifier work correctly
+//! These tests verify that the Shout prover and verifier work correctly
 //! together in an end-to-end fashion.
 
 const std = @import("std");
@@ -12,60 +12,60 @@ const expanding_table = @import("expanding_table.zig");
 const split_eq = @import("split_eq.zig");
 const poly = @import("../../poly/mod.zig");
 
-const LassoProver = prover.LassoProver;
-const LassoParams = prover.LassoParams;
-const LassoProof = prover.LassoProof;
-const LassoVerifier = verifier.LassoVerifier;
+const ShoutProver = prover.ShoutProver;
+const ShoutParams = prover.ShoutParams;
+const ShoutProof = prover.ShoutProof;
+const ShoutVerifier = verifier.ShoutVerifier;
 const ExpandingTable = expanding_table.ExpandingTable;
 const SplitEqPolynomial = split_eq.SplitEqPolynomial;
 
-/// Helper to run a complete Lasso protocol between prover and verifier
-fn runLassoProtocol(
+/// Helper to run a complete Shout protocol between prover and verifier
+fn runShoutProtocol(
     comptime F: type,
     allocator: Allocator,
     lookup_indices: []const u128,
     lookup_tables: []const usize,
-    params: LassoParams(F),
+    params: ShoutParams(F),
     initial_claim: F,
 ) !bool {
-    var lasso_prover = try LassoProver(F).init(
+    var shout_prover = try ShoutProver(F).init(
         allocator,
         lookup_indices,
         lookup_tables,
         params,
     );
-    defer lasso_prover.deinit();
+    defer shout_prover.deinit();
 
-    var lasso_verifier = try LassoVerifier(F).init(
+    var shout_verifier = try ShoutVerifier(F).init(
         allocator,
         params,
         initial_claim,
     );
-    defer lasso_verifier.deinit();
+    defer shout_verifier.deinit();
 
     // Run the protocol
     var round: usize = 0;
-    while (!lasso_prover.isComplete()) : (round += 1) {
+    while (!shout_prover.isComplete()) : (round += 1) {
         // Prover computes round polynomial
-        var round_poly = try lasso_prover.computeRoundPolynomial();
+        var round_poly = try shout_prover.computeRoundPolynomial();
         defer round_poly.deinit();
 
         // Verifier checks and gets challenge
-        const challenge = lasso_verifier.verifyRound(round_poly) catch |err| {
+        const challenge = shout_verifier.verifyRound(round_poly) catch |err| {
             std.debug.print("Verification failed at round {}: {}\n", .{ round, err });
             return false;
         };
 
         // Prover receives challenge
-        try lasso_prover.receiveChallenge(challenge);
+        try shout_prover.receiveChallenge(challenge);
     }
 
     // Check final evaluation
-    const final_eval = lasso_prover.getFinalEval();
-    return lasso_verifier.verifyFinalEval(final_eval) catch false;
+    const final_eval = shout_prover.getFinalEval();
+    return shout_verifier.verifyFinalEval(final_eval) catch false;
 }
 
-test "lasso end-to-end simple case" {
+test "shout end-to-end simple case" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -79,7 +79,7 @@ test "lasso end-to-end simple case" {
         F.fromU64(3),
     };
 
-    const params = LassoParams(F).init(
+    const params = ShoutParams(F).init(
         F.fromU64(5), // gamma
         2, // log_T (4 cycles)
         3, // log_K (8 table entries)
@@ -87,27 +87,27 @@ test "lasso end-to-end simple case" {
     );
 
     // Initialize prover and compute initial claim
-    var lasso_prover = try LassoProver(F).init(
+    var shout_prover = try ShoutProver(F).init(
         allocator,
         &lookup_indices,
         &lookup_tables,
         params,
     );
-    defer lasso_prover.deinit();
+    defer shout_prover.deinit();
 
     // For a simple test, compute the initial claim from the expanding table
-    const initial_claim = lasso_prover.expanding_v.sum();
+    const initial_claim = shout_prover.expanding_v.sum();
 
     // Run the protocol manually
-    var lasso_verifier = try LassoVerifier(F).init(
+    var shout_verifier = try ShoutVerifier(F).init(
         allocator,
         params,
         initial_claim,
     );
-    defer lasso_verifier.deinit();
+    defer shout_verifier.deinit();
 
     // Run first round
-    var round1 = try lasso_prover.computeRoundPolynomial();
+    var round1 = try shout_prover.computeRoundPolynomial();
     defer round1.deinit();
 
     // Check that g(0) + g(1) = claim
@@ -119,7 +119,7 @@ test "lasso end-to-end simple case" {
     try std.testing.expect(sum.eql(initial_claim));
 }
 
-test "lasso expanding table accumulation" {
+test "shout expanding table accumulation" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -151,7 +151,7 @@ test "lasso expanding table accumulation" {
     try std.testing.expect(table.get(0).eql(expected_000));
 }
 
-test "lasso split eq optimization" {
+test "shout split eq optimization" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -199,7 +199,7 @@ test "lasso split eq optimization" {
     try std.testing.expect(result.eql(expected));
 }
 
-test "lasso verifier rejects invalid proof" {
+test "shout verifier rejects invalid proof" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -208,7 +208,7 @@ test "lasso verifier rejects invalid proof" {
         F.fromU64(3),
     };
 
-    const params = LassoParams(F).init(
+    const params = ShoutParams(F).init(
         F.fromU64(5),
         2,
         3,
@@ -216,8 +216,8 @@ test "lasso verifier rejects invalid proof" {
     );
 
     // Claim = 100
-    var lasso_verifier = try LassoVerifier(F).init(allocator, params, F.fromU64(100));
-    defer lasso_verifier.deinit();
+    var shout_verifier = try ShoutVerifier(F).init(allocator, params, F.fromU64(100));
+    defer shout_verifier.deinit();
 
     // Create invalid round polynomial where g(0) + g(1) != 100
     // g(X) = 40 + 50X => g(0) = 40, g(1) = 90, sum = 130 != 100
@@ -232,11 +232,11 @@ test "lasso verifier rejects invalid proof" {
     };
 
     // Should fail verification
-    const result = lasso_verifier.verifyRound(round_poly);
+    const result = shout_verifier.verifyRound(round_poly);
     try std.testing.expectError(error.SumcheckVerificationFailed, result);
 }
 
-test "lasso verifier accepts valid proof" {
+test "shout verifier accepts valid proof" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -245,7 +245,7 @@ test "lasso verifier accepts valid proof" {
         F.fromU64(3),
     };
 
-    const params = LassoParams(F).init(
+    const params = ShoutParams(F).init(
         F.fromU64(5),
         2,
         3,
@@ -253,8 +253,8 @@ test "lasso verifier accepts valid proof" {
     );
 
     // Claim = 100
-    var lasso_verifier = try LassoVerifier(F).init(allocator, params, F.fromU64(100));
-    defer lasso_verifier.deinit();
+    var shout_verifier = try ShoutVerifier(F).init(allocator, params, F.fromU64(100));
+    defer shout_verifier.deinit();
 
     // Create valid round polynomial where g(0) + g(1) = 100
     // g(X) = 40 + 20X => g(0) = 40, g(1) = 60, sum = 100 ✓
@@ -269,17 +269,17 @@ test "lasso verifier accepts valid proof" {
     };
 
     // Should pass verification
-    const challenge = try lasso_verifier.verifyRound(round_poly);
+    const challenge = try shout_verifier.verifyRound(round_poly);
     _ = challenge;
 
     // Verifier should advance to next round
-    try std.testing.expectEqual(@as(usize, 1), lasso_verifier.round);
+    try std.testing.expectEqual(@as(usize, 1), shout_verifier.round);
 
     // New claim should be g(challenge)
-    try std.testing.expect(!lasso_verifier.claim.eql(F.fromU64(100)));
+    try std.testing.expect(!shout_verifier.claim.eql(F.fromU64(100)));
 }
 
-test "lasso multiple rounds consistent" {
+test "shout multiple rounds consistent" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -291,30 +291,30 @@ test "lasso multiple rounds consistent" {
         F.fromU64(3),
     };
 
-    const params = LassoParams(F).init(
+    const params = ShoutParams(F).init(
         F.fromU64(5),
         2, // log_T
         3, // log_K
         &r_reduction,
     );
 
-    var lasso_prover = try LassoProver(F).init(
+    var shout_prover = try ShoutProver(F).init(
         allocator,
         &lookup_indices,
         &lookup_tables,
         params,
     );
-    defer lasso_prover.deinit();
+    defer shout_prover.deinit();
 
     // Track claim consistency
-    var prev_claim = lasso_prover.expanding_v.sum();
+    var prev_claim = shout_prover.expanding_v.sum();
     var challenges_used: std.ArrayListUnmanaged(F) = .{};
     defer challenges_used.deinit(allocator);
 
     // Run 3 rounds
     var round: usize = 0;
-    while (round < 3 and !lasso_prover.isComplete()) : (round += 1) {
-        var round_poly = try lasso_prover.computeRoundPolynomial();
+    while (round < 3 and !shout_prover.isComplete()) : (round += 1) {
+        var round_poly = try shout_prover.computeRoundPolynomial();
         defer round_poly.deinit();
 
         // Check consistency: g(0) + g(1) should equal previous claim
@@ -331,7 +331,7 @@ test "lasso multiple rounds consistent" {
         prev_claim = round_poly.evaluate(challenge);
 
         // Prover receives challenge
-        try lasso_prover.receiveChallenge(challenge);
+        try shout_prover.receiveChallenge(challenge);
     }
 
     try std.testing.expectEqual(@as(usize, 3), challenges_used.items.len);

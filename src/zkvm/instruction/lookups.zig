@@ -1,7 +1,7 @@
 //! Instruction Lookup Implementations
 //!
 //! This module implements the lookup operations for RISC-V instructions
-//! using the Lasso lookup argument infrastructure. Each instruction type
+//! using the Shout lookup argument infrastructure. Each instruction type
 //! defines how to compute lookup indices and verify results.
 //!
 //! The key insight from Jolt is that many RISC-V operations can be decomposed

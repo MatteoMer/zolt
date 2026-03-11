@@ -113,7 +113,7 @@ zolt/
         ├── jolt_serialization.zig
         ├── preprocessing.zig
         ├── spartan/       # Spartan R1CS prover
-        ├── lasso/         # Lasso lookup argument
+        ├── shout/         # Shout lookup argument
         ├── r1cs/          # R1CS constraints
         ├── bytecode/      # Bytecode handling
         ├── instruction/   # RISC-V instruction decoder

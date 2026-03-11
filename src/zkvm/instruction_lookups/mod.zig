@@ -8,7 +8,7 @@
 //! Jolt uses lookup arguments to prove correct instruction execution:
 //! 1. Each instruction decomposes into subtable lookups
 //! 2. The prover generates lookup queries during execution
-//! 3. The verifier checks that all lookups are valid using Lasso
+//! 3. The verifier checks that all lookups are valid using Shout
 //!
 //! ## Components
 //!
@@ -22,7 +22,7 @@
 //!
 //! The instruction lookup logic is currently implemented in:
 //! - `src/zkvm/instruction/lookups.zig` - Per-instruction lookup implementations
-//! - `src/zkvm/lasso/mod.zig` - Lasso prover/verifier
+//! - `src/zkvm/shout/mod.zig` - Shout prover/verifier
 //!
 //! This module exists as a placeholder for future refactoring to match Jolt's structure.
 

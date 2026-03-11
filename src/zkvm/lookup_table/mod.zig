@@ -7,7 +7,7 @@
 //! 1. materializeEntry(index) - Returns the table entry at a given index
 //! 2. evaluateMLE(r) - Evaluates the multilinear extension at point r
 //!
-//! The key insight from the Jolt/Lasso papers is that many RISC-V operations can be
+//! The key insight from the Jolt papers is that many RISC-V operations can be
 //! verified by looking up precomputed values in small tables, rather than computing
 //! them via expensive arithmetic circuits.
 

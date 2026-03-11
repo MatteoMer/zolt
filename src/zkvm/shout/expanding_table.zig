@@ -1,6 +1,6 @@
-//! Expanding Table for Lasso Lookup Arguments
+//! Expanding Table for Shout Lookup Arguments
 //!
-//! This module implements the ExpandingTable data structure used in the Lasso
+//! This module implements the ExpandingTable data structure used in the Shout
 //! lookup argument protocol. The ExpandingTable incrementally builds EQ polynomial
 //! evaluations as sumcheck rounds progress.
 //!

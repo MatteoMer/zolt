@@ -1,6 +1,6 @@
 //! Prefix-Suffix Decomposition for Lookup Tables
 //!
-//! This module implements the prefix-suffix decomposition technique used in Lasso
+//! This module implements the prefix-suffix decomposition technique used in Shout
 //! to efficiently evaluate structured lookup tables. The key insight is that many
 //! lookup tables have a special structure where the MLE can be decomposed as:
 //!

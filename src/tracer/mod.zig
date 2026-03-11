@@ -178,7 +178,7 @@ pub const Emulator = struct {
     device: common.JoltDevice,
     /// Execution trace
     trace: ExecutionTrace,
-    /// Lookup trace for Lasso proofs
+    /// Lookup trace for Shout proofs
     lookup_trace: zkvm.instruction.LookupTraceCollector(64),
     /// Whether the current instruction is compressed
     is_compressed: bool,
@@ -620,7 +620,7 @@ pub const Emulator = struct {
         // Capture rd pre-value from effective register (vr40 for JAL/JALR x0)
         const rd_pre_value = try self.registers.read(effective_rd);
 
-        // Record lookup trace for Lasso proofs (before execution)
+        // Record lookup trace for Shout proofs (before execution)
         try self.lookup_trace.recordInstruction(
             @intCast(self.state.cycle),
             self.state.pc,

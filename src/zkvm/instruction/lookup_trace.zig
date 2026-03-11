@@ -1,11 +1,11 @@
 //! Lookup Trace Collector
 //!
 //! This module provides a lookup trace collector that connects the RISC-V
-//! execution tracer to the Lasso lookup argument infrastructure.
+//! execution tracer to the Shout lookup argument infrastructure.
 //!
 //! During execution, each instruction generates one or more lookup queries
 //! that are recorded in the lookup trace. This trace is then used by the
-//! Lasso prover to generate the lookup argument proof.
+//! Shout prover to generate the lookup argument proof.
 //!
 //! Reference: jolt-core/src/zkvm/instruction_lookups/
 

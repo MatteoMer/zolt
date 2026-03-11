@@ -5290,14 +5290,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
 
-                        // Debug: print first 5 rematerialized values
                         if (comptime debug_verbose) {
+                            // Debug: print first 5 rematerialized values
                             dbg("[STAGE5 REMATERIALIZE] First 5 combined_vals after rematerialization:\n", .{});
-                        }
-                        for (0..@min(5, trace_len)) |j| {
-                            const table_idx_dbg = cycle_table_indices[j];
-                            const table_val_dbg = if (table_idx_dbg >= 0 and @as(usize, @intCast(table_idx_dbg)) < NUM_TABLES) table_values[@intCast(table_idx_dbg)] else F.zero();
-                            if (comptime debug_verbose) {
+                            for (0..@min(5, trace_len)) |j| {
+                                const table_idx_dbg = cycle_table_indices[j];
+                                const table_val_dbg = if (table_idx_dbg >= 0 and @as(usize, @intCast(table_idx_dbg)) < NUM_TABLES) table_values[@intCast(table_idx_dbg)] else F.zero();
                                 dbg("  j={}: combined_val={x}, is_identity_path={}, table_idx={}, table_val={x}\n", .{
                                     j,
                                     lookups_combined_vals[j].toBytesBE()[24..32].*,
@@ -5321,51 +5319,33 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // See: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:354-356
                         //
                         // We reinitialize lookups_eq_evals here.
-                        // DIAGNOSTIC: Compute sum using condensed u_evals BEFORE reinitializing
-                        // condensed_u_eval(j) should equal eq(j, r_reduction) * eq(K(j), r_addr)
-                        // So Σ condensed_u_eval(j) * cv_remat(j) should equal lookups_claim
-                        {
+                        if (comptime debug_verbose) {
+                            // DIAGNOSTIC: Compute sum using condensed u_evals BEFORE reinitializing
                             var condensed_sum = F.zero();
                             for (0..T) |jj| {
                                 condensed_sum = condensed_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
                             }
-                            if (comptime debug_verbose) {
-                                dbg("[CONDENSED_DIAG] Σ condensed_eq * cv_remat = {x}\n", .{condensed_sum.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] match = {}\n", .{condensed_sum.eql(lookups_claim)});
-                            }
+                            dbg("[CONDENSED_DIAG] Σ condensed_eq * cv_remat = {x}\n", .{condensed_sum.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] match = {}\n", .{condensed_sum.eql(lookups_claim)});
 
-                            // Also check: condensed_u_eval[0] vs eq_fresh(0) * ra(0)
                             const fresh_eq_0 = computeEqAtIndex(r_reduction, 0);
-                            if (comptime debug_verbose) {
-                                dbg("[CONDENSED_DIAG] condensed_eq[0] = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] fresh_eq(0) = {x}\n", .{fresh_eq_0.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] ra_weights[0] = {x}\n", .{lookups_ra_weights[0].toBytesBE()[16..32].*});
-                            }
+                            dbg("[CONDENSED_DIAG] condensed_eq[0] = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] fresh_eq(0) = {x}\n", .{fresh_eq_0.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] ra_weights[0] = {x}\n", .{lookups_ra_weights[0].toBytesBE()[16..32].*});
                             const expected_condensed_0 = fresh_eq_0.mul(lookups_ra_weights[0]);
-                            if (comptime debug_verbose) {
-                                dbg("[CONDENSED_DIAG] fresh_eq(0) * ra(0) = {x}\n", .{expected_condensed_0.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra: {}\n", .{lookups_eq_evals[0].eql(expected_condensed_0)});
-                            }
+                            dbg("[CONDENSED_DIAG] fresh_eq(0) * ra(0) = {x}\n", .{expected_condensed_0.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra: {}\n", .{lookups_eq_evals[0].eql(expected_condensed_0)});
 
-                            // Check if the missing factor is v[7][k_bound_7]
-                            // For cycle 0: k = 0x8000, phase 7 shift = 0, k_bound_7 = 0x8000
                             const k_lo_0_diag = lookups_indices_lo[0];
-                            const k_hi_0_diag = lookups_indices_hi[0];
-                            const shift_7 = 0; // (8-1-7) * 16
+                            const shift_7 = 0;
                             const k_bound_7: usize = @truncate(k_lo_0_diag >> @intCast(shift_7));
                             const k_bound_7_masked = k_bound_7 & ((@as(usize, 1) << @intCast(log_m)) - 1);
                             const v7_val = expanding_tables[num_phases - 1].get(k_bound_7_masked);
                             const expected_with_v7 = expected_condensed_0.mul(v7_val);
-                            _ = k_hi_0_diag;
-                            if (comptime debug_verbose) {
-                                dbg("[CONDENSED_DIAG] k_lo_0=0x{x}, k_bound_7=0x{x}, k_bound_7_masked=0x{x}\n", .{k_lo_0_diag, k_bound_7, k_bound_7_masked});
-                                dbg("[CONDENSED_DIAG] v[7][0x{x}] = {x}\n", .{k_bound_7_masked, v7_val.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] fresh*ra_partial(0..6) = {x}\n", .{expected_condensed_0.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] fresh*ra_partial * v7 = {x}\n", .{expected_with_v7.toBytesBE()[16..32].*});
-                            }
+                            dbg("[CONDENSED_DIAG] v[7][0x{x}] = {x}\n", .{k_bound_7_masked, v7_val.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] fresh*ra_partial * v7 = {x}\n", .{expected_with_v7.toBytesBE()[16..32].*});
 
-                            // Also compute ra_partial = Π_{p=0}^{6} v[p][k_p(0)]
                             var ra_partial = F.one();
                             for (0..num_phases - 1) |pp| {
                                 const shift_pp = (num_phases - 1 - pp) * log_m;
@@ -5379,21 +5359,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 ra_partial = ra_partial.mul(expanding_tables[pp].get(k_pp));
                             }
                             const fresh_ra_partial = fresh_eq_0.mul(ra_partial);
-                            if (comptime debug_verbose) {
-                                dbg("[CONDENSED_DIAG] ra_partial (phases 0-6) = {x}\n", .{ra_partial.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] fresh*ra_partial (phases 0-6) = {x}\n", .{fresh_ra_partial.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra_partial: {}\n", .{lookups_eq_evals[0].eql(fresh_ra_partial)});
-                            }
+                            dbg("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra_partial: {}\n", .{lookups_eq_evals[0].eql(fresh_ra_partial)});
 
-                            // Now compute Σ condensed_eq(j) * v[15][k_15(j)] * cv_remat(j)
-                            // This should equal the claim
-                            var sum_with_last_phase = F.zero();
                             const last_phase = num_phases - 1;
-                            const last_log_m = log_m;
-                            const last_m_mask = (@as(usize, 1) << @intCast(last_log_m)) - 1;
-                            const last_shift: u7 = 0; // last phase handles LSB bits
+                            const last_m_mask = (@as(usize, 1) << @intCast(log_m)) - 1;
+                            const last_shift: u7 = 0;
+                            var sum_with_last_phase = F.zero();
                             for (0..T) |jj| {
-                                // Extract k_bound for last phase
                                 const k_lo_jj = lookups_indices_lo[jj];
                                 const k_bound_last: usize = @truncate(k_lo_jj >> @intCast(last_shift));
                                 const k_masked = k_bound_last & last_m_mask;
@@ -5402,237 +5374,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     lookups_eq_evals[jj].mul(v_last).mul(lookups_combined_vals[jj])
                                 );
                             }
-                            if (comptime debug_verbose) {
-                                dbg("[CONDENSED_DIAG] Σ condensed * v[15] * cv_remat = {x}\n", .{sum_with_last_phase.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                                dbg("[CONDENSED_DIAG] FINAL match = {}\n", .{sum_with_last_phase.eql(lookups_claim)});
-                            }
-
-                            // PER-OPCODE DIAGNOSTIC: Break down sum by opcode type
-                            var sum_padding = F.zero();
-                            var sum_regular = F.zero();
-                            var sum_virtual = F.zero();
-                            var count_padding: usize = 0;
-                            var count_regular: usize = 0;
-                            var count_virtual: usize = 0;
-                            for (0..T) |jj2| {
-                                const k_lo_jj2 = lookups_indices_lo[jj2];
-                                const k_bound_last2: usize = @truncate(k_lo_jj2 >> @intCast(last_shift));
-                                const k_masked2 = k_bound_last2 & last_m_mask;
-                                const v_last2 = expanding_tables[last_phase].get(k_masked2);
-                                const contrib = lookups_eq_evals[jj2].mul(v_last2).mul(lookups_combined_vals[jj2]);
-
-                                if (jj2 >= trace_len) {
-                                    sum_padding = sum_padding.add(contrib);
-                                    count_padding += 1;
-                                } else {
-                                    const step_diag = trace.steps.items[jj2];
-                                    const opcode_diag = step_diag.instruction & 0x7f;
-                                    if (opcode_diag == 0x02 or opcode_diag == 0x22 or opcode_diag == 0x42 or opcode_diag == 0x62) {
-                                        sum_virtual = sum_virtual.add(contrib);
-                                        count_virtual += 1;
-                                    } else {
-                                        sum_regular = sum_regular.add(contrib);
-                                        count_regular += 1;
-                                    }
-                                }
-                            }
-                            if (comptime debug_verbose) {
-                                dbg("[OPCODE_DIAG] padding: count={}, sum={x}\n", .{count_padding, sum_padding.toBytesBE()[16..32].*});
-                                dbg("[OPCODE_DIAG] regular: count={}, sum={x}\n", .{count_regular, sum_regular.toBytesBE()[16..32].*});
-                                dbg("[OPCODE_DIAG] virtual: count={}, sum={x}\n", .{count_virtual, sum_virtual.toBytesBE()[16..32].*});
-                                dbg("[OPCODE_DIAG] total (pad+reg+virt) = {x}\n", .{sum_padding.add(sum_regular).add(sum_virtual).toBytesBE()[16..32].*});
-                                dbg("[OPCODE_DIAG] claim               = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                            }
-
-                            // Also compute what the chain gives for virtual vs non-virtual
-                            // by computing partial sums without virtual cycles
-                            var sum_without_virtual = F.zero();
-                            for (0..T) |jj3| {
-                                if (jj3 < trace_len) {
-                                    const step_diag3 = trace.steps.items[jj3];
-                                    const opcode_diag3 = step_diag3.instruction & 0x7f;
-                                    if (opcode_diag3 == 0x02 or opcode_diag3 == 0x22 or opcode_diag3 == 0x42 or opcode_diag3 == 0x62) continue;
-                                }
-                                const k_lo_jj3 = lookups_indices_lo[jj3];
-                                const k_bound_last3: usize = @truncate(k_lo_jj3 >> @intCast(last_shift));
-                                const k_masked3 = k_bound_last3 & last_m_mask;
-                                const v_last3 = expanding_tables[last_phase].get(k_masked3);
-                                sum_without_virtual = sum_without_virtual.add(
-                                    lookups_eq_evals[jj3].mul(v_last3).mul(lookups_combined_vals[jj3])
-                                );
-                            }
-                            if (comptime debug_verbose) {
-                                dbg("[OPCODE_DIAG] sum_without_virtual = {x}\n", .{sum_without_virtual.toBytesBE()[16..32].*});
-                                dbg("[OPCODE_DIAG] claim - sum_without_virtual = {x}\n", .{lookups_claim.sub(sum_without_virtual).toBytesBE()[16..32].*});
-                                dbg("[OPCODE_DIAG] sum_virtual                = {x}\n", .{sum_virtual.toBytesBE()[16..32].*});
-                                dbg("[OPCODE_DIAG] virtual matches remaining: {}\n", .{sum_virtual.eql(lookups_claim.sub(sum_without_virtual))});
-                            }
-
-                            // ============================================================
-                            // DECOMPOSED DIAGNOSTIC: Separate TABLE and RAF contributions
-                            // ============================================================
-                            // cv_remat = table_value + raf_val
-                            // Sum = Σ eq_ra * (table + raf) = Σ eq_ra * table + Σ eq_ra * raf
-                            // Check each part independently
-                            var sum_table_only = F.zero();
-                            var sum_raf_only = F.zero();
-                            var sum_table_virtual = F.zero();
-                            var sum_table_regular = F.zero();
-                            var sum_raf_virtual = F.zero();
-                            var sum_raf_regular = F.zero();
-                            var sum_raf_interleaved = F.zero();
-                            var sum_raf_identity_cycles = F.zero();
-                            for (0..T) |jd| {
-                                const k_lo_jd = lookups_indices_lo[jd];
-                                const k_bound_d: usize = @truncate(k_lo_jd >> @intCast(last_shift));
-                                const k_masked_d = k_bound_d & last_m_mask;
-                                const v_last_d = expanding_tables[last_phase].get(k_masked_d);
-                                const eq_ra_d = lookups_eq_evals[jd].mul(v_last_d);
-
-                                // Table part
-                                const t_idx_d = cycle_table_indices[jd];
-                                var table_val_d = F.zero();
-                                if (t_idx_d >= 0 and @as(usize, @intCast(t_idx_d)) < NUM_TABLES) {
-                                    table_val_d = table_values[@intCast(t_idx_d)];
-                                }
-                                sum_table_only = sum_table_only.add(eq_ra_d.mul(table_val_d));
-
-                                // RAF part
-                                const raf_val_d = if (!cycle_is_identity_path[jd]) raf_interleaved else raf_identity;
-                                sum_raf_only = sum_raf_only.add(eq_ra_d.mul(raf_val_d));
-
-                                // Per-type breakdown
-                                const is_virtual_d = jd < trace_len and blk_v: {
-                                    const opc_d = trace.steps.items[jd].instruction & 0x7f;
-                                    break :blk_v opc_d == 0x02 or opc_d == 0x22 or opc_d == 0x42 or opc_d == 0x62;
-                                };
-                                if (is_virtual_d) {
-                                    sum_table_virtual = sum_table_virtual.add(eq_ra_d.mul(table_val_d));
-                                    sum_raf_virtual = sum_raf_virtual.add(eq_ra_d.mul(raf_val_d));
-                                } else {
-                                    sum_table_regular = sum_table_regular.add(eq_ra_d.mul(table_val_d));
-                                    sum_raf_regular = sum_raf_regular.add(eq_ra_d.mul(raf_val_d));
-                                }
-
-                                // RAF by path type
-                                if (!cycle_is_identity_path[jd]) {
-                                    sum_raf_interleaved = sum_raf_interleaved.add(eq_ra_d.mul(raf_interleaved));
-                                } else {
-                                    sum_raf_identity_cycles = sum_raf_identity_cycles.add(eq_ra_d.mul(raf_identity));
-                                }
-                            }
-                            if (comptime debug_verbose) {
-                                dbg("[DECOMP_DIAG] sum_table_only   = {x}\n", .{sum_table_only.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] sum_raf_only     = {x}\n", .{sum_raf_only.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] sum_table+raf    = {x}\n", .{sum_table_only.add(sum_raf_only).toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] lookups_claim    = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] table+raf==claim = {}\n", .{sum_table_only.add(sum_raf_only).eql(lookups_claim)});
-                                dbg("[DECOMP_DIAG] table_virtual    = {x}\n", .{sum_table_virtual.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] table_regular    = {x}\n", .{sum_table_regular.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] raf_virtual      = {x}\n", .{sum_raf_virtual.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] raf_regular       = {x}\n", .{sum_raf_regular.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] raf_interleaved_total = {x}\n", .{sum_raf_interleaved.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] raf_identity_total    = {x}\n", .{sum_raf_identity_cycles.toBytesBE()[16..32].*});
-                            }
-
-                            // Also compute what raf SHOULD be from the eq_ra sum
-                            // raf = γ*(1-flag)*left + γ²*(1-flag)*right + γ²*flag*identity
-                            // = (1-flag) * raf_interleaved + flag * raf_identity
-                            // = raf_interleaved - flag*(raf_interleaved - raf_identity) for each cycle
-                            // Total: raf_interleaved * Σeq_ra_interleaved + raf_identity * Σeq_ra_identity
-                            var sum_eq_ra_interleaved = F.zero();
-                            var sum_eq_ra_identity = F.zero();
-                            for (0..T) |je| {
-                                const k_lo_je = lookups_indices_lo[je];
-                                const k_bound_e: usize = @truncate(k_lo_je >> @intCast(last_shift));
-                                const k_masked_e = k_bound_e & last_m_mask;
-                                const v_last_e = expanding_tables[last_phase].get(k_masked_e);
-                                const eq_ra_e = lookups_eq_evals[je].mul(v_last_e);
-                                if (!cycle_is_identity_path[je]) {
-                                    sum_eq_ra_interleaved = sum_eq_ra_interleaved.add(eq_ra_e);
-                                } else {
-                                    sum_eq_ra_identity = sum_eq_ra_identity.add(eq_ra_e);
-                                }
-                            }
-                            const raf_from_sums = raf_interleaved.mul(sum_eq_ra_interleaved).add(raf_identity.mul(sum_eq_ra_identity));
-                            if (comptime debug_verbose) {
-                                dbg("[DECOMP_DIAG] sum_eq_ra_interleaved = {x}\n", .{sum_eq_ra_interleaved.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] sum_eq_ra_identity    = {x}\n", .{sum_eq_ra_identity.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] raf_from_sums         = {x}\n", .{raf_from_sums.toBytesBE()[16..32].*});
-                                dbg("[DECOMP_DIAG] raf_from_sums==sum_raf_only = {}\n", .{raf_from_sums.eql(sum_raf_only)});
-                            }
-
-                            // ============================================================
-                            // EQ_RA VERIFICATION: Check condensed eq_ra matches fresh computation
-                            // ============================================================
-                            var eq_ra_mismatches: usize = 0;
-                            var first_mismatch_cycle: usize = 0;
-                            for (0..@min(T, 20)) |jv| {
-                                const k_lo_jv = lookups_indices_lo[jv];
-                                const k_bound_v: usize = @truncate(k_lo_jv >> @intCast(last_shift));
-                                const k_masked_v = k_bound_v & last_m_mask;
-                                const v_last_v = expanding_tables[last_phase].get(k_masked_v);
-                                const eq_ra_condensed = lookups_eq_evals[jv].mul(v_last_v);
-                                const fresh_eq_jv = computeEqAtIndex(r_reduction, jv);
-                                const eq_ra_fresh = fresh_eq_jv.mul(lookups_ra_weights[jv]);
-                                const match_jv = eq_ra_condensed.eql(eq_ra_fresh);
-                                if (!match_jv) {
-                                    eq_ra_mismatches += 1;
-                                    if (eq_ra_mismatches == 1) first_mismatch_cycle = jv;
-                                }
-                                if (jv < 5 or !match_jv) {
-                                    if (comptime debug_verbose) {
-                                        dbg("[EQ_RA_CHECK j={}] condensed={x}, fresh={x}, match={}\n", .{
-                                            jv,
-                                            eq_ra_condensed.toBytesBE()[24..32].*,
-                                            eq_ra_fresh.toBytesBE()[24..32].*,
-                                            match_jv,
-                                        });
-                                    }
-                                }
-                            }
-                            if (comptime debug_verbose) {
-                                dbg("[EQ_RA_CHECK] mismatches in first 20 cycles: {}\n", .{eq_ra_mismatches});
-                            }
-
-                            // Wider check: count mismatches across ALL cycles
-                            var eq_ra_total_mismatches: usize = 0;
-                            for (0..T) |jw| {
-                                const k_lo_jw = lookups_indices_lo[jw];
-                                const k_bound_w: usize = @truncate(k_lo_jw >> @intCast(last_shift));
-                                const k_masked_w = k_bound_w & last_m_mask;
-                                const v_last_w = expanding_tables[last_phase].get(k_masked_w);
-                                const eq_ra_condensed_w = lookups_eq_evals[jw].mul(v_last_w);
-                                const fresh_eq_jw = computeEqAtIndex(r_reduction, jw);
-                                const eq_ra_fresh_w = fresh_eq_jw.mul(lookups_ra_weights[jw]);
-                                if (!eq_ra_condensed_w.eql(eq_ra_fresh_w)) {
-                                    eq_ra_total_mismatches += 1;
-                                }
-                            }
-                            if (comptime debug_verbose) {
-                                dbg("[EQ_RA_CHECK] total mismatches across ALL {} cycles: {}\n", .{T, eq_ra_total_mismatches});
-                            }
-
-                            // If eq_ra matches, the problem is in cv_remat
-                            // Try computing with fresh eq_ra instead
-                            if (eq_ra_total_mismatches == 0) {
-                                if (comptime debug_verbose) {
-                                    dbg("[EQ_RA_CHECK] ALL eq_ra values match! Problem is in cv_remat.\n", .{});
-                                }
-                            } else {
-                                // Compute sum using FRESH eq_ra
-                                var sum_fresh_eq_ra = F.zero();
-                                for (0..T) |jf| {
-                                    const fresh_eq_jf = computeEqAtIndex(r_reduction, jf);
-                                    const eq_ra_f = fresh_eq_jf.mul(lookups_ra_weights[jf]);
-                                    sum_fresh_eq_ra = sum_fresh_eq_ra.add(eq_ra_f.mul(lookups_combined_vals[jf]));
-                                }
-                                if (comptime debug_verbose) {
-                                    dbg("[EQ_RA_CHECK] sum_with_fresh_eq_ra = {x}\n", .{sum_fresh_eq_ra.toBytesBE()[16..32].*});
-                                    dbg("[EQ_RA_CHECK] matches claim: {}\n", .{sum_fresh_eq_ra.eql(lookups_claim)});
-                                }
-                            }
+                            dbg("[CONDENSED_DIAG] FINAL match = {}\n", .{sum_with_last_phase.eql(lookups_claim)});
                         }
 
                         if (comptime debug_verbose) {
@@ -5671,20 +5413,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             dbg("  num_phases={}, ra_num_chunks={}, phases_per_chunk={}\n", .{ num_phases, ra_num_chunks, phases_per_chunk });
                         }
 
-                        // Debug: print expanding table sizes and first few values
                         if (comptime debug_verbose) {
+                            // Debug: print expanding table sizes and first few values
                             dbg("  Expanding table state at round 128:\n", .{});
-                        }
-                        const v0_p0 = expanding_tables[0].get(0);
-                        const v0_p1 = expanding_tables[1].get(0);
-                        const product_check = v0_p0.mul(v0_p1);
-                        if (comptime debug_verbose) {
+                            const v0_p0 = expanding_tables[0].get(0);
+                            const v0_p1 = expanding_tables[1].get(0);
                             dbg("    phase[0] v[0] (full) = {x}\n", .{v0_p0.toBytesBE()[16..32].*});
                             dbg("    phase[1] v[0] (full) = {x}\n", .{v0_p1.toBytesBE()[16..32].*});
-                            dbg("    product v0_p0 * v0_p1 = {x}\n", .{product_check.toBytesBE()[16..32].*});
-                        }
-                        for (0..@min(4, num_phases)) |phase| {
-                            if (comptime debug_verbose) {
+                            dbg("    product v0_p0 * v0_p1 = {x}\n", .{v0_p0.mul(v0_p1).toBytesBE()[16..32].*});
+                            for (0..@min(4, num_phases)) |phase| {
                                 dbg("    phase[{}]: len={}, first_vals=[{x}, {x}, {x}, {x}]\n", .{
                                     phase,
                                     expanding_tables[phase].getLen(),
@@ -5696,136 +5433,73 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
 
-                        // DIAGNOSTIC: Compare accumulated ra_chunk_weights with materialized values
-                        // Save accumulated values for the first few cycles before overwriting
-                        var accum_ra_debug: [8]F = undefined;
-                        for (0..@min(ra_num_chunks, 8)) |c| {
-                            accum_ra_debug[c] = ra_chunk_weights[c][0];
-                        }
-
-                        for (0..T) |j| {
-                            // ALL cycles (including padding) get proper RA values.
-                            // Padding cycles have K(j) = 0, so ra = eq(0, r_addr) = Π(1-r_i).
-                            // In Jolt, ra_polys are computed for ALL T cycles uniformly.
-
-                            // Get lookup index for this cycle
-                            const k_lo = lookups_indices_lo[j];
-                            const k_hi = lookups_indices_hi[j];
-
-                            // Debug: print lookup index for first cycle
-                            if (j == 0) {
-                                if (comptime debug_verbose) {
-                                    dbg("[STAGE5 RA_DEBUG] Cycle 0 lookup_index: k_hi=0x{x:0>16}, k_lo=0x{x:0>16}\n", .{ k_hi, k_lo });
-                                }
-                            }
-
-                            // For each chunk, compute the product of expanding table lookups
-                            for (0..ra_num_chunks) |chunk_idx| {
-                                var ra_val = F.one();
-                                const phase_start = chunk_idx * phases_per_chunk;
-                                const phase_end = @min((chunk_idx + 1) * phases_per_chunk, num_phases);
-
-                                for (phase_start..phase_end) |phase| {
-                                    // Compute which bits of k correspond to this phase
-                                    // Phase 0 handles the MSB bits (127:112), phase (num_phases-1) handles LSB bits
-                                    // Each phase handles log_m bits (16 bits for LOG_K=128, phases=8)
-                                    //
-                                    // The expanding table uses HighToLow binding order:
-                                    // - v[k] = EQ(k, r) where k bits directly correspond to round challenges
-                                    // - No bit reversal needed
-                                    //
-                                    // For phase p, rounds are: p*log_m to (p+1)*log_m - 1
-                                    // These bind address bits: (127 - p*log_m) down to (128 - (p+1)*log_m)
-                                    //
-                                    // Jolt formula: shift = (phases - 1 - phase) * log_m
-                                    // This extracts the appropriate bits from the 128-bit address
-                                    const shift = (num_phases - 1 - phase) * log_m;
-
-                                    // Extract the log_m bits from k at this position (address bits shift+log_m-1 : shift)
-                                    var k_phase: usize = undefined;
-                                    if (shift >= 64) {
-                                        // Bits are in the upper 64 bits
-                                        k_phase = @truncate(k_hi >> @intCast(shift - 64));
-                                    } else if (shift + log_m <= 64) {
-                                        // Bits are in the lower 64 bits
-                                        k_phase = @truncate(k_lo >> @intCast(shift));
-                                    } else {
-                                        // Bits span both halves
-                                        const lo_bits = k_lo >> @intCast(shift);
-                                        const hi_bits = k_hi << @intCast(64 - shift);
-                                        k_phase = @truncate(lo_bits | hi_bits);
-                                    }
-                                    k_phase &= (@as(usize, 1) << @intCast(log_m)) - 1; // Mask to log_m bits
-
-                                    // Look up in expanding table (HighToLow binding - no bit reversal needed)
-                                    // With HighToLow binding, v[k] = EQ(k, r) where k bits correspond directly
-                                    // to round indices: bit 0 = round 0's challenge, etc.
-                                    const table_val = expanding_tables[phase].get(k_phase);
-
-                                    // Debug: print detailed info for first cycle
-                                    if (j == 0 and chunk_idx < 2) {
-                                        if (comptime debug_verbose) {
-                                            dbg("[STAGE5 RA_DEBUG] j=0, chunk={}, phase={}: shift={}, k_phase=0x{x}, table_val={x}\n", .{
-                                                chunk_idx,
-                                                phase,
-                                                shift,
-                                                k_phase,
-                                                table_val.toBytesBE()[28..32].*,
-                                            });
+                        // Materialize ra_chunk_weights from expanding tables (parallel over T cycles)
+                        {
+                            const RaChunkRematCtx = struct {
+                                indices_lo: []const u64,
+                                indices_hi: []const u64,
+                                chunks: *[MAX_RA_CHUNKS][]F,
+                                tables: *const [16]ExpandingTable(F),
+                                n_phases: usize,
+                                ppc: usize, // phases_per_chunk
+                                n_chunks: usize,
+                                lm: usize, // log_m
+                            };
+                            const rctx = RaChunkRematCtx{
+                                .indices_lo = lookups_indices_lo,
+                                .indices_hi = lookups_indices_hi,
+                                .chunks = &ra_chunk_weights,
+                                .tables = &expanding_tables,
+                                .n_phases = num_phases,
+                                .ppc = phases_per_chunk,
+                                .n_chunks = ra_num_chunks,
+                                .lm = log_m,
+                            };
+                            const rematChunkFn = struct {
+                                fn f(c: RaChunkRematCtx, j: usize) void {
+                                    const k_lo = c.indices_lo[j];
+                                    const k_hi = c.indices_hi[j];
+                                    const phase_mask = (@as(usize, 1) << @intCast(c.lm)) - 1;
+                                    for (0..c.n_chunks) |chunk_idx| {
+                                        var ra_val = F.one();
+                                        const phase_start = chunk_idx * c.ppc;
+                                        const phase_end = @min((chunk_idx + 1) * c.ppc, c.n_phases);
+                                        for (phase_start..phase_end) |phase| {
+                                            const shift = (c.n_phases - 1 - phase) * c.lm;
+                                            var k_phase: usize = undefined;
+                                            if (shift >= 64) {
+                                                k_phase = @truncate(k_hi >> @intCast(shift - 64));
+                                            } else if (shift + c.lm <= 64) {
+                                                k_phase = @truncate(k_lo >> @intCast(shift));
+                                            } else {
+                                                const lo_bits = k_lo >> @intCast(shift);
+                                                const hi_bits = k_hi << @intCast(64 - shift);
+                                                k_phase = @truncate(lo_bits | hi_bits);
+                                            }
+                                            k_phase &= phase_mask;
+                                            ra_val = ra_val.mul(c.tables[phase].get(k_phase));
                                         }
-                                    }
-
-                                    ra_val = ra_val.mul(table_val);
-                                }
-
-                                ra_chunk_weights[chunk_idx][j] = ra_val;
-
-                                // Debug: print final ra_val for first cycle, first 2 chunks
-                                if (j == 0 and chunk_idx < 2) {
-                                    if (comptime debug_verbose) {
-                                        dbg("[STAGE5 RA_DEBUG] j=0, chunk={}: final ra_val={x}\n", .{
-                                            chunk_idx,
-                                            ra_val.toBytesBE()[16..32].*,
-                                        });
+                                        c.chunks[chunk_idx][j] = ra_val;
                                     }
                                 }
+                            }.f;
+                            if (self.thread_pool) |tp| {
+                                tp.parallelForForce(T, rctx, rematChunkFn);
+                            } else {
+                                for (0..T) |j| rematChunkFn(rctx, j);
                             }
                         }
 
-                        // Debug: print first few ra_chunk_weights after materialization
                         if (comptime debug_verbose) {
+                            // Debug: print first few ra_chunk_weights after materialization
                             dbg("[STAGE5 CYCLE] ra_chunk_weights after materialization (first 4 cycles):\n", .{});
-                        }
-                        for (0..@min(4, T)) |j| {
-                            if (comptime debug_verbose) {
+                            for (0..@min(4, T)) |j| {
                                 dbg("  j={}: ra_chunks=[", .{j});
-                            }
-                            for (0..ra_num_chunks) |c| {
-                                if (comptime debug_verbose) {
+                                for (0..ra_num_chunks) |c| {
                                     if (c > 0) dbg(", ", .{});
                                     dbg("{x}", .{ra_chunk_weights[c][j].toBytesBE()[24..32].*});
                                 }
-                            }
-                            if (comptime debug_verbose) {
                                 dbg("]\n", .{});
-                            }
-                        }
-
-                        // DIAGNOSTIC: Compare accumulated vs materialized for cycle 0
-                        if (comptime debug_verbose) {
-                            dbg("[RA_ACCUM_VS_MATERIAL] Comparing for cycle 0:\n", .{});
-                        }
-                        for (0..@min(ra_num_chunks, 8)) |c| {
-                            const materialized = ra_chunk_weights[c][0];
-                            const accumulated = accum_ra_debug[c];
-                            const match_val = materialized.eql(accumulated);
-                            if (comptime debug_verbose) {
-                                dbg("  chunk[{}]: accum={x}, material={x}, match={}\n", .{
-                                    c,
-                                    accumulated.toBytesBE()[16..32].*,
-                                    materialized.toBytesBE()[16..32].*,
-                                    match_val,
-                                });
                             }
                         }
 
@@ -5845,13 +5519,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             dbg("[RA_COMPARE] material==claim: {}\n", .{sum_with_material.eql(lookups_claim)});
                         }
 
-                        // Update lookups_ra_weights[j] to be the product of all chunks
-                        for (0..T) |j| {
-                            var ra_prod = F.one();
-                            for (0..ra_num_chunks) |c| {
-                                ra_prod = ra_prod.mul(ra_chunk_weights[c][j]);
+                        if (comptime debug_verbose) {
+                            // Update lookups_ra_weights[j] to be the product of all chunks (debug only)
+                            for (0..T) |j| {
+                                var ra_prod = F.one();
+                                for (0..ra_num_chunks) |c| {
+                                    ra_prod = ra_prod.mul(ra_chunk_weights[c][j]);
+                                }
+                                lookups_ra_weights[j] = ra_prod;
                             }
-                            lookups_ra_weights[j] = ra_prod;
                         }
 
                         // DEBUG: Verify RA computation directly

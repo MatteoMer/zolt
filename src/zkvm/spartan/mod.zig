@@ -148,3 +148,10 @@ test "spartan types compile" {
     _ = R1CSProof(F);
     _ = R1CSShape(F);
 }
+
+test {
+    // Discover tests in sub-modules (refAllDecls doesn't traverse @import'd modules)
+    _ = @import("ra_poly.zig");
+    _ = @import("stage6_prover.zig");
+    _ = @import("stage5_prover.zig");
+}

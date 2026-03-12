@@ -1466,6 +1466,11 @@ pub fn JoltProver(comptime F: type) type {
 }
 
 
+test {
+    // Discover tests in sub-modules
+    _ = @import("spartan/mod.zig");
+}
+
 test "vm state basic operations" {
     var state = VMState.init(0x80000000);
 

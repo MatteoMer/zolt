@@ -1456,8 +1456,10 @@ fn IncClaimReductionProver(comptime F: type) type {
         prefix_n_vars: usize,
         suffix_n_vars: usize,
         n_vars: usize,
+        /// Caller-owned trace; must outlive Phase 1→2 transition (not accessed after).
         trace: *const ExecutionTrace,
-        points_be: [4][]const F, // original BE opening points (caller-owned)
+        /// Original BE opening points (caller-owned); must outlive Phase 1→2 transition.
+        points_be: [4][]const F,
         allocator: Allocator,
         pool: ?*ThreadPool = null,
 
@@ -1782,7 +1784,9 @@ fn IncClaimReductionProver(comptime F: type) type {
 
             // Build combined eq arrays: eq_ram[x_hi] = scalar_r2·eq_hi_r2[x_hi] + γ·scalar_r4·eq_hi_r4[x_hi]
             const eq_ram_arr = try self.allocator.alloc(F, suffix_len);
+            errdefer self.allocator.free(eq_ram_arr);
             const eq_rd_arr = try self.allocator.alloc(F, suffix_len);
+            errdefer self.allocator.free(eq_rd_arr);
 
             const scale_r2 = eq_prefix_scalars[0];
             const scale_r4 = eq_prefix_scalars[1];
@@ -1829,7 +1833,9 @@ fn IncClaimReductionProver(comptime F: type) type {
 
             // Materialize ram_inc and rd_inc by folding trace over prefix dimension
             const ram_inc_arr = try self.allocator.alloc(F, suffix_len);
+            errdefer self.allocator.free(ram_inc_arr);
             const rd_inc_arr = try self.allocator.alloc(F, suffix_len);
+            errdefer self.allocator.free(rd_inc_arr);
 
             const IncP2Ctx = struct {
                 steps: []const tracer.TraceStep,
@@ -1954,6 +1960,7 @@ fn IncClaimReductionProver(comptime F: type) type {
         }
 
         pub fn openingClaims(self: *const Self) struct { ram_inc: F, rd_inc: F } {
+            std.debug.assert(self.phase == .phase2);
             return .{
                 .ram_inc = self.ram_inc[0],
                 .rd_inc = self.rd_inc[0],
@@ -2080,7 +2087,14 @@ fn HammingBooleanityProver(comptime F: type) type {
                 .suffix_len = suffix_len,
             };
 
-            // Parallelize over suffix_len (outer loop over j_outer)
+            // Parallelize over suffix_len (outer loop over j_outer).
+            // Index layout: H is a flat T-sized array with LE indexing. The flat index
+            // x = x_lo + x_hi * prefix_len, where x_lo ∈ [0, prefix_len) is the
+            // fastest-varying (prefix) dimension. We pair indices (2j, 2j+1) which
+            // toggle bit 0 (the first sumcheck variable). Decomposing j = j_inner +
+            // j_outer * half_lo gives: 2j = 2*j_inner + j_outer*prefix_len, keeping
+            // the j_outer (suffix) block constant within each pair — so eq_hi[j_outer]
+            // factors out correctly.
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [4]F {
                     const two = F.fromU64(2);
@@ -2207,7 +2221,10 @@ fn HammingBooleanityProver(comptime F: type) type {
                     const half = self.current_len / 2;
                     const half_lo = self.prefix_current_len / 2;
 
-                    // eq_lo is tiny (sqrt(T)), bind inline; H is large
+                    // eq_lo is tiny (sqrt(T)), bind inline. H is large but in-place MLE
+                    // bind has data dependencies (write[j] aliases future read[2j]),
+                    // so it cannot be parallelized within one array. Phase 2 parallelizes
+                    // by running H and eq concurrently as separate arrays.
                     bindOne(self.eq_lo, half_lo, r);
                     bindOne(self.H, half, r);
                     self.current_len = half;
@@ -2274,6 +2291,14 @@ fn RamRaVirtualProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
+        /// In-place MLE bind: arr[j] = arr[2j] + challenge*(arr[2j+1] - arr[2j]) for j < h.
+        /// Sequential only (write[j] aliases future read[2j], cannot parallelize within one array).
+        fn bindSlice(arr: []F, h: usize, challenge: F) void {
+            for (0..h) |j| {
+                arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
+            }
+        }
+
         /// Compressed ra polynomials (u8 indices in round 1, dense after bind)
         ra_polys: []RaPoly,
         /// eq(r_cycle_reduced, .) evaluations
@@ -2301,8 +2326,10 @@ fn RamRaVirtualProver(comptime F: type) type {
             std.debug.assert(log_k_chunk <= ra_poly_mod.MAX_LOG_K_CHUNK);
 
             var ra_polys = try allocator.alloc(RaPoly, d);
+            // Track how many ra_polys have been assembled for safe errdefer cleanup
+            var ra_polys_assembled: usize = 0;
             errdefer {
-                for (ra_polys[0..d]) |*rp| rp.deinit(allocator);
+                for (ra_polys[0..ra_polys_assembled]) |*rp| rp.deinit(allocator);
                 allocator.free(ra_polys);
             }
 
@@ -2313,12 +2340,22 @@ fn RamRaVirtualProver(comptime F: type) type {
             var eq_tables = try allocator.alloc([]F, d);
             defer allocator.free(eq_tables); // only frees the pointer array, not contents
 
+            // Track allocation progress for errdefer cleanup (before assembly into RaPolys)
+            var indices_allocated: usize = 0;
+            var eq_tables_allocated: usize = 0;
+            errdefer {
+                for (0..eq_tables_allocated) |i| allocator.free(eq_tables[i]);
+                for (0..indices_allocated) |i| allocator.free(indices_arr[i]);
+            }
+
             for (0..d) |i| {
                 indices_arr[i] = try allocator.alloc(?u8, T);
+                indices_allocated += 1;
                 var r_chunk_rev = try allocator.alloc(F, log_k_chunk);
                 defer allocator.free(r_chunk_rev);
                 for (0..log_k_chunk) |ci| r_chunk_rev[ci] = r_addr_chunks[i][log_k_chunk - 1 - ci];
                 eq_tables[i] = try computeEqTable(F, allocator, r_chunk_rev, log_k_chunk);
+                eq_tables_allocated += 1;
             }
 
             // Parallel fill: each chunk i is independent
@@ -2370,14 +2407,15 @@ fn RamRaVirtualProver(comptime F: type) type {
                 for (0..d) |i| ramRaInitFn(ram_ra_ctx, i);
             }
 
-            // Assemble RaPolynomials
+            // Assemble RaPolynomials (prescales eq_table by scale=1, validates invariants).
+            // Ownership of indices_arr[i] and eq_tables[i] transfers to the RaPoly;
+            // clear allocation counters so the pre-assembly errdefer won't double-free.
             for (0..d) |i| {
-                ra_polys[i] = .{ .round1 = .{
-                    .indices = indices_arr[i],
-                    .eq_table = eq_tables[i],
-                    .scale = F.one(),
-                } };
+                ra_polys[i] = RaPoly.initRound1(indices_arr[i], eq_tables[i], F.one());
+                ra_polys_assembled += 1;
             }
+            indices_allocated = 0;
+            eq_tables_allocated = 0;
 
             // r_cycle is in BE order; reverse for LE computeEqTable
             var r_cycle_rev = try allocator.alloc(F, n_vars);
@@ -2479,14 +2517,6 @@ fn RamRaVirtualProver(comptime F: type) type {
         pub fn bindChallenge(self: *Self, r: F) !void {
             const half = self.current_len / 2;
 
-            const bindOne = struct {
-                fn f(arr: []F, h: usize, challenge: F) void {
-                    for (0..h) |j| {
-                        arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
-                    }
-                }
-            }.f;
-
             const all_dense = self.ra_polys.len > 0 and self.ra_polys[0] == .dense;
 
             if (all_dense and self.pool != null) {
@@ -2496,25 +2526,19 @@ fn RamRaVirtualProver(comptime F: type) type {
                 const ctx = RaBindCtx{ .ra = self.ra_polys, .eq = self.eq, .d = self.d, .half = half, .r = r };
                 self.pool.?.parallelForForce(total, ctx, struct {
                     fn f(c: RaBindCtx, idx: usize) void {
-                        const bOne = struct {
-                            fn bf(arr: []F, h: usize, challenge: F) void {
-                                for (0..h) |j| {
-                                    arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
-                                }
-                            }
-                        }.bf;
                         if (idx < c.d) {
-                            bOne(c.ra[idx].dense.coeffs[0 .. c.half * 2], c.half, c.r);
+                            std.debug.assert(c.ra[idx] == .dense);
+                            bindSlice(c.ra[idx].dense.coeffs[0 .. c.half * 2], c.half, c.r);
                             c.ra[idx].dense.current_len = c.half;
                         } else {
-                            bOne(c.eq, c.half, c.r);
+                            bindSlice(c.eq, c.half, c.r);
                         }
                     }
                 }.f);
             } else {
                 // First round (round1→dense transition) or no pool: sequential.
                 // TODO: parallelize round1→dense materialization across d polys for large T.
-                bindOne(self.eq, half, r);
+                bindSlice(self.eq, half, r);
                 for (self.ra_polys) |*rp| {
                     try rp.bind(r, self.allocator);
                 }
@@ -3282,6 +3306,13 @@ fn LookupsRaVirtualProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
+        /// In-place MLE bind (same as RamRaVirtualProver.bindSlice).
+        fn bindSlice(arr: []F, h: usize, challenge: F) void {
+            for (0..h) |j| {
+                arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
+            }
+        }
+
         /// ra_bound[i][j] - pre-bound to address chunks
         /// First poly in each virtual batch pre-scaled by gamma^batch
         ra_bound: [][]F,
@@ -3499,14 +3530,6 @@ fn LookupsRaVirtualProver(comptime F: type) type {
         pub fn bindChallenge(self: *Self, r: F) void {
             const half = self.current_len / 2;
 
-            const bindOne = struct {
-                fn f(arr: []F, h: usize, challenge: F) void {
-                    for (0..h) |j| {
-                        arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
-                    }
-                }
-            }.f;
-
             if (self.pool) |pool| {
                 // total_committed+1 independent arrays: total_committed ra_bound + 1 eq
                 const total = self.total_committed + 1;
@@ -3514,25 +3537,18 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 const ctx = BindCtx{ .ra = self.ra_bound, .eq = self.eq, .tc = self.total_committed, .half = half, .r = r };
                 pool.parallelForForce(total, ctx, struct {
                     fn f(c: BindCtx, idx: usize) void {
-                        const bOne = struct {
-                            fn bf(arr: []F, h: usize, challenge: F) void {
-                                for (0..h) |j| {
-                                    arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
-                                }
-                            }
-                        }.bf;
                         if (idx < c.tc) {
-                            bOne(c.ra[idx], c.half, c.r);
+                            bindSlice(c.ra[idx], c.half, c.r);
                         } else {
-                            bOne(c.eq, c.half, c.r);
+                            bindSlice(c.eq, c.half, c.r);
                         }
                     }
                 }.f);
             } else {
                 for (0..self.total_committed) |i| {
-                    bindOne(self.ra_bound[i], half, r);
+                    bindSlice(self.ra_bound[i], half, r);
                 }
-                bindOne(self.eq, half, r);
+                bindSlice(self.eq, half, r);
             }
 
             self.current_len = half;
@@ -7030,8 +7046,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             const hamming_weight_claim = hamming_prover.openingClaim();
 
             const bytecode_ra_claims = try bytecode_prover.getOpeningClaims(self.allocator);
-            // Debug: bytecode RA claims (ALWAYS ON for debugging)
-            {
+            if (comptime debug_verbose) {
                 dbg("[S6P] Bytecode RA claims (d={d}):\n", .{bytecode_d});
                 for (0..bytecode_d) |i| {
                     const be = bytecode_ra_claims[i].toBytesBE();
@@ -7136,7 +7151,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // Get booleanity claims directly from the prover's final H state.
             // After all Phase 2 rounds, H[i][0] = ra_i(ρ_addr, ρ_cycle).
             const booleanity_ra_claims = try booleanity_prover.getBooleanityClaims(self.allocator);
-            {
+            if (comptime debug_verbose) {
                 const total_booleanity_polys = instruction_d + bytecode_d + ram_d;
                 dbg("[STAGE6] Booleanity claims from H final state:\n", .{});
                 for (0..@min(5, total_booleanity_polys)) |i| {
@@ -7147,6 +7162,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
             }
 
+            if (comptime debug_verbose) {
             // Debug: compute what the verifier would compute for Instance 1 (Booleanity)
             // expected = eq(challenges, combined_r) * Σ gamma^{2i} * (ra_i^2 - ra_i)
             // combined_r = r_address.reversed ++ r_cycle.reversed
@@ -7290,7 +7306,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     dbg("[BOOL_VERIFY] eq_match={}\n", .{@intFromBool(eq_direct.eql(eq_from_prover))});
                 }
             }
+            } // end if (comptime debug_verbose) for BOOL_VERIFY
 
+            if (comptime debug_verbose) {
             dbg("[STAGE6] Opening claims (full LE hex):\n", .{});
             {
                 const be = ram_inc_claim.toBytesBE();
@@ -7456,6 +7474,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 for (0..32) |bi| dbg("{x:0>2}", .{rv5[31 - bi]});
                 dbg("]\n", .{});
             }
+            } // end if (comptime debug_verbose)
 
             // ====================================================================
             // Cache openings to transcript
@@ -8188,4 +8207,1013 @@ fn evaluateDeg3FromEvals(comptime F: type, evals: [4]F, challenge: F) F {
     const l3 = x.mul(xm1).mul(xm2).mul(six_inv);
 
     return l0.mul(p0).add(l1.mul(p1)).add(l2.mul(p2)).add(l3.mul(p3));
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+
+/// Helper: compute eq(r, x) directly for a boolean vector x and field vector r.
+/// Both in LE order (r[0] = LSB, matching computeEqTable's output convention).
+fn eqEvalDirect(r: []const BN254Scalar, x: usize) BN254Scalar {
+    var result = BN254Scalar.one();
+    for (0..r.len) |i| {
+        const bit: u1 = @truncate(x >> @intCast(i));
+        if (bit == 1) {
+            result = result.mul(r[i]);
+        } else {
+            result = result.mul(BN254Scalar.one().sub(r[i]));
+        }
+    }
+    return result;
+}
+
+test "split-eq factorization: eq_lo * eq_hi = eq_full" {
+    // Verify the core split-eq identity:
+    //   eq(r, x) = eq(r_lo, x_lo) * eq(r_hi, x_hi)
+    // where x = x_lo + x_hi << prefix_n_vars
+    //
+    // computeEqTable takes BE input r[0..n], output table[j] has bit i → r[i].
+    // For x = x_lo | (x_hi << prefix_n_vars):
+    //   bits 0..prefix_n_vars-1 (x_lo) → r_be[0..prefix_n_vars]
+    //   bits prefix_n_vars..n_vars-1 (x_hi) → r_be[prefix_n_vars..n_vars]
+    const allocator = testing.allocator;
+    const F = BN254Scalar;
+
+    const n_vars = 4;
+    const prefix_n_vars = 2;
+    const suffix_n_vars = 2;
+    const T: usize = 1 << n_vars;
+    const prefix_len: usize = 1 << prefix_n_vars;
+    const suffix_len: usize = 1 << suffix_n_vars;
+
+    // Full BE challenge
+    var r_be = [4]F{ F.fromU64(17), F.fromU64(31), F.fromU64(7), F.fromU64(53) };
+    const eq_full = try computeEqTable(F, allocator, &r_be, n_vars);
+    defer allocator.free(eq_full);
+
+    // Split: prefix (x_lo bits) uses r_be[0..prefix_n_vars]
+    var r_lo_be = [2]F{ r_be[0], r_be[1] };
+    const eq_lo = try computeEqTable(F, allocator, &r_lo_be, prefix_n_vars);
+    defer allocator.free(eq_lo);
+
+    // Suffix (x_hi bits) uses r_be[prefix_n_vars..n_vars]
+    var r_hi_be = [2]F{ r_be[2], r_be[3] };
+    const eq_hi = try computeEqTable(F, allocator, &r_hi_be, suffix_n_vars);
+    defer allocator.free(eq_hi);
+
+    // Verify: eq_full[x] == eq_lo[x_lo] * eq_hi[x_hi] for all x
+    for (0..T) |x| {
+        const x_lo = x & (prefix_len - 1);
+        const x_hi = x >> prefix_n_vars;
+        const product = eq_lo[x_lo].mul(eq_hi[x_hi]);
+        try testing.expect(eq_full[x].eql(product));
+    }
+
+    // Also verify: Σ_{x_hi} f(x_lo, x_hi) * eq_hi[x_hi] correctly folds suffix dimension
+    var folded = [_]F{F.zero()} ** prefix_len;
+    for (0..prefix_len) |x_lo| {
+        for (0..suffix_len) |x_hi| {
+            const x = x_lo + (x_hi << prefix_n_vars);
+            folded[x_lo] = folded[x_lo].add(eq_hi[x_hi].mul(F.fromU64(@intCast(x))));
+        }
+    }
+    // Verify: Σ_x_lo P[x_lo] * folded[x_lo] == Σ_x eq_full[x] * f(x)
+    var sum_pq = F.zero();
+    for (0..prefix_len) |x_lo| {
+        sum_pq = sum_pq.add(eq_lo[x_lo].mul(folded[x_lo]));
+    }
+    var sum_direct = F.zero();
+    for (0..T) |x| {
+        sum_direct = sum_direct.add(eq_full[x].mul(F.fromU64(@intCast(x))));
+    }
+    try testing.expect(sum_pq.eql(sum_direct));
+}
+
+test "split-eq bind Phase 1 then Phase 2 matches flat eq bind" {
+    // Verify that binding a split eq (Phase 1 prefix, then Phase 2 suffix)
+    // produces the same result as binding the flat eq table.
+    const allocator = testing.allocator;
+    const F = BN254Scalar;
+
+    const n_vars = 4;
+    const prefix_n_vars = 2;
+    const suffix_n_vars = 2;
+    const prefix_len: usize = 1 << prefix_n_vars;
+    const suffix_len: usize = 1 << suffix_n_vars;
+
+    var r_be = [4]F{ F.fromU64(5), F.fromU64(13), F.fromU64(3), F.fromU64(19) };
+    const challenges = [4]F{ F.fromU64(7), F.fromU64(11), F.fromU64(2), F.fromU64(17) };
+
+    // Build flat eq table and bind sequentially
+    var eq_flat = try computeEqTable(F, allocator, &r_be, n_vars);
+    defer allocator.free(eq_flat);
+
+    var flat_len: usize = 1 << n_vars;
+    for (challenges) |ch| {
+        const half = flat_len / 2;
+        for (0..half) |j| {
+            eq_flat[j] = eq_flat[2 * j].add(ch.mul(eq_flat[2 * j + 1].sub(eq_flat[2 * j])));
+        }
+        flat_len = half;
+    }
+    const flat_final = eq_flat[0];
+
+    // Split: prefix uses r_be[0..prefix_n_vars], suffix uses r_be[prefix_n_vars..]
+    var r_lo_be = [2]F{ r_be[0], r_be[1] };
+    var eq_lo = try computeEqTable(F, allocator, &r_lo_be, prefix_n_vars);
+    defer allocator.free(eq_lo);
+
+    var r_hi_be = [2]F{ r_be[2], r_be[3] };
+    var eq_hi = try computeEqTable(F, allocator, &r_hi_be, suffix_n_vars);
+    defer allocator.free(eq_hi);
+
+    // Phase 1: bind prefix rounds on eq_lo
+    var lo_len = prefix_len;
+    for (0..prefix_n_vars) |round| {
+        const half = lo_len / 2;
+        for (0..half) |j| {
+            eq_lo[j] = eq_lo[2 * j].add(challenges[round].mul(eq_lo[2 * j + 1].sub(eq_lo[2 * j])));
+        }
+        lo_len = half;
+    }
+    const eq_lo_scalar = eq_lo[0];
+
+    // Phase 2: scale eq_hi by eq_lo scalar and bind suffix rounds
+    for (0..suffix_len) |j| {
+        eq_hi[j] = eq_hi[j].mul(eq_lo_scalar);
+    }
+    var hi_len = suffix_len;
+    for (0..suffix_n_vars) |round| {
+        const half = hi_len / 2;
+        for (0..half) |j| {
+            eq_hi[j] = eq_hi[2 * j].add(challenges[prefix_n_vars + round].mul(eq_hi[2 * j + 1].sub(eq_hi[2 * j])));
+        }
+        hi_len = half;
+    }
+    const split_final = eq_hi[0];
+
+    try testing.expect(flat_final.eql(split_final));
+}
+
+test "P*Q sum matches flat polynomial sum" {
+    // Verify that Σ P[x_lo] * Q[x_lo] == Σ_x eq(r, x) * f(x)
+    // where Q[x_lo] = Σ_{x_hi} eq_hi(r_hi, x_hi) * f(x_lo, x_hi)
+    // This is the IncClaimReduction Phase 1 correctness property.
+    const allocator = testing.allocator;
+    const F = BN254Scalar;
+
+    const n_vars = 6;
+    const prefix_n_vars = 3;
+    const suffix_n_vars = 3;
+    const T: usize = 1 << n_vars;
+    const prefix_len: usize = 1 << prefix_n_vars;
+    const suffix_len: usize = 1 << suffix_n_vars;
+
+    var r_be = [6]F{
+        F.fromU64(3), F.fromU64(7), F.fromU64(11),
+        F.fromU64(17), F.fromU64(23), F.fromU64(29),
+    };
+
+    const eq_full = try computeEqTable(F, allocator, &r_be, n_vars);
+    defer allocator.free(eq_full);
+
+    // Prefix uses r_be[0..prefix_n_vars], suffix uses r_be[prefix_n_vars..]
+    var r_lo_be = [3]F{ r_be[0], r_be[1], r_be[2] };
+    const eq_lo = try computeEqTable(F, allocator, &r_lo_be, prefix_n_vars);
+    defer allocator.free(eq_lo);
+
+    var r_hi_be = [3]F{ r_be[3], r_be[4], r_be[5] };
+    const eq_hi = try computeEqTable(F, allocator, &r_hi_be, suffix_n_vars);
+    defer allocator.free(eq_hi);
+
+    // f(x) = x^2 + 3x + 1 (arbitrary polynomial for testing)
+    var f_vals = try allocator.alloc(F, T);
+    defer allocator.free(f_vals);
+    for (0..T) |x| {
+        const xf = F.fromU64(@intCast(x));
+        f_vals[x] = xf.mul(xf).add(F.fromU64(3).mul(xf)).add(F.one());
+    }
+
+    // Q[x_lo] = Σ_{x_hi} eq_hi[x_hi] * f(x_lo + x_hi << prefix_n_vars)
+    var Q = try allocator.alloc(F, prefix_len);
+    defer allocator.free(Q);
+    for (0..prefix_len) |x_lo| {
+        Q[x_lo] = F.zero();
+        for (0..suffix_len) |x_hi| {
+            const x = x_lo + (x_hi << prefix_n_vars);
+            Q[x_lo] = Q[x_lo].add(eq_hi[x_hi].mul(f_vals[x]));
+        }
+    }
+
+    // Σ P[x_lo] * Q[x_lo]
+    var sum_pq = F.zero();
+    for (0..prefix_len) |x_lo| {
+        sum_pq = sum_pq.add(eq_lo[x_lo].mul(Q[x_lo]));
+    }
+
+    // Σ eq_full[x] * f(x)
+    var sum_direct = F.zero();
+    for (0..T) |x| {
+        sum_direct = sum_direct.add(eq_full[x].mul(f_vals[x]));
+    }
+
+    try testing.expect(sum_pq.eql(sum_direct));
+}
+
+test "P*Q Phase 1 sumcheck round polynomial matches flat" {
+    // Verify that the Phase 1 round polynomial from the P*Q factorization
+    // produces the same evaluations as computing from the flat polynomial.
+    const allocator = testing.allocator;
+    const F = BN254Scalar;
+
+    const n_vars = 4;
+    const prefix_n_vars = 2;
+    const suffix_n_vars = 2;
+    const T: usize = 1 << n_vars;
+    const prefix_len: usize = 1 << prefix_n_vars;
+    const suffix_len: usize = 1 << suffix_n_vars;
+
+    var r_be = [4]F{ F.fromU64(5), F.fromU64(13), F.fromU64(3), F.fromU64(19) };
+
+    // Build flat polynomial: poly[x] = eq(r, x) * f(x)
+    const eq_full = try computeEqTable(F, allocator, &r_be, n_vars);
+    defer allocator.free(eq_full);
+
+    // f(x) = x + 1
+    var poly = try allocator.alloc(F, T);
+    defer allocator.free(poly);
+    for (0..T) |x| {
+        poly[x] = eq_full[x].mul(F.fromU64(@intCast(x + 1)));
+    }
+
+    // Flat round 1: p(0) = Σ poly[2j], p(1) = Σ poly[2j+1]
+    var flat_p0 = F.zero();
+    var flat_p1 = F.zero();
+    for (0..T / 2) |j| {
+        flat_p0 = flat_p0.add(poly[2 * j]);
+        flat_p1 = flat_p1.add(poly[2 * j + 1]);
+    }
+
+    // Split: P * Q version (prefix = r_be[0..2], suffix = r_be[2..4])
+    var r_lo_be = [2]F{ r_be[0], r_be[1] };
+    const P = try computeEqTable(F, allocator, &r_lo_be, prefix_n_vars);
+    defer allocator.free(P);
+
+    var r_hi_be = [2]F{ r_be[2], r_be[3] };
+    const eq_hi = try computeEqTable(F, allocator, &r_hi_be, suffix_n_vars);
+    defer allocator.free(eq_hi);
+
+    var Q = try allocator.alloc(F, prefix_len);
+    defer allocator.free(Q);
+    for (0..prefix_len) |x_lo| {
+        Q[x_lo] = F.zero();
+        for (0..suffix_len) |x_hi| {
+            const x = x_lo + (x_hi << prefix_n_vars);
+            Q[x_lo] = Q[x_lo].add(eq_hi[x_hi].mul(F.fromU64(@intCast(x + 1))));
+        }
+    }
+
+    // Phase 1 round 1: p(t) = Σ_{x_lo} P(x_lo, t) * Q(x_lo, t)
+    // P(x_lo, 0) = P[2*x_lo], P(x_lo, 1) = P[2*x_lo+1] (standard MLE bind)
+    // Q same structure
+    var split_p0 = F.zero();
+    var split_p1 = F.zero();
+    const half = prefix_len / 2;
+    for (0..half) |j| {
+        split_p0 = split_p0.add(P[2 * j].mul(Q[2 * j]));
+        split_p1 = split_p1.add(P[2 * j + 1].mul(Q[2 * j + 1]));
+    }
+
+    try testing.expect(flat_p0.eql(split_p0));
+    try testing.expect(flat_p1.eql(split_p1));
+}
+
+test "HammingBooleanity split-eq: Phase 1 sum matches flat" {
+    // HammingBooleanity computes Σ_x eq(r, x) * H(x) * (H(x) - 1)
+    // Verify split-eq Phase 1 round poly matches flat computation.
+    const allocator = testing.allocator;
+    const F = BN254Scalar;
+
+    const n_vars = 4;
+    const prefix_n_vars = 2;
+    const suffix_n_vars = 2;
+    const T: usize = 1 << n_vars;
+    const prefix_len: usize = 1 << prefix_n_vars;
+    const suffix_len: usize = 1 << suffix_n_vars;
+
+    var r_be = [4]F{ F.fromU64(11), F.fromU64(23), F.fromU64(7), F.fromU64(41) };
+
+    // Build flat eq
+    const eq_full = try computeEqTable(F, allocator, &r_be, n_vars);
+    defer allocator.free(eq_full);
+
+    // H(x) = some test values (simulating Hamming weight or similar)
+    var H = [16]F{
+        F.fromU64(0), F.fromU64(1), F.fromU64(1), F.fromU64(2),
+        F.fromU64(1), F.fromU64(2), F.fromU64(2), F.fromU64(3),
+        F.fromU64(1), F.fromU64(2), F.fromU64(2), F.fromU64(3),
+        F.fromU64(2), F.fromU64(3), F.fromU64(3), F.fromU64(4),
+    };
+
+    // Flat sum: Σ eq(r,x) * H(x) * (H(x) - 1) for degree 3 sumcheck
+    // Round 1: p(t) at t=0 and t=1
+    var flat_p0 = F.zero();
+    var flat_p1 = F.zero();
+    for (0..T / 2) |j| {
+        flat_p0 = flat_p0.add(eq_full[2 * j].mul(H[2 * j]).mul(H[2 * j].sub(F.one())));
+        flat_p1 = flat_p1.add(eq_full[2 * j + 1].mul(H[2 * j + 1]).mul(H[2 * j + 1].sub(F.one())));
+    }
+
+    // Split-eq: prefix = r_be[0..2], suffix = r_be[2..4]
+    var r_lo_be = [2]F{ r_be[0], r_be[1] };
+    const eq_lo = try computeEqTable(F, allocator, &r_lo_be, prefix_n_vars);
+    defer allocator.free(eq_lo);
+
+    var r_hi_be = [2]F{ r_be[2], r_be[3] };
+    const eq_hi = try computeEqTable(F, allocator, &r_hi_be, suffix_n_vars);
+    defer allocator.free(eq_hi);
+
+    // Split round 1 (prefix dimension, bit 0):
+    // p(t) = Σ_{x_lo_rest, x_hi} eq_lo(x_lo_rest, t) * eq_hi(x_hi) * H * (H-1)
+    // At t=0: sum over even x_lo indices; at t=1: sum over odd x_lo indices
+    var split_p0 = F.zero();
+    var split_p1 = F.zero();
+    const half_lo = prefix_len / 2;
+    for (0..half_lo) |j_lo| {
+        for (0..suffix_len) |j_hi| {
+            const x0 = 2 * j_lo + (j_hi << prefix_n_vars);
+            const x1 = 2 * j_lo + 1 + (j_hi << prefix_n_vars);
+            const eq_term = eq_lo[2 * j_lo].mul(eq_hi[j_hi]);
+            const eq_term1 = eq_lo[2 * j_lo + 1].mul(eq_hi[j_hi]);
+            split_p0 = split_p0.add(eq_term.mul(H[x0]).mul(H[x0].sub(F.one())));
+            split_p1 = split_p1.add(eq_term1.mul(H[x1]).mul(H[x1].sub(F.one())));
+        }
+    }
+
+    try testing.expect(flat_p0.eql(split_p0));
+    try testing.expect(flat_p1.eql(split_p1));
+}
+
+test "IncClaimReduction Phase 1→2 transition: folded suffix matches flat" {
+    // Verify that the Phase 1→2 transition math produces the same result as flat computation.
+    // All eq tables use LE convention (matching the actual prover which reverses BE→LE first).
+    const allocator = testing.allocator;
+    const F = BN254Scalar;
+
+    const n_vars = 4;
+    const prefix_n_vars = 2;
+    const suffix_n_vars = 2;
+    const T: usize = 1 << n_vars;
+    const prefix_len: usize = 1 << prefix_n_vars;
+    const suffix_len: usize = 1 << suffix_n_vars;
+
+    const gamma = F.fromU64(13);
+    const challenges = [2]F{ F.fromU64(7), F.fromU64(11) }; // prefix sumcheck challenges
+
+    // 4 opening points in LE order (simulates the prover's reversed BE→LE points).
+    // In the prover: r_cycle_rev[i] = r_cycle_be[n_vars - 1 - i].
+    // Here we just define them directly in LE.
+    var points_le: [4][4]F = undefined;
+    points_le[0] = .{ F.fromU64(23), F.fromU64(5), F.fromU64(17), F.fromU64(3) };
+    points_le[1] = .{ F.fromU64(19), F.fromU64(2), F.fromU64(11), F.fromU64(7) };
+    points_le[2] = .{ F.fromU64(37), F.fromU64(31), F.fromU64(29), F.fromU64(13) };
+    points_le[3] = .{ F.fromU64(53), F.fromU64(47), F.fromU64(43), F.fromU64(41) };
+
+    // Build full eq tables for each point (LE input to computeEqTable)
+    var eq_full: [4][]F = undefined;
+    for (0..4) |i| {
+        eq_full[i] = try computeEqTable(F, allocator, &points_le[i], n_vars);
+    }
+    defer for (0..4) |i| allocator.free(eq_full[i]);
+
+    // Flat approach: eq_ram[x] = eq_0[x] + gamma*eq_1[x], eq_rd[x] = eq_2[x] + gamma*eq_3[x]
+    // Then bind prefix variables with challenges to get suffix-sized arrays.
+    var flat_eq_ram = try allocator.alloc(F, T);
+    defer allocator.free(flat_eq_ram);
+    var flat_eq_rd = try allocator.alloc(F, T);
+    defer allocator.free(flat_eq_rd);
+    for (0..T) |x| {
+        flat_eq_ram[x] = eq_full[0][x].add(gamma.mul(eq_full[1][x]));
+        flat_eq_rd[x] = eq_full[2][x].add(gamma.mul(eq_full[3][x]));
+    }
+
+    // Bind prefix_n_vars rounds (round 0 binds bit 0, round 1 binds bit 1)
+    var flat_len: usize = T;
+    for (challenges) |ch| {
+        const half = flat_len / 2;
+        for (0..half) |j| {
+            flat_eq_ram[j] = flat_eq_ram[2 * j].add(ch.mul(flat_eq_ram[2 * j + 1].sub(flat_eq_ram[2 * j])));
+            flat_eq_rd[j] = flat_eq_rd[2 * j].add(ch.mul(flat_eq_rd[2 * j + 1].sub(flat_eq_rd[2 * j])));
+        }
+        flat_len = half;
+    }
+
+    // Split approach: eq_lo from first prefix_n_vars LE vars, eq_hi from the rest.
+    // This mirrors the prover's init which does:
+    //   P[i] = computeEqTable(rev_lo, prefix_n_vars) where rev_lo[k] = points_be[n-1-k]
+    //   eq_hi[i] = computeEqTable(rev_hi, suffix_n_vars) where rev_hi[k] = points_be[suffix-1-k]
+    // In LE terms: lo = points_le[0..prefix_n_vars], hi = points_le[prefix_n_vars..n_vars]
+    var eq_hi: [4][]F = undefined;
+    for (0..4) |i| {
+        var r_hi: [2]F = undefined;
+        for (0..suffix_n_vars) |k| r_hi[k] = points_le[i][prefix_n_vars + k];
+        eq_hi[i] = try computeEqTable(F, allocator, &r_hi, suffix_n_vars);
+    }
+    defer for (0..4) |i| allocator.free(eq_hi[i]);
+
+    // Prefix scalars: eq(challenges, point_lo_i) where point_lo = points_le[0..prefix_n_vars]
+    var eq_prefix_scalars: [4]F = undefined;
+    for (0..4) |i| {
+        var result = F.one();
+        for (0..prefix_n_vars) |k| {
+            const a = challenges[k];
+            const b = points_le[i][k];
+            const prod = a.mul(b);
+            result = result.mul(prod.add(prod).add(F.one()).sub(a.add(b)));
+        }
+        eq_prefix_scalars[i] = result;
+    }
+
+    // Build split eq arrays and compare
+    for (0..suffix_len) |x_hi| {
+        const split_ram = eq_prefix_scalars[0].mul(eq_hi[0][x_hi]).add(gamma.mul(eq_prefix_scalars[1].mul(eq_hi[1][x_hi])));
+        const split_rd = eq_prefix_scalars[2].mul(eq_hi[2][x_hi]).add(gamma.mul(eq_prefix_scalars[3].mul(eq_hi[3][x_hi])));
+        try testing.expect(flat_eq_ram[x_hi].eql(split_ram));
+        try testing.expect(flat_eq_rd[x_hi].eql(split_rd));
+    }
+
+    // Also verify the inc folding: Σ_{x_lo} eq_prefix[x_lo] * f(x_lo, x_hi) matches
+    // flat bind of f(x) over prefix variables.
+    const eq_prefix_table = try computeEqTable(F, allocator, &challenges, prefix_n_vars);
+    defer allocator.free(eq_prefix_table);
+
+    // f(x) = x + 1 (synthetic)
+    var f_vals = try allocator.alloc(F, T);
+    defer allocator.free(f_vals);
+    for (0..T) |x| f_vals[x] = F.fromU64(@intCast(x + 1));
+
+    // Flat bind of f over prefix
+    var f_flat = try allocator.alloc(F, T);
+    defer allocator.free(f_flat);
+    @memcpy(f_flat, f_vals);
+    var f_len: usize = T;
+    for (challenges) |ch| {
+        const half = f_len / 2;
+        for (0..half) |j| {
+            f_flat[j] = f_flat[2 * j].add(ch.mul(f_flat[2 * j + 1].sub(f_flat[2 * j])));
+        }
+        f_len = half;
+    }
+
+    // Split fold: Σ_{x_lo} eq_prefix[x_lo] * f(x_lo + x_hi << prefix_n_vars)
+    for (0..suffix_len) |x_hi| {
+        var acc = F.zero();
+        for (0..prefix_len) |x_lo| {
+            const x = x_lo + (x_hi << prefix_n_vars);
+            acc = acc.add(eq_prefix_table[x_lo].mul(f_vals[x]));
+        }
+        try testing.expect(f_flat[x_hi].eql(acc));
+    }
+}
+
+test "BytecodeReadRaf split-eq F_s: inner*outer matches flat eq pushforward" {
+    // Verify F_s[pc] = Σ_c eq(r_cycle, c) * δ(PC(c)=pc) is the same whether computed
+    // via a flat T-sized eq table or via the split-eq double loop with touched-PC tracking.
+    const allocator = testing.allocator;
+    const F = BN254Scalar;
+
+    const n_vars = 4;
+    const T: usize = 1 << n_vars;
+    const lo_bits = n_vars / 2;
+    const hi_bits = n_vars - lo_bits;
+    const in_len: usize = 1 << lo_bits;
+    const out_len: usize = 1 << hi_bits;
+    const bytecode_K: usize = 8;
+
+    // PC map: cycle c → pc_idx (some synthetic mapping)
+    var pc_map_arr: [T]usize = undefined;
+    for (0..T) |c| {
+        pc_map_arr[c] = (c * 3 + 1) % bytecode_K;
+    }
+
+    // r_cycle in LE order (r[0]→LSB, as used by computeEqTable)
+    var r_le = [4]F{ F.fromU64(5), F.fromU64(17), F.fromU64(31), F.fromU64(43) };
+
+    // Method 1: Flat computation with full T-sized eq table
+    const eq_flat = try computeEqTable(F, allocator, &r_le, n_vars);
+    defer allocator.free(eq_flat);
+
+    var F_s_flat: [bytecode_K]F = .{F.zero()} ** bytecode_K;
+    for (0..T) |c| {
+        F_s_flat[pc_map_arr[c]] = F_s_flat[pc_map_arr[c]].add(eq_flat[c]);
+    }
+
+    // Method 2: Split-eq double loop (same algorithm as BytecodeReadRafProver.init)
+    // Split LE points into lo and hi halves
+
+    var r_lo_arr = [2]F{ r_le[0], r_le[1] };
+    const E_lo = try computeEqTable(F, allocator, &r_lo_arr, lo_bits);
+    defer allocator.free(E_lo);
+
+    var r_hi_arr = [2]F{ r_le[2], r_le[3] };
+    const E_hi = try computeEqTable(F, allocator, &r_hi_arr, hi_bits);
+    defer allocator.free(E_hi);
+
+    var F_s_split: [bytecode_K]F = .{F.zero()} ** bytecode_K;
+    var inner_buf: [bytecode_K]F = .{F.zero()} ** bytecode_K;
+    var touched_buf: [bytecode_K]usize = undefined;
+    var touched_set: [bytecode_K]bool = .{false} ** bytecode_K;
+
+    for (0..out_len) |c_hi| {
+        var touched_count: usize = 0;
+
+        for (0..in_len) |c_lo| {
+            const c = c_lo + (c_hi << @intCast(lo_bits));
+            const pc = pc_map_arr[c];
+            if (!touched_set[pc]) {
+                touched_set[pc] = true;
+                touched_buf[touched_count] = pc;
+                touched_count += 1;
+            }
+            inner_buf[pc] = inner_buf[pc].add(E_lo[c_lo]);
+        }
+
+        const e_hi_val = E_hi[c_hi];
+        for (0..touched_count) |ti| {
+            const pc = touched_buf[ti];
+            F_s_split[pc] = F_s_split[pc].add(e_hi_val.mul(inner_buf[pc]));
+            inner_buf[pc] = F.zero();
+            touched_set[pc] = false;
+        }
+    }
+
+    for (0..bytecode_K) |k| {
+        try testing.expect(F_s_flat[k].eql(F_s_split[k]));
+    }
+}
+
+test "IncClaimReduction full multi-round: split P/Q matches flat across phase transition" {
+    // Full multi-round sumcheck simulation for IncClaimReduction:
+    // Phase 1 (prefix rounds on P/Q) → transition → Phase 2 (suffix rounds on dense arrays).
+    // The sumcheck is degree 2 (product of two linear factors: eq × inc).
+    // We keep the factors separate in the flat reference to properly evaluate the degree-2
+    // round polynomial at 3 points [s(0), s(1), s(2)].
+    const allocator = testing.allocator;
+    const F = BN254Scalar;
+
+    const n_vars = 6;
+    const prefix_n_vars = 3;
+    const suffix_n_vars = 3;
+    const T: usize = 1 << n_vars;
+    const prefix_len: usize = 1 << prefix_n_vars;
+    const suffix_len: usize = 1 << suffix_n_vars;
+
+    const gamma = F.fromU64(13);
+    const gamma_sqr = gamma.mul(gamma);
+
+    // 4 opening points in LE order
+    const points_le = [4][6]F{
+        .{ F.fromU64(3), F.fromU64(7), F.fromU64(11), F.fromU64(17), F.fromU64(23), F.fromU64(29) },
+        .{ F.fromU64(5), F.fromU64(13), F.fromU64(19), F.fromU64(31), F.fromU64(37), F.fromU64(41) },
+        .{ F.fromU64(2), F.fromU64(43), F.fromU64(47), F.fromU64(53), F.fromU64(59), F.fromU64(61) },
+        .{ F.fromU64(67), F.fromU64(71), F.fromU64(73), F.fromU64(79), F.fromU64(83), F.fromU64(89) },
+    };
+
+    // Synthetic inc values
+    var ram_inc_vals: [T]F = undefined;
+    var rd_inc_vals: [T]F = undefined;
+    for (0..T) |x| {
+        ram_inc_vals[x] = F.fromU64(@intCast(x + 1));
+        rd_inc_vals[x] = F.fromU64(@intCast(2 * x + 3));
+    }
+
+    // Build flat eq tables
+    var eq_full: [4][]F = undefined;
+    for (0..4) |i| {
+        eq_full[i] = try computeEqTable(F, allocator, @constCast(&points_le[i]), n_vars);
+    }
+    defer for (0..4) |i| allocator.free(eq_full[i]);
+
+    // Flat: keep eq and inc separate (4 eq arrays, 2 inc arrays) for degree-2 round poly
+    var flat_ram_inc = try allocator.alloc(F, T);
+    defer allocator.free(flat_ram_inc);
+    var flat_rd_inc = try allocator.alloc(F, T);
+    defer allocator.free(flat_rd_inc);
+    @memcpy(flat_ram_inc, &ram_inc_vals);
+    @memcpy(flat_rd_inc, &rd_inc_vals);
+
+    // --- Split approach: build P, Q arrays ---
+    var P: [4][]F = undefined;
+    var eq_hi: [4][]F = undefined;
+    for (0..4) |i| {
+        var r_lo: [3]F = undefined;
+        for (0..prefix_n_vars) |k| r_lo[k] = points_le[i][k];
+        P[i] = try computeEqTable(F, allocator, &r_lo, prefix_n_vars);
+
+        var r_hi: [3]F = undefined;
+        for (0..suffix_n_vars) |k| r_hi[k] = points_le[i][prefix_n_vars + k];
+        eq_hi[i] = try computeEqTable(F, allocator, &r_hi, suffix_n_vars);
+    }
+    defer for (0..4) |i| {
+        allocator.free(P[i]);
+        allocator.free(eq_hi[i]);
+    };
+
+    var Q: [4][]F = undefined;
+    for (0..4) |i| {
+        Q[i] = try allocator.alloc(F, prefix_len);
+        for (0..prefix_len) |x_lo| {
+            var acc = F.zero();
+            for (0..suffix_len) |x_hi| {
+                const x = x_lo + (x_hi << prefix_n_vars);
+                const inc_val = if (i < 2) ram_inc_vals[x] else rd_inc_vals[x];
+                acc = acc.add(eq_hi[i][x_hi].mul(inc_val));
+            }
+            Q[i][x_lo] = acc;
+        }
+    }
+    defer for (0..4) |i| allocator.free(Q[i]);
+
+    const gamma_cub = gamma_sqr.mul(gamma);
+    const weights = [4]F{ F.one(), gamma, gamma_sqr, gamma_cub };
+
+    var flat_len: usize = T;
+    var p_len: usize = prefix_len;
+    var challenges: [6]F = undefined;
+    var in_phase2 = false;
+
+    var p2_ram_inc: ?[]F = null;
+    defer if (p2_ram_inc) |a| allocator.free(a);
+    var p2_rd_inc: ?[]F = null;
+    defer if (p2_rd_inc) |a| allocator.free(a);
+    var p2_eq_ram: ?[]F = null;
+    defer if (p2_eq_ram) |a| allocator.free(a);
+    var p2_eq_rd: ?[]F = null;
+    defer if (p2_eq_rd) |a| allocator.free(a);
+    var p2_len: usize = 0;
+
+    for (0..n_vars) |round| {
+        const r = F.fromU64(@intCast(round * 7 + 3));
+        challenges[round] = r;
+
+        const flat_half = flat_len / 2;
+
+        // --- Flat round poly (degree 2): 3 evaluation points ---
+        // s(t) = Σ_j [ (eq_0(t) + γ·eq_1(t))·ram_inc(t) + γ²·(eq_2(t) + γ·eq_3(t))·rd_inc(t) ]
+        var flat_evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
+        for (0..flat_half) |j| {
+            // Values at t=0, t=1, t=2
+            var eq_ram_at: [3]F = undefined;
+            var eq_rd_at: [3]F = undefined;
+            var ram_at: [3]F = undefined;
+            var rd_at: [3]F = undefined;
+            for (0..3) |t| {
+                const tf = F.fromU64(@intCast(t));
+                inline for (0..4) |k| {
+                    const v0 = eq_full[k][2 * j];
+                    const v1 = eq_full[k][2 * j + 1];
+                    const interp = v0.add(tf.mul(v1.sub(v0)));
+                    if (k == 0) eq_ram_at[t] = interp;
+                    if (k == 1) eq_ram_at[t] = eq_ram_at[t].add(gamma.mul(interp));
+                    if (k == 2) eq_rd_at[t] = interp;
+                    if (k == 3) eq_rd_at[t] = eq_rd_at[t].add(gamma.mul(interp));
+                }
+                const r0 = flat_ram_inc[2 * j];
+                const r1 = flat_ram_inc[2 * j + 1];
+                ram_at[t] = r0.add(tf.mul(r1.sub(r0)));
+                const d0 = flat_rd_inc[2 * j];
+                const d1 = flat_rd_inc[2 * j + 1];
+                rd_at[t] = d0.add(tf.mul(d1.sub(d0)));
+            }
+            for (0..3) |t| {
+                flat_evals[t] = flat_evals[t].add(
+                    ram_at[t].mul(eq_ram_at[t]).add(gamma_sqr.mul(rd_at[t].mul(eq_rd_at[t]))),
+                );
+            }
+        }
+
+        // --- Split round poly ---
+        var split_evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
+
+        if (!in_phase2) {
+            const half = p_len / 2;
+            for (0..half) |j| {
+                for (0..3) |t| {
+                    const tf = F.fromU64(@intCast(t));
+                    var term = F.zero();
+                    for (0..4) |k| {
+                        const p0 = P[k][2 * j];
+                        const p1 = P[k][2 * j + 1];
+                        const q0 = Q[k][2 * j];
+                        const q1 = Q[k][2 * j + 1];
+                        const p_t = p0.add(tf.mul(p1.sub(p0)));
+                        const q_t = q0.add(tf.mul(q1.sub(q0)));
+                        term = term.add(weights[k].mul(p_t.mul(q_t)));
+                    }
+                    split_evals[t] = split_evals[t].add(term);
+                }
+            }
+        } else {
+            const half = p2_len / 2;
+            for (0..half) |j| {
+                for (0..3) |t| {
+                    const tf = F.fromU64(@intCast(t));
+                    const ram_t = p2_ram_inc.?[2 * j].add(tf.mul(p2_ram_inc.?[2 * j + 1].sub(p2_ram_inc.?[2 * j])));
+                    const eq_r_t = p2_eq_ram.?[2 * j].add(tf.mul(p2_eq_ram.?[2 * j + 1].sub(p2_eq_ram.?[2 * j])));
+                    const rd_t = p2_rd_inc.?[2 * j].add(tf.mul(p2_rd_inc.?[2 * j + 1].sub(p2_rd_inc.?[2 * j])));
+                    const eq_d_t = p2_eq_rd.?[2 * j].add(tf.mul(p2_eq_rd.?[2 * j + 1].sub(p2_eq_rd.?[2 * j])));
+                    split_evals[t] = split_evals[t].add(
+                        ram_t.mul(eq_r_t).add(gamma_sqr.mul(rd_t.mul(eq_d_t))),
+                    );
+                }
+            }
+        }
+
+        for (0..3) |t| {
+            try testing.expect(flat_evals[t].eql(split_evals[t]));
+        }
+
+        // --- Bind all arrays ---
+        // Flat: bind 4 eq arrays + 2 inc arrays
+        for (0..flat_half) |j| {
+            for (0..4) |k| {
+                eq_full[k][j] = eq_full[k][2 * j].add(r.mul(eq_full[k][2 * j + 1].sub(eq_full[k][2 * j])));
+            }
+            flat_ram_inc[j] = flat_ram_inc[2 * j].add(r.mul(flat_ram_inc[2 * j + 1].sub(flat_ram_inc[2 * j])));
+            flat_rd_inc[j] = flat_rd_inc[2 * j].add(r.mul(flat_rd_inc[2 * j + 1].sub(flat_rd_inc[2 * j])));
+        }
+        flat_len = flat_half;
+
+        if (!in_phase2) {
+            if (p_len == 2) {
+                // Transition to Phase 2
+                const eq_prefix = try computeEqTable(F, allocator, challenges[0 .. round + 1], prefix_n_vars);
+                defer allocator.free(eq_prefix);
+
+                var eq_prefix_scalars: [4]F = undefined;
+                for (0..4) |i| {
+                    var result = F.one();
+                    for (0..prefix_n_vars) |k| {
+                        const a = challenges[k];
+                        const b = points_le[i][k];
+                        const prod = a.mul(b);
+                        result = result.mul(prod.add(prod).add(F.one()).sub(a.add(b)));
+                    }
+                    eq_prefix_scalars[i] = result;
+                }
+
+                p2_eq_ram = try allocator.alloc(F, suffix_len);
+                p2_eq_rd = try allocator.alloc(F, suffix_len);
+                for (0..suffix_len) |x_hi| {
+                    p2_eq_ram.?[x_hi] = eq_prefix_scalars[0].mul(eq_hi[0][x_hi]).add(
+                        gamma.mul(eq_prefix_scalars[1].mul(eq_hi[1][x_hi])),
+                    );
+                    p2_eq_rd.?[x_hi] = eq_prefix_scalars[2].mul(eq_hi[2][x_hi]).add(
+                        gamma.mul(eq_prefix_scalars[3].mul(eq_hi[3][x_hi])),
+                    );
+                }
+
+                p2_ram_inc = try allocator.alloc(F, suffix_len);
+                p2_rd_inc = try allocator.alloc(F, suffix_len);
+                for (0..suffix_len) |x_hi| {
+                    var acc_ram = F.zero();
+                    var acc_rd = F.zero();
+                    for (0..prefix_len) |x_lo| {
+                        const x = x_lo + (x_hi << prefix_n_vars);
+                        acc_ram = acc_ram.add(eq_prefix[x_lo].mul(ram_inc_vals[x]));
+                        acc_rd = acc_rd.add(eq_prefix[x_lo].mul(rd_inc_vals[x]));
+                    }
+                    p2_ram_inc.?[x_hi] = acc_ram;
+                    p2_rd_inc.?[x_hi] = acc_rd;
+                }
+                p2_len = suffix_len;
+                in_phase2 = true;
+            } else {
+                const half = p_len / 2;
+                for (0..4) |k| {
+                    for (0..half) |j| {
+                        P[k][j] = P[k][2 * j].add(r.mul(P[k][2 * j + 1].sub(P[k][2 * j])));
+                        Q[k][j] = Q[k][2 * j].add(r.mul(Q[k][2 * j + 1].sub(Q[k][2 * j])));
+                    }
+                }
+                p_len = half;
+            }
+        } else {
+            const half = p2_len / 2;
+            for (0..half) |j| {
+                p2_ram_inc.?[j] = p2_ram_inc.?[2 * j].add(r.mul(p2_ram_inc.?[2 * j + 1].sub(p2_ram_inc.?[2 * j])));
+                p2_rd_inc.?[j] = p2_rd_inc.?[2 * j].add(r.mul(p2_rd_inc.?[2 * j + 1].sub(p2_rd_inc.?[2 * j])));
+                p2_eq_ram.?[j] = p2_eq_ram.?[2 * j].add(r.mul(p2_eq_ram.?[2 * j + 1].sub(p2_eq_ram.?[2 * j])));
+                p2_eq_rd.?[j] = p2_eq_rd.?[2 * j].add(r.mul(p2_eq_rd.?[2 * j + 1].sub(p2_eq_rd.?[2 * j])));
+            }
+            p2_len = half;
+        }
+    }
+
+    // Final scalar: split must match flat
+    const flat_final = flat_ram_inc[0].mul(
+        eq_full[0][0].add(gamma.mul(eq_full[1][0])),
+    ).add(gamma_sqr.mul(flat_rd_inc[0].mul(
+        eq_full[2][0].add(gamma.mul(eq_full[3][0])),
+    )));
+    const split_final = p2_ram_inc.?[0].mul(p2_eq_ram.?[0]).add(
+        gamma_sqr.mul(p2_rd_inc.?[0].mul(p2_eq_rd.?[0])),
+    );
+    try testing.expect(flat_final.eql(split_final));
+}
+
+test "HammingBooleanity full multi-round: split-eq matches flat across phase transition" {
+    // Full multi-round sumcheck simulation for HammingBooleanity:
+    // Phase 1 (prefix rounds with factored eq_lo·eq_hi) → transition → Phase 2 (merged eq).
+    // Verifies every round polynomial matches the flat (unsplit) computation.
+    const allocator = testing.allocator;
+    const F = BN254Scalar;
+
+    const n_vars = 6;
+    const prefix_n_vars = 3;
+    const suffix_n_vars = 3;
+    const T: usize = 1 << n_vars;
+    const prefix_len: usize = 1 << prefix_n_vars;
+    const suffix_len: usize = 1 << suffix_n_vars;
+
+    // r_cycle in LE order
+    var r_le = [6]F{
+        F.fromU64(5), F.fromU64(13), F.fromU64(3),
+        F.fromU64(19), F.fromU64(7), F.fromU64(11),
+    };
+
+    // H values: simulate Hamming weight (binary values for booleanity test)
+    var H_flat: [T]F = undefined;
+    var H_split: [T]F = undefined;
+    for (0..T) |x| {
+        // Mix of 0 and 1 with some non-boolean values to make test interesting
+        const v: u64 = if (x % 5 == 0) 0 else if (x % 3 == 0) 1 else @intCast(x % 4);
+        H_flat[x] = F.fromU64(v);
+        H_split[x] = F.fromU64(v);
+    }
+
+    // Flat eq table
+    var eq_flat = try computeEqTable(F, allocator, &r_le, n_vars);
+    defer allocator.free(eq_flat);
+
+    // Split eq tables
+    var r_lo: [3]F = undefined;
+    for (0..prefix_n_vars) |k| r_lo[k] = r_le[k];
+    var eq_lo = try computeEqTable(F, allocator, &r_lo, prefix_n_vars);
+    defer allocator.free(eq_lo);
+
+    var r_hi: [3]F = undefined;
+    for (0..suffix_n_vars) |k| r_hi[k] = r_le[prefix_n_vars + k];
+    const eq_hi = try computeEqTable(F, allocator, &r_hi, suffix_n_vars);
+    defer allocator.free(eq_hi);
+
+    var flat_len: usize = T;
+    var split_h_len: usize = T;
+    var lo_len: usize = prefix_len;
+    var in_phase2 = false;
+
+    // Phase 2 state
+    var eq_merged: ?[]F = null;
+    defer if (eq_merged) |a| allocator.free(a);
+    var merged_len: usize = 0;
+
+    for (0..n_vars) |round| {
+        const r = F.fromU64(@intCast(round * 11 + 2));
+        const two = F.fromU64(2);
+        const three = F.fromU64(3);
+
+        // --- Flat round poly: [s(0), s(1), s(2), s(3)] ---
+        const flat_half = flat_len / 2;
+        var flat_evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
+        for (0..flat_half) |j| {
+            const h0 = H_flat[2 * j];
+            const h1 = H_flat[2 * j + 1];
+            const h_delta = h1.sub(h0);
+            const e0 = eq_flat[2 * j];
+            const e1 = eq_flat[2 * j + 1];
+            const e_delta = e1.sub(e0);
+
+            flat_evals[0] = flat_evals[0].add(e0.mul(h0.mul(h0).sub(h0)));
+            flat_evals[1] = flat_evals[1].add(e1.mul(h1.mul(h1).sub(h1)));
+
+            const h_at_2 = h0.add(two.mul(h_delta));
+            const e_at_2 = e0.add(two.mul(e_delta));
+            flat_evals[2] = flat_evals[2].add(e_at_2.mul(h_at_2.mul(h_at_2).sub(h_at_2)));
+
+            const h_at_3 = h0.add(three.mul(h_delta));
+            const e_at_3 = e0.add(three.mul(e_delta));
+            flat_evals[3] = flat_evals[3].add(e_at_3.mul(h_at_3.mul(h_at_3).sub(h_at_3)));
+        }
+
+        // --- Split round poly ---
+        var split_evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
+
+        if (!in_phase2) {
+            // Phase 1: double loop with factored eq = eq_lo(x_lo) * eq_hi(x_hi)
+            const half_lo = lo_len / 2;
+            for (0..suffix_len) |j_outer| {
+                const eq_hi_val = eq_hi[j_outer];
+                for (0..half_lo) |j_inner| {
+                    const j = j_inner + j_outer * half_lo;
+                    const h0 = H_split[2 * j];
+                    const h1 = H_split[2 * j + 1];
+                    const h_delta = h1.sub(h0);
+
+                    const eq_lo_0 = eq_lo[2 * j_inner];
+                    const eq_lo_1 = eq_lo[2 * j_inner + 1];
+                    const e0 = eq_lo_0.mul(eq_hi_val);
+                    const e1 = eq_lo_1.mul(eq_hi_val);
+                    const e_delta = e1.sub(e0);
+
+                    split_evals[0] = split_evals[0].add(e0.mul(h0.mul(h0).sub(h0)));
+                    split_evals[1] = split_evals[1].add(e1.mul(h1.mul(h1).sub(h1)));
+
+                    const h_at_2 = h0.add(two.mul(h_delta));
+                    const e_at_2 = e0.add(two.mul(e_delta));
+                    split_evals[2] = split_evals[2].add(e_at_2.mul(h_at_2.mul(h_at_2).sub(h_at_2)));
+
+                    const h_at_3 = h0.add(three.mul(h_delta));
+                    const e_at_3 = e0.add(three.mul(e_delta));
+                    split_evals[3] = split_evals[3].add(e_at_3.mul(h_at_3.mul(h_at_3).sub(h_at_3)));
+                }
+            }
+        } else {
+            // Phase 2: flat loop with merged eq
+            const half = split_h_len / 2;
+            for (0..half) |j| {
+                const h0 = H_split[2 * j];
+                const h1 = H_split[2 * j + 1];
+                const h_delta = h1.sub(h0);
+                const e0 = eq_merged.?[2 * j];
+                const e1 = eq_merged.?[2 * j + 1];
+                const e_delta = e1.sub(e0);
+
+                split_evals[0] = split_evals[0].add(e0.mul(h0.mul(h0).sub(h0)));
+                split_evals[1] = split_evals[1].add(e1.mul(h1.mul(h1).sub(h1)));
+
+                const h_at_2 = h0.add(two.mul(h_delta));
+                const e_at_2 = e0.add(two.mul(e_delta));
+                split_evals[2] = split_evals[2].add(e_at_2.mul(h_at_2.mul(h_at_2).sub(h_at_2)));
+
+                const h_at_3 = h0.add(three.mul(h_delta));
+                const e_at_3 = e0.add(three.mul(e_delta));
+                split_evals[3] = split_evals[3].add(e_at_3.mul(h_at_3.mul(h_at_3).sub(h_at_3)));
+            }
+        }
+
+        // All 4 evaluation points must match
+        for (0..4) |k| {
+            try testing.expect(flat_evals[k].eql(split_evals[k]));
+        }
+
+        // --- Bind ---
+        // Flat: bind eq and H
+        for (0..flat_half) |j| {
+            eq_flat[j] = eq_flat[2 * j].add(r.mul(eq_flat[2 * j + 1].sub(eq_flat[2 * j])));
+            H_flat[j] = H_flat[2 * j].add(r.mul(H_flat[2 * j + 1].sub(H_flat[2 * j])));
+        }
+        flat_len = flat_half;
+
+        // Split: bind H always, plus eq_lo or merged eq
+        const split_half = split_h_len / 2;
+        for (0..split_half) |j| {
+            H_split[j] = H_split[2 * j].add(r.mul(H_split[2 * j + 1].sub(H_split[2 * j])));
+        }
+        split_h_len = split_half;
+
+        if (!in_phase2) {
+            const half_lo = lo_len / 2;
+            for (0..half_lo) |j| {
+                eq_lo[j] = eq_lo[2 * j].add(r.mul(eq_lo[2 * j + 1].sub(eq_lo[2 * j])));
+            }
+            lo_len = half_lo;
+
+            // Transition when eq_lo reaches length 1
+            if (half_lo == 1) {
+                const eq_lo_scalar = eq_lo[0];
+                // Merge: eq_merged[j_hi] = eq_lo_scalar * eq_hi[j_hi]
+                eq_merged = try allocator.alloc(F, suffix_len);
+                for (0..suffix_len) |j| {
+                    eq_merged.?[j] = eq_lo_scalar.mul(eq_hi[j]);
+                }
+                merged_len = suffix_len;
+                in_phase2 = true;
+            }
+        } else {
+            // Phase 2: bind merged eq
+            const half = merged_len / 2;
+            for (0..half) |j| {
+                eq_merged.?[j] = eq_merged.?[2 * j].add(r.mul(eq_merged.?[2 * j + 1].sub(eq_merged.?[2 * j])));
+            }
+            merged_len = half;
+        }
+    }
+
+    // Final scalars must match
+    try testing.expect(H_flat[0].eql(H_split[0]));
+    try testing.expect(eq_flat[0].eql(eq_merged.?[0]));
 }

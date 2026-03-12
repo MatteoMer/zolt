@@ -2313,6 +2313,574 @@ pub fn pairingCheckFp(p1: G1PointFp, q1: G2Point, p2: G1PointFp, q2: G2Point) bo
 }
 
 // ============================================================================
+// Batched Miller Loop (shared squaring across pairs)
+// ============================================================================
+
+/// Maximum pairs per sub-batch for unprepared Miller loop.
+/// Keeps per-pair G2HomProjective accumulators (~320 bytes/pair) in L1 cache.
+const MAX_UNPREPARED_BATCH: usize = 8;
+
+/// Maximum pairs per sub-batch for prepared Miller loop.
+/// Only reads EllCoeff per step (~48 bytes/pair), so larger batches fit L1.
+const MAX_PREPARED_BATCH: usize = 16;
+
+/// Batched Miller loop using precomputed G2 coefficients.
+/// Shares a single Fp12.square() per ATE iteration across all pairs,
+/// saving (n-1) × 64 Fp12 squarings compared to n independent Miller loops.
+pub fn batchedMillerLoopPrepared(
+    g1_points: []const G1PointFp,
+    g2_preps: []const G2Prepared,
+) Fp12 {
+    const n = g1_points.len;
+    if (n == 0) return Fp12.one();
+    if (n == 1) return millerLoopPrepared(g1_points[0], &g2_preps[0]);
+
+    // Sub-batch to keep per-pair read data in L1 cache
+    if (n > MAX_PREPARED_BATCH) {
+        var acc = Fp12.one();
+        var offset: usize = 0;
+        while (offset < n) {
+            const batch_end = @min(offset + MAX_PREPARED_BATCH, n);
+            const ml = batchedMillerLoopPrepared(g1_points[offset..batch_end], g2_preps[offset..batch_end]);
+            acc = acc.mul(ml);
+            offset = batch_end;
+        }
+        return acc;
+    }
+
+    var f = Fp12.one();
+    var coeff_idx: usize = 0;
+
+    var idx: usize = ATE_LOOP_COUNT.len - 1;
+    while (idx >= 1) : (idx -= 1) {
+        // ONE shared square per iteration
+        if (idx != ATE_LOOP_COUNT.len - 1) {
+            f = f.square();
+        }
+
+        // Doubling coefficients for all pairs
+        for (0..n) |k| {
+            if (g1_points[k].infinity or g2_preps[k].infinity) continue;
+            const coeffs = g2_preps[k].coeffs[coeff_idx];
+            const c0_eval = fp2ScalarMul(coeffs.c0, g1_points[k].y);
+            const c1_eval = fp2ScalarMul(coeffs.c1, g1_points[k].x);
+            f = fp12MulBy034(f, c0_eval, c1_eval, coeffs.c2);
+        }
+        coeff_idx += 1;
+
+        // Addition coefficients if bit is non-zero
+        const bit = ATE_LOOP_COUNT[idx - 1];
+        if (bit == 1 or bit == -1) {
+            for (0..n) |k| {
+                if (g1_points[k].infinity or g2_preps[k].infinity) continue;
+                const coeffs = g2_preps[k].coeffs[coeff_idx];
+                const c0_eval = fp2ScalarMul(coeffs.c0, g1_points[k].y);
+                const c1_eval = fp2ScalarMul(coeffs.c1, g1_points[k].x);
+                f = fp12MulBy034(f, c0_eval, c1_eval, coeffs.c2);
+            }
+            coeff_idx += 1;
+        }
+    }
+
+    if (X_IS_NEGATIVE) {
+        f = f.conjugate();
+    }
+
+    // Final Frobenius steps
+    for (0..2) |_| {
+        for (0..n) |k| {
+            if (g1_points[k].infinity or g2_preps[k].infinity) continue;
+            const coeffs = g2_preps[k].coeffs[coeff_idx];
+            const c0_eval = fp2ScalarMul(coeffs.c0, g1_points[k].y);
+            const c1_eval = fp2ScalarMul(coeffs.c1, g1_points[k].x);
+            f = fp12MulBy034(f, c0_eval, c1_eval, coeffs.c2);
+        }
+        coeff_idx += 1;
+    }
+
+    std.debug.assert(coeff_idx == PREPARED_COEFFS_LEN);
+    return f;
+}
+
+/// Batched Miller loop without precomputed coefficients.
+/// Maintains per-pair G2HomProjective accumulators while sharing Fp12.square().
+/// For n > MAX_UNPREPARED_BATCH, processes in sub-batches and multiplies results.
+pub fn batchedMillerLoopUnprepared(
+    g1_points: []const G1PointFp,
+    g2_points: []const G2Point,
+) Fp12 {
+    const n = g1_points.len;
+    if (n == 0) return Fp12.one();
+    if (n == 1) return millerLoopArkworks(g1_points[0], g2_points[0]);
+
+    // Sub-batch to keep per-pair state in L1 cache
+    if (n > MAX_UNPREPARED_BATCH) {
+        var acc = Fp12.one();
+        var offset: usize = 0;
+        while (offset < n) {
+            const batch_end = @min(offset + MAX_UNPREPARED_BATCH, n);
+            const ml = batchedMillerLoopUnprepared(g1_points[offset..batch_end], g2_points[offset..batch_end]);
+            acc = acc.mul(ml);
+            offset = batch_end;
+        }
+        return acc;
+    }
+
+    const two_inv = Fp.fromU64(2).inverse() orelse return Fp12.one();
+
+    // Per-pair projective accumulators and negated Q (n <= MAX_UNPREPARED_BATCH, stack is fine)
+    var rs: [MAX_UNPREPARED_BATCH]G2HomProjective = undefined;
+    var nqs: [MAX_UNPREPARED_BATCH]G2Point = undefined;
+
+    for (0..n) |k| {
+        rs[k] = G2HomProjective.fromAffine(g2_points[k]);
+        nqs[k] = g2_points[k].neg();
+    }
+
+    var f = Fp12.one();
+
+    var idx: usize = ATE_LOOP_COUNT.len - 1;
+    while (idx >= 1) : (idx -= 1) {
+        if (idx != ATE_LOOP_COUNT.len - 1) {
+            f = f.square();
+        }
+
+        // Doubling step for all pairs
+        for (0..n) |k| {
+            if (g1_points[k].infinity or g2_points[k].infinity) continue;
+            const coeffs_dbl = rs[k].double_in_place(two_inv);
+            const c0_eval = fp2ScalarMul(coeffs_dbl.c0, g1_points[k].y);
+            const c1_eval = fp2ScalarMul(coeffs_dbl.c1, g1_points[k].x);
+            f = fp12MulBy034(f, c0_eval, c1_eval, coeffs_dbl.c2);
+        }
+
+        const bit = ATE_LOOP_COUNT[idx - 1];
+        if (bit == 1) {
+            for (0..n) |k| {
+                if (g1_points[k].infinity or g2_points[k].infinity) continue;
+                const coeffs_add = rs[k].add_in_place(g2_points[k]);
+                const c0_add = fp2ScalarMul(coeffs_add.c0, g1_points[k].y);
+                const c1_add = fp2ScalarMul(coeffs_add.c1, g1_points[k].x);
+                f = fp12MulBy034(f, c0_add, c1_add, coeffs_add.c2);
+            }
+        } else if (bit == -1) {
+            for (0..n) |k| {
+                if (g1_points[k].infinity or g2_points[k].infinity) continue;
+                const coeffs_add = rs[k].add_in_place(nqs[k]);
+                const c0_add = fp2ScalarMul(coeffs_add.c0, g1_points[k].y);
+                const c1_add = fp2ScalarMul(coeffs_add.c1, g1_points[k].x);
+                f = fp12MulBy034(f, c0_add, c1_add, coeffs_add.c2);
+            }
+        }
+    }
+
+    if (X_IS_NEGATIVE) {
+        f = f.conjugate();
+    }
+
+    // Final Frobenius steps
+    for (0..n) |k| {
+        if (g1_points[k].infinity or g2_points[k].infinity) continue;
+        const q1 = mulByChar(g2_points[k]);
+        const coeffs_q1 = rs[k].add_in_place(q1);
+        const c0_q1 = fp2ScalarMul(coeffs_q1.c0, g1_points[k].y);
+        const c1_q1 = fp2ScalarMul(coeffs_q1.c1, g1_points[k].x);
+        f = fp12MulBy034(f, c0_q1, c1_q1, coeffs_q1.c2);
+    }
+
+    for (0..n) |k| {
+        if (g1_points[k].infinity or g2_points[k].infinity) continue;
+        var q2 = mulByChar(mulByChar(g2_points[k]));
+        q2.y = q2.y.neg();
+        const coeffs_q2 = rs[k].add_in_place(q2);
+        const c0_q2 = fp2ScalarMul(coeffs_q2.c0, g1_points[k].y);
+        const c1_q2 = fp2ScalarMul(coeffs_q2.c1, g1_points[k].x);
+        f = fp12MulBy034(f, c0_q2, c1_q2, coeffs_q2.c2);
+    }
+
+    return f;
+}
+
+// ============================================================================
+// Phase 2: Sparse-Sparse Line Combination
+// ============================================================================
+
+/// Multiply two 034-sparse Fp12 elements.
+/// Each has form (c0, 0, 0) + (c3, c4, 0)·w in the Fp6[w]/(w²-v) tower.
+/// Cost: 6 Fp2.mul (vs 2×13 = 26 for two sequential fp12MulBy034).
+fn fp12Mul034By034(a0: Fp2, a3: Fp2, a4: Fp2, b0: Fp2, b3: Fp2, b4: Fp2) Fp12 {
+    const x0 = a0.mul(b0);
+    const x3 = a3.mul(b3);
+    const x4 = a4.mul(b4);
+    const x03 = a0.add(a3).mul(b0.add(b3)).sub(x0).sub(x3);
+    const x04 = a0.add(a4).mul(b0.add(b4)).sub(x0).sub(x4);
+    const x34 = a3.add(a4).mul(b3.add(b4)).sub(x3).sub(x4);
+
+    return Fp12{
+        .c0 = Fp6{
+            .c0 = x0.add(Fp6.mulByXi(x4)),
+            .c1 = x3,
+            .c2 = x34,
+        },
+        .c1 = Fp6{
+            .c0 = x03,
+            .c1 = x04,
+            .c2 = Fp2.zero(),
+        },
+    };
+}
+
+/// Multiply full Fp12 by 01234-sparse element (s.c1.c2 == 0).
+/// Cost: 17 Fp2.mul (vs 18 for full Fp12.mul).
+fn fp12MulBy01234(f: Fp12, s: Fp12) Fp12 {
+    // p = f.c0 * s.c0 (full Fp6 mul: 6 Fp2.mul)
+    const p = f.c0.mul(s.c0);
+    // q = fp6MulBy01(f.c1, s.c1.c0, s.c1.c1) (sparse: 5 Fp2.mul)
+    const q = fp6MulBy01(f.c1, s.c1.c0, s.c1.c1);
+    // cross = (f.c0 + f.c1) * (s.c0 + s.c1) where s.c1.c2=0 makes s_sum dense
+    const s_sum = Fp6{
+        .c0 = s.c0.c0.add(s.c1.c0),
+        .c1 = s.c0.c1.add(s.c1.c1),
+        .c2 = s.c0.c2,
+    };
+    const f_sum = Fp6{
+        .c0 = f.c0.c0.add(f.c1.c0),
+        .c1 = f.c0.c1.add(f.c1.c1),
+        .c2 = f.c0.c2.add(f.c1.c2),
+    };
+    // full Fp6 mul: 6 Fp2.mul
+    const cross = f_sum.mul(s_sum);
+
+    const q_v = fp6MulByV(q);
+    return Fp12{
+        .c0 = Fp6{
+            .c0 = p.c0.add(q_v.c0),
+            .c1 = p.c1.add(q_v.c1),
+            .c2 = p.c2.add(q_v.c2),
+        },
+        .c1 = Fp6{
+            .c0 = cross.c0.sub(p.c0).sub(q.c0),
+            .c1 = cross.c1.sub(p.c1).sub(q.c1),
+            .c2 = cross.c2.sub(p.c2).sub(q.c2),
+        },
+    };
+}
+
+/// Batched Miller loop with sparse-sparse line combination (Phase 2).
+/// At non-zero ATE bits, combines the doubling and addition lines via
+/// fp12Mul034By034 + fp12MulBy01234 (23 Fp2.mul vs 26 for two fp12MulBy034).
+pub fn batchedMillerLoopPreparedSparse(
+    g1_points: []const G1PointFp,
+    g2_preps: []const G2Prepared,
+) Fp12 {
+    const n = g1_points.len;
+    if (n == 0) return Fp12.one();
+    if (n == 1) return millerLoopPrepared(g1_points[0], &g2_preps[0]);
+
+    if (n > MAX_PREPARED_BATCH) {
+        var acc = Fp12.one();
+        var offset: usize = 0;
+        while (offset < n) {
+            const batch_end = @min(offset + MAX_PREPARED_BATCH, n);
+            const ml = batchedMillerLoopPreparedSparse(g1_points[offset..batch_end], g2_preps[offset..batch_end]);
+            acc = acc.mul(ml);
+            offset = batch_end;
+        }
+        return acc;
+    }
+
+    var f = Fp12.one();
+    var coeff_idx: usize = 0;
+
+    var idx: usize = ATE_LOOP_COUNT.len - 1;
+    while (idx >= 1) : (idx -= 1) {
+        if (idx != ATE_LOOP_COUNT.len - 1) {
+            f = f.square();
+        }
+
+        const bit = ATE_LOOP_COUNT[idx - 1];
+
+        if (bit == 1 or bit == -1) {
+            // Non-zero bit: combine doubling + addition lines via sparse-sparse
+            for (0..n) |k| {
+                if (g1_points[k].infinity or g2_preps[k].infinity) continue;
+                // Doubling line coefficients
+                const dbl = g2_preps[k].coeffs[coeff_idx];
+                const dbl_c0 = fp2ScalarMul(dbl.c0, g1_points[k].y);
+                const dbl_c1 = fp2ScalarMul(dbl.c1, g1_points[k].x);
+                // Addition line coefficients
+                const add = g2_preps[k].coeffs[coeff_idx + 1];
+                const add_c0 = fp2ScalarMul(add.c0, g1_points[k].y);
+                const add_c1 = fp2ScalarMul(add.c1, g1_points[k].x);
+                // Sparse × sparse combination (6 Fp2.mul)
+                const combined = fp12Mul034By034(dbl_c0, dbl_c1, dbl.c2, add_c0, add_c1, add.c2);
+                // 01234-sparse × full (17 Fp2.mul)
+                f = fp12MulBy01234(f, combined);
+            }
+            coeff_idx += 2;
+        } else {
+            // Zero bit: only doubling line
+            for (0..n) |k| {
+                if (g1_points[k].infinity or g2_preps[k].infinity) continue;
+                const coeffs = g2_preps[k].coeffs[coeff_idx];
+                const c0_eval = fp2ScalarMul(coeffs.c0, g1_points[k].y);
+                const c1_eval = fp2ScalarMul(coeffs.c1, g1_points[k].x);
+                f = fp12MulBy034(f, c0_eval, c1_eval, coeffs.c2);
+            }
+            coeff_idx += 1;
+        }
+    }
+
+    if (X_IS_NEGATIVE) {
+        f = f.conjugate();
+    }
+
+    // Final Frobenius steps — two addition-only lines, combine with sparse-sparse
+    for (0..n) |k| {
+        if (g1_points[k].infinity or g2_preps[k].infinity) continue;
+        const frob1 = g2_preps[k].coeffs[coeff_idx];
+        const f1_c0 = fp2ScalarMul(frob1.c0, g1_points[k].y);
+        const f1_c1 = fp2ScalarMul(frob1.c1, g1_points[k].x);
+        const frob2 = g2_preps[k].coeffs[coeff_idx + 1];
+        const f2_c0 = fp2ScalarMul(frob2.c0, g1_points[k].y);
+        const f2_c1 = fp2ScalarMul(frob2.c1, g1_points[k].x);
+        const combined = fp12Mul034By034(f1_c0, f1_c1, frob1.c2, f2_c0, f2_c1, frob2.c2);
+        f = fp12MulBy01234(f, combined);
+    }
+    coeff_idx += 2;
+
+    std.debug.assert(coeff_idx == PREPARED_COEFFS_LEN);
+    return f;
+}
+
+// ============================================================================
+// Phase 3: Affine Line Precomputation with Batch Inversion
+// ============================================================================
+
+/// Batch inversion of Fp2 elements using Montgomery's trick.
+/// Inverts elements in-place. Zero elements are skipped.
+/// `scratch` must have the same length as `elements`.
+/// Cost: 2(n-1) Fp2.mul + 1 Fp2.inverse (vs n individual Fp2.inverse).
+fn batchInverseFp2(elements: []Fp2, scratch: []Fp2) void {
+    const n_elems = elements.len;
+    if (n_elems == 0) return;
+
+    // Forward pass: prefix products
+    var acc = Fp2.one();
+    for (0..n_elems) |i| {
+        scratch[i] = acc;
+        if (!elements[i].isZero()) {
+            acc = acc.mul(elements[i]);
+        }
+    }
+
+    // Single inversion
+    var inv = acc.inverse() orelse unreachable;
+
+    // Backward pass: extract individual inverses
+    var i: usize = n_elems;
+    while (i > 0) {
+        i -= 1;
+        if (elements[i].isZero()) continue;
+        const old = elements[i];
+        elements[i] = scratch[i].mul(inv);
+        inv = inv.mul(old);
+    }
+}
+
+/// Precomputed G2 point with affine line coefficients.
+/// Line evaluation at P gives (1, 0, 0, c3, c4, 0) — c0=1 implicit.
+/// This enables fp12MulBy34 (10 Fp2.mul) instead of fp12MulBy034 (13 Fp2.mul).
+pub const G2PreparedAffine = struct {
+    coeffs: [PREPARED_COEFFS_LEN]LineCoeffs,
+    infinity: bool,
+
+    /// Convert from projective G2Prepared to affine line coefficients.
+    /// Uses batch Fp2 inversion to convert all 87 coefficients at once.
+    pub fn fromG2Prepared(prep: *const G2Prepared) G2PreparedAffine {
+        if (prep.infinity) {
+            var result: G2PreparedAffine = undefined;
+            result.infinity = true;
+            for (0..PREPARED_COEFFS_LEN) |i| {
+                result.coeffs[i] = .{ .r0 = Fp2.zero(), .r1 = Fp2.zero() };
+            }
+            return result;
+        }
+
+        // Extract c0 values and batch-invert them
+        var c0_values: [PREPARED_COEFFS_LEN]Fp2 = undefined;
+        var c0_scratch: [PREPARED_COEFFS_LEN]Fp2 = undefined;
+        for (0..PREPARED_COEFFS_LEN) |i| {
+            c0_values[i] = prep.coeffs[i].c0;
+        }
+        batchInverseFp2(&c0_values, &c0_scratch);
+
+        // Convert: r0 = -c1 * inv_c0, r1 = c2 * inv_c0
+        var result: G2PreparedAffine = undefined;
+        result.infinity = false;
+        for (0..PREPARED_COEFFS_LEN) |i| {
+            const inv_c0 = c0_values[i];
+            result.coeffs[i] = .{
+                .r0 = prep.coeffs[i].c1.neg().mul(inv_c0),
+                .r1 = prep.coeffs[i].c2.mul(inv_c0),
+            };
+        }
+        return result;
+    }
+
+    /// Create directly from a G2 point.
+    pub fn fromG2Point(q: G2Point) G2PreparedAffine {
+        const prep = G2Prepared.fromG2Point(q);
+        return fromG2Prepared(&prep);
+    }
+};
+
+/// Multiply Fp12 by sparse element (1, 0, 0, c3, c4, 0) where c0=1 is implicit.
+/// Cost: 10 Fp2.mul (vs 13 for fp12MulBy034 with explicit c0).
+fn fp12MulBy34(f: Fp12, c3: Fp2, c4: Fp2) Fp12 {
+    // a = f.c0 * 1 = f.c0 (FREE — saves 3 Fp2.mul)
+    const a = f.c0;
+
+    // b = fp6MulBy01(f.c1, c3, c4) — 5 Fp2.mul
+    const b = fp6MulBy01(f.c1, c3, c4);
+
+    // cross = fp6MulBy01(f.c0 + f.c1, 1 + c3, c4) — 5 Fp2.mul
+    const f_sum = Fp6{
+        .c0 = f.c0.c0.add(f.c1.c0),
+        .c1 = f.c0.c1.add(f.c1.c1),
+        .c2 = f.c0.c2.add(f.c1.c2),
+    };
+    const e = fp6MulBy01(f_sum, Fp2.one().add(c3), c4);
+
+    const b_v = fp6MulByV(b);
+    return Fp12{
+        .c0 = Fp6{
+            .c0 = a.c0.add(b_v.c0),
+            .c1 = a.c1.add(b_v.c1),
+            .c2 = a.c2.add(b_v.c2),
+        },
+        .c1 = Fp6{
+            .c0 = e.c0.sub(a.c0).sub(b.c0),
+            .c1 = e.c1.sub(a.c1).sub(b.c1),
+            .c2 = e.c2.sub(a.c2).sub(b.c2),
+        },
+    };
+}
+
+/// Multiply two 34-sparse Fp12 elements (c0=1 implicit for both).
+/// Each has form 1 + c3·w + c4·vw.
+/// Cost: 3 Fp2.mul (vs 6 for fp12Mul034By034 with explicit c0).
+fn fp12Mul34By34(a3: Fp2, a4: Fp2, b3: Fp2, b4: Fp2) Fp12 {
+    // x0 = 1 (free)
+    const x3 = a3.mul(b3);
+    const x4 = a4.mul(b4);
+    // x03 = (1+a3)(1+b3) - 1 - x3 = a3 + b3 (FREE)
+    const x03 = a3.add(b3);
+    // x04 = (1+a4)(1+b4) - 1 - x4 = a4 + b4 (FREE)
+    const x04 = a4.add(b4);
+    const x34 = a3.add(a4).mul(b3.add(b4)).sub(x3).sub(x4);
+
+    return Fp12{
+        .c0 = Fp6{
+            .c0 = Fp2.one().add(Fp6.mulByXi(x4)),
+            .c1 = x3,
+            .c2 = x34,
+        },
+        .c1 = Fp6{
+            .c0 = x03,
+            .c1 = x04,
+            .c2 = Fp2.zero(),
+        },
+    };
+}
+
+/// Batched Miller loop with affine line precomputation (Phase 3).
+/// Uses fp12MulBy34 (10 Fp2.mul) for zero-bit steps and
+/// fp12Mul34By34 + fp12MulBy01234 (20 Fp2.mul) for non-zero-bit steps.
+pub fn batchedMillerLoopAffine(
+    g1_points: []const G1PointFp,
+    g2_lines: []const G2PreparedAffine,
+) Fp12 {
+    const n = g1_points.len;
+    if (n == 0) return Fp12.one();
+
+    if (n > MAX_PREPARED_BATCH) {
+        var acc = Fp12.one();
+        var offset: usize = 0;
+        while (offset < n) {
+            const batch_end = @min(offset + MAX_PREPARED_BATCH, n);
+            const ml = batchedMillerLoopAffine(g1_points[offset..batch_end], g2_lines[offset..batch_end]);
+            acc = acc.mul(ml);
+            offset = batch_end;
+        }
+        return acc;
+    }
+
+    // Precompute x_neg_over_y and y_inv for each G1 point via batch Fp inversion
+    var y_vals: [MAX_PREPARED_BATCH]Fp = undefined;
+    var y_scratch: [MAX_PREPARED_BATCH]Fp = undefined;
+    var xnoy_vals: [MAX_PREPARED_BATCH]Fp = undefined;
+
+    for (0..n) |k| {
+        y_vals[k] = if (g1_points[k].infinity) Fp.zero() else g1_points[k].y;
+    }
+    Fp.batchInversion(y_vals[0..n], y_scratch[0..n]);
+
+    for (0..n) |k| {
+        xnoy_vals[k] = if (g1_points[k].infinity) Fp.zero() else g1_points[k].x.neg().mul(y_vals[k]);
+    }
+
+    var f = Fp12.one();
+    var coeff_idx: usize = 0;
+
+    var idx: usize = ATE_LOOP_COUNT.len - 1;
+    while (idx >= 1) : (idx -= 1) {
+        if (idx != ATE_LOOP_COUNT.len - 1) {
+            f = f.square();
+        }
+
+        const bit = ATE_LOOP_COUNT[idx - 1];
+
+        if (bit == 1 or bit == -1) {
+            // Non-zero bit: combine doubling + addition via 34×34
+            for (0..n) |k| {
+                if (g1_points[k].infinity or g2_lines[k].infinity) continue;
+                const dbl_line = evaluateLineSparse(g2_lines[k].coeffs[coeff_idx], xnoy_vals[k], y_vals[k]);
+                const add_line = evaluateLineSparse(g2_lines[k].coeffs[coeff_idx + 1], xnoy_vals[k], y_vals[k]);
+                const combined = fp12Mul34By34(dbl_line.c3, dbl_line.c4, add_line.c3, add_line.c4);
+                f = fp12MulBy01234(f, combined);
+            }
+            coeff_idx += 2;
+        } else {
+            // Zero bit: only doubling, use fp12MulBy34
+            for (0..n) |k| {
+                if (g1_points[k].infinity or g2_lines[k].infinity) continue;
+                const line = evaluateLineSparse(g2_lines[k].coeffs[coeff_idx], xnoy_vals[k], y_vals[k]);
+                f = fp12MulBy34(f, line.c3, line.c4);
+            }
+            coeff_idx += 1;
+        }
+    }
+
+    if (X_IS_NEGATIVE) {
+        f = f.conjugate();
+    }
+
+    // Final Frobenius steps — combine both lines
+    for (0..n) |k| {
+        if (g1_points[k].infinity or g2_lines[k].infinity) continue;
+        const f1_line = evaluateLineSparse(g2_lines[k].coeffs[coeff_idx], xnoy_vals[k], y_vals[k]);
+        const f2_line = evaluateLineSparse(g2_lines[k].coeffs[coeff_idx + 1], xnoy_vals[k], y_vals[k]);
+        const combined = fp12Mul34By34(f1_line.c3, f1_line.c4, f2_line.c3, f2_line.c4);
+        f = fp12MulBy01234(f, combined);
+    }
+    coeff_idx += 2;
+
+    std.debug.assert(coeff_idx == PREPARED_COEFFS_LEN);
+    return f;
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -2747,4 +3315,165 @@ test "GT alias equals Fp12" {
     const gt_one = GT.one();
     const fp12_one = Fp12.one();
     try std.testing.expect(gt_one.eql(fp12_one));
+}
+
+test "batchedMillerLoopPrepared matches individual" {
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+    const prep = G2Prepared.fromG2Point(g2);
+
+    // n=1: should match single millerLoopPrepared
+    const single = millerLoopPrepared(g1, &prep);
+    const batch1 = batchedMillerLoopPrepared(&.{g1}, &.{prep});
+    try std.testing.expect(single.eql(batch1));
+
+    // n=2: should match product of two individual Miller loops
+    const g1b = G1PointFp{ .x = Fp.fromU64(3), .y = Fp.fromU64(5), .infinity = false };
+    const g2b = G2Point.generator();
+    const prep_b = G2Prepared.fromG2Point(g2b);
+
+    const ml_a = millerLoopPrepared(g1, &prep);
+    const ml_b = millerLoopPrepared(g1b, &prep_b);
+    const product = ml_a.mul(ml_b);
+
+    const batch2 = batchedMillerLoopPrepared(&.{ g1, g1b }, &.{ prep, prep_b });
+    try std.testing.expect(product.eql(batch2));
+}
+
+test "batchedMillerLoopUnprepared matches prepared" {
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+    const prep = G2Prepared.fromG2Point(g2);
+
+    const prepared_result = batchedMillerLoopPrepared(&.{g1}, &.{prep});
+    const unprepared_result = batchedMillerLoopUnprepared(&.{g1}, &.{g2});
+    try std.testing.expect(prepared_result.eql(unprepared_result));
+}
+
+test "fp12Mul034By034 matches full Fp12.mul" {
+    const a0 = Fp2.init(Fp.fromU64(7), Fp.fromU64(11));
+    const a3 = Fp2.init(Fp.fromU64(13), Fp.fromU64(17));
+    const a4 = Fp2.init(Fp.fromU64(19), Fp.fromU64(23));
+    const b0 = Fp2.init(Fp.fromU64(29), Fp.fromU64(31));
+    const b3 = Fp2.init(Fp.fromU64(37), Fp.fromU64(41));
+    const b4 = Fp2.init(Fp.fromU64(43), Fp.fromU64(47));
+
+    const full_a = Fp12{
+        .c0 = Fp6{ .c0 = a0, .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+        .c1 = Fp6{ .c0 = a3, .c1 = a4, .c2 = Fp2.zero() },
+    };
+    const full_b = Fp12{
+        .c0 = Fp6{ .c0 = b0, .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+        .c1 = Fp6{ .c0 = b3, .c1 = b4, .c2 = Fp2.zero() },
+    };
+
+    const expected = full_a.mul(full_b);
+    const sparse = fp12Mul034By034(a0, a3, a4, b0, b3, b4);
+    try std.testing.expect(expected.eql(sparse));
+}
+
+test "fp12MulBy01234 matches full Fp12.mul" {
+    const f = Fp12{
+        .c0 = Fp6{
+            .c0 = Fp2.init(Fp.fromU64(2), Fp.fromU64(3)),
+            .c1 = Fp2.init(Fp.fromU64(5), Fp.fromU64(7)),
+            .c2 = Fp2.init(Fp.fromU64(11), Fp.fromU64(13)),
+        },
+        .c1 = Fp6{
+            .c0 = Fp2.init(Fp.fromU64(17), Fp.fromU64(19)),
+            .c1 = Fp2.init(Fp.fromU64(23), Fp.fromU64(29)),
+            .c2 = Fp2.init(Fp.fromU64(31), Fp.fromU64(37)),
+        },
+    };
+    const s = Fp12{
+        .c0 = Fp6{
+            .c0 = Fp2.init(Fp.fromU64(41), Fp.fromU64(43)),
+            .c1 = Fp2.init(Fp.fromU64(47), Fp.fromU64(53)),
+            .c2 = Fp2.init(Fp.fromU64(59), Fp.fromU64(61)),
+        },
+        .c1 = Fp6{
+            .c0 = Fp2.init(Fp.fromU64(67), Fp.fromU64(71)),
+            .c1 = Fp2.init(Fp.fromU64(73), Fp.fromU64(79)),
+            .c2 = Fp2.zero(),
+        },
+    };
+
+    const expected = f.mul(s);
+    const result = fp12MulBy01234(f, s);
+    try std.testing.expect(expected.eql(result));
+}
+
+test "batchedMillerLoopPreparedSparse matches non-sparse" {
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+    const prep = G2Prepared.fromG2Point(g2);
+
+    const non_sparse = batchedMillerLoopPrepared(&.{g1}, &.{prep});
+    const sparse = batchedMillerLoopPreparedSparse(&.{g1}, &.{prep});
+    try std.testing.expect(non_sparse.eql(sparse));
+}
+
+test "batchInverseFp2 correctness" {
+    var elements: [4]Fp2 = .{
+        Fp2.init(Fp.fromU64(7), Fp.fromU64(11)),
+        Fp2.init(Fp.fromU64(13), Fp.fromU64(17)),
+        Fp2.init(Fp.fromU64(23), Fp.fromU64(29)),
+        Fp2.init(Fp.fromU64(31), Fp.fromU64(37)),
+    };
+    const originals: [4]Fp2 = elements;
+    var scratch: [4]Fp2 = undefined;
+
+    batchInverseFp2(&elements, &scratch);
+
+    for (0..4) |i| {
+        const product = originals[i].mul(elements[i]);
+        try std.testing.expect(product.eql(Fp2.one()));
+    }
+}
+
+test "fp12MulBy34 matches fp12MulBy034 with c0=1" {
+    const f = Fp12{
+        .c0 = Fp6{
+            .c0 = Fp2.init(Fp.fromU64(2), Fp.fromU64(3)),
+            .c1 = Fp2.init(Fp.fromU64(5), Fp.fromU64(7)),
+            .c2 = Fp2.init(Fp.fromU64(11), Fp.fromU64(13)),
+        },
+        .c1 = Fp6{
+            .c0 = Fp2.init(Fp.fromU64(17), Fp.fromU64(19)),
+            .c1 = Fp2.init(Fp.fromU64(23), Fp.fromU64(29)),
+            .c2 = Fp2.init(Fp.fromU64(31), Fp.fromU64(37)),
+        },
+    };
+    const c3 = Fp2.init(Fp.fromU64(41), Fp.fromU64(43));
+    const c4 = Fp2.init(Fp.fromU64(47), Fp.fromU64(53));
+
+    const expected = fp12MulBy034(f, Fp2.one(), c3, c4);
+    const result = fp12MulBy34(f, c3, c4);
+    try std.testing.expect(expected.eql(result));
+}
+
+test "fp12Mul34By34 matches fp12Mul034By034 with c0=1" {
+    const a3 = Fp2.init(Fp.fromU64(7), Fp.fromU64(11));
+    const a4 = Fp2.init(Fp.fromU64(13), Fp.fromU64(17));
+    const b3 = Fp2.init(Fp.fromU64(23), Fp.fromU64(29));
+    const b4 = Fp2.init(Fp.fromU64(31), Fp.fromU64(37));
+
+    const expected = fp12Mul034By034(Fp2.one(), a3, a4, Fp2.one(), b3, b4);
+    const result = fp12Mul34By34(a3, a4, b3, b4);
+    try std.testing.expect(expected.eql(result));
+}
+
+test "batchedMillerLoopAffine matches prepared" {
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+    const prep = G2Prepared.fromG2Point(g2);
+    const affine_prep = G2PreparedAffine.fromG2Prepared(&prep);
+
+    const prepared_result = millerLoopPrepared(g1, &prep);
+    const affine_result = batchedMillerLoopAffine(&.{g1}, &.{affine_prep});
+
+    // Affine path differs from projective by a factor killed by final exponentiation
+    const fe_prep = finalExponentiation(prepared_result);
+    const fe_affine = finalExponentiation(affine_result);
+    try std.testing.expect(fe_prep.eql(fe_affine));
 }

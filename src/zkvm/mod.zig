@@ -760,10 +760,26 @@ pub fn JoltProver(comptime F: type) type {
                 }
             }.f;
 
+            // Dense commits: run sequentially so each can use full thread pool for
+            // inner parallelism (1024-point MSMs × 1024 rows benefit hugely from parallel rows).
+            // parallelForEach would trigger nested dispatch detection, disabling inner parallelism.
+            for (0..num_dense) |i| commitOnePoly(commit_ctx, i);
+
+            // One-hot commits: run in parallel since they're lightweight (point adds + pairing).
+            // Inner parallelism isn't critical for these — the outer parallelism across 38 commits
+            // provides better throughput than sequential with inner parallelism.
             if (self.thread_pool) |tp| {
-                tp.parallelForEach(num_total_polys, commit_ctx, commitOnePoly);
+                const OhCtx = struct {
+                    cc: CommitCtx,
+                    off: usize,
+                };
+                tp.parallelForEach(num_onehot, OhCtx{ .cc = commit_ctx, .off = num_dense }, struct {
+                    fn f(c: OhCtx, idx: usize) void {
+                        commitOnePoly(c.cc, c.off + idx);
+                    }
+                }.f);
             } else {
-                for (0..num_total_polys) |i| commitOnePoly(commit_ctx, i);
+                for (num_dense..num_total_polys) |i| commitOnePoly(commit_ctx, i);
             }
 
             // Check for errors from parallel workers

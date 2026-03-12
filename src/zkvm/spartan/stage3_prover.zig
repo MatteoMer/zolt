@@ -2262,41 +2262,31 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
         }
 
         // Helper: Compute eq+1(r, j) for all j
+        // Uses the identity eq+1(r, j) = eq(r, j-1): build eq table and shift right by 1.
         fn computeEqPlusOneEvals(allocator: Allocator, r: []const F, out: []F) !void {
             const n = r.len;
             const size = out.len;
             std.debug.assert(size == @as(usize, 1) << @intCast(n));
 
-            const j_bits = try allocator.alloc(F, n);
-            defer allocator.free(j_bits);
-
-            for (0..size) |j| {
-                // Convert j to binary (BIG_ENDIAN: bit 0 is MSB)
-                for (0..n) |k| {
-                    const bit_pos: u6 = @intCast(n - 1 - k);
-                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
-                }
-                out[j] = poly_mod.EqPlusOnePolynomial(F).mle(r, j_bits);
-            }
+            const eq_table = try poly_mod.EqPolynomial(F).evalsSliceWithScaling(F, allocator, r, null);
+            defer allocator.free(eq_table);
+            out[0] = F.zero();
+            @memcpy(out[1..], eq_table[0 .. size - 1]);
         }
 
         // Helper: Compute both eq and eq+1 evaluations
+        // Uses batch eq table construction + shift identity for eq+1.
         fn computeEqAndEqPlusOneEvals(allocator: Allocator, r: []const F, eq_out: []F, eq_plus_one_out: []F) !void {
             const n = r.len;
             const size = eq_out.len;
             std.debug.assert(size == @as(usize, 1) << @intCast(n));
+            std.debug.assert(eq_plus_one_out.len == size);
 
-            const j_bits = try allocator.alloc(F, n);
-            defer allocator.free(j_bits);
-
-            for (0..size) |j| {
-                for (0..n) |k| {
-                    const bit_pos: u6 = @intCast(n - 1 - k);
-                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
-                }
-                eq_out[j] = poly_mod.EqPolynomial(F).mle(r, j_bits);
-                eq_plus_one_out[j] = poly_mod.EqPlusOnePolynomial(F).mle(r, j_bits);
-            }
+            const eq_table = try poly_mod.EqPolynomial(F).evalsSliceWithScaling(F, allocator, r, null);
+            defer allocator.free(eq_table);
+            @memcpy(eq_out, eq_table);
+            eq_plus_one_out[0] = F.zero();
+            @memcpy(eq_plus_one_out[1..], eq_table[0 .. size - 1]);
         }
     };
 }

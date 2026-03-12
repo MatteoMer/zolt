@@ -53,10 +53,19 @@ pub fn RaPolynomial(comptime F: type) type {
         /// Initialize a round1 RaPolynomial. Takes ownership of both `indices` and `eq_table`;
         /// caller must not access either array after this call. Prescales `eq_table` entries
         /// in-place by `scale` so that per-access multiplication is avoided.
-        /// Asserts eq_table fits in u8 index range and indices length is a power of two.
+        /// Asserts eq_table fits in u8 index range, indices length is a power of two,
+        /// and all non-null indices are within eq_table bounds.
         pub fn initRound1(indices: []?u8, eq_table: []F, scale: F) @This() {
             std.debug.assert(indices.len > 0 and std.math.isPowerOfTwo(indices.len));
             std.debug.assert(eq_table.len <= (@as(usize, 1) << MAX_LOG_K_CHUNK));
+            // Validate all non-null indices are within eq_table bounds
+            if (std.debug.runtime_safety) {
+                for (indices) |maybe_idx| {
+                    if (maybe_idx) |idx| {
+                        std.debug.assert(idx < eq_table.len);
+                    }
+                }
+            }
             // Prescale eq_table entries
             for (eq_table) |*entry| {
                 entry.* = entry.*.mul(scale);
@@ -83,7 +92,8 @@ pub fn RaPolynomial(comptime F: type) type {
 
         /// Bind one sumcheck variable: transitions round1 → dense (materialized at half size).
         /// For dense state, performs in-place MLE bind.
-        /// On error, `self` remains in its original state and must still be deinit'd.
+        /// The only possible error is OOM during the round1→dense allocation, in which
+        /// case `self` is unchanged and must still be deinit'd.
         pub fn bind(self: *@This(), r: F, allocator: Allocator) !void {
             switch (self.*) {
                 .round1 => |*s| {
@@ -488,5 +498,41 @@ test "RaPolynomial currentLen tracks through transitions" {
     try poly.bind(BN254Scalar.fromU64(11), allocator);
     try std.testing.expectEqual(@as(usize, 1), poly.currentLen());
 
+    poly.deinit(allocator);
+}
+
+test "RaPolynomial all null indices produces zero polynomial" {
+    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    var eq_table = try allocator.alloc(BN254Scalar, 4);
+    eq_table[0] = BN254Scalar.fromU64(10);
+    eq_table[1] = BN254Scalar.fromU64(20);
+    eq_table[2] = BN254Scalar.fromU64(30);
+    eq_table[3] = BN254Scalar.fromU64(40);
+
+    var indices = try allocator.alloc(?u8, 8);
+    for (0..8) |j| indices[j] = null;
+
+    const RaPoly = RaPolynomial(BN254Scalar);
+    var poly = RaPoly.initRound1(indices, eq_table, BN254Scalar.fromU64(5));
+
+    // All coefficients should be zero
+    for (0..8) |j| {
+        try std.testing.expect(poly.getBoundCoeff(j).eql(BN254Scalar.zero()));
+    }
+
+    // Bind all 3 rounds to a scalar
+    const challenges = [3]BN254Scalar{
+        BN254Scalar.fromU64(7),
+        BN254Scalar.fromU64(13),
+        BN254Scalar.fromU64(29),
+    };
+    for (challenges) |r| {
+        try poly.bind(r, allocator);
+    }
+
+    // Final claim should be zero
+    try std.testing.expect(poly.finalClaim().eql(BN254Scalar.zero()));
     poly.deinit(allocator);
 }

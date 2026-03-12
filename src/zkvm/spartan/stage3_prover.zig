@@ -1316,8 +1316,8 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const P_1_prod = try allocator.alloc(F, prefix_size);
 
             // Compute eq+1(r_lo, j) - PREFIX uses r_lo (Jolt convention)
-            try computeEqPlusOneEvals(allocator, r_outer_lo, P_0_outer);
-            try computeEqPlusOneEvals(allocator, r_prod_lo, P_0_prod);
+            poly_mod.EqPolynomial(F).buildEqPlusOneTableInPlace(r_outer_lo, P_0_outer);
+            poly_mod.EqPolynomial(F).buildEqPlusOneTableInPlace(r_prod_lo, P_0_prod);
 
             // Compute is_max(r_lo) for prefix_1
             // is_max(x) = eq((1,1,...,1), x) = product of x[i]
@@ -1348,8 +1348,8 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             defer allocator.free(suffix_1_prod);
 
             // SUFFIX uses r_hi (Jolt convention)
-            try computeEqAndEqPlusOneEvals(allocator, r_outer_hi, suffix_0_outer, suffix_1_outer);
-            try computeEqAndEqPlusOneEvals(allocator, r_prod_hi, suffix_0_prod, suffix_1_prod);
+            poly_mod.EqPolynomial(F).buildEqAndEqPlusOneInPlace(r_outer_hi, suffix_0_outer, suffix_1_outer);
+            poly_mod.EqPolynomial(F).buildEqAndEqPlusOneInPlace(r_prod_hi, suffix_0_prod, suffix_1_prod);
 
             // Initialize Q buffers to zero
             const Q_0_outer = try allocator.alloc(F, prefix_size);
@@ -1910,7 +1910,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const prefix_size_outer: usize = @as(usize, 1) << @intCast(r_outer_lo.len);
             const prefix_0_outer = self.allocator.alloc(F, prefix_size_outer) catch unreachable;
             defer self.allocator.free(prefix_0_outer);
-            computeEqPlusOneEvals(self.allocator, r_outer_lo, prefix_0_outer) catch unreachable;
+            poly_mod.EqPolynomial(F).buildEqPlusOneTableInPlace(r_outer_lo, prefix_0_outer);
 
             const prefix_1_outer = self.allocator.alloc(F, prefix_size_outer) catch unreachable;
             defer self.allocator.free(prefix_1_outer);
@@ -1923,7 +1923,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
             // Evaluate prefix polynomials at r_prefix
             // NOTE: evaluateMle binds point[0] to the LSB of the table index.
-            // The prefix table is in BIG_ENDIAN order (computeEqPlusOneEvals uses BIG_ENDIAN bits).
+            // The prefix table is in BIG_ENDIAN order (buildEqPlusOneTableInPlace uses BIG_ENDIAN bits).
             // So evaluateMle(table, [r_0, r_1, r_2]) binds r_0→LSB, r_1→mid, r_2→MSB.
             // This matches Jolt's MultilinearPolynomial::evaluate(r_prefix_BE) which also
             // evaluates Σ table[i] * Eq(r_prefix_BE, i_BE), since eq_evals uses BIG_ENDIAN.
@@ -1952,7 +1952,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             defer self.allocator.free(suffix_0_outer);
             const suffix_1_outer = self.allocator.alloc(F, suffix_size) catch unreachable;
             defer self.allocator.free(suffix_1_outer);
-            computeEqAndEqPlusOneEvals(self.allocator, r_outer_hi, suffix_0_outer, suffix_1_outer) catch unreachable;
+            poly_mod.EqPolynomial(F).buildEqAndEqPlusOneInPlace(r_outer_hi, suffix_0_outer, suffix_1_outer);
 
             // Same for r_product
             const r_prod_hi = self.r_product[0..self.suffix_n_vars]; // For SUFFIX
@@ -1962,7 +1962,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const prefix_size_prod: usize = @as(usize, 1) << @intCast(r_prod_lo.len);
             const prefix_0_prod = self.allocator.alloc(F, prefix_size_prod) catch unreachable;
             defer self.allocator.free(prefix_0_prod);
-            computeEqPlusOneEvals(self.allocator, r_prod_lo, prefix_0_prod) catch unreachable;
+            poly_mod.EqPolynomial(F).buildEqPlusOneTableInPlace(r_prod_lo, prefix_0_prod);
 
             const prefix_1_prod = self.allocator.alloc(F, prefix_size_prod) catch unreachable;
             defer self.allocator.free(prefix_1_prod);
@@ -1982,7 +1982,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             defer self.allocator.free(suffix_0_prod);
             const suffix_1_prod = self.allocator.alloc(F, suffix_size) catch unreachable;
             defer self.allocator.free(suffix_1_prod);
-            computeEqAndEqPlusOneEvals(self.allocator, r_prod_hi, suffix_0_prod, suffix_1_prod) catch unreachable;
+            poly_mod.EqPolynomial(F).buildEqAndEqPlusOneInPlace(r_prod_hi, suffix_0_prod, suffix_1_prod);
 
             // =====================================================================
             // Step 2: Construct eq+1(r_outer, (r_prefix, j)) for all j in suffix domain
@@ -2261,33 +2261,6 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             };
         }
 
-        // Helper: Compute eq+1(r, j) for all j
-        // Uses the identity eq+1(r, j) = eq(r, j-1): build eq table and shift right by 1.
-        fn computeEqPlusOneEvals(allocator: Allocator, r: []const F, out: []F) !void {
-            const n = r.len;
-            const size = out.len;
-            std.debug.assert(size == @as(usize, 1) << @intCast(n));
-
-            const eq_table = try poly_mod.EqPolynomial(F).evalsSliceWithScaling(F, allocator, r, null);
-            defer allocator.free(eq_table);
-            out[0] = F.zero();
-            @memcpy(out[1..], eq_table[0 .. size - 1]);
-        }
-
-        // Helper: Compute both eq and eq+1 evaluations
-        // Uses batch eq table construction + shift identity for eq+1.
-        fn computeEqAndEqPlusOneEvals(allocator: Allocator, r: []const F, eq_out: []F, eq_plus_one_out: []F) !void {
-            const n = r.len;
-            const size = eq_out.len;
-            std.debug.assert(size == @as(usize, 1) << @intCast(n));
-            std.debug.assert(eq_plus_one_out.len == size);
-
-            const eq_table = try poly_mod.EqPolynomial(F).evalsSliceWithScaling(F, allocator, r, null);
-            defer allocator.free(eq_table);
-            @memcpy(eq_out, eq_table);
-            eq_plus_one_out[0] = F.zero();
-            @memcpy(eq_plus_one_out[1..], eq_table[0 .. size - 1]);
-        }
     };
 }
 

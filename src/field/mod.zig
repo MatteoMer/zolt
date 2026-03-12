@@ -2306,3 +2306,5 @@ test {
     _ = pairing;
 }
 
+// Benchmark removed — was temporary for profiling
+

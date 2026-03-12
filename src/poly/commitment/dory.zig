@@ -756,18 +756,40 @@ fn multiPairG1G2WithPool(g1_vec: []const G1Point, g2_vec: []const G2Point, tp: ?
 
     const mapFn = struct {
         fn map(c: Ctx, start: usize, end: usize) pairing.Fp12 {
-            var acc = pairing.Fp12.one();
-            for (start..end) |i| {
-                if (c.g1_vec[i].infinity or c.g2_vec[i].infinity) continue;
-                const g1_fp = G1PointFp{
+            const chunk_len = end - start;
+            // Convert G1 points to Fp for batched Miller loop
+            var stack_g1: [64]G1PointFp = undefined;
+            const use_heap = chunk_len > 64;
+            var heap_g1: ?[]G1PointFp = null;
+            defer if (heap_g1) |h| std.heap.page_allocator.free(h);
+
+            var g1_fps: []G1PointFp = undefined;
+            if (use_heap) {
+                heap_g1 = std.heap.page_allocator.alloc(G1PointFp, chunk_len) catch {
+                    // Fallback to individual loops
+                    var acc = pairing.Fp12.one();
+                    for (start..end) |i| {
+                        if (c.g1_vec[i].infinity or c.g2_vec[i].infinity) continue;
+                        const g1_fp = G1PointFp{ .x = c.g1_vec[i].x, .y = c.g1_vec[i].y, .infinity = false };
+                        acc = acc.mul(pairing.millerLoopArkworks(g1_fp, c.g2_vec[i]));
+                    }
+                    return acc;
+                };
+                g1_fps = heap_g1.?;
+            } else {
+                g1_fps = stack_g1[0..chunk_len];
+            }
+
+            for (0..chunk_len) |j| {
+                const i = start + j;
+                g1_fps[j] = G1PointFp{
                     .x = c.g1_vec[i].x,
                     .y = c.g1_vec[i].y,
-                    .infinity = false,
+                    .infinity = c.g1_vec[i].infinity,
                 };
-                const ml = pairing.millerLoopArkworks(g1_fp, c.g2_vec[i]);
-                acc = acc.mul(ml);
             }
-            return acc;
+
+            return pairing.batchedMillerLoopUnprepared(g1_fps, c.g2_vec[start..end]);
         }
     }.map;
 
@@ -796,18 +818,98 @@ fn multiPairG1G2Prepared(g1_vec: []const G1Point, g2_prep: []const G2Prepared, t
 
     const mapFn = struct {
         fn map(c: Ctx, start: usize, end: usize) pairing.Fp12 {
-            var acc = pairing.Fp12.one();
-            for (start..end) |i| {
-                if (c.g1_vec[i].infinity or c.g2_prep[i].infinity) continue;
-                const g1_fp = G1PointFp{
+            const chunk_len = end - start;
+            var stack_g1: [64]G1PointFp = undefined;
+            const use_heap = chunk_len > 64;
+            var heap_g1: ?[]G1PointFp = null;
+            defer if (heap_g1) |h| std.heap.page_allocator.free(h);
+
+            var g1_fps: []G1PointFp = undefined;
+            if (use_heap) {
+                heap_g1 = std.heap.page_allocator.alloc(G1PointFp, chunk_len) catch {
+                    var acc = pairing.Fp12.one();
+                    for (start..end) |i| {
+                        if (c.g1_vec[i].infinity or c.g2_prep[i].infinity) continue;
+                        const g1_fp = G1PointFp{ .x = c.g1_vec[i].x, .y = c.g1_vec[i].y, .infinity = false };
+                        acc = acc.mul(pairing.millerLoopPrepared(g1_fp, &c.g2_prep[i]));
+                    }
+                    return acc;
+                };
+                g1_fps = heap_g1.?;
+            } else {
+                g1_fps = stack_g1[0..chunk_len];
+            }
+
+            for (0..chunk_len) |j| {
+                const i = start + j;
+                g1_fps[j] = G1PointFp{
                     .x = c.g1_vec[i].x,
                     .y = c.g1_vec[i].y,
-                    .infinity = false,
+                    .infinity = c.g1_vec[i].infinity,
                 };
-                const ml = pairing.millerLoopPrepared(g1_fp, &c.g2_prep[i]);
-                acc = acc.mul(ml);
             }
-            return acc;
+
+            return pairing.batchedMillerLoopPreparedSparse(g1_fps, c.g2_prep[start..end]);
+        }
+    }.map;
+
+    const reduceFn = struct {
+        fn reduce(a: pairing.Fp12, b: pairing.Fp12) pairing.Fp12 {
+            return a.mul(b);
+        }
+    }.reduce;
+
+    const miller_acc = if (tp) |pool|
+        pool.parallelReduceForce(pairing.Fp12, n, pairing.Fp12.one(), ctx, mapFn, reduceFn)
+    else
+        mapFn(ctx, 0, n);
+
+    if (miller_acc.eql(pairing.Fp12.one())) return GT.one();
+    return pairing.finalExponentiation(miller_acc);
+}
+
+/// Multi-pairing using affine line coefficients (fastest path: c0=1 implicit).
+fn multiPairG1G2PreparedAffine(g1_vec: []const G1Point, g2_affine: []const G2PreparedAffine, tp: ?*ThreadPool) GT {
+    const n = @min(g1_vec.len, g2_affine.len);
+    if (n == 0) return GT.one();
+
+    const Ctx = struct { g1_vec: []const G1Point, g2_affine: []const G2PreparedAffine };
+    const ctx = Ctx{ .g1_vec = g1_vec, .g2_affine = g2_affine };
+
+    const mapFn = struct {
+        fn map(c: Ctx, start: usize, end: usize) pairing.Fp12 {
+            const chunk_len = end - start;
+            var stack_g1: [64]G1PointFp = undefined;
+            const use_heap = chunk_len > 64;
+            var heap_g1: ?[]G1PointFp = null;
+            defer if (heap_g1) |h| std.heap.page_allocator.free(h);
+
+            var g1_fps: []G1PointFp = undefined;
+            if (use_heap) {
+                heap_g1 = std.heap.page_allocator.alloc(G1PointFp, chunk_len) catch {
+                    var acc = pairing.Fp12.one();
+                    for (start..end) |i| {
+                        if (c.g1_vec[i].infinity or c.g2_affine[i].infinity) continue;
+                        const g1_fp = G1PointFp{ .x = c.g1_vec[i].x, .y = c.g1_vec[i].y, .infinity = false };
+                        acc = acc.mul(pairing.millerLoopArkworks(g1_fp, pairing.G2Point{ .x = pairing.Fp2.zero(), .y = pairing.Fp2.zero(), .infinity = true }));
+                    }
+                    return acc;
+                };
+                g1_fps = heap_g1.?;
+            } else {
+                g1_fps = stack_g1[0..chunk_len];
+            }
+
+            for (0..chunk_len) |j| {
+                const i = start + j;
+                g1_fps[j] = G1PointFp{
+                    .x = c.g1_vec[i].x,
+                    .y = c.g1_vec[i].y,
+                    .infinity = c.g1_vec[i].infinity,
+                };
+            }
+
+            return pairing.batchedMillerLoopAffine(g1_fps, c.g2_affine[start..end]);
         }
     }.map;
 
@@ -865,26 +967,57 @@ pub fn multiPairBatched(comptime N: comptime_int, groups: [N]PairGroup, tp: ?*Th
             inline for (0..N) |g| {
                 accs[g] = pairing.Fp12.one();
             }
-            for (start..end) |idx| {
-                // Find which group this index belongs to (N is small, ≤4)
-                var group_idx: usize = 0;
-                for (0..N) |g| {
-                    if (idx < c.offsets[g + 1]) {
-                        group_idx = g;
-                        break;
-                    }
+
+            // Process each group's sub-range within [start, end) using batched Miller loop
+            for (0..N) |g| {
+                const group_start = c.offsets[g];
+                const group_end = c.offsets[g + 1];
+                // Intersect [group_start, group_end) with [start, end)
+                const lo = @max(group_start, start);
+                const hi = @min(group_end, end);
+                if (lo >= hi) continue;
+
+                const chunk_len = hi - lo;
+                const local_lo = lo - group_start;
+
+                // Convert G1 points to Fp and batch Miller loop
+                var stack_g1: [64]G1PointFp = undefined;
+                const use_heap = chunk_len > 64;
+                var heap_g1: ?[]G1PointFp = null;
+                defer if (heap_g1) |h| std.heap.page_allocator.free(h);
+
+                var g1_fps: []G1PointFp = undefined;
+                if (use_heap) {
+                    heap_g1 = std.heap.page_allocator.alloc(G1PointFp, chunk_len) catch {
+                        // Fallback to individual loops
+                        for (lo..hi) |idx| {
+                            const li = idx - group_start;
+                            const g1_pt = c.groups[g].g1[li];
+                            const g2_pt = c.groups[g].g2[li];
+                            if (g1_pt.infinity or g2_pt.infinity) continue;
+                            const g1_fp = G1PointFp{ .x = g1_pt.x, .y = g1_pt.y, .infinity = false };
+                            accs[g] = accs[g].mul(pairing.millerLoopArkworks(g1_fp, g2_pt));
+                        }
+                        continue;
+                    };
+                    g1_fps = heap_g1.?;
+                } else {
+                    g1_fps = stack_g1[0..chunk_len];
                 }
-                const local_idx = idx - c.offsets[group_idx];
-                const g1_pt = c.groups[group_idx].g1[local_idx];
-                const g2_pt = c.groups[group_idx].g2[local_idx];
-                if (g1_pt.infinity or g2_pt.infinity) continue;
-                const g1_fp = G1PointFp{
-                    .x = g1_pt.x,
-                    .y = g1_pt.y,
-                    .infinity = false,
-                };
-                const ml = pairing.millerLoopArkworks(g1_fp, g2_pt);
-                accs[group_idx] = accs[group_idx].mul(ml);
+
+                for (0..chunk_len) |j| {
+                    const pt = c.groups[g].g1[local_lo + j];
+                    g1_fps[j] = G1PointFp{
+                        .x = pt.x,
+                        .y = pt.y,
+                        .infinity = pt.infinity,
+                    };
+                }
+
+                accs[g] = pairing.batchedMillerLoopUnprepared(
+                    g1_fps,
+                    c.groups[g].g2[local_lo .. local_lo + chunk_len],
+                );
             }
             return accs;
         }
@@ -1191,6 +1324,7 @@ fn g2OptimalWindowSize(n: usize) usize {
 /// Dory structured reference string (SRS)
 /// Generated using the seed "Jolt Dory URS seed" for compatibility
 const G2Prepared = pairing.G2Prepared;
+const G2PreparedAffine = pairing.G2PreparedAffine;
 
 pub const DorySRS = struct {
     /// G1 generators for polynomial coefficients
@@ -1199,6 +1333,8 @@ pub const DorySRS = struct {
     g2_vec: []G2Point,
     /// Precomputed G2 Miller loop coefficients for fast pairings
     g2_prepared: ?[]G2Prepared,
+    /// Precomputed affine line coefficients (Phase 3: c0=1 implicit, batch-inverted)
+    g2_prepared_affine: ?[]G2PreparedAffine,
     /// Maximum number of columns in the matrix
     num_columns: usize,
     /// Maximum number of rows in the matrix
@@ -1233,6 +1369,32 @@ pub const DorySRS = struct {
             }
         }
         self.g2_prepared = prepared;
+
+        // Also build affine cache from the projective prepared data
+        self.initPreparedCacheAffine(tp);
+    }
+
+    /// Precompute affine line coefficients from projective G2Prepared.
+    /// Uses batch Fp2 inversion for ~15% faster Miller loops (c0=1 implicit).
+    fn initPreparedCacheAffine(self: *DorySRS, tp: ?*ThreadPool) void {
+        if (self.g2_prepared_affine != null) return;
+        const prep = self.g2_prepared orelse return;
+        const n = prep.len;
+        if (n == 0) return;
+        const affine = self.allocator.alloc(G2PreparedAffine, n) catch return;
+        if (tp) |pool| {
+            const AffCtx = struct { src: []const G2Prepared, dst: []G2PreparedAffine };
+            pool.parallelForForce(n, AffCtx{ .src = prep, .dst = affine }, struct {
+                fn f(ctx: AffCtx, i: usize) void {
+                    ctx.dst[i] = G2PreparedAffine.fromG2Prepared(&ctx.src[i]);
+                }
+            }.f);
+        } else {
+            for (0..n) |i| {
+                affine[i] = G2PreparedAffine.fromG2Prepared(&prep[i]);
+            }
+        }
+        self.g2_prepared_affine = affine;
     }
 
     pub fn deinit(self: *DorySRS) void {
@@ -1242,6 +1404,9 @@ pub const DorySRS = struct {
         }
         if (self.g2_prepared) |prep| {
             self.allocator.free(prep);
+        }
+        if (self.g2_prepared_affine) |affine| {
+            self.allocator.free(affine);
         }
     }
 };
@@ -1338,6 +1503,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .g1_vec = g1_vec,
                 .g2_vec = g2_vec,
                 .g2_prepared = null,
+                .g2_prepared_affine = null,
                 .num_columns = @intCast(g1_count),
                 .num_rows = @intCast(g2_count),
                 .sigma = sigma,
@@ -1504,6 +1670,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .g1_vec = g1_vec,
                 .g2_vec = g2_vec,
                 .g2_prepared = null,
+                .g2_prepared_affine = null,
                 .num_columns = num_columns,
                 .num_rows = num_rows,
                 .sigma = sigma,
@@ -1555,32 +1722,58 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) pairing.Fp12 {
-                    var acc = pairing.Fp12.one();
-                    for (start..end) |row| {
-                        const row_start = row * c.n_cols;
-                        if (row_start >= c.evals_ptr.len) break;
-                        const row_end = @min(row_start + c.n_cols, c.evals_ptr.len);
-                        const row_evals = c.evals_ptr[row_start..row_end];
+                    const chunk_len = end - start;
+                    if (chunk_len == 0) return pairing.Fp12.one();
 
-                        const row_commitment = msm.MSM(F, Fp).compute(
-                            c.params_ptr.g1_vec[0..row_evals.len],
-                            row_evals,
-                        );
+                    // Phase 1: compute all MSM results for rows in chunk
+                    var stack_g1: [64]G1PointFp = undefined;
+                    const use_heap = chunk_len > 64;
+                    var heap_g1: ?[]G1PointFp = null;
+                    defer if (heap_g1) |h| std.heap.page_allocator.free(h);
 
-                        if (row < c.params_ptr.g2_vec.len and !row_commitment.infinity) {
-                            const row_g1 = G1PointFp{
-                                .x = row_commitment.x,
-                                .y = row_commitment.y,
-                                .infinity = false,
-                            };
-                            const ml = if (c.params_ptr.g2_prepared) |prep|
-                                pairing.millerLoopPrepared(row_g1, &prep[row])
-                            else
-                                pairing.millerLoopArkworks(row_g1, c.params_ptr.g2_vec[row]);
-                            acc = acc.mul(ml);
-                        }
+                    var g1_fps: []G1PointFp = undefined;
+                    if (use_heap) {
+                        heap_g1 = std.heap.page_allocator.alloc(G1PointFp, chunk_len) catch {
+                            // Fallback to individual loops
+                            var acc = pairing.Fp12.one();
+                            for (start..end) |row| {
+                                const row_s = row * c.n_cols;
+                                if (row_s >= c.evals_ptr.len) break;
+                                const row_e = @min(row_s + c.n_cols, c.evals_ptr.len);
+                                const rc = msm.MSM(F, Fp).compute(c.params_ptr.g1_vec[0..row_e - row_s], c.evals_ptr[row_s..row_e]);
+                                if (row < c.params_ptr.g2_vec.len and !rc.infinity) {
+                                    const g1_fp = G1PointFp{ .x = rc.x, .y = rc.y, .infinity = false };
+                                    acc = acc.mul(pairing.millerLoopArkworks(g1_fp, c.params_ptr.g2_vec[row]));
+                                }
+                            }
+                            return acc;
+                        };
+                        g1_fps = heap_g1.?;
+                    } else {
+                        g1_fps = stack_g1[0..chunk_len];
                     }
-                    return acc;
+
+                    for (0..chunk_len) |j| {
+                        const row = start + j;
+                        const row_start_idx = row * c.n_cols;
+                        if (row_start_idx >= c.evals_ptr.len or row >= c.params_ptr.g2_vec.len) {
+                            g1_fps[j] = G1PointFp{ .x = Fp.zero(), .y = Fp.one(), .infinity = true };
+                            continue;
+                        }
+                        const row_end_idx = @min(row_start_idx + c.n_cols, c.evals_ptr.len);
+                        const row_evals = c.evals_ptr[row_start_idx..row_end_idx];
+                        const rc = msm.MSM(F, Fp).compute(c.params_ptr.g1_vec[0..row_evals.len], row_evals);
+                        g1_fps[j] = G1PointFp{ .x = rc.x, .y = rc.y, .infinity = rc.infinity };
+                    }
+
+                    // Phase 2: batched Miller loop (prefer affine > prepared sparse > unprepared)
+                    if (c.params_ptr.g2_prepared_affine) |affine| {
+                        return pairing.batchedMillerLoopAffine(g1_fps, affine[start .. start + chunk_len]);
+                    } else if (c.params_ptr.g2_prepared) |prep| {
+                        return pairing.batchedMillerLoopPreparedSparse(g1_fps, prep[start .. start + chunk_len]);
+                    } else {
+                        return pairing.batchedMillerLoopUnprepared(g1_fps, c.params_ptr.g2_vec[start .. start + chunk_len]);
+                    }
                 }
             }.f;
 
@@ -1792,23 +1985,53 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) pairing.Fp12 {
-                    var acc = pairing.Fp12.one();
-                    for (start..end) |row| {
-                        if (row >= c.row_comms.len) break;
-                        const rc = c.row_comms[row];
-                        if (rc.infinity) continue;
-                        const row_g1 = G1PointFp{
-                            .x = rc.x,
-                            .y = rc.y,
-                            .infinity = false,
+                    const chunk_len = @min(end, c.row_comms.len) - @min(start, c.row_comms.len);
+                    if (chunk_len == 0) return pairing.Fp12.one();
+
+                    var stack_g1: [64]G1PointFp = undefined;
+                    const use_heap = chunk_len > 64;
+                    var heap_g1: ?[]G1PointFp = null;
+                    defer if (heap_g1) |h| std.heap.page_allocator.free(h);
+
+                    var g1_fps: []G1PointFp = undefined;
+                    if (use_heap) {
+                        heap_g1 = std.heap.page_allocator.alloc(G1PointFp, chunk_len) catch {
+                            // Fallback to individual loops
+                            var acc = pairing.Fp12.one();
+                            for (start..@min(end, c.row_comms.len)) |row| {
+                                const rc = c.row_comms[row];
+                                if (rc.infinity) continue;
+                                const row_g1 = G1PointFp{ .x = rc.x, .y = rc.y, .infinity = false };
+                                const ml = if (c.params_ptr.g2_prepared) |prep|
+                                    pairing.millerLoopPrepared(row_g1, &prep[row])
+                                else
+                                    pairing.millerLoopArkworks(row_g1, c.params_ptr.g2_vec[row]);
+                                acc = acc.mul(ml);
+                            }
+                            return acc;
                         };
-                        const ml = if (c.params_ptr.g2_prepared) |prep|
-                            pairing.millerLoopPrepared(row_g1, &prep[row])
-                        else
-                            pairing.millerLoopArkworks(row_g1, c.params_ptr.g2_vec[row]);
-                        acc = acc.mul(ml);
+                        g1_fps = heap_g1.?;
+                    } else {
+                        g1_fps = stack_g1[0..chunk_len];
                     }
-                    return acc;
+
+                    for (0..chunk_len) |j| {
+                        const row = start + j;
+                        if (row >= c.row_comms.len) {
+                            g1_fps[j] = G1PointFp{ .x = Fp.zero(), .y = Fp.one(), .infinity = true };
+                        } else {
+                            const rc = c.row_comms[row];
+                            g1_fps[j] = G1PointFp{ .x = rc.x, .y = rc.y, .infinity = rc.infinity };
+                        }
+                    }
+
+                    if (c.params_ptr.g2_prepared_affine) |affine| {
+                        return pairing.batchedMillerLoopAffine(g1_fps, affine[start .. start + chunk_len]);
+                    } else if (c.params_ptr.g2_prepared) |prep| {
+                        return pairing.batchedMillerLoopPreparedSparse(g1_fps, prep[start .. start + chunk_len]);
+                    } else {
+                        return pairing.batchedMillerLoopUnprepared(g1_fps, c.params_ptr.g2_vec[start .. start + chunk_len]);
+                    }
                 }
             }.f;
 
@@ -2138,11 +2361,15 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     // So multiPair(g1[0..n], v2[0..n]) = e(MSM(g1[0..n], v_vec[0..n]), g2_vec[0])
                     std.debug.assert(v_vec.len >= current_len);
                     const g2_fin = params.g2_vec[0];
-                    d1_left = if (params.g2_prepared) |prep|
+                    d1_left = if (params.g2_prepared_affine) |affine|
+                        multiPairG1G2PreparedAffine(v1_work[0..g2_size], affine[0..g2_size], tp)
+                    else if (params.g2_prepared) |prep|
                         multiPairG1G2Prepared(v1_work[0..g2_size], prep[0..g2_size], tp)
                     else
                         multiPairG1G2WithPool(v1_work[0..g2_size], params.g2_vec[0..g2_size], tp);
-                    d1_right = if (params.g2_prepared) |prep|
+                    d1_right = if (params.g2_prepared_affine) |affine|
+                        multiPairG1G2PreparedAffine(v1_work[n2..v1_r_end], affine[0..g2_size], tp)
+                    else if (params.g2_prepared) |prep|
                         multiPairG1G2Prepared(v1_work[n2..v1_r_end], prep[0..g2_size], tp)
                     else
                         multiPairG1G2WithPool(v1_work[n2..v1_r_end], params.g2_vec[0..g2_size], tp);
@@ -2599,11 +2826,15 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const n2 = current_len / 2;
 
                 // Compute first reduce message
-                const d1_left = if (params.g2_prepared) |prep|
+                const d1_left = if (params.g2_prepared_affine) |affine|
+                    multiPairG1G2PreparedAffine(v1_work[0..n2], affine[0..n2], tp)
+                else if (params.g2_prepared) |prep|
                     multiPairG1G2Prepared(v1_work[0..n2], prep[0..n2], tp)
                 else
                     multiPairG1G2WithPool(v1_work[0..n2], params.g2_vec[0..n2], tp);
-                const d1_right = if (params.g2_prepared) |prep|
+                const d1_right = if (params.g2_prepared_affine) |affine|
+                    multiPairG1G2PreparedAffine(v1_work[n2..current_len], affine[0..n2], tp)
+                else if (params.g2_prepared) |prep|
                     multiPairG1G2Prepared(v1_work[n2..current_len], prep[0..n2], tp)
                 else
                     multiPairG1G2WithPool(v1_work[n2..current_len], params.g2_vec[0..n2], tp);

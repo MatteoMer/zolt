@@ -2095,6 +2095,12 @@ fn HammingBooleanityProver(comptime F: type) type {
             // j_outer * half_lo gives: 2j = 2*j_inner + j_outer*prefix_len, keeping
             // the j_outer (suffix) block constant within each pair — so eq_hi[j_outer]
             // factors out correctly.
+            //
+            // Cache locality note: H accesses stride by prefix_len between j_outer blocks
+            // (non-contiguous). Swapping loop order (parallel over prefix, sequential over
+            // suffix) would improve locality but would prevent eq_hi factorization. The
+            // current order is chosen because the eq_hi factorization saves a multiply per
+            // pair, which dominates the cache cost for typical sizes.
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [4]F {
                     const two = F.fromU64(2);
@@ -2517,7 +2523,12 @@ fn RamRaVirtualProver(comptime F: type) type {
         pub fn bindChallenge(self: *Self, r: F) !void {
             const half = self.current_len / 2;
 
+            // After the first bind(), all ra_polys transition from round1→dense simultaneously
+            // (they all have the same length T). Check index 0 as representative.
             const all_dense = self.ra_polys.len > 0 and self.ra_polys[0] == .dense;
+            if (std.debug.runtime_safety and all_dense) {
+                for (self.ra_polys) |rp| std.debug.assert(rp == .dense);
+            }
 
             if (all_dense and self.pool != null) {
                 // Parallel bind: d ra_poly dense arrays + 1 eq array
@@ -2850,70 +2861,9 @@ fn BooleanityProver(comptime F: type) type {
             evals[1] = s1;
             evals[2] = eq_eval_2.mul(q2);
             evals[3] = eq_eval_3.mul(q3);
-
-            // Debug: brute force check
-            if (true) {
-                var bf_Q0 = F.zero();
-                var bf_Q1 = F.zero();
-                for (0..self.K) |k| {
-                    const k_m_bf = (k >> @intCast(m)) & 1;
-                    const k_bound_bf = k & f_mask;
-                    const k_upper_bf = k >> @intCast(m + 1);
-                    const f_k_bf = if (m == 0) F.one() else self.F_table[k_bound_bf];
-                    const eu_bf = eq_upper[k_upper_bf];
-                    var gsum_bf = F.zero();
-                    for (0..self.N) |i| {
-                        gsum_bf = gsum_bf.add(self.gamma_powers_sq[i].mul(self.G[i][k]));
-                    }
-                    const qval_bf = eu_bf.mul(gsum_bf.mul(f_k_bf)).mul(f_k_bf.sub(F.one()));
-                    if (k_m_bf == 0) { bf_Q0 = bf_Q0.add(qval_bf); }
-                    else { bf_Q1 = bf_Q1.add(qval_bf); }
-                }
-                const bf_s0 = eq_eval_0.mul(bf_Q0);
-                const bf_s1 = eq_eval_1.mul(bf_Q1);
-                const bf_sum = bf_s0.add(bf_s1);
-                const c_ok: u8 = if (c.eql(bf_Q0)) 1 else 0;
-                const sum_ok: u8 = if (bf_sum.eql(previous_claim)) 1 else 0;
-                // Also compute e and the expected sum from the polynomial theory
-                var bf_e2 = F.zero();
-                for (0..self.K) |k| {
-                    const k_bound_bf = k & f_mask;
-                    const k_upper_bf = k >> @intCast(m + 1);
-                    const f_k_bf = if (m == 0) F.one() else self.F_table[k_bound_bf];
-                    const eu_bf = eq_upper[k_upper_bf];
-                    var gsum_bf = F.zero();
-                    for (0..self.N) |i| {
-                        gsum_bf = gsum_bf.add(self.gamma_powers_sq[i].mul(self.G[i][k]));
-                    }
-                    bf_e2 = bf_e2.add(eu_bf.mul(gsum_bf).mul(f_k_bf.mul(f_k_bf)));
-                }
-                const e_ok: u8 = if (e.eql(bf_e2)) 1 else 0;
-                dbg("  [BOOL_PH1] m={} c_ok={} e_ok={} sum_ok={}\n", .{ m, c_ok, e_ok, sum_ok });
-                if (sum_ok == 0) {
-                    // Print what previous_claim should be
-                    // The actual claim should be s(r) from the PREVIOUS round
-                    // which equals eq(w_m, r) * Q(r) where Q is the quadratic
-                    // But we don't have easy access to the challenge here.
-                    // Instead, just print the values for inspection.
-                    const pc = previous_claim.toBytesBE();
-                    const bs = bf_sum.toBytesBE();
-                    dbg("  [BOOL_PH1]   prev_claim_BE={x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{ pc[0], pc[1], pc[2], pc[3] });
-                    dbg("  [BOOL_PH1]   bf_sum_BE    ={x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{ bs[0], bs[1], bs[2], bs[3] });
-                    // Diagnose: compute from the polynomial at round m=0
-                    // If m=1, the claim comes from round 0's polynomial at the challenge.
-                    // Round 0's polynomial: s_0(X) = eq(w_0,X) * e_prev * X * (X-1)
-                    // where e_prev = e at round 0.
-                    // But we don't store e from previous rounds.
-                    // Instead, let's check a simpler invariant:
-                    // The claim at round m should equal B_scalar * [something].
-                    // Print B_scalar for inspection.
-                    const bsb = self.B_scalar.toBytesBE();
-                    dbg("  [BOOL_PH1]   B_scalar_BE  ={x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{ bsb[0], bsb[1], bsb[2], bsb[3] });
-                }
-            }
         }
 
-        fn computePhase2Poly(self: *Self, evals: []F, previous_claim: F) void {
+        fn computePhase2Poly(self: *Self, evals: []F, _: F) void {
             // Phase 2: Gruen poly deg 3 approach (matching Jolt's compute_phase2_message)
             //
             // The polynomial is:
@@ -3029,13 +2979,6 @@ fn BooleanityProver(comptime F: type) type {
             // Scale by eq_r_r
             for (0..4) |k| {
                 evals[k] = evals[k].mul(self.eq_r_r);
-            }
-
-            // Debug: check s(0)+s(1) vs previous_claim
-            if (true) {
-                const sum = evals[0].add(evals[1]);
-                const ok: u8 = if (sum.eql(previous_claim)) 1 else 0;
-                dbg("  [BOOL_PH2] p(0)+p(1)=claim? {} phase2_round={}\n", .{ ok, self.round - self.log_k_chunk });
             }
         }
 
@@ -3302,6 +3245,12 @@ fn BooleanityProver(comptime F: type) type {
 // Proves: Sigma_c eq(r_cycle, c) * Sum_{v=0}^{N-1} gamma^v * Prod_{j=0}^{M-1} ra_{v*M+j}(c)
 // Variables: n_cycle_vars
 // Degree: M+1 (product of M linear ra polys * one linear eq)
+//
+// NOTE: Unlike RamRaVirtualProver, this uses dense []F arrays rather than RaPolynomial
+// compression. The gamma scale is baked into the first poly of each virtual batch at
+// init time (ra_bound[v*M] *= gamma^v), so the compressed representation would need
+// per-index scaling, not a single shared eq_table scale. Future optimization could
+// store separate gamma-scaled and unscaled eq_tables per batch.
 fn LookupsRaVirtualProver(comptime F: type) type {
     return struct {
         const Self = @This();

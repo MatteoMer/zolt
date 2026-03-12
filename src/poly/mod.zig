@@ -289,41 +289,9 @@ pub fn EqPolynomial(comptime F: type) type {
         /// - For each i in active region: result[i+size] = result[i] * r[j], result[i] -= result[i+size]
         pub fn evalsSliceWithScaling(comptime FieldType: type, allocator: Allocator, r: []const FieldType, scaling_factor: ?FieldType) ![]FieldType {
             const n = r.len;
-            if (n == 0) {
-                const result = try allocator.alloc(FieldType, 1);
-                result[0] = scaling_factor orelse FieldType.one();
-                return result;
-            }
-
             const final_size = @as(usize, 1) << @as(u6, @intCast(n));
             const result = try allocator.alloc(FieldType, final_size);
-
-            // Initialize first element with scaling factor
-            @memset(result, FieldType.zero());
-            result[0] = scaling_factor orelse FieldType.one();
-
-            // Build evaluations using Jolt's evals_parallel algorithm
-            // Jolt iterates r in reverse: for r in r.iter().rev()
-            // This gives big-endian indexing where r[0] is MSB
-            var size: usize = 1;
-            var j: usize = n;
-            while (j > 0) {
-                j -= 1;
-                const r_j = r[j];
-
-                // For each i in [0, size), compute:
-                // result[i + size] = result[i] * r[j]
-                // result[i] = result[i] - result[i + size]
-                for (0..size) |i| {
-                    const x = result[i];
-                    const y = x.mul(r_j);
-                    result[i + size] = y;
-                    result[i] = x.sub(y);
-                }
-
-                size *= 2;
-            }
-
+            buildEqTableInPlace(r, result, scaling_factor);
             return result;
         }
 
@@ -340,7 +308,7 @@ pub fn EqPolynomial(comptime F: type) type {
             const final_size = @as(usize, 1) << @as(u6, @intCast(n));
             const result = try allocator.alloc(FieldType, final_size);
 
-            @memset(result, FieldType.zero());
+            // No memset needed: every entry is written before read by the expansion loop below.
             result[0] = scaling_factor orelse FieldType.one();
 
             // BE convention: iterate r in reverse
@@ -380,6 +348,59 @@ pub fn EqPolynomial(comptime F: type) type {
             }
 
             return result;
+        }
+
+        /// Build eq table in-place into a pre-allocated output buffer.
+        /// out must have length 2^r.len. No temporary allocation.
+        /// Supports an optional scaling factor: out[0] starts as scale instead of 1.
+        pub fn buildEqTableInPlace(r: []const F, out: []F, scaling_factor: ?F) void {
+            const n = r.len;
+            std.debug.assert(out.len == @as(usize, 1) << @intCast(n));
+            // No memset needed: the loop writes every entry before reading it.
+            // At each level, we read out[0..level_size-1] (already written) and
+            // write out[0..2*level_size-1]. After n levels all 2^n entries are set.
+            out[0] = scaling_factor orelse F.one();
+            var level_size: usize = 1;
+            var j: usize = n;
+            while (j > 0) {
+                j -= 1;
+                const r_j = r[j];
+                for (0..level_size) |i| {
+                    const x = out[i];
+                    const y = x.mul(r_j);
+                    out[i + level_size] = y;
+                    out[i] = x.sub(y);
+                }
+                level_size *= 2;
+            }
+        }
+
+        /// Build eq+1 table in-place: out[j] = eq(r, j-1) with out[0] = 0.
+        /// Uses the identity eq+1(r, j) = eq(r, j-1).
+        /// out must have length 2^r.len. No temporary allocation.
+        pub fn buildEqPlusOneTableInPlace(r: []const F, out: []F) void {
+            const n = r.len;
+            const size = out.len;
+            std.debug.assert(size == @as(usize, 1) << @intCast(n));
+            // Build eq table in-place, then shift right by 1.
+            // Shift must go backwards to avoid overwriting unread entries.
+            buildEqTableInPlace(r, out, null);
+            var k: usize = size - 1;
+            while (k > 0) : (k -= 1) {
+                out[k] = out[k - 1];
+            }
+            out[0] = F.zero();
+        }
+
+        /// Build both eq and eq+1 tables in-place. No temporary allocation.
+        /// eq_out[j] = eq(r, j), eq_plus_one_out[j] = eq(r, j-1) with [0] = 0.
+        pub fn buildEqAndEqPlusOneInPlace(r: []const F, eq_out: []F, eq_plus_one_out: []F) void {
+            const size = eq_out.len;
+            std.debug.assert(size == @as(usize, 1) << @intCast(r.len));
+            std.debug.assert(eq_plus_one_out.len == size);
+            buildEqTableInPlace(r, eq_out, null);
+            eq_plus_one_out[0] = F.zero();
+            @memcpy(eq_plus_one_out[1..], eq_out[0 .. size - 1]);
         }
 
         /// Bind the first variable and reduce polynomial size in-place
@@ -601,8 +622,8 @@ pub fn EqPlusOnePrefixSuffixPoly(comptime F: type) type {
 
             // Compute eq+1(r_lo, j) and eq+1(r_hi, j) for all j
             // Also compute eq(r_hi, j) = suffix_0
-            try computeEqPlusOneEvals(allocator, r_lo, prefix_0);
-            try computeEqAndEqPlusOneEvals(allocator, r_hi, suffix_0, suffix_1);
+            EqPolynomial(F).buildEqPlusOneTableInPlace(r_lo, prefix_0);
+            EqPolynomial(F).buildEqAndEqPlusOneInPlace(r_hi, suffix_0, suffix_1);
 
             return Self{
                 .prefix_0 = prefix_0,
@@ -630,46 +651,6 @@ pub fn EqPlusOnePrefixSuffixPoly(comptime F: type) type {
             return self.suffix_0.len;
         }
 
-        /// Helper to compute eq+1(r, j) for all j in {0, ..., 2^n - 1}
-        fn computeEqPlusOneEvals(allocator: Allocator, r: []const F, out: []F) !void {
-            const n = r.len;
-            const size = out.len;
-            std.debug.assert(size == @as(usize, 1) << @intCast(n));
-
-            // For each j, compute eq+1(r, j)
-            const j_bits = try allocator.alloc(F, n);
-            defer allocator.free(j_bits);
-
-            for (0..size) |j| {
-                // Convert j to binary (BIG_ENDIAN: bit 0 is MSB)
-                for (0..n) |k| {
-                    const bit_pos: u6 = @intCast(n - 1 - k);
-                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
-                }
-                out[j] = EqPlusOnePolynomial(F).mle(r, j_bits);
-            }
-        }
-
-        /// Helper to compute both eq(r, j) and eq+1(r, j) for all j
-        fn computeEqAndEqPlusOneEvals(allocator: Allocator, r: []const F, eq_out: []F, eq_plus_one_out: []F) !void {
-            const n = r.len;
-            const size = eq_out.len;
-            std.debug.assert(size == @as(usize, 1) << @intCast(n));
-            std.debug.assert(eq_plus_one_out.len == size);
-
-            const j_bits = try allocator.alloc(F, n);
-            defer allocator.free(j_bits);
-
-            for (0..size) |j| {
-                // Convert j to binary (BIG_ENDIAN: bit 0 is MSB)
-                for (0..n) |bit_idx| {
-                    const bit_pos: u6 = @intCast(n - 1 - bit_idx);
-                    j_bits[bit_idx] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
-                }
-                eq_out[j] = EqPolynomial(F).mle(r, j_bits);
-                eq_plus_one_out[j] = EqPlusOnePolynomial(F).mle(r, j_bits);
-            }
-        }
     };
 }
 
@@ -1553,7 +1534,299 @@ test "EqPlusOnePolynomial basic" {
     }
 }
 
-// Reference tests from submodules to ensure they run
+test "EqPolynomial buildEqTableInPlace matches per-point mle" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // n = 0: single entry should be 1
+    {
+        var out: [1]F = undefined;
+        EqPolynomial(F).buildEqTableInPlace(&.{}, &out, null);
+        try std.testing.expect(out[0].eql(F.one()));
+    }
+
+    // n = 0 with scaling factor
+    {
+        const scale = F.fromU64(42);
+        var out: [1]F = undefined;
+        EqPolynomial(F).buildEqTableInPlace(&.{}, &out, scale);
+        try std.testing.expect(out[0].eql(scale));
+    }
+
+    for (1..13) |n| {
+        const size = @as(usize, 1) << @intCast(n);
+
+        const r = try allocator.alloc(F, n);
+        defer allocator.free(r);
+        for (0..n) |i| r[i] = F.fromU64(@as(u64, i * 7 + 3));
+
+        // Build via in-place builder (no scaling)
+        const out = try allocator.alloc(F, size);
+        defer allocator.free(out);
+        EqPolynomial(F).buildEqTableInPlace(r, out, null);
+
+        // Verify against per-point mle() reference for all 2^n entries
+        const j_bits = try allocator.alloc(F, n);
+        defer allocator.free(j_bits);
+        for (0..size) |j| {
+            for (0..n) |k| {
+                const bit_pos: u6 = @intCast(n - 1 - k);
+                j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+            }
+            const expected = EqPolynomial(F).mle(r, j_bits);
+            try std.testing.expect(out[j].eql(expected));
+        }
+
+        // Also test with a scaling factor: out[j] == scale * eq(r, j)
+        const scale = F.fromU64(17);
+        const out_scaled = try allocator.alloc(F, size);
+        defer allocator.free(out_scaled);
+        EqPolynomial(F).buildEqTableInPlace(r, out_scaled, scale);
+
+        for (0..size) |j| {
+            for (0..n) |k| {
+                const bit_pos: u6 = @intCast(n - 1 - k);
+                j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+            }
+            const expected_scaled = scale.mul(EqPolynomial(F).mle(r, j_bits));
+            try std.testing.expect(out_scaled[j].eql(expected_scaled));
+        }
+    }
+}
+
+test "EqPolynomial buildEqPlusOneTableInPlace matches per-point mle" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // n = 0: single entry should be 0 (eq+1 at index 0 is always 0)
+    {
+        var out: [1]F = undefined;
+        EqPolynomial(F).buildEqPlusOneTableInPlace(&.{}, &out);
+        try std.testing.expect(out[0].eql(F.zero()));
+    }
+
+    for (1..13) |n| {
+        const size = @as(usize, 1) << @intCast(n);
+
+        const r = try allocator.alloc(F, n);
+        defer allocator.free(r);
+        for (0..n) |i| r[i] = F.fromU64(@as(u64, i * 7 + 3));
+
+        const out = try allocator.alloc(F, size);
+        defer allocator.free(out);
+        EqPolynomial(F).buildEqPlusOneTableInPlace(r, out);
+
+        // Verify eq+1[0] = 0
+        try std.testing.expect(out[0].eql(F.zero()));
+
+        // Verify against per-point MLE for all 2^n entries
+        const j_bits = try allocator.alloc(F, n);
+        defer allocator.free(j_bits);
+        for (0..size) |j| {
+            for (0..n) |k| {
+                const bit_pos: u6 = @intCast(n - 1 - k);
+                j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+            }
+            const expected = EqPlusOnePolynomial(F).mle(r, j_bits);
+            try std.testing.expect(out[j].eql(expected));
+        }
+    }
+}
+
+test "EqPolynomial buildEqAndEqPlusOneInPlace matches per-point mle" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // n = 0: eq_out = [1], eq_plus_one_out = [0]
+    {
+        var eq_out: [1]F = undefined;
+        var eqp1_out: [1]F = undefined;
+        EqPolynomial(F).buildEqAndEqPlusOneInPlace(&.{}, &eq_out, &eqp1_out);
+        try std.testing.expect(eq_out[0].eql(F.one()));
+        try std.testing.expect(eqp1_out[0].eql(F.zero()));
+    }
+
+    for (1..13) |n| {
+        const size = @as(usize, 1) << @intCast(n);
+
+        const r = try allocator.alloc(F, n);
+        defer allocator.free(r);
+        for (0..n) |i| r[i] = F.fromU64(@as(u64, i * 7 + 3));
+
+        const eq_out = try allocator.alloc(F, size);
+        defer allocator.free(eq_out);
+        const eq_plus_one_out = try allocator.alloc(F, size);
+        defer allocator.free(eq_plus_one_out);
+        EqPolynomial(F).buildEqAndEqPlusOneInPlace(r, eq_out, eq_plus_one_out);
+
+        const j_bits = try allocator.alloc(F, n);
+        defer allocator.free(j_bits);
+        for (0..size) |j| {
+            for (0..n) |k| {
+                const bit_pos: u6 = @intCast(n - 1 - k);
+                j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+            }
+            // eq table matches EqPolynomial.mle
+            const expected_eq = EqPolynomial(F).mle(r, j_bits);
+            try std.testing.expect(eq_out[j].eql(expected_eq));
+            // eq+1 table matches EqPlusOnePolynomial.mle
+            const expected_eqp1 = EqPlusOnePolynomial(F).mle(r, j_bits);
+            try std.testing.expect(eq_plus_one_out[j].eql(expected_eqp1));
+        }
+    }
+}
+
+test "EqPlusOnePrefixSuffixPoly batch construction matches per-point mle" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Test for all n = 2..12, including odd n for asymmetric splits
+    for (2..13) |n| {
+        // Generate deterministic r values (BE order, as required by init)
+        const r = try allocator.alloc(F, n);
+        defer allocator.free(r);
+        for (0..n) |i| {
+            r[i] = F.fromU64(@as(u64, i * 7 + 3));
+        }
+
+        // Build via the actual EqPlusOnePrefixSuffixPoly.init code path
+        var poly = try EqPlusOnePrefixSuffixPoly(F).init(allocator, r);
+        defer poly.deinit();
+
+        const mid = n / 2;
+        const r_hi = r[0..mid];
+        const r_lo = r[mid..];
+        const size_lo: usize = @as(usize, 1) << @intCast(r_lo.len);
+        const size_hi: usize = @as(usize, 1) << @intCast(r_hi.len);
+
+        // Verify prefix_0 = eq+1(r_lo, j) for all j via per-point mle
+        const j_bits = try allocator.alloc(F, @max(r_lo.len, r_hi.len));
+        defer allocator.free(j_bits);
+        for (0..size_lo) |j| {
+            for (0..r_lo.len) |k| {
+                const bit_pos: u6 = @intCast(r_lo.len - 1 - k);
+                j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+            }
+            const expected = EqPlusOnePolynomial(F).mle(r_lo, j_bits[0..r_lo.len]);
+            try std.testing.expect(poly.prefix_0[j].eql(expected));
+        }
+
+        // Verify prefix_1 = is_max(r_lo) * delta(j=0)
+        // is_max(r_lo) = eq((1,1,...,1), r_lo) = product of r_lo[i]
+        {
+            var is_max_expected = F.one();
+            for (0..r_lo.len) |i| is_max_expected = is_max_expected.mul(r_lo[i]);
+            try std.testing.expect(poly.prefix_1[0].eql(is_max_expected));
+            for (1..size_lo) |j| {
+                try std.testing.expect(poly.prefix_1[j].eql(F.zero()));
+            }
+        }
+
+        // Verify suffix_0 = eq(r_hi, j) for all j
+        for (0..size_hi) |j| {
+            for (0..r_hi.len) |k| {
+                const bit_pos: u6 = @intCast(r_hi.len - 1 - k);
+                j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+            }
+            const expected = EqPolynomial(F).mle(r_hi, j_bits[0..r_hi.len]);
+            try std.testing.expect(poly.suffix_0[j].eql(expected));
+        }
+
+        // Verify suffix_1 = eq+1(r_hi, j) for all j
+        for (0..size_hi) |j| {
+            for (0..r_hi.len) |k| {
+                const bit_pos: u6 = @intCast(r_hi.len - 1 - k);
+                j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+            }
+            const expected = EqPlusOnePolynomial(F).mle(r_hi, j_bits[0..r_hi.len]);
+            try std.testing.expect(poly.suffix_1[j].eql(expected));
+        }
+
+        // Verify the decomposition identity for ALL full-size indices:
+        // eq+1(r, j) == prefix_0[j_lo] * suffix_0[j_hi] + prefix_1[j_lo] * suffix_1[j_hi]
+        const full_size: usize = @as(usize, 1) << @intCast(n);
+        const full_j_bits = try allocator.alloc(F, n);
+        defer allocator.free(full_j_bits);
+        for (0..full_size) |j| {
+            const j_hi = j >> @intCast(r_lo.len);
+            const j_lo = j & (size_lo - 1);
+            const actual = poly.prefix_0[j_lo].mul(poly.suffix_0[j_hi])
+                .add(poly.prefix_1[j_lo].mul(poly.suffix_1[j_hi]));
+            for (0..n) |k| {
+                const bit_pos: u6 = @intCast(n - 1 - k);
+                full_j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+            }
+            const expected_full = EqPlusOnePolynomial(F).mle(r, full_j_bits);
+            try std.testing.expect(actual.eql(expected_full));
+        }
+    }
+}
+
+test "EqPolynomial batch builders with large field elements" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Use large field elements that exercise modular reduction.
+    // These are near the BN254 scalar field modulus (~2^254).
+    const large_r = [_]F{
+        F.fromU128(0xfedcba9876543210_fedcba9876543210),
+        F.fromU128(0x123456789abcdef0_123456789abcdef0),
+        F.fromU128(0xa0a0a0a0a0a0a0a0_b1b1b1b1b1b1b1b1),
+        F.fromU128(0xffffffffffffffff_fffffffffffffffe),
+        F.fromU128(0x8000000000000000_0000000000000001),
+    };
+
+    const n = large_r.len;
+    const size = @as(usize, 1) << @intCast(n);
+
+    const j_bits = try allocator.alloc(F, n);
+    defer allocator.free(j_bits);
+
+    // buildEqTableInPlace
+    const eq_out = try allocator.alloc(F, size);
+    defer allocator.free(eq_out);
+    EqPolynomial(F).buildEqTableInPlace(&large_r, eq_out, null);
+    for (0..size) |j| {
+        for (0..n) |k| {
+            const bit_pos: u6 = @intCast(n - 1 - k);
+            j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+        }
+        try std.testing.expect(eq_out[j].eql(EqPolynomial(F).mle(&large_r, j_bits)));
+    }
+
+    // buildEqTableInPlace with scaling
+    const scale = F.fromU128(0xdeadbeefcafebabe_1234567890abcdef);
+    const eq_scaled = try allocator.alloc(F, size);
+    defer allocator.free(eq_scaled);
+    EqPolynomial(F).buildEqTableInPlace(&large_r, eq_scaled, scale);
+    for (0..size) |j| {
+        try std.testing.expect(eq_scaled[j].eql(scale.mul(eq_out[j])));
+    }
+
+    // buildEqPlusOneTableInPlace
+    const eqp1_out = try allocator.alloc(F, size);
+    defer allocator.free(eqp1_out);
+    EqPolynomial(F).buildEqPlusOneTableInPlace(&large_r, eqp1_out);
+    for (0..size) |j| {
+        for (0..n) |k| {
+            const bit_pos: u6 = @intCast(n - 1 - k);
+            j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+        }
+        try std.testing.expect(eqp1_out[j].eql(EqPlusOnePolynomial(F).mle(&large_r, j_bits)));
+    }
+
+    // buildEqAndEqPlusOneInPlace
+    const eq2 = try allocator.alloc(F, size);
+    defer allocator.free(eq2);
+    const eqp1_2 = try allocator.alloc(F, size);
+    defer allocator.free(eqp1_2);
+    EqPolynomial(F).buildEqAndEqPlusOneInPlace(&large_r, eq2, eqp1_2);
+    for (0..size) |j| {
+        try std.testing.expect(eq2[j].eql(eq_out[j]));
+        try std.testing.expect(eqp1_2[j].eql(eqp1_out[j]));
+    }
+}
+
 test {
     std.testing.refAllDecls(split_eq);
     std.testing.refAllDecls(multiquadratic);

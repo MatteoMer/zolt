@@ -1953,12 +1953,10 @@ fn IncClaimReductionProver(comptime F: type) type {
             }
         }
 
-        pub fn openingClaims(self: *const Self) struct { ram_inc: F, rd_inc: F, eq_ram: F, eq_rd: F } {
+        pub fn openingClaims(self: *const Self) struct { ram_inc: F, rd_inc: F } {
             return .{
                 .ram_inc = self.ram_inc[0],
                 .rd_inc = self.rd_inc[0],
-                .eq_ram = self.eq_ram[0],
-                .eq_rd = self.eq_rd[0],
             };
         }
     };
@@ -2209,21 +2207,9 @@ fn HammingBooleanityProver(comptime F: type) type {
                     const half = self.current_len / 2;
                     const half_lo = self.prefix_current_len / 2;
 
-                    // Bind eq_lo and H in parallel
-                    if (self.pool) |pool| {
-                        const arrays = [2][]F{ self.eq_lo, self.H };
-                        const halves = [2]usize{ half_lo, half };
-                        const Ctx = struct { arrs: [2][]F, halves: [2]usize, r: F };
-                        const ctx = Ctx{ .arrs = arrays, .halves = halves, .r = r };
-                        pool.parallelForForce(2, ctx, struct {
-                            fn f(c: Ctx, idx: usize) void {
-                                bindOne(c.arrs[idx], c.halves[idx], c.r);
-                            }
-                        }.f);
-                    } else {
-                        bindOne(self.eq_lo, half_lo, r);
-                        bindOne(self.H, half, r);
-                    }
+                    // eq_lo is tiny (sqrt(T)), bind inline; H is large
+                    bindOne(self.eq_lo, half_lo, r);
+                    bindOne(self.H, half, r);
                     self.current_len = half;
                     self.prefix_current_len = half_lo;
 
@@ -2233,10 +2219,18 @@ fn HammingBooleanityProver(comptime F: type) type {
                         self.allocator.free(self.eq_lo);
 
                         // Merge: eq[j_hi] = eq_lo_scalar * eq_hi[j_hi]
-                        // Reuse eq_hi allocation if possible, or scale in place
                         const eq_merged = self.eq_hi;
-                        for (0..self.suffix_len) |j| {
-                            eq_merged[j] = eq_lo_scalar.mul(eq_merged[j]);
+                        const ScaleCtx = struct { eq: []F, scalar: F };
+                        const scale_ctx = ScaleCtx{ .eq = eq_merged, .scalar = eq_lo_scalar };
+                        const scaleFn = struct {
+                            fn f(c: ScaleCtx, j: usize) void {
+                                c.eq[j] = c.scalar.mul(c.eq[j]);
+                            }
+                        }.f;
+                        if (self.pool) |pool| {
+                            pool.parallelFor(self.suffix_len, scale_ctx, scaleFn);
+                        } else {
+                            for (0..self.suffix_len) |j| scaleFn(scale_ctx, j);
                         }
                         self.eq = eq_merged;
                         self.phase = .phase2;
@@ -2302,6 +2296,9 @@ fn RamRaVirtualProver(comptime F: type) type {
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
             const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
+
+            // u8 indices can represent chunk values up to 255
+            std.debug.assert(log_k_chunk <= ra_poly_mod.MAX_LOG_K_CHUNK);
 
             var ra_polys = try allocator.alloc(RaPoly, d);
             errdefer {
@@ -2482,7 +2479,6 @@ fn RamRaVirtualProver(comptime F: type) type {
         pub fn bindChallenge(self: *Self, r: F) !void {
             const half = self.current_len / 2;
 
-            // Bind eq array (always dense)
             const bindOne = struct {
                 fn f(arr: []F, h: usize, challenge: F) void {
                     for (0..h) |j| {
@@ -2491,11 +2487,37 @@ fn RamRaVirtualProver(comptime F: type) type {
                 }
             }.f;
 
-            bindOne(self.eq, half, r);
+            const all_dense = self.ra_polys.len > 0 and self.ra_polys[0] == .dense;
 
-            // Bind ra_polys (handles round1→dense transition)
-            for (self.ra_polys) |*rp| {
-                try rp.bind(r, self.allocator);
+            if (all_dense and self.pool != null) {
+                // Parallel bind: d ra_poly dense arrays + 1 eq array
+                const total = self.d + 1;
+                const RaBindCtx = struct { ra: []RaPoly, eq: []F, d: usize, half: usize, r: F };
+                const ctx = RaBindCtx{ .ra = self.ra_polys, .eq = self.eq, .d = self.d, .half = half, .r = r };
+                self.pool.?.parallelForForce(total, ctx, struct {
+                    fn f(c: RaBindCtx, idx: usize) void {
+                        const bOne = struct {
+                            fn bf(arr: []F, h: usize, challenge: F) void {
+                                for (0..h) |j| {
+                                    arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
+                                }
+                            }
+                        }.bf;
+                        if (idx < c.d) {
+                            bOne(c.ra[idx].dense.coeffs[0 .. c.half * 2], c.half, c.r);
+                            c.ra[idx].dense.current_len = c.half;
+                        } else {
+                            bOne(c.eq, c.half, c.r);
+                        }
+                    }
+                }.f);
+            } else {
+                // First round (round1→dense transition) or no pool: sequential.
+                // TODO: parallelize round1→dense materialization across d polys for large T.
+                bindOne(self.eq, half, r);
+                for (self.ra_polys) |*rp| {
+                    try rp.bind(r, self.allocator);
+                }
             }
 
             self.current_len = half;
@@ -3257,13 +3279,12 @@ fn BooleanityProver(comptime F: type) type {
 // Variables: n_cycle_vars
 // Degree: M+1 (product of M linear ra polys * one linear eq)
 fn LookupsRaVirtualProver(comptime F: type) type {
-    const RaPoly = ra_poly_mod.RaPolynomial(F);
-
     return struct {
         const Self = @This();
 
-        /// Compressed ra polynomials (u8 indices in round 1, dense after bind)
-        ra_polys: []RaPoly,
+        /// ra_bound[i][j] - pre-bound to address chunks
+        /// First poly in each virtual batch pre-scaled by gamma^batch
+        ra_bound: [][]F,
         /// eq(r_cycle, .) evaluations
         eq: []F,
         M: usize,
@@ -3290,23 +3311,20 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             const total_committed = M * N;
             const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
 
-            var ra_polys = try allocator.alloc(RaPoly, total_committed);
+            var ra_bound_arr = try allocator.alloc([]F, total_committed);
             errdefer {
-                for (ra_polys[0..total_committed]) |*rp| rp.deinit(allocator);
-                allocator.free(ra_polys);
+                for (ra_bound_arr[0..total_committed]) |arr| allocator.free(arr);
+                allocator.free(ra_bound_arr);
             }
 
-            // Pre-allocate index arrays and eq_tables
-            var indices_arr = try allocator.alloc([]?u8, total_committed);
-            defer allocator.free(indices_arr);
+            // Pre-allocate eq_tables and gamma scales for parallel materialization
             var lk_eq_tables = try allocator.alloc([]F, total_committed);
-            defer allocator.free(lk_eq_tables); // only frees pointer array
-
+            defer allocator.free(lk_eq_tables);
             var gamma_scales = try allocator.alloc(F, total_committed);
             defer allocator.free(gamma_scales);
 
             for (0..total_committed) |i| {
-                indices_arr[i] = try allocator.alloc(?u8, T);
+                ra_bound_arr[i] = try allocator.alloc(F, T);
                 var r_chunk_rev = try allocator.alloc(F, log_k_chunk);
                 defer allocator.free(r_chunk_rev);
                 for (0..log_k_chunk) |ci| r_chunk_rev[ci] = r_addr_chunks[i][log_k_chunk - 1 - ci];
@@ -3327,30 +3345,36 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 }
             }
 
-            // Parallel fill: each committed poly i is independent (stores u8 indices)
+            // Parallel fill: compute ra_bound[i][j] = eq_table[chunk_val] * scale
             const LkRaInitCtx = struct {
                 steps: []const tracer.TraceStep,
-                indices_arr: [][]?u8,
+                ra_bound: [][]F,
+                lk_eq_tables: [][]F,
+                gamma_scales: []const F,
                 log_k_chunk: usize,
                 k_chunk: usize,
                 instruction_d: usize,
             };
             const lk_ra_ctx = LkRaInitCtx{
                 .steps = trace.steps.items,
-                .indices_arr = indices_arr,
+                .ra_bound = ra_bound_arr,
+                .lk_eq_tables = lk_eq_tables,
+                .gamma_scales = gamma_scales,
                 .log_k_chunk = log_k_chunk,
                 .k_chunk = k_chunk,
                 .instruction_d = instruction_d,
             };
             const lkRaInitFn = struct {
                 fn f(c: LkRaInitCtx, i: usize) void {
+                    const eq_t = c.lk_eq_tables[i];
+                    const scl = c.gamma_scales[i];
                     for (0..c.steps.len) |j| {
                         const step = c.steps[j];
                         const chunk_val = getLookupChunkInterleaved(step, i, c.log_k_chunk, c.instruction_d);
                         if (chunk_val < c.k_chunk) {
-                            c.indices_arr[i][j] = @intCast(chunk_val);
+                            c.ra_bound[i][j] = eq_t[chunk_val].mul(scl);
                         } else {
-                            c.indices_arr[i][j] = null;
+                            c.ra_bound[i][j] = F.zero();
                         }
                     }
                 }
@@ -3361,50 +3385,9 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 for (0..total_committed) |i| lkRaInitFn(lk_ra_ctx, i);
             }
 
-            // Materialize to dense arrays (parallelize over total_committed)
-            var dense_arrs = try allocator.alloc([]F, total_committed);
-            defer allocator.free(dense_arrs);
+            // Free eq_tables (values already materialized into ra_bound)
             for (0..total_committed) |i| {
-                dense_arrs[i] = try allocator.alloc(F, T);
-            }
-
-            const LkMaterCtx = struct {
-                indices_arr: [][]?u8,
-                lk_eq_tables: [][]F,
-                gamma_scales: []const F,
-                dense_arrs: [][]F,
-                T: usize,
-            };
-            const lk_mater_ctx = LkMaterCtx{
-                .indices_arr = indices_arr,
-                .lk_eq_tables = lk_eq_tables,
-                .gamma_scales = gamma_scales,
-                .dense_arrs = dense_arrs,
-                .T = T,
-            };
-            const lkMaterFn = struct {
-                fn f(c: LkMaterCtx, i: usize) void {
-                    const eq_t = c.lk_eq_tables[i];
-                    const scl = c.gamma_scales[i];
-                    for (0..c.T) |j| {
-                        c.dense_arrs[i][j] = if (c.indices_arr[i][j]) |idx|
-                            eq_t[idx].mul(scl)
-                        else
-                            F.zero();
-                    }
-                }
-            }.f;
-            if (init_pool) |p| {
-                p.parallelFor(total_committed, lk_mater_ctx, lkMaterFn);
-            } else {
-                for (0..total_committed) |i| lkMaterFn(lk_mater_ctx, i);
-            }
-
-            // Free index arrays and eq_tables, assemble RaPolynomials in dense mode
-            for (0..total_committed) |i| {
-                allocator.free(indices_arr[i]);
                 allocator.free(lk_eq_tables[i]);
-                ra_polys[i] = .{ .dense = .{ .coeffs = dense_arrs[i], .current_len = T } };
             }
 
             // r_cycle is in BE order; reverse for LE computeEqTable
@@ -3414,7 +3397,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             const eq_arr = try computeEqTableParallel(F, allocator, r_cycle_rev, n_vars, init_pool);
 
             return Self{
-                .ra_polys = ra_polys,
+                .ra_bound = ra_bound_arr,
                 .eq = eq_arr,
                 .M = M,
                 .N = N,
@@ -3426,8 +3409,8 @@ fn LookupsRaVirtualProver(comptime F: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            for (self.ra_polys) |*rp| rp.deinit(self.allocator);
-            self.allocator.free(self.ra_polys);
+            for (self.ra_bound) |arr| self.allocator.free(arr);
+            self.allocator.free(self.ra_bound);
             self.allocator.free(self.eq);
         }
 
@@ -3443,7 +3426,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             }
 
             const Ctx = struct {
-                ra_polys: []RaPoly,
+                ra_bound: [][]F,
                 eq: []F,
                 M: usize,
                 N: usize,
@@ -3451,7 +3434,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 x_vals: [MAX_RA_EVALS]F,
             };
             const ctx = Ctx{
-                .ra_polys = self.ra_polys,
+                .ra_bound = self.ra_bound,
                 .eq = self.eq,
                 .M = self.M,
                 .N = self.N,
@@ -3476,8 +3459,8 @@ fn LookupsRaVirtualProver(comptime F: type) type {
 
                                 for (0..c.M) |m| {
                                     const idx = v * c.M + m;
-                                    const v0 = c.ra_polys[idx].getBoundCoeff(2 * j);
-                                    const v1 = c.ra_polys[idx].getBoundCoeff(2 * j + 1);
+                                    const v0 = c.ra_bound[idx][2 * j];
+                                    const v1 = c.ra_bound[idx][2 * j + 1];
                                     product = product.mul(v0.add(x.mul(v1.sub(v0))));
                                 }
 
@@ -3513,10 +3496,9 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             return evals;
         }
 
-        pub fn bindChallenge(self: *Self, r: F) !void {
+        pub fn bindChallenge(self: *Self, r: F) void {
             const half = self.current_len / 2;
 
-            // Bind eq array (always dense)
             const bindOne = struct {
                 fn f(arr: []F, h: usize, challenge: F) void {
                     for (0..h) |j| {
@@ -3525,11 +3507,32 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 }
             }.f;
 
-            bindOne(self.eq, half, r);
-
-            // Bind ra_polys (handles round1→dense transition)
-            for (self.ra_polys) |*rp| {
-                try rp.bind(r, self.allocator);
+            if (self.pool) |pool| {
+                // total_committed+1 independent arrays: total_committed ra_bound + 1 eq
+                const total = self.total_committed + 1;
+                const BindCtx = struct { ra: [][]F, eq: []F, tc: usize, half: usize, r: F };
+                const ctx = BindCtx{ .ra = self.ra_bound, .eq = self.eq, .tc = self.total_committed, .half = half, .r = r };
+                pool.parallelForForce(total, ctx, struct {
+                    fn f(c: BindCtx, idx: usize) void {
+                        const bOne = struct {
+                            fn bf(arr: []F, h: usize, challenge: F) void {
+                                for (0..h) |j| {
+                                    arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
+                                }
+                            }
+                        }.bf;
+                        if (idx < c.tc) {
+                            bOne(c.ra[idx], c.half, c.r);
+                        } else {
+                            bOne(c.eq, c.half, c.r);
+                        }
+                    }
+                }.f);
+            } else {
+                for (0..self.total_committed) |i| {
+                    bindOne(self.ra_bound[i], half, r);
+                }
+                bindOne(self.eq, half, r);
             }
 
             self.current_len = half;
@@ -3538,7 +3541,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
         pub fn getOpeningClaims(self: *const Self, allocator: Allocator, gamma_powers: []const F) ![]F {
             var claims = try allocator.alloc(F, self.total_committed);
             for (0..self.total_committed) |i| {
-                var claim = self.ra_polys[i].finalClaim();
+                var claim = self.ra_bound[i][0];
                 // Undo gamma pre-scaling for first poly in each batch
                 const is_first_in_batch = (i % self.M == 0);
                 if (is_first_in_batch) {
@@ -3646,6 +3649,8 @@ fn BytecodeReadRafProver(comptime F: type) type {
             defer allocator.free(inner_buf);
             var touched_buf = try allocator.alloc(usize, bytecode_K);
             defer allocator.free(touched_buf);
+            var touched_set = try allocator.alloc(bool, bytecode_K);
+            defer allocator.free(touched_set);
 
             var r_cycle_rev = try allocator.alloc(F, n_cycle_vars);
             defer allocator.free(r_cycle_rev);
@@ -3665,8 +3670,11 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 F_s_arrs[s] = try allocator.alloc(F, bytecode_K);
                 @memset(F_s_arrs[s], F.zero());
                 @memset(inner_buf, F.zero());
+                @memset(touched_set, false);
 
-                // Double loop with touched-PC tracking
+                // Double loop with touched-PC tracking.
+                // TODO: parallelize — outer loop has F_s accumulation dependency;
+                // could use per-thread F_s buffers with a final reduce for large T.
                 for (0..out_len) |c_hi| {
                     var touched_count: usize = 0;
 
@@ -3676,7 +3684,8 @@ fn BytecodeReadRafProver(comptime F: type) type {
                         const step = trace.steps.items[c];
                         const pc_idx = pc_map.getPCForStep(step);
                         if (pc_idx < bytecode_K) {
-                            if (inner_buf[pc_idx].eql(F.zero())) {
+                            if (!touched_set[pc_idx]) {
+                                touched_set[pc_idx] = true;
                                 touched_buf[touched_count] = pc_idx;
                                 touched_count += 1;
                             }
@@ -3689,7 +3698,8 @@ fn BytecodeReadRafProver(comptime F: type) type {
                     for (0..touched_count) |ti| {
                         const pc = touched_buf[ti];
                         F_s_arrs[s][pc] = F_s_arrs[s][pc].add(e_hi_val.mul(inner_buf[pc]));
-                        inner_buf[pc] = F.zero(); // reset for next c_hi
+                        inner_buf[pc] = F.zero();
+                        touched_set[pc] = false;
                     }
                 }
 
@@ -6943,7 +6953,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     instance_claims[4] = evaluatePolyFromEvals(F, cached_lookups_ra.?, challenge);
                     self.allocator.free(cached_lookups_ra.?);
                     cached_lookups_ra = null;
-                    try lookups_ra_prover.bindChallenge(challenge);
+                    lookups_ra_prover.bindChallenge(challenge);
                 }
 
                 // Instance 5: IncClaimReduction
@@ -6999,8 +7009,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             const ram_inc_claim = inc_opening.ram_inc;
             const rd_inc_claim = inc_opening.rd_inc;
             if (comptime debug_verbose) {
-                const eq_r = inc_opening.eq_ram;
-                const eq_d = inc_opening.eq_rd;
+                const eq_r = inc_prover.eq_ram[0];
+                const eq_d = inc_prover.eq_rd[0];
                 const recomp = ram_inc_claim.mul(eq_r).add(inc_gamma2.mul(rd_inc_claim.mul(eq_d)));
                 const er_be = eq_r.toBytesBE();
                 const ed_be = eq_d.toBytesBE();

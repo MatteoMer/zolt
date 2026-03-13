@@ -946,11 +946,12 @@ pub fn multiPairBatched(comptime N: comptime_int, groups: [N]PairGroup, tp: ?*Th
     }
     const total = offsets[N];
 
-    // Fallback: sequential per-group
+    // Fallback: sequential per-group, but each group can still parallelize internally
+    // via TLS pool (enables nested parallelism from work-stealing dispatch).
     if (total == 0 or tp == null) {
         var results: [N]GT = undefined;
         inline for (0..N) |g| {
-            results[g] = multiPairG1G2WithPool(groups[g].g1, groups[g].g2, null);
+            results[g] = multiPairG1G2WithPool(groups[g].g1, groups[g].g2, ThreadPool.getPool());
         }
         return results;
     }
@@ -1689,8 +1690,9 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         /// - nu = num_vars - sigma
         ///
         /// This matches Jolt/dory-pcs matrix layout for compatible commitments.
+        /// Uses TLS pool for nested parallelism when called from within a pool-managed thread.
         pub fn commit(params: *const SetupParams, evals: []const F) Commitment {
-            return commitWithPool(params, evals, null);
+            return commitWithPool(params, evals, ThreadPool.getPool());
         }
 
         pub fn commitWithPool(params: *const SetupParams, evals: []const F, tp: ?*ThreadPool) Commitment {
@@ -2127,7 +2129,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             point: []const F,
             allocator: Allocator,
         ) !Proof {
-            return openWithRowCommitments(params, evals, point, null, allocator, null);
+            // Uses TLS pool for nested parallelism when called from within a pool-managed thread.
+            return openWithRowCommitments(params, evals, point, null, allocator, ThreadPool.getPool());
         }
 
         /// Create an opening proof with pre-computed row commitments
@@ -2875,19 +2878,19 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         eb_ctx,
                         struct {
                             fn f(cx: EBetaCtx) G1Point {
-                                return msm.MSM(F, Fp).computeWithPool(cx.g1[0..cx.len], cx.s2[0..cx.len], null);
+                                return msm.MSM(F, Fp).computeWithPool(cx.g1[0..cx.len], cx.s2[0..cx.len], ThreadPool.getPool());
                             }
                         }.f,
                         eb_ctx,
                         struct {
                             fn f(cx: EBetaCtx) G2Point {
-                                return msmG2(F, cx.g2[0..cx.len], cx.s1[0..cx.len], null);
+                                return msmG2(F, cx.g2[0..cx.len], cx.s1[0..cx.len], ThreadPool.getPool());
                             }
                         }.f,
                     );
                 } else .{
-                    msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..current_len], s2_work[0..current_len], null),
-                    msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len], null),
+                    msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..current_len], s2_work[0..current_len], ThreadPool.getPool()),
+                    msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len], ThreadPool.getPool()),
                 };
 
                 // Debug: write e2_beta for each round to /tmp for validation
@@ -2996,19 +2999,19 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         e1_ctx,
                         struct {
                             fn f(cx: E1Ctx) G1Point {
-                                return msm.MSM(F, Fp).computeWithPool(cx.v1[0..cx.n2], cx.s2[cx.n2..cx.current_len], null);
+                                return msm.MSM(F, Fp).computeWithPool(cx.v1[0..cx.n2], cx.s2[cx.n2..cx.current_len], ThreadPool.getPool());
                             }
                         }.f,
                         e1_ctx,
                         struct {
                             fn f(cx: E1Ctx) G1Point {
-                                return msm.MSM(F, Fp).computeWithPool(cx.v1[cx.n2..cx.current_len], cx.s2[0..cx.n2], null);
+                                return msm.MSM(F, Fp).computeWithPool(cx.v1[cx.n2..cx.current_len], cx.s2[0..cx.n2], ThreadPool.getPool());
                             }
                         }.f,
                     );
                 } else .{
-                    msm.MSM(F, Fp).computeWithPool(v1_work[0..n2], s2_work[n2..current_len], null),
-                    msm.MSM(F, Fp).computeWithPool(v1_work[n2..current_len], s2_work[0..n2], null),
+                    msm.MSM(F, Fp).computeWithPool(v1_work[0..n2], s2_work[n2..current_len], ThreadPool.getPool()),
+                    msm.MSM(F, Fp).computeWithPool(v1_work[n2..current_len], s2_work[0..n2], ThreadPool.getPool()),
                 };
                 const e2_plus, const e2_minus = if (tp) |pool| blk: {
                     const E2Ctx = struct {
@@ -3024,19 +3027,19 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         e2_ctx,
                         struct {
                             fn f(cx: E2Ctx) G2Point {
-                                return msmG2(F, cx.v2[cx.n2..cx.current_len], cx.s1[0..cx.n2], null);
+                                return msmG2(F, cx.v2[cx.n2..cx.current_len], cx.s1[0..cx.n2], ThreadPool.getPool());
                             }
                         }.f,
                         e2_ctx,
                         struct {
                             fn f(cx: E2Ctx) G2Point {
-                                return msmG2(F, cx.v2[0..cx.n2], cx.s1[cx.n2..cx.current_len], null);
+                                return msmG2(F, cx.v2[0..cx.n2], cx.s1[cx.n2..cx.current_len], ThreadPool.getPool());
                             }
                         }.f,
                     );
                 } else .{
-                    msmG2(F, v2_work[n2..current_len], s1_work[0..n2], null),
-                    msmG2(F, v2_work[0..n2], s1_work[n2..current_len], null),
+                    msmG2(F, v2_work[n2..current_len], s1_work[0..n2], ThreadPool.getPool()),
+                    msmG2(F, v2_work[0..n2], s1_work[n2..current_len], ThreadPool.getPool()),
                 };
 
                 second_messages[round] = SecondReduceMessage{

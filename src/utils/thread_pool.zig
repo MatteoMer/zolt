@@ -1,10 +1,10 @@
-//! ThreadPool - Atomic counter dispatch thread pool
+//! ThreadPool - Chase-Lev Work-Stealing Thread Pool
 //!
-//! Replaces std.Thread.Pool-based dispatch with zero-allocation atomic counter dispatch.
-//! Workers claim chunks via fetchAdd on a shared counter. Generation-based wake with
-//! 3-phase spin-park (spin → yield → futex) for low-latency dispatch.
+//! Per-worker Chase-Lev deques (2013 PPoPP paper orderings) with adaptive work splitting.
+//! Supports unlimited nested dispatch via TLS-based worker identification.
+//! Workers stay productive while waiting: pop own deque → steal from random victim.
 //!
-//! Same public API as the previous implementation — zero call-site changes required.
+//! Same public API as the previous atomic counter implementation — zero call-site changes.
 
 const std = @import("std");
 const atomic = std.atomic;
@@ -22,6 +22,10 @@ const cache_line = atomic.cache_line;
 const SPIN_ITERS: u32 = 64;
 const YIELD_ITERS: u32 = 8;
 
+// Chase-Lev deque capacity (power of 2). Supports ~256 pending jobs per worker.
+// Max depth with 3-level nesting and adaptive splitting: ~54 entries.
+const DEQUE_CAP: usize = 256;
+
 const WorkerState = enum(u32) {
     spinning = 0,
     yielding = 1,
@@ -30,38 +34,268 @@ const WorkerState = enum(u32) {
     shutdown = 4,
 };
 
-const PaddedWorkerState = struct {
+// ============================================================================
+// Job: 64-byte cache-line-sized work unit
+// ============================================================================
+
+const Job = struct {
+    execute_fn: *const fn (*Job, *WorkerData) void,
+    data: [56]u8 align(8) = undefined,
+
+    fn initFrom(comptime T: type, val: T, execute_fn: *const fn (*Job, *WorkerData) void) Job {
+        comptime std.debug.assert(@sizeOf(T) <= 56);
+        var job = Job{ .execute_fn = execute_fn };
+        @memcpy(job.data[0..@sizeOf(T)], std.mem.asBytes(&val));
+        return job;
+    }
+
+    fn getPayload(self: *Job, comptime T: type) *T {
+        return @ptrCast(@alignCast(&self.data));
+    }
+};
+
+comptime {
+    std.debug.assert(@sizeOf(Job) == 64);
+}
+
+// ============================================================================
+// CompletionLatch: stack-allocated completion tracking
+// ============================================================================
+
+const CompletionLatch = struct {
+    remaining: atomic.Value(u32) align(cache_line),
+    done: atomic.Value(u32) = atomic.Value(u32).init(0),
+
+    fn init(count: u32) CompletionLatch {
+        return .{
+            .remaining = atomic.Value(u32).init(count),
+        };
+    }
+
+    fn addPending(self: *CompletionLatch, n: u32) void {
+        _ = self.remaining.fetchAdd(n, .acq_rel);
+    }
+
+    fn completeOne(self: *CompletionLatch) void {
+        const prev = self.remaining.fetchSub(1, .acq_rel);
+        if (prev == 1) {
+            self.done.store(1, .release);
+            Futex.wake(&self.done, std.math.maxInt(u32));
+        }
+    }
+
+    fn isDone(self: *const CompletionLatch) bool {
+        return self.done.load(.acquire) == 1;
+    }
+
+    fn waitWhileWorking(self: *CompletionLatch, worker: *WorkerData, pool: *ThreadPool) void {
+        while (!self.isDone()) {
+            // Try to pop from own deque (LIFO — cache friendly)
+            if (worker.deque.pop()) |*job_mut| {
+                var job = job_mut.*;
+                job.execute_fn(&job, worker);
+                continue;
+            }
+
+            // Try to steal from random victim
+            if (worker.tryStealing(pool)) |*stolen_mut| {
+                var job = stolen_mut.*;
+                job.execute_fn(&job, worker);
+                continue;
+            }
+
+            // Brief spin before futex wait
+            for (0..32) |_| {
+                if (self.isDone()) return;
+                atomic.spinLoopHint();
+            }
+
+            // Futex wait if still not done
+            if (!self.isDone()) {
+                Futex.timedWait(&self.done, 0, 1_000_000) catch {}; // 1ms timeout
+            }
+        }
+    }
+};
+
+// ============================================================================
+// Chase-Lev Deque: lock-free SPMC work-stealing deque
+// ============================================================================
+
+const Deque = struct {
+    buffer: [DEQUE_CAP]Job align(cache_line) = undefined,
+    bottom: atomic.Value(i64) align(cache_line) = atomic.Value(i64).init(0),
+    top: atomic.Value(i64) align(cache_line) = atomic.Value(i64).init(0),
+
+    const StealResult = union(enum) {
+        success: Job,
+        empty,
+        retry,
+    };
+
+    /// Owner-only push. O(1), uncontended. Returns false if deque is full.
+    fn push(self: *Deque, job: Job) bool {
+        const b = self.bottom.load(.monotonic);
+        const t = self.top.load(.acquire);
+
+        if (b - t >= DEQUE_CAP) {
+            return false;
+        }
+
+        self.buffer[@intCast(@mod(b, DEQUE_CAP))] = job;
+        // Release fence folded into bottom store: ensures buffer write is visible before bottom update
+        self.bottom.store(b + 1, .release);
+        return true;
+    }
+
+    /// Owner-only pop. LIFO (cache-friendly). Returns null if empty.
+    fn pop(self: *Deque) ?Job {
+        const b = self.bottom.load(.monotonic) - 1;
+        // All four pop/steal boundary ops use seq_cst per Chase-Lev (Lê et al., PPoPP 2013)
+        self.bottom.store(b, .seq_cst);
+        const t = self.top.load(.seq_cst);
+
+        if (t <= b) {
+            // Non-empty
+            const job = self.buffer[@intCast(@mod(b, DEQUE_CAP))];
+            if (t == b) {
+                // Last element — race with stealers
+                if (self.top.cmpxchgStrong(t, t + 1, .seq_cst, .monotonic)) |_| {
+                    // Lost race to stealer
+                    self.bottom.store(t + 1, .monotonic);
+                    return null;
+                }
+                self.bottom.store(t + 1, .monotonic);
+            }
+            return job;
+        } else {
+            // Empty
+            self.bottom.store(t, .monotonic);
+            return null;
+        }
+    }
+
+    /// Any-thread steal. FIFO (fair). CAS-based.
+    fn steal(self: *Deque) StealResult {
+        // All four pop/steal boundary ops use seq_cst per Chase-Lev (Lê et al., PPoPP 2013)
+        const t = self.top.load(.seq_cst);
+        const b = self.bottom.load(.seq_cst);
+
+        if (t >= b) return .empty;
+
+        const job = self.buffer[@intCast(@mod(t, DEQUE_CAP))];
+
+        if (self.top.cmpxchgStrong(t, t + 1, .seq_cst, .monotonic)) |_| {
+            return .retry;
+        }
+
+        return .{ .success = job };
+    }
+};
+
+// ============================================================================
+// WorkerData: per-worker state with deque and TLS
+// ============================================================================
+
+const WorkerData = struct {
+    deque: Deque align(cache_line) = .{},
+    pool_ptr: *ThreadPool = undefined,
+    index: usize = 0,
+    rng_state: u32 = 0,
     state: atomic.Value(u32) align(cache_line) = atomic.Value(u32).init(@intFromEnum(WorkerState.spinning)),
-    last_seen_gen: u32 = 0,
+    /// Nesting depth for the main-thread slot. 0 = free. Prevents SPMC violation
+    /// if two non-worker threads try to use the same pool concurrently.
+    /// Incremented on each dispatch entry, decremented on exit. Only the first
+    /// increment (0→1) claims the slot; only the last decrement (1→0) releases it.
+    claim_depth: atomic.Value(u32) = atomic.Value(u32).init(0),
+
+    fn initRng(self: *WorkerData) void {
+        // Seed RNG with index + timestamp for randomness
+        const ts: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+        self.rng_state = @truncate((self.index +% 1) *% 2654435761 +% ts);
+        if (self.rng_state == 0) self.rng_state = 1;
+    }
+
+    fn nextRandom(self: *WorkerData) u32 {
+        var x = self.rng_state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng_state = x;
+        return x;
+    }
+
+    fn tryStealing(self: *WorkerData, pool: *ThreadPool) ?Job {
+        const total = pool.thread_count + 1; // workers + main thread slot
+        if (total <= 1) return null;
+
+        const start = self.nextRandom() % @as(u32, @intCast(total));
+        for (0..total) |offset| {
+            const victim_idx = (@as(usize, start) + offset) % total;
+            if (victim_idx == self.index) continue;
+
+            switch (pool.workers[victim_idx].deque.steal()) {
+                .success => |job| return job,
+                .empty => continue,
+                .retry => continue,
+            }
+        }
+        return null;
+    }
 };
 
-/// Type-erased function pointer for dispatch callbacks.
-const DispatchFn = *const fn (dispatch: *DispatchState, start: usize, end: usize) void;
+threadlocal var tls_worker: ?*WorkerData = null;
 
-const DispatchState = struct {
-    // CL0: Written once by caller, read once by each worker
-    func_ptr: DispatchFn align(cache_line) = undefined,
-    context_ptr: *const anyopaque = undefined,
-    total_items: usize = 0,
-    chunk_size: usize = 0,
-    num_chunks: usize = 0,
+// ============================================================================
+// Job Payloads
+// ============================================================================
 
-    // CL1: Hot contended atomics
-    next_chunk: atomic.Value(u32) align(cache_line) = atomic.Value(u32).init(0),
-    remaining: atomic.Value(u32) = atomic.Value(u32).init(0),
-    done_futex: atomic.Value(u32) = atomic.Value(u32).init(0),
-
-    // CL2: Generation counter (polled by spinning workers)
-    generation: atomic.Value(u32) align(cache_line) = atomic.Value(u32).init(0),
+const RangeJobPayload = struct {
+    user_fn: *const anyopaque, // type-erased fn pointer
+    context_ptr: *const anyopaque,
+    start: usize,
+    end: usize,
+    latch: *CompletionLatch,
+    split_threshold: usize,
 };
+
+comptime {
+    std.debug.assert(@sizeOf(RangeJobPayload) <= 56);
+}
+
+const ReduceJobPayload = struct {
+    user_fn: *const anyopaque,
+    context_ptr: *const anyopaque,
+    start: usize,
+    end: usize,
+    latch: *CompletionLatch,
+    partial_ptr: *anyopaque,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(ReduceJobPayload) <= 56);
+}
+
+const ClosureJobPayload = struct {
+    user_fn: *const anyopaque,
+    context_ptr: *const anyopaque,
+    latch: *CompletionLatch,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(ClosureJobPayload) <= 56);
+}
+
+// ============================================================================
+// ThreadPool
+// ============================================================================
 
 pub const ThreadPool = struct {
-    dispatch: DispatchState,
-    dispatch_depth: atomic.Value(u32) align(cache_line),
-    workers: [MAX_THREADS]PaddedWorkerState,
+    workers: [MAX_THREADS + 1]WorkerData,
     threads: [MAX_THREADS]std.Thread,
     thread_count: usize,
     allocator: Allocator,
+    generation: atomic.Value(u32) align(cache_line),
 
     /// Initialize a thread pool with auto-detected CPU count (capped at 16).
     pub fn init(allocator: Allocator) !*ThreadPool {
@@ -78,22 +312,27 @@ pub const ThreadPool = struct {
         errdefer allocator.destroy(self);
 
         self.* = ThreadPool{
-            .dispatch = .{},
-            .dispatch_depth = atomic.Value(u32).init(0),
-            .workers = [_]PaddedWorkerState{.{}} ** MAX_THREADS,
+            .workers = [_]WorkerData{.{}} ** (MAX_THREADS + 1),
             .threads = undefined,
             .thread_count = actual_count,
             .allocator = allocator,
+            .generation = atomic.Value(u32).init(0),
         };
 
-        // Spawn worker threads
+        // Initialize worker metadata
+        for (0..actual_count + 1) |i| {
+            self.workers[i].pool_ptr = self;
+            self.workers[i].index = i;
+            self.workers[i].initRng();
+        }
+
+        // Spawn worker threads (indices 0..actual_count-1)
         var spawned: usize = 0;
         errdefer {
-            // Shutdown any already-spawned threads
             for (self.workers[0..spawned]) |*w| {
                 w.state.store(@intFromEnum(WorkerState.shutdown), .release);
             }
-            _ = self.dispatch.generation.fetchAdd(1, .release);
+            _ = self.generation.fetchAdd(1, .release);
             for (self.workers[0..spawned]) |*w| {
                 Futex.wake(&w.state, 1);
             }
@@ -111,21 +350,62 @@ pub const ThreadPool = struct {
     }
 
     pub fn deinit(self: *ThreadPool) void {
-        // Signal shutdown to all workers
+        // Signal shutdown
         for (self.workers[0..self.thread_count]) |*w| {
             w.state.store(@intFromEnum(WorkerState.shutdown), .release);
         }
-        // Bump generation so spinning/yielding workers see shutdown
-        _ = self.dispatch.generation.fetchAdd(1, .release);
-        // Wake parked workers
+        _ = self.generation.fetchAdd(1, .release);
         for (self.workers[0..self.thread_count]) |*w| {
             Futex.wake(&w.state, 1);
         }
-        // Join all threads
         for (self.threads[0..self.thread_count]) |t| {
             t.join();
         }
+        // Clear TLS and claim depth if main thread was using this pool
+        if (tls_worker) |w| {
+            if (w.pool_ptr == self) {
+                w.claim_depth.store(0, .release);
+                tls_worker = null;
+            }
+        }
         self.allocator.destroy(self);
+    }
+
+    /// Get the current worker for this thread, initializing the main thread slot if needed.
+    /// Only one non-worker thread may use the pool at a time (SPMC deque invariant).
+    /// Returns null if the main-thread slot is already claimed by another thread.
+    fn getCurrentWorker(self: *ThreadPool) ?*WorkerData {
+        if (tls_worker) |w| {
+            if (w.pool_ptr == self) {
+                // Nested dispatch from same thread — bump depth (never fails)
+                if (w.index == self.thread_count) {
+                    _ = w.claim_depth.fetchAdd(1, .monotonic);
+                }
+                return w;
+            }
+        }
+        // Main thread: CAS 0→1 to claim the slot (prevents SPMC violation)
+        const w = &self.workers[self.thread_count];
+        if (w.claim_depth.cmpxchgStrong(0, 1, .acquire, .monotonic) != null) {
+            return null; // Another non-worker thread already owns this slot
+        }
+        tls_worker = w;
+        return w;
+    }
+
+    /// Release one nesting level of the main-thread slot. Only truly releases when depth hits 0.
+    fn releaseWorkerClaim(worker: *WorkerData) void {
+        const prev = worker.claim_depth.fetchSub(1, .release);
+        if (prev == 1) {
+            // Last nesting level — slot is now free for other threads
+            tls_worker = null;
+        }
+    }
+
+    /// Get pool from TLS (for downstream code that needs pool access inside closures).
+    pub fn getPool() ?*ThreadPool {
+        if (tls_worker) |w| return w.pool_ptr;
+        return null;
     }
 
     // ========================================================================
@@ -133,7 +413,6 @@ pub const ThreadPool = struct {
     // ========================================================================
 
     /// Force-parallel for: ignores MIN_ITEMS_PER_THREAD threshold.
-    /// Use for heavy operations where even 1 item per thread is worthwhile.
     pub fn parallelForForce(
         self: *ThreadPool,
         len: usize,
@@ -144,28 +423,7 @@ pub const ThreadPool = struct {
             for (0..len) |i| func(context, i);
             return;
         }
-
-        // Nested dispatch detection
-        if (self.dispatch_depth.load(.acquire) > 0) {
-            for (0..len) |i| func(context, i);
-            return;
-        }
-
-        const Ctx = @TypeOf(context);
-        var ctx_copy = context;
-
-        const Wrapper = struct {
-            fn call(d: *DispatchState, start: usize, end: usize) void {
-                const ctx: *const Ctx = @ptrCast(@alignCast(d.context_ptr));
-                for (start..end) |i| func(ctx.*, i);
-            }
-        };
-
-        const actual_threads = @min(self.thread_count + 1, len);
-        const chunk_size = (len + actual_threads - 1) / actual_threads;
-        const num_chunks = (len + chunk_size - 1) / chunk_size;
-
-        self.dispatchAndWait(&Wrapper.call, @ptrCast(&ctx_copy), len, chunk_size, num_chunks, actual_threads);
+        self.parallelForImpl(len, context, func, @min(self.thread_count + 1, len));
     }
 
     /// Fine-grained parallel for: submits each index as its own work item.
@@ -180,29 +438,10 @@ pub const ThreadPool = struct {
             for (0..len) |i| func(context, i);
             return;
         }
-
-        // Nested dispatch detection
-        if (self.dispatch_depth.load(.acquire) > 0) {
-            for (0..len) |i| func(context, i);
-            return;
-        }
-
-        const Ctx = @TypeOf(context);
-        var ctx_copy = context;
-
-        const Wrapper = struct {
-            fn call(d: *DispatchState, start: usize, end: usize) void {
-                const ctx: *const Ctx = @ptrCast(@alignCast(d.context_ptr));
-                for (start..end) |i| func(ctx.*, i);
-            }
-        };
-
-        // chunk_size = 1 for per-item dispatch
-        self.dispatchAndWait(&Wrapper.call, @ptrCast(&ctx_copy), len, 1, len, @min(self.thread_count + 1, len));
+        self.parallelForImplWithThreshold(len, context, func, @min(self.thread_count + 1, len), 1);
     }
 
     /// Parallel for: apply `func(context, index)` for each index in 0..len.
-    /// Each invocation is independent and may run on any thread.
     pub fn parallelFor(
         self: *ThreadPool,
         len: usize,
@@ -217,26 +456,7 @@ pub const ThreadPool = struct {
             return;
         }
 
-        // Nested dispatch detection
-        if (self.dispatch_depth.load(.acquire) > 0) {
-            for (0..len) |i| func(context, i);
-            return;
-        }
-
-        const Ctx = @TypeOf(context);
-        var ctx_copy = context;
-
-        const Wrapper = struct {
-            fn call(d: *DispatchState, start: usize, end: usize) void {
-                const ctx: *const Ctx = @ptrCast(@alignCast(d.context_ptr));
-                for (start..end) |i| func(ctx.*, i);
-            }
-        };
-
-        const chunk_size = (len + actual_threads - 1) / actual_threads;
-        const num_chunks = (len + chunk_size - 1) / chunk_size;
-
-        self.dispatchAndWait(&Wrapper.call, @ptrCast(&ctx_copy), len, chunk_size, num_chunks, actual_threads);
+        self.parallelForImpl(len, context, func, actual_threads);
     }
 
     /// Parallel chunks: split `slice` into chunks and call `func(context, chunk, chunk_start_index)`.
@@ -262,17 +482,7 @@ pub const ThreadPool = struct {
             return;
         }
 
-        // Nested dispatch detection
-        if (self.dispatch_depth.load(.acquire) > 0) {
-            var offset: usize = 0;
-            while (offset < slice.len) {
-                const end = @min(offset + actual_chunk_size, slice.len);
-                func(context, slice[offset..end], offset);
-                offset = end;
-            }
-            return;
-        }
-
+        // Wrap chunks as indices into a parallelFor
         const Ctx = @TypeOf(context);
         const ChunkCtx = struct {
             ctx: Ctx,
@@ -287,19 +497,13 @@ pub const ThreadPool = struct {
             .chunk_size = actual_chunk_size,
         };
 
-        const Wrapper = struct {
-            fn call(d: *DispatchState, start: usize, end: usize) void {
-                const cc: *const ChunkCtx = @ptrCast(@alignCast(d.context_ptr));
-                // Each "item" is a chunk index
-                for (start..end) |chunk_idx| {
-                    const off = chunk_idx * cc.chunk_size;
-                    const chunk_end = @min(off + cc.chunk_size, cc.slice_len);
-                    func(cc.ctx, cc.slice_ptr[off..chunk_end], off);
-                }
+        self.parallelForForce(n_chunks, &chunk_ctx, struct {
+            fn run(cc: *const ChunkCtx, chunk_idx: usize) void {
+                const off = chunk_idx * cc.chunk_size;
+                const chunk_end = @min(off + cc.chunk_size, cc.slice_len);
+                func(cc.ctx, cc.slice_ptr[off..chunk_end], off);
             }
-        };
-
-        self.dispatchAndWait(&Wrapper.call, @ptrCast(&chunk_ctx), n_chunks, 1, n_chunks, @min(self.thread_count + 1, n_chunks));
+        }.run);
     }
 
     /// Parallel reduce: split 0..len into chunks, each producing a partial result via
@@ -324,7 +528,6 @@ pub const ThreadPool = struct {
     }
 
     /// Force-parallel reduce: ignores MIN_ITEMS_PER_THREAD threshold.
-    /// Use this for heavy operations (MSM, Miller loops) where even 1 item per thread is worthwhile.
     pub fn parallelReduceForce(
         self: *ThreadPool,
         comptime R: type,
@@ -354,12 +557,7 @@ pub const ThreadPool = struct {
         context_b: anytype,
         comptime func_b: fn (@TypeOf(context_b)) RB,
     ) struct { RA, RB } {
-        if (self.thread_count <= 1) {
-            return .{ func_a(context_a), func_b(context_b) };
-        }
-
-        // Nested dispatch detection
-        if (self.dispatch_depth.load(.acquire) > 0) {
+        if (self.thread_count == 0) {
             return .{ func_a(context_a), func_b(context_b) };
         }
 
@@ -375,27 +573,103 @@ pub const ThreadPool = struct {
             .result_ptr = &result_b,
         };
 
-        const Wrapper = struct {
-            fn call(d: *DispatchState, _: usize, _: usize) void {
-                const jc: *const JoinCtx = @ptrCast(@alignCast(d.context_ptr));
-                jc.result_ptr.* = func_b(jc.ctx_b);
-            }
+        const worker = self.getCurrentWorker() orelse {
+            return .{ func_a(context_a), func_b(context_b) };
+        };
+        defer if (worker.index == self.thread_count) releaseWorkerClaim(worker);
+
+        var latch = CompletionLatch.init(1);
+
+        const closure_payload = ClosureJobPayload{
+            .user_fn = @ptrCast(&struct {
+                fn call(jc: *const JoinCtx) void {
+                    jc.result_ptr.* = func_b(jc.ctx_b);
+                }
+            }.call),
+            .context_ptr = @ptrCast(&join_ctx),
+            .latch = &latch,
         };
 
-        // Dispatch task B as single chunk to 1 worker (caller does task A, not workLoop)
-        self.dispatchAndRun(&Wrapper.call, @ptrCast(&join_ctx), 1, 1, 1, 2);
+        const job = Job.initFrom(ClosureJobPayload, closure_payload, &closureJobExecute);
+        if (!worker.deque.push(job)) {
+            // Deque full: run both sequentially
+            return .{ func_a(context_a), func_b(context_b) };
+        }
 
-        // Caller executes task A
+        // Wake idle workers
+        self.wakeWorkers(1);
+
+        // Caller does task A
         const result_a = func_a(context_a);
 
-        // Wait for task B
-        self.waitForCompletion();
+        // Wait for task B, staying productive
+        latch.waitWhileWorking(worker, self);
 
         return .{ result_a, result_b };
     }
 
     // ========================================================================
-    // Internal: Reduce implementation
+    // Internal: parallelFor implementation with adaptive splitting
+    // ========================================================================
+
+    fn parallelForImpl(
+        self: *ThreadPool,
+        len: usize,
+        context: anytype,
+        comptime func: fn (@TypeOf(context), usize) void,
+        actual_threads: usize,
+    ) void {
+        self.parallelForImplWithThreshold(len, context, func, actual_threads, @max(1, len / (actual_threads * 4)));
+    }
+
+    fn parallelForImplWithThreshold(
+        self: *ThreadPool,
+        len: usize,
+        context: anytype,
+        comptime func: fn (@TypeOf(context), usize) void,
+        actual_threads: usize,
+        split_threshold: usize,
+    ) void {
+        const worker = self.getCurrentWorker() orelse {
+            for (0..len) |i| func(context, i);
+            return;
+        };
+        defer if (worker.index == self.thread_count) releaseWorkerClaim(worker);
+
+        const Ctx = @TypeOf(context);
+        var ctx_copy = context;
+
+        var latch = CompletionLatch.init(1);
+
+        const range_payload = RangeJobPayload{
+            .user_fn = @ptrCast(&struct {
+                fn call(ctx: *const Ctx, start: usize, end: usize) void {
+                    for (start..end) |i| func(ctx.*, i);
+                }
+            }.call),
+            .context_ptr = @ptrCast(&ctx_copy),
+            .start = 0,
+            .end = len,
+            .latch = &latch,
+            .split_threshold = split_threshold,
+        };
+
+        const job = Job.initFrom(RangeJobPayload, range_payload, &rangeJobExecute);
+        if (!worker.deque.push(job)) {
+            // Deque full: run sequentially
+            for (0..len) |i| func(ctx_copy, i);
+            return;
+        }
+
+        // Wake idle workers
+        self.wakeWorkers(@min(actual_threads - 1, self.thread_count));
+
+        // Caller participates by popping/stealing
+        latch.waitWhileWorking(worker, self);
+    }
+
+    // ========================================================================
+    // Internal: Reduce implementation (pre-chunked for stable partial indices)
     // ========================================================================
 
     fn reduceImpl(
@@ -408,17 +682,12 @@ pub const ThreadPool = struct {
         comptime reduce: fn (R, R) R,
         actual_threads: usize,
     ) R {
-        // Nested dispatch detection
-        if (self.dispatch_depth.load(.acquire) > 0) {
-            return map(context, 0, len);
-        }
-
         const chunk_size = (len + actual_threads - 1) / actual_threads;
         const num_chunks = (len + chunk_size - 1) / chunk_size;
 
         const Ctx = @TypeOf(context);
 
-        // Padded partial to prevent false sharing between worker threads
+        // Padded partial to prevent false sharing
         const padded_size = if (@sizeOf(R) <= cache_line) cache_line else ((@sizeOf(R) + cache_line - 1) / cache_line) * cache_line;
         const PaddedPartial = struct {
             value: R,
@@ -443,20 +712,44 @@ pub const ThreadPool = struct {
             .total_items = len,
         };
 
-        const Wrapper = struct {
-            fn call(d: *DispatchState, start: usize, end: usize) void {
-                const rc: *const ReduceCtx = @ptrCast(@alignCast(d.context_ptr));
-                // Each "item" in dispatch is a chunk index
-                for (start..end) |chunk_idx| {
-                    const item_start = chunk_idx * rc.chunk_size;
-                    const item_end = @min(item_start + rc.chunk_size, rc.total_items);
-                    rc.partials_ptr[chunk_idx].value = map(rc.ctx, item_start, item_end);
-                }
-            }
+        const worker = self.getCurrentWorker() orelse {
+            return map(context, 0, len);
         };
+        defer if (worker.index == self.thread_count) releaseWorkerClaim(worker);
 
-        // Dispatch chunks (each dispatch item = one reduce chunk)
-        self.dispatchAndWait(&Wrapper.call, @ptrCast(&reduce_ctx), num_chunks, 1, num_chunks, @min(self.thread_count + 1, num_chunks));
+        var latch = CompletionLatch.init(@intCast(num_chunks));
+
+        // Push one job per chunk
+        for (0..num_chunks) |chunk_idx| {
+            const item_start = chunk_idx * chunk_size;
+            const item_end = @min(item_start + chunk_size, len);
+
+            const payload = ReduceJobPayload{
+                .user_fn = @ptrCast(&struct {
+                    fn call(ctx: *const ReduceCtx, start: usize, end: usize, partial: *PaddedPartial) void {
+                        partial.value = map(ctx.ctx, start, end);
+                    }
+                }.call),
+                .context_ptr = @ptrCast(&reduce_ctx),
+                .start = item_start,
+                .end = item_end,
+                .latch = &latch,
+                .partial_ptr = @ptrCast(&partials[chunk_idx]),
+            };
+
+            const job = Job.initFrom(ReduceJobPayload, payload, &reduceJobExecute);
+            if (!worker.deque.push(job)) {
+                // Deque full: execute this chunk inline
+                partials[chunk_idx].value = map(context, item_start, item_end);
+                latch.completeOne();
+            }
+        }
+
+        // Wake workers
+        self.wakeWorkers(@min(num_chunks - 1, self.thread_count));
+
+        // Caller participates
+        latch.waitWhileWorking(worker, self);
 
         // Sequential combine
         var result = partials[0].value;
@@ -467,101 +760,95 @@ pub const ThreadPool = struct {
     }
 
     // ========================================================================
-    // Internal: Dispatch core
+    // Job executors
     // ========================================================================
 
-    /// Setup dispatch, wake workers, caller participates, then wait for completion.
-    fn dispatchAndWait(
-        self: *ThreadPool,
-        func_ptr: *const fn (*DispatchState, usize, usize) void,
-        context_ptr: *const anyopaque,
-        total_items: usize,
-        chunk_size: usize,
-        num_chunks: usize,
-        actual_threads: usize,
-    ) void {
-        self.dispatchAndRun(func_ptr, context_ptr, total_items, chunk_size, num_chunks, actual_threads);
-        self.workLoop(); // caller participates
-        self.waitForCompletion();
-    }
+    fn rangeJobExecute(job: *Job, worker: *WorkerData) void {
+        const p = job.getPayload(RangeJobPayload);
+        const len = p.end - p.start;
 
-    /// Setup dispatch and wake workers, but don't participate or wait.
-    fn dispatchAndRun(
-        self: *ThreadPool,
-        func_ptr: *const fn (*DispatchState, usize, usize) void,
-        context_ptr: *const anyopaque,
-        total_items: usize,
-        chunk_size: usize,
-        num_chunks: usize,
-        actual_threads: usize,
-    ) void {
-        _ = self.dispatch_depth.fetchAdd(1, .monotonic);
+        if (len > p.split_threshold) {
+            // Split in half: push left, tail-recurse right.
+            // Latch accounting: this job's pending count (1) is NOT completed here.
+            // Instead, addPending(1) adds a count for the left child. The right child
+            // inherits the original count via tail recursion to its eventual leaf.
+            // Net: original 1 → +1 (addPending) = 2 pending, both halves complete → 0.
+            const mid = p.start + len / 2;
 
-        // Setup dispatch state
-        self.dispatch.func_ptr = func_ptr;
-        self.dispatch.context_ptr = context_ptr;
-        self.dispatch.total_items = total_items;
-        self.dispatch.chunk_size = chunk_size;
-        self.dispatch.num_chunks = num_chunks;
-        self.dispatch.next_chunk.store(0, .monotonic);
-        self.dispatch.remaining.store(@intCast(num_chunks), .monotonic);
-        self.dispatch.done_futex.store(0, .monotonic);
+            var left_payload = p.*;
+            left_payload.end = mid;
+            const left_job = Job.initFrom(RangeJobPayload, left_payload, &rangeJobExecute);
 
-        // Publish dispatch state to workers
-        _ = self.dispatch.generation.fetchAdd(1, .release);
-
-        // Wake workers (minus 1 for caller, unless this is join where caller doesn't participate via workLoop call here)
-        const workers_to_wake = if (actual_threads > 0) actual_threads - 1 else 0;
-        self.wakeWorkers(workers_to_wake);
-    }
-
-    /// Wait for all chunks to complete.
-    fn waitForCompletion(self: *ThreadPool) void {
-        while (self.dispatch.done_futex.load(.acquire) != 1) {
-            Futex.wait(&self.dispatch.done_futex, 0);
-        }
-        _ = self.dispatch_depth.fetchSub(1, .release);
-    }
-
-    /// Claim and execute chunks from the dispatch.
-    fn workLoop(self: *ThreadPool) void {
-        while (true) {
-            const chunk_idx = self.dispatch.next_chunk.fetchAdd(1, .monotonic);
-            if (chunk_idx >= self.dispatch.num_chunks) break;
-
-            const start = chunk_idx * self.dispatch.chunk_size;
-            const end = @min(start + self.dispatch.chunk_size, self.dispatch.total_items);
-            self.dispatch.func_ptr(&self.dispatch, start, end);
-
-            const prev = self.dispatch.remaining.fetchSub(1, .release);
-            if (prev == 1) {
-                // Last chunk completed
-                self.dispatch.done_futex.store(1, .release);
-                Futex.wake(&self.dispatch.done_futex, 1);
-                return;
+            p.latch.addPending(1);
+            if (!worker.deque.push(left_job)) {
+                // Deque full: execute left half inline and complete it
+                const TypeErasedFn = *const fn (*const anyopaque, usize, usize) void;
+                const call_fn: TypeErasedFn = @ptrCast(@alignCast(p.user_fn));
+                call_fn(p.context_ptr, p.start, mid);
+                p.latch.completeOne();
             }
+
+            // Execute right half (may split further)
+            var right_payload = p.*;
+            right_payload.start = mid;
+            var right_job = Job.initFrom(RangeJobPayload, right_payload, &rangeJobExecute);
+            rangeJobExecute(&right_job, worker);
+        } else {
+            // Leaf: execute the range
+            const TypeErasedFn = *const fn (*const anyopaque, usize, usize) void;
+            const call_fn: TypeErasedFn = @ptrCast(@alignCast(p.user_fn));
+            call_fn(p.context_ptr, p.start, p.end);
+            p.latch.completeOne();
         }
     }
 
+    fn reduceJobExecute(job: *Job, _: *WorkerData) void {
+        const p = job.getPayload(ReduceJobPayload);
+        const TypeErasedFn = *const fn (*const anyopaque, usize, usize, *anyopaque) void;
+        const call_fn: TypeErasedFn = @ptrCast(@alignCast(p.user_fn));
+        call_fn(p.context_ptr, p.start, p.end, p.partial_ptr);
+        p.latch.completeOne();
+    }
+
+    fn closureJobExecute(job: *Job, _: *WorkerData) void {
+        const p = job.getPayload(ClosureJobPayload);
+        const TypeErasedFn = *const fn (*const anyopaque) void;
+        const call_fn: TypeErasedFn = @ptrCast(@alignCast(p.user_fn));
+        call_fn(p.context_ptr);
+        p.latch.completeOne();
+    }
+
     // ========================================================================
-    // Internal: Worker thread
+    // Worker thread
     // ========================================================================
 
     fn workerMain(self: *ThreadPool, worker_idx: usize) void {
         const worker = &self.workers[worker_idx];
+        tls_worker = worker;
         var last_seen_gen: u32 = 0;
 
         while (true) {
-            // Check for shutdown
             if (worker.state.load(.acquire) == @intFromEnum(WorkerState.shutdown)) return;
 
-            // Check for new work
-            const gen = self.dispatch.generation.load(.acquire);
+            // Check generation for wake signal
+            const gen = self.generation.load(.acquire);
             if (gen != last_seen_gen) {
                 last_seen_gen = gen;
-                // Re-check shutdown after acquiring generation
                 if (worker.state.load(.acquire) == @intFromEnum(WorkerState.shutdown)) return;
-                self.workLoop();
+                // Process work: pop own deque, then steal
+                self.workerProcessWork(worker);
+                continue;
+            }
+
+            // Try to find work opportunistically
+            if (worker.deque.pop()) |*job_mut| {
+                var job = job_mut.*;
+                job.execute_fn(&job, worker);
+                continue;
+            }
+            if (worker.tryStealing(self)) |*stolen_mut| {
+                var job = stolen_mut.*;
+                job.execute_fn(&job, worker);
                 continue;
             }
 
@@ -570,8 +857,15 @@ pub const ThreadPool = struct {
             for (0..SPIN_ITERS) |_| {
                 atomic.spinLoopHint();
                 if (worker.state.load(.acquire) == @intFromEnum(WorkerState.shutdown)) return;
-                const g = self.dispatch.generation.load(.acquire);
+                const g = self.generation.load(.acquire);
                 if (g != last_seen_gen) {
+                    found_work = true;
+                    break;
+                }
+                // Also check deque/steal during spin
+                if (worker.deque.pop()) |*j| {
+                    var job = j.*;
+                    job.execute_fn(&job, worker);
                     found_work = true;
                     break;
                 }
@@ -583,7 +877,7 @@ pub const ThreadPool = struct {
             for (0..YIELD_ITERS) |_| {
                 std.Thread.yield() catch {};
                 if (worker.state.load(.acquire) == @intFromEnum(WorkerState.shutdown)) return;
-                const g = self.dispatch.generation.load(.acquire);
+                const g = self.generation.load(.acquire);
                 if (g != last_seen_gen) {
                     found_work = true;
                     break;
@@ -596,9 +890,7 @@ pub const ThreadPool = struct {
 
             // Phase 3: Park
             worker.state.store(@intFromEnum(WorkerState.parking), .release);
-
-            // Critical: recheck generation after storing parking state
-            const recheck_gen = self.dispatch.generation.load(.acquire);
+            const recheck_gen = self.generation.load(.acquire);
             if (recheck_gen != last_seen_gen) {
                 worker.state.store(@intFromEnum(WorkerState.spinning), .release);
                 continue;
@@ -606,8 +898,30 @@ pub const ThreadPool = struct {
 
             worker.state.store(@intFromEnum(WorkerState.parked), .release);
             Futex.wait(&worker.state, @intFromEnum(WorkerState.parked));
-            // Woken up: state was CAS'd to spinning by wakeWorkers, or set to
-            // shutdown by deinit. Do NOT overwrite — just loop back and recheck.
+            // Woken: state was CAS'd by wakeWorkers or set to shutdown. Don't overwrite.
+        }
+    }
+
+    /// Process available work until deques are empty (with steal retries).
+    fn workerProcessWork(self: *ThreadPool, worker: *WorkerData) void {
+        var consecutive_steal_failures: u32 = 0;
+        while (true) {
+            if (worker.deque.pop()) |*job_mut| {
+                var job = job_mut.*;
+                job.execute_fn(&job, worker);
+                consecutive_steal_failures = 0;
+                continue;
+            }
+            if (worker.tryStealing(self)) |*stolen_mut| {
+                var job = stolen_mut.*;
+                job.execute_fn(&job, worker);
+                consecutive_steal_failures = 0;
+                continue;
+            }
+            // Retry a few times before giving up — work may be in-flight to other deques
+            consecutive_steal_failures += 1;
+            if (consecutive_steal_failures >= 3) break;
+            atomic.spinLoopHint();
         }
     }
 
@@ -615,13 +929,15 @@ pub const ThreadPool = struct {
     fn wakeWorkers(self: *ThreadPool, count: usize) void {
         if (count == 0) return;
 
+        // Bump generation to signal new work
+        _ = self.generation.fetchAdd(1, .release);
+
         var woken: usize = 0;
         for (self.workers[0..self.thread_count]) |*worker| {
             if (woken >= count) break;
 
             const state = worker.state.load(.acquire);
             if (state == @intFromEnum(WorkerState.parked)) {
-                // Try to CAS parked → spinning, then futex wake
                 if (worker.state.cmpxchgStrong(
                     @intFromEnum(WorkerState.parked),
                     @intFromEnum(WorkerState.spinning),
@@ -632,7 +948,6 @@ pub const ThreadPool = struct {
                     woken += 1;
                 }
             } else if (state == @intFromEnum(WorkerState.parking)) {
-                // Try to CAS parking → spinning (no futex needed)
                 if (worker.state.cmpxchgStrong(
                     @intFromEnum(WorkerState.parking),
                     @intFromEnum(WorkerState.spinning),
@@ -653,7 +968,6 @@ pub const ThreadPool = struct {
         const work_units = total_items * items_per_unit;
         if (work_units < MIN_ITEMS_PER_THREAD) return 1;
         const max_by_work = work_units / MIN_ITEMS_PER_THREAD;
-        // +1 for the calling thread which also participates
         return @min(self.thread_count + 1, max_by_work);
     }
 };
@@ -750,7 +1064,7 @@ test "ThreadPool: parallelForEach basic" {
     var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
     defer tp.deinit();
 
-    const n = 37; // simulate ~37 polynomial commits
+    const n = 37;
     var data: [n]u64 = undefined;
     for (0..n) |i| data[i] = 0;
 
@@ -841,17 +1155,588 @@ test "ThreadPool: dispatch overhead microbenchmark" {
 
     for (0..iters) |_| {
         tp.parallelForForce(16, {}, struct {
-            fn run(_: void, _: usize) void {
-                // Empty work — measure dispatch overhead only
-            }
+            fn run(_: void, _: usize) void {}
         }.run);
     }
 
     const elapsed_ns = timer.read();
     const per_dispatch_ns = elapsed_ns / iters;
-    // Log for informational purposes; no strict assertion
     std.debug.print("\n  Dispatch overhead: {}ns per dispatch ({} dispatches)\n", .{ per_dispatch_ns, iters });
-
-    // Soft assertion: should be well under 100µs per dispatch
     try std.testing.expect(per_dispatch_ns < 100_000);
+}
+
+test "ThreadPool: nested parallelFor" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    const outer_n = 4;
+    const inner_n = 256;
+    var data: [outer_n][inner_n]u64 = undefined;
+    for (0..outer_n) |i| {
+        for (0..inner_n) |j| data[i][j] = 0;
+    }
+
+    const InnerCtx = struct {
+        row: *[inner_n]u64,
+        pool: *ThreadPool,
+    };
+
+    const OuterCtx = struct {
+        data: *[outer_n][inner_n]u64,
+        pool: *ThreadPool,
+    };
+    const outer_ctx = OuterCtx{ .data = &data, .pool = tp };
+
+    tp.parallelForForce(outer_n, outer_ctx, struct {
+        fn run(c: OuterCtx, i: usize) void {
+            const inner_ctx = InnerCtx{ .row = &c.data[i], .pool = c.pool };
+            c.pool.parallelFor(inner_n, inner_ctx, struct {
+                fn inner_run(ic: InnerCtx, j: usize) void {
+                    ic.row[j] = @intCast(j + 1);
+                }
+            }.inner_run);
+        }
+    }.run);
+
+    for (0..outer_n) |i| {
+        for (0..inner_n) |j| {
+            try std.testing.expectEqual(@as(u64, j + 1), data[i][j]);
+        }
+    }
+}
+
+test "ThreadPool: nested join with reduce" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    const PoolCtx = struct { pool: *ThreadPool };
+    const ctx = PoolCtx{ .pool = tp };
+
+    const result = tp.join(
+        u64,
+        u64,
+        ctx,
+        struct {
+            fn a(c: PoolCtx) u64 {
+                // Inner reduce inside join task A
+                return c.pool.parallelReduce(
+                    u64,
+                    512,
+                    0,
+                    {},
+                    struct {
+                        fn map(_: void, start: usize, end: usize) u64 {
+                            var s: u64 = 0;
+                            for (start..end) |i| s += @as(u64, @intCast(i));
+                            return s;
+                        }
+                    }.map,
+                    struct {
+                        fn reduce(x: u64, y: u64) u64 {
+                            return x + y;
+                        }
+                    }.reduce,
+                );
+            }
+        }.a,
+        ctx,
+        struct {
+            fn b(c: PoolCtx) u64 {
+                // Inner reduce inside join task B
+                return c.pool.parallelReduce(
+                    u64,
+                    256,
+                    0,
+                    {},
+                    struct {
+                        fn map(_: void, start: usize, end: usize) u64 {
+                            var s: u64 = 0;
+                            for (start..end) |i| s += @as(u64, @intCast(i));
+                            return s;
+                        }
+                    }.map,
+                    struct {
+                        fn reduce(x: u64, y: u64) u64 {
+                            return x + y;
+                        }
+                    }.reduce,
+                );
+            }
+        }.b,
+    );
+
+    try std.testing.expectEqual(@as(u64, 511 * 512 / 2), result[0]);
+    try std.testing.expectEqual(@as(u64, 255 * 256 / 2), result[1]);
+}
+
+test "ThreadPool: 3-level nesting" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    // Level 1: parallelForForce(4)
+    // Level 2: join(A, B)
+    // Level 3: parallelFor(256) inside each join branch
+    const n = 4;
+    var sums: [n]u64 = [_]u64{0} ** n;
+
+    const PoolCtx = struct { pool: *ThreadPool, sums: *[n]u64 };
+    const ctx = PoolCtx{ .pool = tp, .sums = &sums };
+
+    tp.parallelForForce(n, ctx, struct {
+        fn run(c: PoolCtx, i: usize) void {
+            const JoinCtx = struct { pool: *ThreadPool };
+            const jc = JoinCtx{ .pool = c.pool };
+            const result = c.pool.join(
+                u64,
+                u64,
+                jc,
+                struct {
+                    fn a(j: JoinCtx) u64 {
+                        var sum: u64 = 0;
+                        const SumCtx = struct { pool: *ThreadPool, sum_ptr: *u64 };
+                        var sum_ctx = SumCtx{ .pool = j.pool, .sum_ptr = &sum };
+                        j.pool.parallelFor(256, &sum_ctx, struct {
+                            fn inner(sc: *const SumCtx, k: usize) void {
+                                _ = @atomicRmw(u64, sc.sum_ptr, .Add, @as(u64, @intCast(k)), .monotonic);
+                            }
+                        }.inner);
+                        return sum;
+                    }
+                }.a,
+                jc,
+                struct {
+                    fn b(j: JoinCtx) u64 {
+                        return j.pool.parallelReduce(
+                            u64,
+                            256,
+                            0,
+                            {},
+                            struct {
+                                fn map(_: void, start: usize, end: usize) u64 {
+                                    var s: u64 = 0;
+                                    for (start..end) |k| s += @as(u64, @intCast(k));
+                                    return s;
+                                }
+                            }.map,
+                            struct {
+                                fn reduce(x: u64, y: u64) u64 {
+                                    return x + y;
+                                }
+                            }.reduce,
+                        );
+                    }
+                }.b,
+            );
+            c.sums[i] = result[0] + result[1];
+        }
+    }.run);
+
+    const expected: u64 = 255 * 256 / 2;
+    for (0..n) |i| {
+        try std.testing.expectEqual(expected * 2, sums[i]);
+    }
+}
+
+test "ThreadPool: stress nested dispatches" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    // Each iteration: outer reduce over 32 items, inner parallelFor per chunk.
+    // Inner sums global indices (start + i), so total per iteration = sum(0..31) = 496.
+    const n = 32;
+    const expected_per_iter: u64 = @as(u64, n) * (n - 1) / 2; // sum of 0..31
+
+    for (0..100) |_| {
+        const sum = tp.parallelReduceForce(
+            u64,
+            n,
+            0,
+            tp,
+            struct {
+                fn map(pool: *ThreadPool, start: usize, end: usize) u64 {
+                    // Nested parallelFor inside reduce — sum global indices
+                    var s: u64 = 0;
+                    const Ctx = struct { pool: *ThreadPool, sum: *u64, base: usize };
+                    var ctx = Ctx{ .pool = pool, .sum = &s, .base = start };
+                    pool.parallelFor(end - start, &ctx, struct {
+                        fn run(c: *const Ctx, i: usize) void {
+                            _ = @atomicRmw(u64, c.sum, .Add, @as(u64, @intCast(c.base + i)), .monotonic);
+                        }
+                    }.run);
+                    return s;
+                }
+            }.map,
+            struct {
+                fn reduce(a: u64, b: u64) u64 {
+                    return a + b;
+                }
+            }.reduce,
+        );
+        try std.testing.expectEqual(expected_per_iter, sum);
+    }
+}
+
+test "ThreadPool: nested parallelForForce exercises parallelism" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    const outer_n = 4;
+    const inner_n = 512;
+    var data: [outer_n][inner_n]u64 = undefined;
+    for (0..outer_n) |i| {
+        for (0..inner_n) |j| data[i][j] = 0;
+    }
+
+    const OuterCtx = struct {
+        data: *[outer_n][inner_n]u64,
+        pool: *ThreadPool,
+    };
+
+    tp.parallelForForce(outer_n, OuterCtx{ .data = &data, .pool = tp }, struct {
+        fn run(c: OuterCtx, i: usize) void {
+            const InnerCtx = struct { row: *[inner_n]u64 };
+            c.pool.parallelForForce(inner_n, InnerCtx{ .row = &c.data[i] }, struct {
+                fn inner_run(ic: InnerCtx, j: usize) void {
+                    ic.row[j] = @intCast(j + 1);
+                }
+            }.inner_run);
+        }
+    }.run);
+
+    for (0..outer_n) |i| {
+        for (0..inner_n) |j| {
+            try std.testing.expectEqual(@as(u64, j + 1), data[i][j]);
+        }
+    }
+}
+
+test "ThreadPool: stress addPending race" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    for (0..500) |_| {
+        var sum = atomic.Value(u64).init(0);
+
+        const Ctx = struct { sum: *atomic.Value(u64) };
+        // parallelForEach uses threshold=1, maximizing splitting (stress for addPending race)
+        tp.parallelForEach(1000, Ctx{ .sum = &sum }, struct {
+            fn run(c: Ctx, i: usize) void {
+                _ = c.sum.fetchAdd(@as(u64, @intCast(i)), .monotonic);
+            }
+        }.run);
+
+        try std.testing.expectEqual(@as(u64, 999 * 1000 / 2), sum.load(.acquire));
+    }
+}
+
+test "ThreadPool: parallelChunks basic" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    const n = 1024;
+    var data: [n]u32 = undefined;
+    for (0..n) |i| data[i] = 0;
+
+    tp.parallelChunks(u32, &data, 128, {}, struct {
+        fn run(_: void, chunk: []u32, start_idx: usize) void {
+            for (chunk, 0..) |*elem, j| {
+                elem.* = @intCast(start_idx + j);
+            }
+        }
+    }.run);
+
+    for (0..n) |i| {
+        try std.testing.expectEqual(@as(u32, @intCast(i)), data[i]);
+    }
+}
+
+test "ThreadPool: getPool returns correct pool" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    var seen_pool = atomic.Value(usize).init(0);
+
+    const Ctx = struct { pool: *ThreadPool, seen: *atomic.Value(usize) };
+    tp.parallelForForce(8, Ctx{ .pool = tp, .seen = &seen_pool }, struct {
+        fn run(c: Ctx, _: usize) void {
+            if (ThreadPool.getPool()) |p| {
+                if (p == c.pool) {
+                    _ = c.seen.fetchAdd(1, .monotonic);
+                }
+            }
+        }
+    }.run);
+
+    try std.testing.expectEqual(@as(usize, 8), seen_pool.load(.acquire));
+}
+
+test "ThreadPool: join with thread_count=1" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 1);
+    defer tp.deinit();
+
+    // With the fix, thread_count=1 means 1 worker + main = 2 threads, so join should parallelize.
+    var task_a_ran = atomic.Value(u32).init(0);
+    var task_b_ran = atomic.Value(u32).init(0);
+
+    const Ctx = struct { flag: *atomic.Value(u32) };
+
+    const result = tp.join(
+        u64,
+        u64,
+        Ctx{ .flag = &task_a_ran },
+        struct {
+            fn a(c: Ctx) u64 {
+                c.flag.store(1, .release);
+                return 42;
+            }
+        }.a,
+        Ctx{ .flag = &task_b_ran },
+        struct {
+            fn b(c: Ctx) u64 {
+                c.flag.store(1, .release);
+                return 99;
+            }
+        }.b,
+    );
+
+    try std.testing.expectEqual(@as(u64, 42), result[0]);
+    try std.testing.expectEqual(@as(u64, 99), result[1]);
+    try std.testing.expectEqual(@as(u32, 1), task_a_ran.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), task_b_ran.load(.acquire));
+}
+
+test "ThreadPool: deque overflow fallback" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 2);
+    defer tp.deinit();
+
+    // Deep nesting that may overflow deque (DEQUE_CAP=256).
+    // parallelForEach uses threshold=1, maximizing splitting to stress deque capacity.
+    const n = 1024;
+    var data: [n]u64 = undefined;
+    for (0..n) |i| data[i] = 0;
+
+    const Ctx = struct { data: *[n]u64 };
+    tp.parallelForEach(n, Ctx{ .data = &data }, struct {
+        fn run(c: Ctx, i: usize) void {
+            c.data[i] = @intCast(i + 1);
+        }
+    }.run);
+
+    for (0..n) |i| {
+        try std.testing.expectEqual(@as(u64, i + 1), data[i]);
+    }
+}
+
+test "ThreadPool: thread_count=0 sequential fallback" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 0);
+    defer tp.deinit();
+
+    // parallelFor should run sequentially
+    var sum = atomic.Value(u64).init(0);
+    const SumCtx = struct { s: *atomic.Value(u64) };
+    tp.parallelFor(100, SumCtx{ .s = &sum }, struct {
+        fn run(c: SumCtx, i: usize) void {
+            _ = c.s.fetchAdd(@as(u64, @intCast(i)), .monotonic);
+        }
+    }.run);
+    try std.testing.expectEqual(@as(u64, 99 * 100 / 2), sum.load(.acquire));
+
+    // parallelForForce should also run sequentially (len > 1 but thread_count = 0)
+    sum.store(0, .monotonic);
+    tp.parallelForForce(50, SumCtx{ .s = &sum }, struct {
+        fn run(c: SumCtx, i: usize) void {
+            _ = c.s.fetchAdd(@as(u64, @intCast(i)), .monotonic);
+        }
+    }.run);
+    try std.testing.expectEqual(@as(u64, 49 * 50 / 2), sum.load(.acquire));
+
+    // parallelReduce should run sequentially
+    const result = tp.parallelReduce(
+        u64,
+        100,
+        0,
+        {},
+        struct {
+            fn map(_: void, start: usize, end: usize) u64 {
+                var s: u64 = 0;
+                for (start..end) |i| s += @as(u64, @intCast(i));
+                return s;
+            }
+        }.map,
+        struct {
+            fn reduce(a: u64, b: u64) u64 {
+                return a + b;
+            }
+        }.reduce,
+    );
+    try std.testing.expectEqual(@as(u64, 99 * 100 / 2), result);
+
+    // join should run sequentially
+    const jr = tp.join(u64, u64, {}, struct {
+        fn a(_: void) u64 {
+            return 42;
+        }
+    }.a, {}, struct {
+        fn b(_: void) u64 {
+            return 99;
+        }
+    }.b);
+    try std.testing.expectEqual(@as(u64, 42), jr[0]);
+    try std.testing.expectEqual(@as(u64, 99), jr[1]);
+}
+
+test "ThreadPool: mixed nesting patterns stress" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    // Outer parallelForForce with heterogeneous inner patterns per iteration:
+    // - Even indices: join(parallelReduce, parallelFor)
+    // - Odd indices: nested parallelForForce
+    const n = 8;
+    var results: [n]u64 = [_]u64{0} ** n;
+
+    const Ctx = struct { pool: *ThreadPool, results: *[n]u64 };
+    const ctx = Ctx{ .pool = tp, .results = &results };
+
+    tp.parallelForForce(n, ctx, struct {
+        fn run(c: Ctx, i: usize) void {
+            if (i % 2 == 0) {
+                // Even: join with inner reduce + inner parallelFor
+                const JCtx = struct { pool: *ThreadPool };
+                const jc = JCtx{ .pool = c.pool };
+                const jr = c.pool.join(u64, u64, jc, struct {
+                    fn a(j: JCtx) u64 {
+                        return j.pool.parallelReduce(u64, 128, 0, {}, struct {
+                            fn map(_: void, start: usize, end: usize) u64 {
+                                var s: u64 = 0;
+                                for (start..end) |k| s += @as(u64, @intCast(k));
+                                return s;
+                            }
+                        }.map, struct {
+                            fn reduce(x: u64, y: u64) u64 {
+                                return x + y;
+                            }
+                        }.reduce);
+                    }
+                }.a, jc, struct {
+                    fn b(j: JCtx) u64 {
+                        var s = atomic.Value(u64).init(0);
+                        const SCtx = struct { sum: *atomic.Value(u64) };
+                        j.pool.parallelForForce(128, SCtx{ .sum = &s }, struct {
+                            fn inner(sc: SCtx, k: usize) void {
+                                _ = sc.sum.fetchAdd(@as(u64, @intCast(k)), .monotonic);
+                            }
+                        }.inner);
+                        return s.load(.acquire);
+                    }
+                }.b);
+                c.results[i] = jr[0] + jr[1];
+            } else {
+                // Odd: nested parallelForForce with atomic accumulation
+                var s = atomic.Value(u64).init(0);
+                const SCtx = struct { pool: *ThreadPool, sum: *atomic.Value(u64) };
+                c.pool.parallelForForce(16, SCtx{ .pool = c.pool, .sum = &s }, struct {
+                    fn outer(sc: SCtx, j: usize) void {
+                        var inner_s = atomic.Value(u64).init(0);
+                        const ICtx = struct { sum: *atomic.Value(u64), base: usize };
+                        sc.pool.parallelForForce(16, ICtx{ .sum = &inner_s, .base = j * 16 }, struct {
+                            fn inner(ic: ICtx, k: usize) void {
+                                _ = ic.sum.fetchAdd(@as(u64, @intCast(ic.base + k)), .monotonic);
+                            }
+                        }.inner);
+                        _ = sc.sum.fetchAdd(inner_s.load(.acquire), .monotonic);
+                    }
+                }.outer);
+                c.results[i] = s.load(.acquire);
+            }
+        }
+    }.run);
+
+    const expected_even: u64 = 127 * 128 / 2; // sum(0..127) from reduce + sum(0..127) from parallelFor
+    const expected_odd: u64 = 255 * 256 / 2; // sum(0..255) via 16x16 nested grid
+    for (0..n) |i| {
+        if (i % 2 == 0) {
+            try std.testing.expectEqual(expected_even * 2, results[i]);
+        } else {
+            try std.testing.expectEqual(expected_odd, results[i]);
+        }
+    }
+}
+
+test "ThreadPool: nested reduce inside reduce" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    // Outer reduce: 8 chunks, each chunk's map does an inner reduce over 256 elements.
+    const result = tp.parallelReduceForce(
+        u64,
+        8,
+        0,
+        tp,
+        struct {
+            fn map(pool: *ThreadPool, start: usize, end: usize) u64 {
+                var total: u64 = 0;
+                for (start..end) |chunk| {
+                    const base = chunk * 256;
+                    total += pool.parallelReduce(
+                        u64,
+                        256,
+                        0,
+                        base,
+                        struct {
+                            fn inner_map(b: usize, s: usize, e: usize) u64 {
+                                var sum_val: u64 = 0;
+                                for (s..e) |k| sum_val += @as(u64, @intCast(b + k));
+                                return sum_val;
+                            }
+                        }.inner_map,
+                        struct {
+                            fn reduce(a: u64, b: u64) u64 {
+                                return a + b;
+                            }
+                        }.reduce,
+                    );
+                }
+                return total;
+            }
+        }.map,
+        struct {
+            fn reduce(a: u64, b: u64) u64 {
+                return a + b;
+            }
+        }.reduce,
+    );
+
+    // Total: sum of (base + k) for base in {0,256,512,...,1792}, k in 0..255
+    // = sum of 0..2047 = 2047 * 2048 / 2 = 2096128
+    try std.testing.expectEqual(@as(u64, 2047 * 2048 / 2), result);
+}
+
+test "ThreadPool: concurrent external callers fallback" {
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    defer tp.deinit();
+
+    // Two OS threads both try to use the same pool. One should succeed with parallel
+    // dispatch, the other should fall back to sequential. Both must produce correct results.
+    var sum_a = atomic.Value(u64).init(0);
+    var sum_b = atomic.Value(u64).init(0);
+
+    const Work = struct {
+        fn run(pool: *ThreadPool, sum: *atomic.Value(u64)) void {
+            const WorkCtx = struct { sum: *atomic.Value(u64) };
+            pool.parallelForForce(512, WorkCtx{ .sum = sum }, struct {
+                fn work(c: WorkCtx, i: usize) void {
+                    _ = c.sum.fetchAdd(@as(u64, @intCast(i)), .monotonic);
+                }
+            }.work);
+        }
+    };
+
+    const t = try std.Thread.spawn(.{}, Work.run, .{ tp, &sum_b });
+    Work.run(tp, &sum_a);
+    t.join();
+
+    const expected: u64 = 511 * 512 / 2;
+    try std.testing.expectEqual(expected, sum_a.load(.acquire));
+    try std.testing.expectEqual(expected, sum_b.load(.acquire));
 }

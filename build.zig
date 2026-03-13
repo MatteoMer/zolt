@@ -162,4 +162,20 @@ pub fn build(b: *std.Build) void {
     const run_pipeline_example = b.addRunArtifact(pipeline_example);
     const pipeline_example_step = b.step("example-pipeline", "Run full proving pipeline example");
     pipeline_example_step.dependOn(&run_pipeline_example.step);
+
+    // Benchmark: Field Arithmetic
+    const field_bench = b.addExecutable(.{
+        .name = "field-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/field_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_field_bench = b.addRunArtifact(field_bench);
+    const field_bench_step = b.step("bench-field", "Run field arithmetic benchmark");
+    field_bench_step.dependOn(&run_field_bench.step);
 }

@@ -1359,7 +1359,7 @@ pub const BN254Scalar = struct {
     }
 
     /// Field multiplication
-    pub fn mul(self: Self, other: Self) Self {
+    pub inline fn mul(self: Self, other: Self) Self {
         if (comptime use_asm_mul) {
             return self.montgomeryMulX86(other);
         }
@@ -1497,7 +1497,7 @@ pub const BN254Scalar = struct {
 
     /// Field squaring (optimized using Karatsuba-like technique)
     /// Saves ~25% multiplications compared to naive multiplication
-    pub fn square(self: Self) Self {
+    pub inline fn square(self: Self) Self {
         if (comptime use_asm_mul) {
             return self.montgomeryMulX86(self);
         }
@@ -1639,7 +1639,8 @@ pub const BN254Scalar = struct {
         return result;
     }
 
-    fn lessThanModulus(self: Self) bool {
+    inline fn lessThanModulus(self: Self) bool {
+        @setEvalBranchQuota(10000);
         var i: usize = 3;
         while (true) : (i -= 1) {
             if (self.limbs[i] < BN254_MODULUS[i]) return true;
@@ -1649,7 +1650,8 @@ pub const BN254Scalar = struct {
         return false;
     }
 
-    fn subtractModulus(self: Self) Self {
+    inline fn subtractModulus(self: Self) Self {
+        @setEvalBranchQuota(10000);
         var result: [4]u64 = undefined;
         var borrow: u64 = 0;
 

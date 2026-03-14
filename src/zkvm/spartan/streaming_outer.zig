@@ -59,6 +59,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
         /// Per-cycle R1CS witnesses
         cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+        /// Compact integer witnesses for cache-friendly evaluation (optional)
+        compact_witnesses: ?[]const evaluators.CompactWitness = null,
         /// Number of cycle variables (log2 of trace length)
         num_cycle_vars: usize,
         /// Padded trace length (power of 2)
@@ -239,7 +241,21 @@ pub fn StreamingOuterProver(comptime F: type) type {
             };
         }
 
+        /// Build and attach compact integer witnesses for fast evaluation.
+        /// Should be called once before any compute calls.
+        pub fn buildCompactWitnesses(self: *Self) !void {
+            if (self.compact_witnesses != null) return;
+            self.compact_witnesses = try evaluators.buildCompactWitnesses(
+                F,
+                self.cycle_witnesses,
+                self.allocator,
+            );
+        }
+
         pub fn deinit(self: *Self) void {
+            if (self.compact_witnesses) |cw| {
+                self.allocator.free(cw);
+            }
             self.split_eq.deinit();
             self.challenges.deinit(self.allocator);
             self.r_grid.deinit();
@@ -671,18 +687,14 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // we parallelize over x_out (typically 256 items), computing Az/Bz base values
             // once per cycle and reusing them for all 9 targets.
 
-            // Precompute 2^64 field element for second-group Bz
-            const two_pow_64 = blk_2p64: {
-                var bytes: [16]u8 = undefined;
-                std.mem.writeInt(u128, &bytes, 0x10000000000000000, .little);
-                break :blk_2p64 F.fromBytes(&bytes);
-            };
-
             const FirstRoundCtx = struct {
                 num_x_in_vals: usize,
                 num_x_in_prime_bits: u6,
                 E_out: []const F,
                 E_in: []const F,
+                // Compact integer witnesses (primary path)
+                compact: ?[]const evaluators.CompactWitness,
+                // Field witnesses (fallback when compact not available)
                 cycle_witnesses: []const constraints.R1CSCycleInputs(F),
                 two_pow_64: F,
             };
@@ -690,6 +702,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const firstRoundMapReduce = struct {
                 fn map(ctx: FirstRoundCtx, start: usize, end: usize) [DEGREE]F {
                     var accum: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+                    const cw_len = if (ctx.compact) |c| c.len else ctx.cycle_witnesses.len;
 
                     for (start..end) |x_out| {
                         const e_out = if (x_out < ctx.E_out.len) ctx.E_out[x_out] else F.zero();
@@ -704,37 +717,62 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             const cycle = (x_out << ctx.num_x_in_prime_bits) | x_in_prime;
                             const group: u1 = @truncate(x_in & 1);
 
-                            if (cycle < ctx.cycle_witnesses.len) {
-                                const witness = ctx.cycle_witnesses[cycle].asSlice();
-
-                                // Compute Az/Bz base values ONCE for this cycle+group
-                                if (group == 0) {
-                                    const az_int = evaluators.computeAzFirstGroupInt(F, witness);
-                                    const bz_field = evaluators.computeBzFirstGroupDirect(F, witness);
-
-                                    inline for (0..DEGREE) |j| {
-                                        const product = evaluators.interpolateAzBzProduct(
-                                            F,
-                                            &az_int,
-                                            &bz_field,
-                                            &univariate_skip.COEFFS_PER_J[j],
-                                            FIRST_GROUP_SIZE,
-                                        );
-                                        inner[j] = inner[j].add(e_in.mul(product));
+                            if (cycle < cw_len) {
+                                if (ctx.compact) |compact| {
+                                    // Fast path: integer arithmetic with compact witnesses
+                                    const cw = &compact[cycle];
+                                    if (group == 0) {
+                                        inline for (0..DEGREE) |j| {
+                                            const product_int = evaluators.interpolateAzBzProductInt(
+                                                &cw.az_first,
+                                                &cw.bz_first,
+                                                &univariate_skip.COEFFS_PER_J[j],
+                                            );
+                                            if (product_int != 0) {
+                                                const product_f = if (product_int >= 0)
+                                                    F.fromU128(@intCast(product_int))
+                                                else
+                                                    F.fromU128(@intCast(-product_int)).neg();
+                                                inner[j] = inner[j].add(e_in.mul(product_f));
+                                            }
+                                        }
+                                    } else {
+                                        // Second group: use field-based computation for correctness
+                                        // (integer interpolation has overflow issues with large bz_second values)
+                                        const witness = ctx.cycle_witnesses[cycle].asSlice();
+                                        const az_int_sg = evaluators.computeAzSecondGroupInt(F, witness);
+                                        const bz_field_sg = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
+                                        inline for (0..DEGREE) |j| {
+                                            const coeffs = univariate_skip.COEFFS_PER_J[j][0..SECOND_GROUP_SIZE];
+                                            const product = evaluators.interpolateAzBzProduct(F, &az_int_sg, &bz_field_sg, coeffs, SECOND_GROUP_SIZE);
+                                            if (!product.eql(F.zero())) {
+                                                inner[j] = inner[j].add(e_in.mul(product));
+                                            }
+                                        }
                                     }
                                 } else {
-                                    const az_int = evaluators.computeAzSecondGroupInt(F, witness);
-                                    const bz_field = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
-
-                                    inline for (0..DEGREE) |j| {
-                                        const product = evaluators.interpolateAzBzProduct(
-                                            F,
-                                            &az_int,
-                                            &bz_field,
-                                            &univariate_skip.COEFFS_PER_J[j],
-                                            SECOND_GROUP_SIZE,
-                                        );
-                                        inner[j] = inner[j].add(e_in.mul(product));
+                                    // Fallback: field arithmetic (original path)
+                                    const witness = ctx.cycle_witnesses[cycle].asSlice();
+                                    if (group == 0) {
+                                        const az_int = evaluators.computeAzFirstGroupInt(F, witness);
+                                        const bz_field = evaluators.computeBzFirstGroupDirect(F, witness);
+                                        inline for (0..DEGREE) |j| {
+                                            const product = evaluators.interpolateAzBzProduct(
+                                                F, &az_int, &bz_field,
+                                                &univariate_skip.COEFFS_PER_J[j], FIRST_GROUP_SIZE,
+                                            );
+                                            inner[j] = inner[j].add(e_in.mul(product));
+                                        }
+                                    } else {
+                                        const az_int = evaluators.computeAzSecondGroupInt(F, witness);
+                                        const bz_field = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
+                                        inline for (0..DEGREE) |j| {
+                                            const product = evaluators.interpolateAzBzProduct(
+                                                F, &az_int, &bz_field,
+                                                &univariate_skip.COEFFS_PER_J[j], SECOND_GROUP_SIZE,
+                                            );
+                                            inner[j] = inner[j].add(e_in.mul(product));
+                                        }
                                     }
                                 }
                             }
@@ -758,11 +796,19 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 }
             };
 
+            // Precompute 2^64 field element for second-group Bz (fallback path)
+            const two_pow_64 = blk_2p64: {
+                var bytes: [16]u8 = undefined;
+                std.mem.writeInt(u128, &bytes, 0x10000000000000000, .little);
+                break :blk_2p64 F.fromBytes(&bytes);
+            };
+
             const first_round_ctx = FirstRoundCtx{
                 .num_x_in_vals = num_x_in_vals,
                 .num_x_in_prime_bits = @intCast(num_x_in_prime_bits),
                 .E_out = E_out,
                 .E_in = E_in,
+                .compact = self.compact_witnesses,
                 .cycle_witnesses = self.cycle_witnesses,
                 .two_pow_64 = two_pow_64,
             };
@@ -1792,10 +1838,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
             return result.az.mul(result.bz);
         }
 
-        /// Compute separate Az and Bz for a single cycle for a given constraint group
-        ///
-        /// Returns both Az and Bz separately (used in cycle rounds where we need
-        /// to accumulate them before multiplying)
+        /// Compute separate Az and Bz for a single cycle for a given constraint group.
+        /// Uses compact integer witnesses when available for better cache performance.
         fn computeCycleAzBzForGroup(
             self: *const Self,
             witness: *const constraints.R1CSCycleInputs(F),
@@ -1840,6 +1884,65 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         az_sum = az_sum.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
                     }
                     bz_sum = bz_sum.add(w.mul(bz_field[i]));
+                }
+                return .{ .az = az_sum, .bz = bz_sum };
+            }
+        }
+
+        /// Compact witness version of computeCycleAzBzForGroup.
+        /// Uses precomputed integer Az/Bz values for better cache performance.
+        fn computeCycleAzBzForGroupCompact(
+            self: *const Self,
+            cw: *const evaluators.CompactWitness,
+            group: usize,
+        ) struct { az: F, bz: F } {
+            if (group == 0) {
+                var az_sum = F.zero();
+                var bz_sum = F.zero();
+                inline for (0..FIRST_GROUP_SIZE) |i| {
+                    const w = self.lagrange_evals_r0[i];
+                    const az_i = cw.az_first[i];
+                    if (az_i == 1) {
+                        az_sum = az_sum.add(w);
+                    } else if (az_i == -1) {
+                        az_sum = az_sum.sub(w);
+                    } else if (az_i != 0) {
+                        az_sum = az_sum.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
+                    }
+                    // Convert i128 Bz to field and accumulate
+                    const bz_i = cw.bz_first[i];
+                    if (bz_i != 0) {
+                        const bz_f = if (bz_i >= 0)
+                            F.fromU128(@as(u128, @intCast(bz_i)))
+                        else
+                            F.fromU128(@as(u128, @intCast(-bz_i))).neg();
+                        bz_sum = bz_sum.add(w.mul(bz_f));
+                    }
+                }
+                return .{ .az = az_sum, .bz = bz_sum };
+            } else {
+                // Second group
+                const g2_size = comptime @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+                var az_sum = F.zero();
+                inline for (0..g2_size) |i| {
+                    const w = self.lagrange_evals_r0[i];
+                    const az_i = cw.az_second[i];
+                    if (az_i == 1) {
+                        az_sum = az_sum.add(w);
+                    } else if (az_i == -1) {
+                        az_sum = az_sum.sub(w);
+                    } else if (az_i != 0) {
+                        az_sum = az_sum.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
+                    }
+                }
+                var bz_sum = F.zero();
+                inline for (0..g2_size) |i| {
+                    const w = self.lagrange_evals_r0[i];
+                    const bz_i = cw.bz_second[i];
+                    if (bz_i != 0) {
+                        const bz_f = evaluators.fieldFromI128(F, bz_i);
+                        bz_sum = bz_sum.add(w.mul(bz_f));
+                    }
                 }
                 return .{ .az = az_sum, .bz = bz_sum };
             }
@@ -1977,12 +2080,14 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 window_bits: u6,
                 num_r_bits: u6,
                 cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+                compact_witnesses: ?[]const evaluators.CompactWitness,
                 self_ptr: *const Self,
             };
             const reduceMap = struct {
                 fn f(ctx: ReduceCtx, start: usize, end: usize) [2]F {
                     var local_t_00 = F.zero();
                     var local_t_inf = F.zero();
+                    const cw_len = if (ctx.compact_witnesses) |cw| cw.len else ctx.cycle_witnesses.len;
 
                     var x_out_idx: usize = start;
                     while (x_out_idx < end) : (x_out_idx += 1) {
@@ -2011,8 +2116,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                     const step_idx = full_idx >> 1;
                                     const selector: usize = full_idx & 1;
 
-                                    if (step_idx < ctx.cycle_witnesses.len) {
-                                        const result = ctx.self_ptr.computeCycleAzBzForGroup(&ctx.cycle_witnesses[step_idx], selector);
+                                    if (step_idx < cw_len) {
+                                        const result = if (ctx.compact_witnesses) |compact|
+                                            ctx.self_ptr.computeCycleAzBzForGroupCompact(&compact[step_idx], selector)
+                                        else
+                                            ctx.self_ptr.computeCycleAzBzForGroup(&ctx.cycle_witnesses[step_idx], selector);
                                         az_grid[x_val] = az_grid[x_val].add(r_weight.mul(result.az));
                                         bz_grid[x_val] = bz_grid[x_val].add(r_weight.mul(result.bz));
                                     }
@@ -2047,6 +2155,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .window_bits = window_bits,
                 .num_r_bits = num_r_bits,
                 .cycle_witnesses = self.cycle_witnesses,
+                .compact_witnesses = self.compact_witnesses,
                 .self_ptr = self,
             };
 
@@ -2110,10 +2219,46 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // ALL rounds bind Az/Bz polynomials (this is critical for next_window to work!)
             if (self.az_poly != null and self.bz_poly != null) {
                 if (self.thread_pool) |tp| {
-                    // Each bindLowParallel uses all threads internally (parallelForForce).
-                    // Sequential calls are better than join(2 threads) for large polynomials.
-                    self.az_poly.?.bindLowParallel(r, tp);
-                    self.bz_poly.?.bindLowParallel(r, tp);
+                    // Fused bind: process both Az and Bz in a single parallelForForce call.
+                    // This halves the barrier count and keeps both arrays cache-local per worker.
+                    const az_src = self.az_poly.?.evaluations;
+                    const bz_src = self.bz_poly.?.evaluations;
+                    const az_scratch = self.az_poly.?.scratch;
+                    const bz_scratch = self.bz_poly.?.scratch;
+                    if (az_scratch != null and bz_scratch != null) {
+                        const new_size = az_src.len / 2;
+                        const FusedCtx = struct {
+                            az_s: []const F, az_d: []F,
+                            bz_s: []const F, bz_d: []F,
+                            r_val: F,
+                        };
+                        tp.parallelForForce(new_size, FusedCtx{
+                            .az_s = az_src, .az_d = az_scratch.?,
+                            .bz_s = bz_src, .bz_d = bz_scratch.?,
+                            .r_val = r,
+                        }, struct {
+                            fn f(ctx: FusedCtx, i: usize) void {
+                                const az_lo = ctx.az_s[2 * i];
+                                const az_hi = ctx.az_s[2 * i + 1];
+                                ctx.az_d[i] = az_lo.add(ctx.r_val.mul(az_hi.sub(az_lo)));
+                                const bz_lo = ctx.bz_s[2 * i];
+                                const bz_hi = ctx.bz_s[2 * i + 1];
+                                ctx.bz_d[i] = bz_lo.add(ctx.r_val.mul(bz_hi.sub(bz_lo)));
+                            }
+                        }.f);
+                        // Swap evaluations and scratch (pointer swap, O(1))
+                        const az_tmp = self.az_poly.?.evaluations;
+                        self.az_poly.?.evaluations = az_scratch.?;
+                        self.az_poly.?.scratch = az_tmp;
+                        self.az_poly.?.num_vars -= 1;
+                        const bz_tmp = self.bz_poly.?.evaluations;
+                        self.bz_poly.?.evaluations = bz_scratch.?;
+                        self.bz_poly.?.scratch = bz_tmp;
+                        self.bz_poly.?.num_vars -= 1;
+                    } else {
+                        self.az_poly.?.bindLow(r);
+                        self.bz_poly.?.bindLow(r);
+                    }
                 } else {
                     self.az_poly.?.bindLow(r);
                     self.bz_poly.?.bindLow(r);

@@ -1147,27 +1147,29 @@ pub fn UniPoly(comptime F: type) type {
         pub fn evalLinearProd9(pairs: [9][2]F) [9]F {
             var result: [9]F = undefined;
 
-            // Compute product at each evaluation point
-            // Point ∞ is the product of leading coefficients (deltas)
-            inline for (0..9) |point_idx| {
-                var product = F.one();
-                inline for (0..9) |poly_idx| {
-                    const p0 = pairs[poly_idx][0];
-                    const p1 = pairs[poly_idx][1];
-                    const delta = p1.sub(p0);
-
-                    if (point_idx == 8) {
-                        // Point ∞: use leading coefficient (delta)
-                        product = product.mul(delta);
-                    } else {
-                        // Point k = point_idx + 1: p(k) = p0 + k*delta
-                        const k = F.fromU64(point_idx + 1);
-                        const val = p0.add(k.mul(delta));
-                        product = product.mul(val);
-                    }
-                }
-                result[point_idx] = product;
+            // Sliding evaluation: cur[i] steps from p_i(1) by delta[i] per point.
+            // Avoids redundant delta recomputation across eval points.
+            var cur: [9]F = undefined;
+            var deltas: [9]F = undefined;
+            inline for (0..9) |i| {
+                deltas[i] = pairs[i][1].sub(pairs[i][0]);
+                cur[i] = pairs[i][1]; // p_i(1)
             }
+
+            // Evaluate at x = 1, 2, ..., 8
+            inline for (0..8) |pt| {
+                if (pt > 0) {
+                    inline for (0..9) |i| cur[i] = cur[i].add(deltas[i]);
+                }
+                var product = cur[0];
+                inline for (1..9) |i| product = product.mul(cur[i]);
+                result[pt] = product;
+            }
+
+            // Point ∞: product of leading coefficients
+            var prod_inf = deltas[0];
+            inline for (1..9) |i| prod_inf = prod_inf.mul(deltas[i]);
+            result[8] = prod_inf;
 
             return result;
         }
@@ -1180,27 +1182,28 @@ pub fn UniPoly(comptime F: type) type {
         pub fn evalLinearProd10(pairs: [10][2]F) [10]F {
             var result: [10]F = undefined;
 
-            // Compute product at each evaluation point
-            // Point ∞ is the product of leading coefficients (deltas)
-            inline for (0..10) |point_idx| {
-                var product = F.one();
-                inline for (0..10) |poly_idx| {
-                    const p0 = pairs[poly_idx][0];
-                    const p1 = pairs[poly_idx][1];
-                    const delta = p1.sub(p0);
-
-                    if (point_idx == 9) {
-                        // Point ∞: use leading coefficient (delta)
-                        product = product.mul(delta);
-                    } else {
-                        // Point k = point_idx + 1: p(k) = p0 + k*delta
-                        const k = F.fromU64(point_idx + 1);
-                        const val = p0.add(k.mul(delta));
-                        product = product.mul(val);
-                    }
-                }
-                result[point_idx] = product;
+            // Sliding evaluation: cur[i] steps from p_i(1) by delta[i] per point.
+            var cur: [10]F = undefined;
+            var deltas: [10]F = undefined;
+            inline for (0..10) |i| {
+                deltas[i] = pairs[i][1].sub(pairs[i][0]);
+                cur[i] = pairs[i][1]; // p_i(1)
             }
+
+            // Evaluate at x = 1, 2, ..., 9
+            inline for (0..9) |pt| {
+                if (pt > 0) {
+                    inline for (0..10) |i| cur[i] = cur[i].add(deltas[i]);
+                }
+                var product = cur[0];
+                inline for (1..10) |i| product = product.mul(cur[i]);
+                result[pt] = product;
+            }
+
+            // Point ∞: product of leading coefficients
+            var prod_inf = deltas[0];
+            inline for (1..10) |i| prod_inf = prod_inf.mul(deltas[i]);
+            result[9] = prod_inf;
 
             return result;
         }

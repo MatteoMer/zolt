@@ -7,6 +7,7 @@ use jolt_core::zkvm::verifier::JoltSharedPreprocessing;
 use jolt_core::zkvm::RV64IMACProver;
 use std::fs;
 use std::time::Instant;
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -27,6 +28,13 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Enable tracing for stage-level timing
+    fmt()
+        .with_env_filter(EnvFilter::new("jolt_core=info"))
+        .with_target(false)
+        .with_timer(fmt::time::uptime())
+        .init();
 
     eprintln!("=== Jolt (Rust) Prover Benchmark ===");
     eprintln!("ELF: {}", cli.elf);

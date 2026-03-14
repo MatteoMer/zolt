@@ -1688,11 +1688,221 @@ pub const BN254Scalar = struct {
             self.limbs[0],
         });
     }
+    /// Multiply two field elements and return the unreduced product accumulator.
+    /// This avoids Montgomery reduction, allowing multiple products to be accumulated
+    /// before a single reduction at the end.
+    pub inline fn mulToProductAccum(self: Self, other: Self) UnreducedProductAccum {
+        return UnreducedProductAccum.fromMul(self, other);
+    }
+};
+
+/// Unreduced product accumulator for deferred Montgomery reduction.
+///
+/// Stores partial products in positional `u128` slots to avoid Montgomery reduction
+/// in hot accumulation loops. Each slot holds a sum of u64×u64 partial products;
+/// carries between slots are deferred until `reduce()`. This mirrors Jolt's
+/// `Folded256ProductAccum` type.
+///
+/// ## Usage
+/// ```
+/// var accum = UnreducedProductAccum.zero();
+/// for (a_vals, b_vals) |a, b| {
+///     accum.addAssign(a.mulToProductAccum(b));
+/// }
+/// const result = accum.reduce();  // single Montgomery reduction
+/// ```
+///
+/// ## Overflow Safety
+/// Each `fromMul` contributes at most `4 × (2^64-1)` to any slot. After N `addAssign`
+/// calls, max slot value = `N × 4 × (2^64-1)`. With u128 max = 2^128-1, safe for
+/// N up to ~2^62. At T=2^30 with E_in=2^15, N=32768 → max slot ≈ 2^79, well within bounds.
+pub const UnreducedProductAccum = struct {
+    slots: [8]u128,
+
+    const Self = @This();
+
+    pub inline fn zero() Self {
+        return .{ .slots = .{0} ** 8 };
+    }
+
+    /// Create an accumulator from a single product a×b (schoolbook 4×4, no reduction).
+    pub inline fn fromMul(a: BN254Scalar, b: BN254Scalar) Self {
+        var slots: [8]u128 = .{0} ** 8;
+        inline for (0..4) |i| {
+            inline for (0..4) |j| {
+                const p: u128 = @as(u128, a.limbs[i]) * @as(u128, b.limbs[j]);
+                slots[i + j] += @as(u128, @as(u64, @truncate(p))); // lo 64
+                slots[i + j + 1] += @as(u128, @as(u64, @truncate(p >> 64))); // hi 64
+            }
+        }
+        return .{ .slots = slots };
+    }
+
+    /// Accumulate another product into this accumulator.
+    pub inline fn addAssign(self: *Self, other: Self) void {
+        inline for (0..8) |i| {
+            self.slots[i] += other.slots[i];
+        }
+    }
+
+    /// Add two accumulators.
+    pub inline fn add(self: Self, other: Self) Self {
+        var result: Self = self;
+        inline for (0..8) |i| {
+            result.slots[i] += other.slots[i];
+        }
+        return result;
+    }
+
+    /// Reduce the accumulated products to a single field element via Montgomery reduction.
+    ///
+    /// This is where all the deferred work happens: carry propagation across slots,
+    /// then standard 4-step CIOS Montgomery reduction. If the accumulated value
+    /// overflows 8 limbs (9th limb nonzero), the overflow contribution is folded in
+    /// as `overflow * 2^256 mod p = overflow * R mod p = fromU64(overflow)`.
+    pub fn reduce(self: Self) BN254Scalar {
+        // Step 1: Normalize [8]u128 → [8]u64 + overflow (up to u128)
+        // For N accumulated products, each slot can be up to N * 2^130, so
+        // the carry chain can produce overflow exceeding u64.
+        var limbs: [8]u64 = undefined;
+        var carry: u128 = 0;
+        inline for (0..8) |i| {
+            const sum = self.slots[i] + carry;
+            limbs[i] = @truncate(sum);
+            carry = sum >> 64;
+        }
+        // carry holds the overflow: limbs[8..9] conceptually.
+        // Split into two u64 limbs for handling.
+        const overflow_lo: u64 = @truncate(carry);
+        const overflow_hi: u64 = @truncate(carry >> 64);
+
+        // Step 2: Standard 4-step CIOS Montgomery reduction on limbs[0..7]
+        // Same algorithm as BN254Scalar.square() reduction
+        var t: [5]u64 = .{ limbs[0], limbs[1], limbs[2], limbs[3], 0 };
+
+        inline for (0..4) |i| {
+            const m = t[0] *% BN254_INV;
+            var c: u64 = 0;
+            const prod0 = BN254Scalar.mulWide(m, BN254_MODULUS[0]);
+            const sum0 = @as(u128, t[0]) + prod0;
+            c = @truncate(sum0 >> 64);
+
+            inline for (1..4) |j| {
+                const prod = BN254Scalar.mulWide(m, BN254_MODULUS[j]);
+                const s = @as(u128, t[j]) + prod + @as(u128, c);
+                t[j - 1] = @truncate(s);
+                c = @truncate(s >> 64);
+            }
+            const final_sum = @as(u128, t[4]) + @as(u128, c) + @as(u128, limbs[i + 4]);
+            t[3] = @truncate(final_sum);
+            t[4] = @truncate(final_sum >> 64);
+        }
+
+        // Step 3: Reduce 5-limb CIOS result (t[4]*2^256 + t[0..3]) mod p.
+        // For single products, t[4] is always 0 and one subtraction suffices.
+        // For accumulated products, the 8-limb input can span full 512 bits,
+        // so t[4] can be 1, requiring up to 5 subtractions of p.
+        var result = BN254Scalar{ .limbs = .{ t[0], t[1], t[2], t[3] } };
+        var extra = t[4]; // 0 or 1
+        var iters: u32 = 0;
+        while (extra != 0 or !result.lessThanModulus()) : (iters += 1) {
+            std.debug.assert(iters < 6); // at most 5 subtractions of p
+            const was_less = result.lessThanModulus();
+            result = result.subtractModulus();
+            if (was_less) extra -= 1; // borrow consumed from extra
+        }
+
+        // Step 4: Add overflow contribution from limbs beyond position 7.
+        // The overflow represents value * 2^512. After Montgomery division by R=2^256,
+        // this becomes overflow_val * 2^256 mod p.
+        // Using toMontgomery: raw_val * R² * R^{-1} = raw_val * R = raw_val * 2^256 mod p.
+        if (overflow_lo != 0 or overflow_hi != 0) {
+            const raw = BN254Scalar{ .limbs = .{ overflow_lo, overflow_hi, 0, 0 } };
+            result = result.add(raw.toMontgomery());
+        }
+
+        return result;
+    }
 };
 
 // Verify BN254Scalar implements JoltField interface
 comptime {
     _ = JoltField(BN254Scalar);
+}
+
+test "UnreducedProductAccum single product matches mul" {
+    const a = BN254Scalar.fromU64(12345);
+    const b = BN254Scalar.fromU64(67890);
+    const expected = a.mul(b);
+    const actual = a.mulToProductAccum(b).reduce();
+    try std.testing.expect(expected.eql(actual));
+}
+
+test "UnreducedProductAccum sum of products" {
+    // Verify sum(a[i]*b[i]) via accum equals sum via direct mul
+    const N = 100;
+    var a_vals: [N]BN254Scalar = undefined;
+    var b_vals: [N]BN254Scalar = undefined;
+
+    // Use deterministic "random" values
+    for (0..N) |i| {
+        a_vals[i] = BN254Scalar.fromU64(@as(u64, i) * 7 + 13);
+        b_vals[i] = BN254Scalar.fromU64(@as(u64, i) * 11 + 29);
+    }
+
+    // Direct sum
+    var expected = BN254Scalar.zero();
+    for (0..N) |i| {
+        expected = expected.add(a_vals[i].mul(b_vals[i]));
+    }
+
+    // Accumulated sum
+    var accum = UnreducedProductAccum.zero();
+    for (0..N) |i| {
+        accum.addAssign(a_vals[i].mulToProductAccum(b_vals[i]));
+    }
+    const actual = accum.reduce();
+
+    try std.testing.expect(expected.eql(actual));
+}
+
+test "UnreducedProductAccum large accumulation (10000 products)" {
+    const N = 10000;
+    var expected = BN254Scalar.zero();
+    var accum = UnreducedProductAccum.zero();
+
+    for (0..N) |i| {
+        const a = BN254Scalar.fromU64(@as(u64, i) * 31 + 7);
+        const b = BN254Scalar.fromU64(@as(u64, i) * 17 + 3);
+        expected = expected.add(a.mul(b));
+        accum.addAssign(a.mulToProductAccum(b));
+    }
+
+    try std.testing.expect(expected.eql(accum.reduce()));
+}
+
+test "UnreducedProductAccum zero accumulation" {
+    const accum = UnreducedProductAccum.zero();
+    try std.testing.expect(accum.reduce().isZero());
+}
+
+test "UnreducedProductAccum with large field elements" {
+    // Use values near the modulus to stress carry propagation
+    const a = BN254Scalar{ .limbs = .{ 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x0FFFFFFFFFFFFFFF } };
+    const b = BN254Scalar{ .limbs = .{ 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x0FFFFFFFFFFFFFFF } };
+
+    const expected = a.mul(b);
+    const actual = a.mulToProductAccum(b).reduce();
+    try std.testing.expect(expected.eql(actual));
+
+    // Accumulate many large products
+    var exp2 = BN254Scalar.zero();
+    var acc2 = UnreducedProductAccum.zero();
+    for (0..50) |_| {
+        exp2 = exp2.add(a.mul(b));
+        acc2.addAssign(a.mulToProductAccum(b));
+    }
+    try std.testing.expect(exp2.eql(acc2.reduce()));
 }
 
 test "bn254 scalar basic operations" {

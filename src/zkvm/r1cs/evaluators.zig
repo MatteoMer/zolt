@@ -309,6 +309,19 @@ pub fn fieldFromI32(comptime F: type, val: i32) F {
     }
 }
 
+/// Convert i128 to field element. Handles the full i128 range including values
+/// produced by wrapping arithmetic (e.g., from @bitCast of large u128 values).
+pub fn fieldFromI128(comptime F: type, val: i128) F {
+    if (val >= 0) {
+        return F.fromU128(@intCast(val));
+    } else {
+        // For negative values, compute F.zero() - F.fromU128(|val|).
+        // Use wrapping negate + bitcast to avoid overflow when val == i128.min.
+        const abs: u128 = @bitCast(-%val);
+        return F.zero().sub(F.fromU128(abs));
+    }
+}
+
 // ============================================================================
 // Fast integer-based Az evaluation
 // ============================================================================
@@ -478,6 +491,189 @@ pub fn interpolateAzBzProduct(
     }
 
     return az_f.mul(bz_f);
+}
+
+// ============================================================================
+// Compact Integer Witness for Fast Outer Spartan Evaluation
+// ============================================================================
+
+/// Compact integer witness storing precomputed Az/Bz values as raw integers.
+/// Size: ~256 bytes per cycle vs 1344 bytes for full field witness.
+/// This enables L3-cache-resident evaluation (16MB vs 84MB for T=65536).
+pub const CompactWitness = struct {
+    /// First-group Az guards as small integers (10 values, each in [-3, 3])
+    az_first: [FIRST_GROUP_SIZE]i8,
+    /// Second-group Az guards as small integers (9 values, each in [-4, 3])
+    az_second: [SECOND_GROUP_SIZE]i8,
+    _pad: [5]u8 = .{0} ** 5, // align to 24 bytes
+    /// First-group Bz magnitudes as i128 (left - right for each constraint)
+    /// Must be i128 (not i64) because witness values can be > i64.max
+    /// (e.g., sign-extended 32-bit values stored as large u64)
+    bz_first: [FIRST_GROUP_SIZE]i128,
+    /// Second-group Bz magnitudes as i128 (left - right for each constraint)
+    bz_second: [SECOND_GROUP_SIZE]i128,
+};
+
+/// Build compact witness array from field-form cycle witnesses.
+/// This performs Montgomery de-encoding once per value, then all subsequent
+/// evaluation uses pure integer arithmetic.
+pub fn buildCompactWitnesses(
+    comptime F: type,
+    cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+    allocator: Allocator,
+) ![]CompactWitness {
+    const n = cycle_witnesses.len;
+    const result = try allocator.alloc(CompactWitness, n);
+
+    for (0..n) |i| {
+        const ws = cycle_witnesses[i].asSlice();
+        result[i] = compactFromFieldWitness(F, ws);
+    }
+
+
+    return result;
+}
+
+/// Convert a single cycle's field witness to compact integer form.
+fn compactFromFieldWitness(comptime F: type, witness: []const F) CompactWitness {
+    var cw: CompactWitness = undefined;
+    cw._pad = .{0} ** 5;
+
+    // Az values (same as existing computeAzFirstGroupInt / computeAzSecondGroupInt)
+    cw.az_first = computeAzFirstGroupInt(F, witness);
+    cw.az_second = computeAzSecondGroupInt(F, witness);
+
+    // Extract raw integer values via Montgomery de-encoding
+    const I = R1CSInputIndex;
+    const ram_addr = witness[comptime I.RamAddress.toIndex()].toU64();
+    const ram_read = witness[comptime I.RamReadValue.toIndex()].toU64();
+    const ram_write = witness[comptime I.RamWriteValue.toIndex()].toU64();
+    const rs1 = witness[comptime I.Rs1Value.toIndex()].toU64();
+    const rs2 = witness[comptime I.Rs2Value.toIndex()].toU64();
+    const rd_write = witness[comptime I.RdWriteValue.toIndex()].toU64();
+    const left_lookup = witness[comptime I.LeftLookupOperand.toIndex()].toU64();
+    const left_input = witness[comptime I.LeftInstructionInput.toIndex()].toU64();
+    const right_input = witness[comptime I.RightInstructionInput.toIndex()].toU64();
+    const lookup_out = witness[comptime I.LookupOutput.toIndex()].toU64();
+    const next_upc = witness[comptime I.NextUnexpandedPC.toIndex()].toU64();
+    const pc = witness[comptime I.PC.toIndex()].toU64();
+    const next_pc = witness[comptime I.NextPC.toIndex()].toU64();
+    const upc = witness[comptime I.UnexpandedPC.toIndex()].toU64();
+    const dont_update: u64 = if (witness[comptime I.FlagDoNotUpdateUnexpandedPC.toIndex()].eql(F.zero())) 0 else 1;
+    const is_compressed: u64 = if (witness[comptime I.FlagIsCompressed.toIndex()].eql(F.zero())) 0 else 1;
+
+    // For second group: values that may be > u64
+    // RightLookupOperand and Product can be u128/i128
+    // We need to extract them properly. toU64() only gets limb[0].
+    // For values > u64, use toBytes and reconstruct.
+    const right_lookup_f = witness[comptime I.RightLookupOperand.toIndex()];
+    const right_lookup_std = right_lookup_f.fromMontgomery();
+    const right_lookup_u128: u128 = @as(u128, right_lookup_std.limbs[0]) | (@as(u128, right_lookup_std.limbs[1]) << 64);
+
+    const product_f = witness[comptime I.Product.toIndex()];
+    const product_std = product_f.fromMontgomery();
+    const product_u128: u128 = @as(u128, product_std.limbs[0]) | (@as(u128, product_std.limbs[1]) << 64);
+
+    // Imm has two possible representations depending on instruction type:
+    // 1. F.fromU64(sign_extended_u64) for ADDI/JALR: limbs = [large_u64, 0, 0, 0]
+    // 2. F.zero().sub(F.fromU64(k)) for BRANCH/LOAD/STORE: limbs = [p-k], all 4 nonzero
+    // Extract as i128 to handle both cases correctly.
+    const imm_f = witness[comptime I.Imm.toIndex()];
+    const imm_std = imm_f.fromMontgomery();
+    const imm: i128 = blk: {
+        if (imm_std.limbs[1] == 0 and imm_std.limbs[2] == 0 and imm_std.limbs[3] == 0) {
+            // Case 1: positive u64 value (possibly large, e.g. 2^64-1 for sign-extended -1)
+            break :blk @as(i128, imm_std.limbs[0]);
+        }
+        // Case 2: field-negative (p - k), extract as -k
+        const neg = F.zero().sub(imm_f);
+        const neg_std = neg.fromMontgomery();
+        if (neg_std.limbs[1] == 0 and neg_std.limbs[2] == 0 and neg_std.limbs[3] == 0) {
+            break :blk -@as(i128, neg_std.limbs[0]);
+        }
+        // Fallback: use lower 128 bits (shouldn't happen for valid RISC-V immediates)
+        break :blk @as(i128, imm_std.limbs[0]) | (@as(i128, imm_std.limbs[1]) << 64);
+    };
+
+    // First group Bz as integers (i128 to safely hold u64 differences)
+    cw.bz_first = .{
+        @as(i128, ram_addr), // FG0: RamAddress
+        @as(i128, ram_read) - @as(i128, ram_write), // FG1: RamRead - RamWrite
+        @as(i128, ram_read) - @as(i128, rd_write), // FG2: RamRead - RdWrite
+        @as(i128, rs2) - @as(i128, ram_write), // FG3: Rs2 - RamWrite
+        @as(i128, left_lookup), // FG4: LeftLookup
+        @as(i128, left_lookup) - @as(i128, left_input), // FG5: LeftLookup - LeftInput
+        @as(i128, lookup_out) - 1, // FG6: LookupOutput - 1
+        @as(i128, next_upc) - @as(i128, lookup_out), // FG7: NextUPC - LookupOutput
+        @as(i128, next_pc) - @as(i128, pc) - 1, // FG8: NextPC - PC - 1
+        1 - @as(i128, dont_update), // FG9: 1 - DoNotUpdate
+    };
+
+    // Second group Bz as integers.
+    // Uses wrapping arithmetic because RightLookupOperand and Product can exceed i128 range
+    // when bitcast from u128. The wrapping is correct because these values are converted back
+    // to field elements (mod p) before use.
+    const TWO_POW_64: i128 = 1 << 64;
+    const right_lookup_i128: i128 = @bitCast(right_lookup_u128);
+    const product_i128: i128 = @bitCast(product_u128);
+    cw.bz_second = .{
+        // SG0: RamAddress - Rs1 - Imm
+        @as(i128, @intCast(ram_addr)) -% @as(i128, @intCast(rs1)) -% imm,
+        // SG1: RightLookup - LeftInput - RightInput
+        right_lookup_i128 -% @as(i128, left_input) -% @as(i128, right_input),
+        // SG2: RightLookup - LeftInput + RightInput - 2^64
+        right_lookup_i128 -% @as(i128, left_input) +% @as(i128, right_input) -% TWO_POW_64,
+        // SG3: RightLookup - Product
+        right_lookup_i128 -% product_i128,
+        // SG4: RightLookup - RightInput
+        right_lookup_i128 -% @as(i128, right_input),
+        // SG5: RdWrite - LookupOutput
+        @as(i128, rd_write) -% @as(i128, lookup_out),
+        // SG6: RdWrite - UPC - 4 + 2*IsCompressed
+        @as(i128, rd_write) -% @as(i128, upc) -% 4 +% 2 *% @as(i128, is_compressed),
+        // SG7: NextUPC - UPC - Imm
+        @as(i128, next_upc) -% @as(i128, upc) -% imm,
+        // SG8: NextUPC - UPC - 4 + 4*DoNotUpdate + 2*IsCompressed
+        @as(i128, next_upc) -% @as(i128, upc) -% 4 +% 4 *% @as(i128, dont_update) +% 2 *% @as(i128, is_compressed),
+    };
+
+    return cw;
+}
+
+/// Integer-based Az*Bz interpolation for the first group.
+/// Returns the product as i128 (guaranteed to fit for BN254 coefficient magnitudes).
+///
+/// Exploits constraint satisfaction: when az_i != 0, bz_i must be 0.
+/// So Az(j) only gets contributions from "active" guards, and
+/// Bz(j) only gets contributions from "inactive" guards.
+pub fn interpolateAzBzProductInt(
+    az_int: *const [FIRST_GROUP_SIZE]i8,
+    bz_int: *const [FIRST_GROUP_SIZE]i128,
+    coeffs: *const [FIRST_GROUP_SIZE]i32,
+) i128 {
+    // Compute Az(j) = Σ coeffs[i] * az_int[i] (integer, fits in i32)
+    var az_j: i32 = 0;
+    // Compute Bz(j) = Σ coeffs[i] * bz_int[i] (integer, fits in i128)
+    // Only accumulate terms where az_int[i] == 0 (exploiting constraint satisfaction)
+    var bz_j: i128 = 0;
+
+    inline for (0..FIRST_GROUP_SIZE) |i| {
+        const c = coeffs[i];
+        const a = az_int[i];
+        if (a != 0) {
+            std.debug.assert(bz_int[i] == 0); // constraint satisfaction: az!=0 implies bz==0
+            az_j += c * @as(i32, a);
+        } else {
+            bz_j += @as(i128, c) * @as(i128, bz_int[i]);
+        }
+    }
+
+    // Early exit if guard sum is zero
+    if (az_j == 0) return 0;
+
+    // Product fits in i128: max |az_j| ≈ 10*140140 ≈ 1.4M, max |bz_j| ≈ 10*140140*2^64 ≈ 2^81
+    // Product ≈ 2^21 * 2^81 = 2^102, well within i128 range
+    return @as(i128, az_j) * bz_j;
 }
 
 // ============================================================================
@@ -692,4 +888,154 @@ test "fast second-group Bz direct matches field Bz" {
     for (0..SECOND_GROUP_SIZE) |i| {
         try std.testing.expect(bz_field.values[i].eql(bz_direct[i]));
     }
+}
+
+test "interpolateAzBzProductInt matches brute force for satisfied constraints" {
+    const univariate_skip = @import("univariate_skip.zig");
+
+    // Simulate a satisfied constraint: when az[i] != 0, bz[i] must be 0.
+    // This is the invariant that interpolateAzBzProductInt exploits.
+    const az = [FIRST_GROUP_SIZE]i8{ 1, 0, 0, -1, 0, 0, 0, 2, 0, 0 };
+    const bz = [FIRST_GROUP_SIZE]i128{
+        0, // az[0]=1, so bz must be 0 (satisfied)
+        42, // az[1]=0, so bz can be non-zero
+        -100, // az[2]=0
+        0, // az[3]=-1, so bz must be 0 (satisfied)
+        999, // az[4]=0
+        -@as(i128, 0x7FFFFFFF_FFFFFFFF), // large negative
+        @as(i128, 0xFFFFFFFF_FFFFFFFE), // large positive
+        0, // az[7]=2, so bz must be 0 (satisfied)
+        0, // az[8]=0
+        12345, // az[9]=0
+    };
+
+    for (0..univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE) |j| {
+        const coeffs = &univariate_skip.COEFFS_PER_J[j];
+
+        // Brute-force: az_j = Σ c[i]*az[i], bz_j = Σ c[i]*bz[i], product = az_j * bz_j
+        var az_j_bf: i64 = 0;
+        var bz_j_bf: i128 = 0;
+        for (0..FIRST_GROUP_SIZE) |i| {
+            az_j_bf += @as(i64, coeffs[i]) * @as(i64, az[i]);
+            bz_j_bf += @as(i128, coeffs[i]) * bz[i];
+        }
+        const bf_product = @as(i128, az_j_bf) * bz_j_bf;
+
+        // Optimized path
+        const opt_product = interpolateAzBzProductInt(&az, &bz, coeffs);
+
+        // Must match because az[i]!=0 implies bz[i]==0
+        try std.testing.expectEqual(bf_product, opt_product);
+    }
+}
+
+test "interpolateAzBzProductInt matches field path for satisfied constraints" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+    const univariate_skip = @import("univariate_skip.zig");
+
+    // Same satisfied-constraint data, but compare against field-arithmetic path
+    const az = [FIRST_GROUP_SIZE]i8{ 0, 1, 0, 0, -1, 0, 0, 0, 3, 0 };
+    const bz_int = [FIRST_GROUP_SIZE]i128{
+        @as(i128, 0xFFFFFFFF_FFFFFFFE), // large value (az=0)
+        0, // az=1, bz must be 0
+        -55555, // az=0
+        @as(i128, 1) << 64, // 2^64 (az=0)
+        0, // az=-1, bz must be 0
+        42, // az=0
+        -1, // az=0
+        0, // az=0
+        0, // az=3, bz must be 0
+        999999, // az=0
+    };
+
+    // Convert bz_int to field values for the reference path
+    var bz_field: [FIRST_GROUP_SIZE]F = undefined;
+    for (0..FIRST_GROUP_SIZE) |i| {
+        bz_field[i] = if (bz_int[i] >= 0)
+            F.fromU128(@intCast(bz_int[i]))
+        else
+            F.fromU128(@intCast(-bz_int[i])).neg();
+    }
+
+    for (0..univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE) |j| {
+        const coeffs = &univariate_skip.COEFFS_PER_J[j];
+
+        // Field-based reference
+        const field_product = interpolateAzBzProduct(F, &az, &bz_field, coeffs, FIRST_GROUP_SIZE);
+
+        // Integer-based optimized path
+        const int_product = interpolateAzBzProductInt(&az, &bz_int, coeffs);
+        const int_as_field = if (int_product >= 0)
+            F.fromU128(@intCast(int_product))
+        else
+            F.fromU128(@intCast(-int_product)).neg();
+
+        try std.testing.expect(field_product.eql(int_as_field));
+    }
+}
+
+test "compact witness az/bz match field witnesses" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
+    witness[R1CSInputIndex.FlagLoad.toIndex()] = F.one();
+    witness[R1CSInputIndex.RamAddress.toIndex()] = F.fromU64(500);
+    witness[R1CSInputIndex.RamReadValue.toIndex()] = F.fromU64(42);
+    witness[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(42);
+
+    const cw = compactFromFieldWitness(F, &witness);
+
+    // Verify az_first matches computeAzFirstGroupInt
+    const az_ref = computeAzFirstGroupInt(F, &witness);
+    for (0..FIRST_GROUP_SIZE) |i| {
+        try std.testing.expectEqual(az_ref[i], cw.az_first[i]);
+    }
+
+    // Verify az_second matches computeAzSecondGroupInt
+    const az2_ref = computeAzSecondGroupInt(F, &witness);
+    for (0..SECOND_GROUP_SIZE) |i| {
+        try std.testing.expectEqual(az2_ref[i], cw.az_second[i]);
+    }
+
+    // Verify bz_first integer values match field Bz when converted back
+    const bz_ref = computeBzFirstGroupDirect(F, &witness);
+    for (0..FIRST_GROUP_SIZE) |i| {
+        const bz_i = cw.bz_first[i];
+        const bz_f = if (bz_i >= 0)
+            F.fromU128(@as(u128, @intCast(bz_i)))
+        else
+            F.fromU128(@as(u128, @intCast(-bz_i))).neg();
+        try std.testing.expect(bz_ref[i].eql(bz_f));
+    }
+}
+
+test "compact witness bz_second with large u128 values" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    // Create witness with RightLookupOperand > 2^127 to exercise @bitCast path
+    var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
+
+    // Set a large RightLookupOperand (> 2^127, would overflow @intCast)
+    const large_val: u128 = (1 << 127) + 42;
+    const large_f = F.fromU128(@truncate(large_val));
+    witness[R1CSInputIndex.RightLookupOperand.toIndex()] = large_f;
+    witness[R1CSInputIndex.LeftInstructionInput.toIndex()] = F.fromU64(100);
+    witness[R1CSInputIndex.RightInstructionInput.toIndex()] = F.fromU64(200);
+
+    // This should not panic (the bug was @intCast trapping for values >= 2^127)
+    const cw = compactFromFieldWitness(F, &witness);
+
+    // Verify bz_second[1] = RightLookup - LeftInput - RightInput (wrapping)
+    const large_as_i128: i128 = @bitCast(large_val);
+    const expected_i128: i128 = large_as_i128 -% 100 -% 200;
+    try std.testing.expectEqual(expected_i128, cw.bz_second[1]);
+
+    // Verify round-trip through fieldFromI128 produces correct field element
+    const field_val = fieldFromI128(F, expected_i128);
+    // The field value should equal F(right_lookup) - F(100) - F(200)
+    const expected_field = large_f.sub(F.fromU64(100)).sub(F.fromU64(200));
+    try std.testing.expect(field_val.eql(expected_field));
 }

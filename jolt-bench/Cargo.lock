@@ -842,6 +842,8 @@ dependencies = [
  "common",
  "jolt-core",
  "mimalloc",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -2714,7 +2714,10 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .y = t_vec_v.y,
                 .infinity = t_vec_v.infinity,
             };
-            const c = pairing.pairingFp(t_vec_v_fp, g2_fin);
+            const c = if (params.g2_prepared) |prep|
+                pairing.finalExponentiation(pairing.millerLoopPrepared(t_vec_v_fp, &prep[0]))
+            else
+                pairing.pairingFp(t_vec_v_fp, g2_fin);
 
             // D₂ and e1 are independent of each other and of C — compute in parallel
             const num_cols = @as(usize, 1) << @intCast(sigma);
@@ -2766,7 +2769,10 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .y = gamma1_v.y,
                 .infinity = gamma1_v.infinity,
             };
-            const d2 = pairing.pairingFp(gamma1_v_fp, g2_fin);
+            const d2 = if (params.g2_prepared) |prep|
+                pairing.finalExponentiation(pairing.millerLoopPrepared(gamma1_v_fp, &prep[0]))
+            else
+                pairing.pairingFp(gamma1_v_fp, g2_fin);
 
             const vmv_message = VMVMessage{
                 .c = c,
@@ -2881,34 +2887,58 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 var d1_right: GT = undefined;
                 var d2_left: GT = undefined;
                 var d2_right: GT = undefined;
+                // D1L/D1R: use prepared G2 caches (SRS points) for ~2x faster Miller loops
+                if (params.g2_prepared_affine) |affine| {
+                    d1_left = multiPairG1G2PreparedAffine(v1_work[0..n2], affine[0..n2], tp);
+                    d1_right = multiPairG1G2PreparedAffine(v1_work[n2..current_len], affine[0..n2], tp);
+                } else if (params.g2_prepared) |prep| {
+                    d1_left = multiPairG1G2Prepared(v1_work[0..n2], prep[0..n2], tp);
+                    d1_right = multiPairG1G2Prepared(v1_work[n2..current_len], prep[0..n2], tp);
+                } else {
+                    d1_left = multiPairG1G2WithPool(v1_work[0..n2], params.g2_vec[0..n2], tp);
+                    d1_right = multiPairG1G2WithPool(v1_work[n2..current_len], params.g2_vec[0..n2], tp);
+                }
+
                 if (round == 0) {
-                    // D1L/D1R: batched multi-pairing
-                    const d1_batch = multiPairBatched(2, .{
-                        PairGroup{ .g1 = v1_work[0..n2], .g2 = params.g2_vec[0..n2] },
-                        PairGroup{ .g1 = v1_work[n2..current_len], .g2 = params.g2_vec[0..n2] },
-                    }, tp);
-                    d1_left = d1_batch[0];
-                    d1_right = d1_batch[1];
-                    // D2L/D2R: first-round MSM+pair optimization
+                    // D2L/D2R: first-round MSM+pair optimization (v2 = scalars · g2_fin)
                     std.debug.assert(v_vec.len >= current_len);
-                    const sum_left = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], tp);
-                    const sum_right = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], tp);
+                    const MsmJoinCtx = struct { g1: []const G1Point, v: []const F };
+                    const msmJoinFn = struct {
+                        fn f(cx: MsmJoinCtx) G1Point {
+                            return msm.MSM(F, Fp).computeWithPool(cx.g1, cx.v, ThreadPool.getPool());
+                        }
+                    }.f;
+                    const sum_left, const sum_right = if (tp) |pool| pool.join(
+                        G1Point,
+                        G1Point,
+                        MsmJoinCtx{ .g1 = params.g1_vec[0..n2], .v = v_vec[0..n2] },
+                        msmJoinFn,
+                        MsmJoinCtx{ .g1 = params.g1_vec[0..n2], .v = v_vec[n2..current_len] },
+                        msmJoinFn,
+                    ) else .{
+                        msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], null),
+                        msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], null),
+                    };
                     const sum_left_fp = G1PointFp{ .x = sum_left.x, .y = sum_left.y, .infinity = sum_left.infinity };
                     const sum_right_fp = G1PointFp{ .x = sum_right.x, .y = sum_right.y, .infinity = sum_right.infinity };
-                    d2_left = pairing.pairingFp(sum_left_fp, g2_fin);
-                    d2_right = pairing.pairingFp(sum_right_fp, g2_fin);
+                    // Use prepared g2_fin for faster Miller loop
+                    if (params.g2_prepared) |prep| {
+                        const ml_left = pairing.millerLoopPrepared(sum_left_fp, &prep[0]);
+                        const ml_right = pairing.millerLoopPrepared(sum_right_fp, &prep[0]);
+                        d2_left = pairing.finalExponentiation(ml_left);
+                        d2_right = pairing.finalExponentiation(ml_right);
+                    } else {
+                        d2_left = pairing.pairingFp(sum_left_fp, g2_fin);
+                        d2_right = pairing.pairingFp(sum_right_fp, g2_fin);
+                    }
                 } else {
-                    // All 4 pairings batched together
-                    const batch = multiPairBatched(4, .{
-                        PairGroup{ .g1 = v1_work[0..n2], .g2 = params.g2_vec[0..n2] },
-                        PairGroup{ .g1 = v1_work[n2..current_len], .g2 = params.g2_vec[0..n2] },
+                    // D2L/D2R: v2_work has no prepared cache, use unprepared batched
+                    const d2_batch = multiPairBatched(2, .{
                         PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_work[0..n2] },
                         PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_work[n2..current_len] },
                     }, tp);
-                    d1_left = batch[0];
-                    d1_right = batch[1];
-                    d2_left = batch[2];
-                    d2_right = batch[3];
+                    d2_left = d2_batch[0];
+                    d2_right = d2_batch[1];
                 }
                 const e1_beta, const e2_beta = if (tp) |pool| blk: {
                     const EBetaCtx = struct {
@@ -3016,18 +3046,14 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     };
                     pool.parallelForForce(current_len, beta_ctx, struct {
                         fn f(cx: BetaCtx, i: usize) void {
-                            const scaled_g1 = glv.glvScalarMulG1(cx.g1[i], cx.b).toAffine();
-                            cx.v1[i] = cx.v1[i].add(scaled_g1);
-                            const scaled_proj = glv.glvScalarMulG2(cx.g2[i], cx.bi);
-                            cx.v2[i] = scaled_proj.addAffine(cx.v2[i]).toAffine();
+                            cx.v1[i] = glv.glvScalarMulG1(cx.g1[i], cx.b).addAffine(cx.v1[i]).toAffine();
+                            cx.v2[i] = glv.glvScalarMulG2(cx.g2[i], cx.bi).addAffine(cx.v2[i]).toAffine();
                         }
                     }.f);
                 } else {
                     for (0..current_len) |i| {
-                        const scaled_g1 = glv.glvScalarMulG1(params.g1_vec[i], beta).toAffine();
-                        v1_work[i] = v1_work[i].add(scaled_g1);
-                        const scaled_proj = glv.glvScalarMulG2(params.g2_vec[i], beta_inv);
-                        v2_work[i] = scaled_proj.addAffine(v2_work[i]).toAffine();
+                        v1_work[i] = glv.glvScalarMulG1(params.g1_vec[i], beta).addAffine(v1_work[i]).toAffine();
+                        v2_work[i] = glv.glvScalarMulG2(params.g2_vec[i], beta_inv).addAffine(v2_work[i]).toAffine();
                     }
                 }
 
@@ -3138,18 +3164,15 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     };
                     pool.parallelForForce(n2, fold_ctx, struct {
                         fn f(cx: FoldCtx, i: usize) void {
-                            const scaled_l = glv.glvScalarMulG1(cx.v1[i], cx.a).toAffine();
-                            cx.v1[i] = scaled_l.add(cx.v1[i + cx.half]);
-                            const scaled_proj = glv.glvScalarMulG2(cx.v2[i], cx.ai);
-                            cx.v2[i] = scaled_proj.addAffine(cx.v2[i + cx.half]).toAffine();
+                            cx.v1[i] = glv.glvScalarMulG1(cx.v1[i], cx.a).addAffine(cx.v1[i + cx.half]).toAffine();
+                            cx.v2[i] = glv.glvScalarMulG2(cx.v2[i], cx.ai).addAffine(cx.v2[i + cx.half]).toAffine();
                             cx.s1[i] = cx.a.mul(cx.s1[i]).add(cx.s1[i + cx.half]);
                             cx.s2[i] = cx.ai.mul(cx.s2[i]).add(cx.s2[i + cx.half]);
                         }
                     }.f);
                 } else {
                     for (0..n2) |i| {
-                        const scaled_l = glv.glvScalarMulG1(v1_work[i], alpha).toAffine();
-                        v1_work[i] = scaled_l.add(v1_work[i + n2]);
+                        v1_work[i] = glv.glvScalarMulG1(v1_work[i], alpha).addAffine(v1_work[i + n2]).toAffine();
                     }
                     for (0..n2) |i| {
                         const scaled_proj = glv.glvScalarMulG2(v2_work[i], alpha_inv);

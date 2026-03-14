@@ -955,7 +955,7 @@ pub fn JoltProver(comptime F: type) type {
                 for (0..log_k_chunk) |i| {
                     lagrange_factor = lagrange_factor.mul(F.one().sub(opening_point[i]));
                 }
-                {
+                if (comptime debug_verbose) {
                     const lf_be = lagrange_factor.toBytesBE();
                     dbg("[STAGE8] lagrange_factor_LE=[", .{});
                     for (0..8) |bi| dbg("{x:0>2}", .{lf_be[31 - bi]});
@@ -1028,7 +1028,11 @@ pub fn JoltProver(comptime F: type) type {
                 const total_poly_size = k_chunk * trace_length;
                 var joint_poly = try self.allocator.alloc(F, total_poly_size);
                 defer self.allocator.free(joint_poly);
-                @memset(joint_poly, F.zero());
+                // Only zero the sparse region; the dense region [0..dense_len) will be overwritten by the dense pass
+                const dense_len_est = @min(@min(witness_polys[1].len, witness_polys[0].len), total_poly_size);
+                if (dense_len_est < total_poly_size) {
+                    @memset(joint_poly[dense_len_est..], F.zero());
+                }
 
                 // Map each claim's gamma to the corresponding polynomial
                 // Dense witness_polys: [0]=RdInc, [1]=RamInc (padded to k_chunk*T)
@@ -1059,56 +1063,75 @@ pub fn JoltProver(comptime F: type) type {
                             .gd = gamma_rd,
                         }, struct {
                             fn f(cx: DenseCtx, j: usize) void {
-                                cx.jp[j] = cx.ram[j].mul(cx.gr).add(cx.rd[j].mul(cx.gd));
+                                cx.jp[j] = F.sumOfProducts(.{ cx.ram[j], cx.rd[j] }, .{ cx.gr, cx.gd });
                             }
                         }.f);
                     } else {
                         for (0..dense_len) |j| {
-                            joint_poly[j] = ram_inc_wp[j].mul(gamma_ram).add(rd_inc_wp[j].mul(gamma_rd));
+                            joint_poly[j] = F.sumOfProducts(.{ ram_inc_wp[j], rd_inc_wp[j] }, .{ gamma_ram, gamma_rd });
                         }
                     }
                 }
 
-                // InstructionRa[0..instruction_d]: gamma_powers[2..2+inst_d]
-                // Sparse: onehot_indices[0..inst_d], CycleMajor layout
+                // Fused sparse one-hot accumulation: build (gamma, oh_idx) pairs, then
+                // iterate cycles (parallelizable since different cycles write to different positions).
+                const num_sparse = instruction_d + bytecode_d + ram_d;
+                const MAX_SPARSE = 64;
+                var sparse_gamma: [MAX_SPARSE]F = undefined;
+                var sparse_oh: [MAX_SPARSE][]?u8 = undefined;
+                var si: usize = 0;
+                // InstructionRa: gamma[2..2+inst_d], oh[0..inst_d]
                 for (0..instruction_d) |i| {
-                    const gamma_idx = 2 + i;
-                    const gamma = gamma_powers[gamma_idx];
-                    const oh_idx = onehot_indices[i];
-                    for (0..trace_length) |cycle| {
-                        if (oh_idx[cycle]) |addr| {
-                            const j = @as(usize, addr) * trace_length + cycle;
-                            joint_poly[j] = joint_poly[j].add(gamma);
-                        }
-                    }
+                    sparse_gamma[si] = gamma_powers[2 + i];
+                    sparse_oh[si] = onehot_indices[i];
+                    si += 1;
                 }
-
-                // BytecodeRa[0..bytecode_d]: gamma_powers[2+inst_d..2+inst_d+bc_d]
-                // Sparse: onehot_indices[inst_d+ram_d..inst_d+ram_d+bc_d] (Zolt stores RamRa before BytecodeRa)
+                // BytecodeRa: gamma[2+inst_d..2+inst_d+bc_d], oh[inst_d+ram_d..inst_d+ram_d+bc_d]
                 for (0..bytecode_d) |i| {
-                    const gamma_idx = 2 + instruction_d + i; // Jolt order: BytecodeRa before RamRa
-                    const oh_arr_idx = instruction_d + ram_d + i; // Zolt order: BytecodeRa after RamRa
-                    const gamma = gamma_powers[gamma_idx];
-                    const oh_idx = onehot_indices[oh_arr_idx];
-                    for (0..trace_length) |cycle| {
-                        if (oh_idx[cycle]) |addr| {
-                            const j = @as(usize, addr) * trace_length + cycle;
-                            joint_poly[j] = joint_poly[j].add(gamma);
-                        }
-                    }
+                    sparse_gamma[si] = gamma_powers[2 + instruction_d + i];
+                    sparse_oh[si] = onehot_indices[instruction_d + ram_d + i];
+                    si += 1;
                 }
-
-                // RamRa[0..ram_d]: gamma_powers[2+inst_d+bc_d..2+inst_d+bc_d+ram_d]
-                // Sparse: onehot_indices[inst_d..inst_d+ram_d] (Zolt order: RamRa before BytecodeRa)
+                // RamRa: gamma[2+inst_d+bc_d..], oh[inst_d..inst_d+ram_d]
                 for (0..ram_d) |i| {
-                    const gamma_idx = 2 + instruction_d + bytecode_d + i; // Jolt order: RamRa after BytecodeRa
-                    const oh_arr_idx = instruction_d + i; // Zolt order: RamRa before BytecodeRa
-                    const gamma = gamma_powers[gamma_idx];
-                    const oh_idx = onehot_indices[oh_arr_idx];
+                    sparse_gamma[si] = gamma_powers[2 + instruction_d + bytecode_d + i];
+                    sparse_oh[si] = onehot_indices[instruction_d + i];
+                    si += 1;
+                }
+                std.debug.assert(si == num_sparse);
+
+                // Parallel over cycles: each cycle writes to unique positions (cycle is low bits of index)
+                if (self.thread_pool) |pool| {
+                    const SparseCtx = struct {
+                        jp: []F,
+                        gammas: []const F,
+                        ohs: []const []?u8,
+                        tl: usize,
+                        ns: usize,
+                    };
+                    pool.parallelFor(trace_length, SparseCtx{
+                        .jp = joint_poly,
+                        .gammas = sparse_gamma[0..num_sparse],
+                        .ohs = sparse_oh[0..num_sparse],
+                        .tl = trace_length,
+                        .ns = num_sparse,
+                    }, struct {
+                        fn f(cx: SparseCtx, cycle: usize) void {
+                            for (0..cx.ns) |p| {
+                                if (cx.ohs[p][cycle]) |addr| {
+                                    const j = @as(usize, addr) * cx.tl + cycle;
+                                    cx.jp[j] = cx.jp[j].add(cx.gammas[p]);
+                                }
+                            }
+                        }
+                    }.f);
+                } else {
                     for (0..trace_length) |cycle| {
-                        if (oh_idx[cycle]) |addr| {
-                            const j = @as(usize, addr) * trace_length + cycle;
-                            joint_poly[j] = joint_poly[j].add(gamma);
+                        for (0..num_sparse) |p| {
+                            if (sparse_oh[p][cycle]) |addr| {
+                                const j = @as(usize, addr) * trace_length + cycle;
+                                joint_poly[j] = joint_poly[j].add(sparse_gamma[p]);
+                            }
                         }
                     }
                 }

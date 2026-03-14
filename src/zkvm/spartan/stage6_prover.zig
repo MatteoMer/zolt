@@ -2304,14 +2304,9 @@ fn RamRaVirtualProver(comptime F: type) type {
 
         /// Compressed ra polynomials (u8 indices in round 1, dense after bind)
         ra_polys: []RaPoly,
-        /// Factored eq: eq(r_cycle, x) = e_out[x >> m] * e_in[x & mask]
-        /// During first m rounds, e_in is halved. After m rounds, e_in is absorbed
-        /// into e_out, and e_out is halved for the remaining rounds.
+        /// eq(r_cycle_reduced, .) evaluations, halved each round
         e_out: []F,
-        e_in: []F,
-        e_in_len: usize,
         e_out_len: usize,
-        m: usize, // split point (n_vars / 2)
         d: usize,
         current_len: usize,
         allocator: Allocator,
@@ -2436,10 +2431,7 @@ fn RamRaVirtualProver(comptime F: type) type {
             return Self{
                 .ra_polys = ra_polys,
                 .e_out = eq_arr,
-                .e_in = &[_]F{},
-                .e_in_len = 0,
                 .e_out_len = T,
-                .m = 0,
                 .d = d,
                 .current_len = T,
                 .allocator = allocator,
@@ -2451,7 +2443,6 @@ fn RamRaVirtualProver(comptime F: type) type {
             for (self.ra_polys) |*rp| rp.deinit(self.allocator);
             self.allocator.free(self.ra_polys);
             self.allocator.free(self.e_out);
-            if (self.e_in_len > 0) self.allocator.free(self.e_in);
         }
 
         /// Compute round polynomial evaluations
@@ -3487,12 +3478,9 @@ fn LookupsRaVirtualProver(comptime F: type) type {
 
         /// Compressed RA polynomials (lazy materialization through round1→round2→round3→dense)
         ra_polys: []RaPoly,
-        /// Factored eq: eq(r_cycle, x) = e_out[x >> m] * e_in[x & mask]
+        /// eq(r_cycle, .) evaluations, halved each round
         e_out: []F,
-        e_in: []F,
-        e_in_len: usize,
         e_out_len: usize,
-        m_split: usize, // split point (n_vars / 2)
         M: usize,
         N: usize,
         total_committed: usize,
@@ -3585,10 +3573,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             return Self{
                 .ra_polys = ra_polys_arr,
                 .e_out = eq_arr,
-                .e_in = &[_]F{},
-                .e_in_len = 0,
                 .e_out_len = T,
-                .m_split = 0,
                 .M = M,
                 .N = N,
                 .total_committed = total_committed,
@@ -3602,7 +3587,6 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             for (self.ra_polys) |*p| p.deinit(self.allocator);
             self.allocator.free(self.ra_polys);
             self.allocator.free(self.e_out);
-            if (self.e_in_len > 0) self.allocator.free(self.e_in);
         }
 
         /// f(x) = eq(x) * Sum_v Prod_{j=0}^{M-1} ra_{v*M+j}(x)
@@ -3613,113 +3597,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             return self.computeRoundPolyFlat(allocator, n_evals);
         }
 
-        /// Factored iteration: parallel over E_out, sequential over E_in pairs.
-        fn computeRoundPolyFactored(self: *Self, allocator: Allocator, n_evals: usize) ![]F {
-            const out_len = self.e_out_len;
-            const in_half = self.e_in_len / 2;
-
-            const Ctx = struct {
-                ra_polys: []RaPoly,
-                e_out: []const F,
-                e_in: []const F,
-                in_half: usize,
-                M: usize,
-                N: usize,
-                n_evals: usize,
-            };
-            const ctx = Ctx{
-                .ra_polys = self.ra_polys,
-                .e_out = self.e_out,
-                .e_in = self.e_in,
-                .in_half = in_half,
-                .M = self.M,
-                .N = self.N,
-                .n_evals = n_evals,
-            };
-
-            const mapFn = struct {
-                fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
-                    var acc: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
-                    const tc = c.N * c.M;
-
-                    for (start..end) |x_out| {
-                        var inner: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
-
-                        for (0..c.in_half) |x_in_pair| {
-                            const j = x_out * c.in_half + x_in_pair;
-
-                            const e_in_0 = c.e_in[2 * x_in_pair];
-                            const e_in_1 = c.e_in[2 * x_in_pair + 1];
-                            const e_in_delta = e_in_1.sub(e_in_0);
-
-                            var cur: [MAX_RA_EVALS * MAX_RA_EVALS]F = undefined;
-                            var delta_arr: [MAX_RA_EVALS * MAX_RA_EVALS]F = undefined;
-                            for (0..tc) |idx| {
-                                const lo = c.ra_polys[idx].getBoundCoeff(2 * j);
-                                const hi = c.ra_polys[idx].getBoundCoeff(2 * j + 1);
-                                cur[idx] = lo;
-                                delta_arr[idx] = hi.sub(lo);
-                            }
-
-                            // x=0
-                            {
-                                var virtual_sum = F.zero();
-                                for (0..c.N) |v| {
-                                    var product = F.one();
-                                    for (0..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
-                                    virtual_sum = virtual_sum.add(product);
-                                }
-                                inner[0] = inner[0].add(e_in_0.mul(virtual_sum));
-                            }
-
-                            // x=1..n_evals-1
-                            var e_in_cur = e_in_0;
-                            for (1..c.n_evals) |pt| {
-                                for (0..tc) |idx| cur[idx] = cur[idx].add(delta_arr[idx]);
-                                e_in_cur = e_in_cur.add(e_in_delta);
-                                var virtual_sum = F.zero();
-                                for (0..c.N) |v| {
-                                    var product = F.one();
-                                    for (0..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
-                                    virtual_sum = virtual_sum.add(product);
-                                }
-                                inner[pt] = inner[pt].add(e_in_cur.mul(virtual_sum));
-                            }
-                        }
-
-                        // Weight by E_out[x_out]
-                        const e_out_val = c.e_out[x_out];
-                        for (0..c.n_evals) |pt| {
-                            acc[pt] = acc[pt].add(e_out_val.mul(inner[pt]));
-                        }
-                    }
-                    return acc;
-                }
-            }.f;
-
-            const reduceFn = struct {
-                fn f(a: [MAX_RA_EVALS]F, b: [MAX_RA_EVALS]F) [MAX_RA_EVALS]F {
-                    var r: [MAX_RA_EVALS]F = undefined;
-                    for (0..MAX_RA_EVALS) |i| {
-                        r[i] = a[i].add(b[i]);
-                    }
-                    return r;
-                }
-            }.f;
-
-            const result = if (self.pool) |pool|
-                pool.parallelReduce([MAX_RA_EVALS]F, out_len, .{F.zero()} ** MAX_RA_EVALS, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, out_len);
-
-            var evals = try allocator.alloc(F, n_evals);
-            for (0..n_evals) |i| {
-                evals[i] = result[i];
-            }
-            return evals;
-        }
-
-        /// Flat iteration using e_out as eq array (after E_in absorbed).
+        /// Flat iteration using e_out as eq array.
         fn computeRoundPolyFlat(self: *Self, allocator: Allocator, n_evals: usize) ![]F {
             const half = self.e_out_len / 2;
 
@@ -6490,9 +6368,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             defer self.allocator.free(bytecode_addr_challenges);
 
             // Per-instance timing accumulators (nanoseconds)
-            var inst_time_ns: [6]u64 = .{0} ** 6;
-            var bind_time_ns: u64 = 0;
-            var inst_timer = std.time.Timer.start() catch unreachable;
 
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
@@ -6521,7 +6396,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var dbg_inst_p1: [6]F = .{F.zero()} ** 6;
 
                 // Instance 0: BytecodeReadRaf - REAL prover
-                inst_timer.reset();
                 {
                     const inst = 0;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6590,7 +6464,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                inst_time_ns[0] += inst_timer.read();
                 dbg_inst_p0[0] = combined_evals[0];
                 dbg_inst_p1[0] = combined_evals[1];
 
@@ -6604,7 +6477,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 1: Booleanity - REAL prover (degree 3)
-                inst_timer.reset();
                 var cached_booleanity: ?[]F = null;
                 {
                     const inst = 1;
@@ -6634,7 +6506,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addFixedEvalsToCombibed(F, combined_evals, polys, 4, batch[inst], num_evals);
                     }
                 }
-                inst_time_ns[1] += inst_timer.read();
                 dbg_inst_p0[1] = combined_evals[0];
                 dbg_inst_p1[1] = combined_evals[1];
 
@@ -6648,7 +6519,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 2: HammingBooleanity - REAL prover
-                inst_timer.reset();
                 {
                     const inst = 2;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6666,7 +6536,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addFixedEvalsToCombibed(F, combined_evals, &polys, 4, batch[inst], num_evals);
                     }
                 }
-                inst_time_ns[2] += inst_timer.read();
                 dbg_inst_p0[2] = combined_evals[0];
                 dbg_inst_p1[2] = combined_evals[1];
 
@@ -6680,7 +6549,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 3: RamRaVirtual - REAL prover
-                inst_timer.reset();
                 {
                     const inst = 3;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6716,7 +6584,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
-                inst_time_ns[3] += inst_timer.read();
                 dbg_inst_p0[3] = combined_evals[0];
                 dbg_inst_p1[3] = combined_evals[1];
 
@@ -6730,7 +6597,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 4: LookupsRaVirtual - REAL prover
-                inst_timer.reset();
                 {
                     const inst = 4;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6765,7 +6631,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
-                inst_time_ns[4] += inst_timer.read();
                 dbg_inst_p0[4] = combined_evals[0];
                 dbg_inst_p1[4] = combined_evals[1];
 
@@ -6779,7 +6644,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 5: IncClaimReduction - REAL prover
-                inst_timer.reset();
                 {
                     const inst = 5;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6824,7 +6688,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         }
                     }
                 }
-                inst_time_ns[5] += inst_timer.read();
                 dbg_inst_p0[5] = combined_evals[0];
                 dbg_inst_p1[5] = combined_evals[1];
 
@@ -7076,7 +6939,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Update per-instance claims from CACHED round polys and bind challenge
-                inst_timer.reset();
                 // Instance 0: BytecodeReadRaf
                 if (inst_active[0]) {
                     if (bytecode_prover.phase == 0) {
@@ -7236,7 +7098,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     try inc_prover.bindChallenge(challenge);
                 }
 
-                bind_time_ns += inst_timer.read();
 
                 // NOTE: Instance claims for inactive instances are NOT halved here.
                 // In Zolt, instance_claims starts at the UNSCALED input_claims (not 2^offset-scaled),
@@ -7245,16 +7106,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // instance_claims[i] = input_claims[i] = the correct unscaled claim.
             }
 
-            // Per-instance timing summary
-            std.debug.print("[STAGE6 TIMING] inst0_bc={d:.1}ms inst1_bool={d:.1}ms inst2_ham={d:.1}ms inst3_ram={d:.1}ms inst4_lkp={d:.1}ms inst5_inc={d:.1}ms bind={d:.1}ms\n", .{
-                @as(f64, @floatFromInt(inst_time_ns[0])) / 1_000_000.0,
-                @as(f64, @floatFromInt(inst_time_ns[1])) / 1_000_000.0,
-                @as(f64, @floatFromInt(inst_time_ns[2])) / 1_000_000.0,
-                @as(f64, @floatFromInt(inst_time_ns[3])) / 1_000_000.0,
-                @as(f64, @floatFromInt(inst_time_ns[4])) / 1_000_000.0,
-                @as(f64, @floatFromInt(inst_time_ns[5])) / 1_000_000.0,
-                @as(f64, @floatFromInt(bind_time_ns)) / 1_000_000.0,
-            });
 
             // Debug: print final instance claims after sumcheck (ALWAYS ON)
             {

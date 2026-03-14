@@ -15,7 +15,6 @@ const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
-// const stage5_inner_timing = true; // removed: Zig can't track vars across 7000-line functions
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -2847,29 +2846,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var split_eq_E_out_len: usize = 0;
             var split_eq_initialized = false;
 
-            var s5_addr_ns: u64 = 0;
-            var s5_cycle_ns: u64 = 0;
-            var s5_compute_ns: u64 = 0;
-            var s5_bind_ns: u64 = 0;
-            var s5_phase_init_ns: u64 = 0;
-            var s5_condense_ns: u64 = 0;
-            var s5_suffix_init_ns: u64 = 0;
-            var s5_raf_init_ns: u64 = 0;
-            var s5_transcript_ns: u64 = 0;
-            var s5_claims_ns: u64 = 0;
-            var s5_inst01_ns: u64 = 0;
-            var s5_misc_ns: u64 = 0;
-            var s5_round_timer = std.time.Timer.start() catch unreachable;
-            var s5_sub_timer = std.time.Timer.start() catch unreachable;
-            var s5_sub2_timer = std.time.Timer.start() catch unreachable;
-
             for (0..max_num_rounds) |round| {
-                s5_round_timer.reset();
                 const remaining_rounds = max_num_rounds - round;
 
                 var combined_poly = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
 
-                s5_sub_timer.reset();
                 // Instance 0: RegistersValEvaluation (8 rounds)
                 if (remaining_rounds > regs_val_num_rounds) {
                     // Not started yet - constant polynomial where p(0) + p(1) = scaled_claim
@@ -3255,7 +3236,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
                 }
 
-                s5_inst01_ns += s5_sub_timer.read();
+
                 // Instance 2: LookupsReadRaf (136 rounds)
                 // Since lookups_num_rounds = max_num_rounds, this instance is always active
                 if (round < LOOKUPS_LOG_K) {
@@ -3271,13 +3252,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const r_x: ?F = if (round % 2 == 1) challenges[round - 1] else null;
 
                     // Compute read-checking contribution via prefix-suffix decomposition
-                    s5_sub_timer.reset();
                     const read_checking_evals = proverMsgReadChecking(F, round, &suffix_polys, &prefix_checkpoints, r_x, self.thread_pool);
 
                     // Compute RAF contribution via prefix-suffix decomposition
                     // gamma_raf = γ, gamma_raf2 = γ²
                     const raf_evals = proverMsgRaf(F, &left_raf, &right_raf, &identity_raf, gamma_raf, gamma_raf2, self.thread_pool);
-                    s5_compute_ns += s5_sub_timer.read();
 
                     // Combined: read_checking + raf
                     const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
@@ -3888,12 +3867,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Append to transcript: 2 coefficients for degree-2 polynomial
                     // Matches Jolt's CompressedUniPoly::append_to_transcript which iterates
                     // over coeffs_except_linear_term (length = degree of polynomial)
-                    s5_sub_timer.reset();
                     transcript.appendScalars("sumcheck_poly", coeffs);
 
                     const challenge = transcript.challengeScalar();
                     challenges[round] = challenge;
-                    s5_transcript_ns += s5_sub_timer.read();
 
                     // DEBUG: Print challenge and coefficients for comparison with Jolt verifier
                     if (comptime debug_verbose) if (round < 4 or round == 7 or round == 127 or round == 128) {
@@ -3904,7 +3881,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         print("[ZOLT S5V R{}] challenge={any}\n", .{ round, challenge.toBytes()[0..16].* });
                     };
 
-                    s5_sub_timer.reset();
                     // Update current_batched_claim by evaluating degree-2 polynomial at challenge
                     // p(r) = c0 + r*c1 + r^2*c2
                     // where c1 = claim - 2*c0 - c2 (from p(0)+p(1) = claim)
@@ -4263,9 +4239,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Update prefix-suffix decomposition state after receiving challenge
                     // ===================================================================
 
-                    s5_claims_ns += s5_sub_timer.read();
                     // Bind challenge to all suffix polynomials
-                    s5_sub_timer.reset();
                     if (self.thread_pool) |tp| {
                         suffix_polys.bindAllParallel(challenge, tp);
                     } else {
@@ -4276,10 +4250,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     left_raf.bind(challenge);
                     right_raf.bind(challenge);
                     identity_raf.bind(challenge);
-                    s5_bind_ns += s5_sub_timer.read();
 
                     // Update the current phase's expanding table with this challenge
-                    s5_sub_timer.reset();
                     expanding_tables[current_phase].update(challenge);
 
                     // Update prefix checkpoints every 2 rounds (after binding X and Y)
@@ -4291,7 +4263,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const suffix_len = LOOKUPS_LOG_K - (current_phase + 1) * log_m;
                         prefix_checkpoints.update(checkpoint_r_x, r_y, round, suffix_len);
                     }
-                    s5_misc_ns += s5_sub_timer.read();
 
                     // Check for phase transition (every log_m = 16 rounds)
                     if ((round + 1) % log_m == 0 and round + 1 < LOOKUPS_LOG_K) {
@@ -4373,10 +4344,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Condense u_evals (lookups_eq_evals) using the expanding table from the previous phase
                         // This is the CRITICAL step that was missing!
                         // u_evals[j] *= v[prev_phase][k_bound] where k_bound = prefix & m_mask
-                        s5_sub_timer.reset();
-                        s5_sub2_timer.reset();
                         condenseUEvals(F, lookups_eq_evals, &expanding_tables[prev_phase], lookup_indices_u128, current_phase, num_phases, self.thread_pool);
-                        s5_condense_ns += s5_sub2_timer.read();
                         if (comptime debug_verbose) {
                             dbg("[STAGE5] Phase {} condense done, now calling initPhase...\n", .{current_phase});
                         }
@@ -4411,7 +4379,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Run initPhase and initQRaf concurrently (they're independent —
                         // initPhase writes to suffix polys, initQRaf writes to RAF Q arrays,
                         // both only read from u_evals and lookup_indices).
-                        s5_sub2_timer.reset();
                         if (self.thread_pool) |tp| {
                             const SuffixInitCtx = struct {
                                 polys: *AllSuffixPolys(F),
@@ -4465,21 +4432,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
                             initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
                         }
-                        s5_suffix_init_ns += s5_sub2_timer.read();
 
                         // Materialize prefix MLE tables for new phase
-                        s5_sub2_timer.reset();
                         left_raf.initPrefix();
                         right_raf.initPrefix();
                         identity_raf.initPrefix();
-                        s5_raf_init_ns += s5_sub2_timer.read();
                         if (comptime debug_verbose) {
                             dbg("[STAGE5] Phase {} initQRaf + initPrefix done\n", .{current_phase});
                         }
 
                         // Reset the new phase's expanding table to 1
                         expanding_tables[current_phase].reset(F.one());
-                        s5_phase_init_ns += s5_sub_timer.read();
 
                         if (comptime debug_verbose) {
                             dbg("[STAGE5] Condensed u_evals with expanding table, reset phase {} table\n", .{current_phase});
@@ -4530,7 +4493,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
-                    s5_addr_ns += s5_round_timer.read();
                     continue; // Skip the rest of the loop for address rounds
                 } else {
                     // Cycle rounds: actual sumcheck over eq_reduction * Π_c ra_chunk[c] * combined_vals
@@ -6536,27 +6498,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
-                    s5_cycle_ns += s5_round_timer.read();
                     continue; // Skip the rest of the loop (we handled everything)
                 }
-                s5_addr_ns += s5_round_timer.read();
             }
 
-            // Stage 5 round timing summary
-            std.debug.print("[STAGE5 TIMING] addr={}ms(inst01={}ms compute={}ms transcript={}ms claims={}ms bind={}ms misc={}ms phase_init={}ms[cond={}ms suf={}ms raf={}ms]) cycle={}ms\n", .{
-                s5_addr_ns / 1_000_000,
-                s5_inst01_ns / 1_000_000,
-                s5_compute_ns / 1_000_000,
-                s5_transcript_ns / 1_000_000,
-                s5_claims_ns / 1_000_000,
-                s5_bind_ns / 1_000_000,
-                s5_misc_ns / 1_000_000,
-                s5_phase_init_ns / 1_000_000,
-                s5_condense_ns / 1_000_000,
-                s5_suffix_init_ns / 1_000_000,
-                s5_raf_init_ns / 1_000_000,
-                s5_cycle_ns / 1_000_000,
-            });
 
             // Debug: print final batched claim (this is output_claim from verifier's perspective)
             if (comptime debug_verbose) {

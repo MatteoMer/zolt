@@ -75,6 +75,9 @@ pub fn RaPolynomial(comptime F: type) type {
             F_10: []F,
             F_11: []F,
 
+            /// LE bit ordering: position offset g has bits [b1, b0] where
+            /// b0 = round0 selector (F_?0 vs F_?1), b1 = round1 selector (F_0? vs F_1?).
+            /// So: base+0 → F_00, base+1 → F_10, base+2 → F_01, base+3 → F_11.
             pub inline fn getBoundCoeff(self: @This(), j: usize) F {
                 const base = 4 * j;
                 const v00 = if (self.indices[base]) |idx| self.F_00[idx] else F.zero();

@@ -1804,7 +1804,9 @@ pub const UnreducedProductAccum = struct {
         // so t[4] can be 1, requiring up to 5 subtractions of p.
         var result = BN254Scalar{ .limbs = .{ t[0], t[1], t[2], t[3] } };
         var extra = t[4]; // 0 or 1
-        while (extra != 0 or !result.lessThanModulus()) {
+        var iters: u32 = 0;
+        while (extra != 0 or !result.lessThanModulus()) : (iters += 1) {
+            std.debug.assert(iters < 6); // at most 5 subtractions of p
             const was_less = result.lessThanModulus();
             result = result.subtractModulus();
             if (was_less) extra -= 1; // borrow consumed from extra

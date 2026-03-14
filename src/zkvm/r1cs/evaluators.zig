@@ -657,35 +657,6 @@ pub fn interpolateAzBzProductInt(
     return @as(i128, az_j) * bz_j;
 }
 
-/// Integer-based Az*Bz interpolation for the second group.
-/// Returns a 2-part result (az as i32, bz as i128) to avoid i256 intermediate.
-/// The caller multiplies az (converted to field) by bz (converted to field).
-pub fn interpolateAzBzProductSecondGroupInt(
-    az_int: *const [SECOND_GROUP_SIZE]i8,
-    bz_int: *const [SECOND_GROUP_SIZE]i128,
-    coeffs: *const [SECOND_GROUP_SIZE]i32,
-) struct { az: i32, bz: i128 } {
-    var az_j: i32 = 0;
-    var bz_j: i128 = 0;
-
-    inline for (0..SECOND_GROUP_SIZE) |i| {
-        const c = coeffs[i];
-        const a = az_int[i];
-        if (a != 0) {
-            az_j += c * @as(i32, a);
-        } else {
-            // For second group, bz values are i128. Product c * bz_int[i] might overflow i128.
-            // But max |c| = 140140 (~17 bits), max |bz_int[i]| < 2^128, so product < 2^145.
-            // We need to handle this carefully. For now, truncate to i128 (valid when values are small).
-            // TODO: use wider arithmetic if needed for extreme values
-            const term = @as(i128, c) *% bz_int[i]; // wrapping multiply, safe for modular arithmetic
-            bz_j +%= term;
-        }
-    }
-
-    return .{ .az = az_j, .bz = bz_j };
-}
-
 // ============================================================================
 // Tests
 // ============================================================================

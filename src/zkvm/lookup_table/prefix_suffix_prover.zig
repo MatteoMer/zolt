@@ -331,6 +331,7 @@ pub fn proverMsgReadChecking(
     suffix_polys: *const AllSuffixPolys(F),
     prefix_checkpoints: *const PrefixCheckpointsState(F),
     r_x: ?F,
+    tp: ?*ThreadPool,
 ) [2]F {
     const len = blk: {
         // Find the current EFFECTIVE Q length from any initialized table
@@ -346,24 +347,23 @@ pub fn proverMsgReadChecking(
     };
 
     // Debug: count non-zero Q values for round 0
-    if (round == 0) {
-        var total_non_zero: usize = 0;
-        var non_zero_tables: usize = 0;
-        for (0..NUM_TABLES) |table_idx| {
-            if (suffix_polys.tables[table_idx]) |table| {
-                var table_non_zero: usize = 0;
-                for (table.polys) |poly| {
-                    for (poly) |v| {
-                        if (!v.eql(F.zero())) table_non_zero += 1;
+    if (comptime debug_verbose) {
+        if (round == 0) {
+            var total_non_zero: usize = 0;
+            var non_zero_tables: usize = 0;
+            for (0..NUM_TABLES) |table_idx| {
+                if (suffix_polys.tables[table_idx]) |table| {
+                    var table_non_zero: usize = 0;
+                    for (table.polys) |poly| {
+                        for (poly) |v| {
+                            if (!v.eql(F.zero())) table_non_zero += 1;
+                        }
                     }
-                }
-                if (table_non_zero > 0) {
-                    non_zero_tables += 1;
-                    total_non_zero += table_non_zero;
-                    dbg("[READ_CHECK ROUND 0] table {} has {} non-zero Q values\n", .{ table_idx, table_non_zero });
+                    if (table_non_zero > 0) {
+                        non_zero_tables += 1;
+                        total_non_zero += table_non_zero;
+                        dbg("[READ_CHECK ROUND 0] table {} has {} non-zero Q values\n", .{ table_idx, table_non_zero });
 
-                    // Print ALL non-zero Q values with indices
-                    {
                         const suffixes_list = tableSuffixes(table_idx);
                         var right_half_nonzero: usize = 0;
                         for (table.polys, 0..) |poly, s_idx| {
@@ -385,141 +385,106 @@ pub fn proverMsgReadChecking(
                     }
                 }
             }
+            dbg("[READ_CHECK ROUND 0] Q poly stats: total_non_zero={}, non_zero_tables={}, len={}\n", .{
+                total_non_zero, non_zero_tables, len,
+            });
         }
-        dbg("[READ_CHECK ROUND 0] Q poly stats: total_non_zero={}, non_zero_tables={}, len={}\n", .{
-            total_non_zero, non_zero_tables, len,
-        });
     }
 
-    if (round < 3) {
-        dbg("[READ_CHECK R{}] effective_len={}\n", .{ round, len });
+    if (comptime debug_verbose) {
+        if (round < 3) {
+            dbg("[READ_CHECK R{}] effective_len={}\n", .{ round, len });
+        }
     }
 
     const log_len = @ctz(len);
     const half_len = len / 2;
 
-    var eval_0 = F.zero();
-    var eval_2_left = F.zero();
-    var eval_2_right = F.zero();
-    var eval_0_per_table: [NUM_TABLES]F = [_]F{F.zero()} ** NUM_TABLES;
-    var eval_2_left_per_table: [NUM_TABLES]F = [_]F{F.zero()} ** NUM_TABLES;
-    var eval_2_right_per_table: [NUM_TABLES]F = [_]F{F.zero()} ** NUM_TABLES;
+    const eval_0_per_table: [NUM_TABLES]F = if (comptime debug_verbose) [_]F{F.zero()} ** NUM_TABLES else undefined;
+    const eval_2_left_per_table: [NUM_TABLES]F = if (comptime debug_verbose) [_]F{F.zero()} ** NUM_TABLES else undefined;
+    const eval_2_right_per_table: [NUM_TABLES]F = if (comptime debug_verbose) [_]F{F.zero()} ** NUM_TABLES else undefined;
 
-    // Sum over all remaining bits b
-    for (0..half_len) |b_idx| {
-        const b = LookupBits(128).new(@as(u128, b_idx), log_len - 1);
+    // Sum over all remaining bits b — parallel reduce across b_idx
+    const ReadCheckCtx = struct {
+        suffix_polys: *const AllSuffixPolys(F),
+        prefix_checkpoints: *const PrefixCheckpointsState(F),
+        r_x: ?F,
+        round: usize,
+        log_len: usize,
+        half_len: usize,
+    };
+    const rc_ctx = ReadCheckCtx{
+        .suffix_polys = suffix_polys,
+        .prefix_checkpoints = prefix_checkpoints,
+        .r_x = r_x,
+        .round = round,
+        .log_len = log_len,
+        .half_len = half_len,
+    };
 
-        // Compute prefix evaluations at c=0, c=1, and c=2 for all prefix types
-        var prefixes_c0: [Prefixes.COUNT]F = undefined;
-        var prefixes_c1: [Prefixes.COUNT]F = undefined;
-        var prefixes_c2: [Prefixes.COUNT]F = undefined;
+    const rc_map = struct {
+        fn map(ctx: ReadCheckCtx, start: usize, end: usize) [3]F {
+            var acc = [3]F{ F.zero(), F.zero(), F.zero() };
+            for (start..end) |b_idx| {
+                const b = LookupBits(128).new(@as(u128, b_idx), ctx.log_len - 1);
 
-        for (0..Prefixes.COUNT) |i| {
-            const prefix: Prefixes = @enumFromInt(i);
-            var b_copy = b;
-            prefixes_c0[i] = prefixes_mod.prefixMle(F, prefix, &prefix_checkpoints.checkpoints, r_x, 0, &b_copy, round);
-            b_copy = b;
-            prefixes_c1[i] = prefixes_mod.prefixMle(F, prefix, &prefix_checkpoints.checkpoints, r_x, 1, &b_copy, round);
-            b_copy = b;
-            prefixes_c2[i] = prefixes_mod.prefixMle(F, prefix, &prefix_checkpoints.checkpoints, r_x, 2, &b_copy, round);
-        }
+                // Compute prefix evaluations at c=0 and c=2 for all prefix types
+                var prefixes_c0: [Prefixes.COUNT]F = undefined;
+                var prefixes_c2: [Prefixes.COUNT]F = undefined;
 
-        // Debug: at round 0, check prefix multilinearity for b_idx=0
-        if (round == 0 and b_idx < 2) {
-            const eq_idx = @intFromEnum(Prefixes.Eq);
-            const eq0 = prefixes_c0[eq_idx];
-            const eq1 = prefixes_c1[eq_idx];
-            const eq2 = prefixes_c2[eq_idx];
-            const expected_eq2 = eq1.add(eq1).sub(eq0);
-            dbg("[PFIX R0 b={}] Eq: c0={x} c1={x} c2={x} expected_c2(2e1-e0)={x} match={}\n", .{
-                b_idx,
-                eq0.toBytesBE()[28..32].*,
-                eq1.toBytesBE()[28..32].*,
-                eq2.toBytesBE()[28..32].*,
-                expected_eq2.toBytesBE()[28..32].*,
-                eq2.eql(expected_eq2),
-            });
-            // Also check LowerWord prefix
-            const lw_idx = @intFromEnum(Prefixes.LowerWord);
-            const lw0 = prefixes_c0[lw_idx];
-            const lw1 = prefixes_c1[lw_idx];
-            const lw2 = prefixes_c2[lw_idx];
-            const expected_lw2 = lw1.add(lw1).sub(lw0);
-            dbg("[PFIX R0 b={}] LowerWord: c0={x} c1={x} c2={x} expected_c2={x} match={}\n", .{
-                b_idx,
-                lw0.toBytesBE()[28..32].*,
-                lw1.toBytesBE()[28..32].*,
-                lw2.toBytesBE()[28..32].*,
-                expected_lw2.toBytesBE()[28..32].*,
-                lw2.eql(expected_lw2),
-            });
-        }
-
-        // Sum contributions from all tables
-        for (0..NUM_TABLES) |table_idx| {
-            if (suffix_polys.tables[table_idx]) |table| {
-                const table_suffixes = tableSuffixes(table_idx);
-
-                // Get suffix values at left and right positions
-                var suffixes_left: [MAX_SUFFIXES_PER_TABLE]F = undefined;
-                var suffixes_right: [MAX_SUFFIXES_PER_TABLE]F = undefined;
-
-                for (table_suffixes, 0..) |_, s_idx| {
-                    const poly = table.polys[s_idx];
-                    suffixes_left[s_idx] = poly[b_idx];
-                    suffixes_right[s_idx] = poly[b_idx + half_len];
+                for (0..Prefixes.COUNT) |i| {
+                    const prefix: Prefixes = @enumFromInt(i);
+                    var b_copy = b;
+                    prefixes_c0[i] = prefixes_mod.prefixMle(F, prefix, &ctx.prefix_checkpoints.checkpoints, ctx.r_x, 0, &b_copy, ctx.round);
+                    b_copy = b;
+                    prefixes_c2[i] = prefixes_mod.prefixMle(F, prefix, &ctx.prefix_checkpoints.checkpoints, ctx.r_x, 2, &b_copy, ctx.round);
                 }
 
-                // Combine using table-specific formula
-                const combined_0 = tableCombine(F, table_idx, &prefixes_c0, suffixes_left[0..table_suffixes.len]);
-                const combined_1_left: F = tableCombine(F, table_idx, &prefixes_c1, suffixes_left[0..table_suffixes.len]);
-                _ = combined_1_left;
-                const combined_1_right = tableCombine(F, table_idx, &prefixes_c1, suffixes_right[0..table_suffixes.len]);
-                const combined_2_left = tableCombine(F, table_idx, &prefixes_c2, suffixes_left[0..table_suffixes.len]);
-                const combined_2_right = tableCombine(F, table_idx, &prefixes_c2, suffixes_right[0..table_suffixes.len]);
+                // Sum contributions from all tables
+                for (0..NUM_TABLES) |table_idx| {
+                    if (ctx.suffix_polys.tables[table_idx]) |table| {
+                        const table_suffixes = tableSuffixes(table_idx);
 
-                // Debug: at round 0, b_idx=0, check each table contribution
-                if (round == 0 and b_idx == 0 and !combined_0.eql(F.zero())) {
-                    // combined_0 = P(0)*Q_left
-                    // combined_1_left = P(1)*Q_left, combined_1_right = P(1)*Q_right
-                    // correct g(c=1,b=0) = P(1)*Q_left*(1-1) + P(1)*Q_right*1 = combined_1_right
-                    // correct g(c=2,b=0) = P(2)*Q_left*(1-2) + P(2)*Q_right*2 = 2*combined_2_right - combined_2_left
-                    // But also: g(c) = a*c^2 + b*c + d where g(0)=combined_0
-                    // For degree-2: g(2) = 2*g(1) - g(0) ONLY IF degree-1!
-                    // For degree-2: need 3 points
-                    const g0 = combined_0;
-                    const g1 = combined_1_right; // at c=1, suffix = Q_right
-                    const formula_g2 = combined_2_right.add(combined_2_right).sub(combined_2_left);
-                    const linear_g2 = g1.add(g1).sub(g0);
-                    dbg("[COMBINE R0 b=0 T{}] g(0)={x} g(1)={x} formula_g(2)={x} linear_g(2)={x} match={}\n", .{
-                        table_idx,
-                        g0.toBytesBE()[24..32].*,
-                        g1.toBytesBE()[24..32].*,
-                        formula_g2.toBytesBE()[24..32].*,
-                        linear_g2.toBytesBE()[24..32].*,
-                        formula_g2.eql(linear_g2),
-                    });
-                    // Check if Q_right is zero
-                    var all_right_zero = true;
-                    for (table_suffixes, 0..) |_, s_idx2| {
-                        if (!table.polys[s_idx2][b_idx + half_len].eql(F.zero())) all_right_zero = false;
+                        // Get suffix values at left and right positions
+                        var suffixes_left: [MAX_SUFFIXES_PER_TABLE]F = undefined;
+                        var suffixes_right: [MAX_SUFFIXES_PER_TABLE]F = undefined;
+
+                        for (table_suffixes, 0..) |_, s_idx| {
+                            const poly = table.polys[s_idx];
+                            suffixes_left[s_idx] = poly[b_idx];
+                            suffixes_right[s_idx] = poly[b_idx + ctx.half_len];
+                        }
+
+                        // Combine using table-specific formula (only need c=0 and c=2)
+                        const combined_0 = tableCombine(F, table_idx, &prefixes_c0, suffixes_left[0..table_suffixes.len]);
+                        const combined_2_left = tableCombine(F, table_idx, &prefixes_c2, suffixes_left[0..table_suffixes.len]);
+                        const combined_2_right = tableCombine(F, table_idx, &prefixes_c2, suffixes_right[0..table_suffixes.len]);
+
+                        acc[0] = acc[0].add(combined_0);
+                        acc[1] = acc[1].add(combined_2_left);
+                        acc[2] = acc[2].add(combined_2_right);
                     }
-                    dbg("[COMBINE R0 b=0 T{}] Q_right_all_zero={} Q_left_suf0={x}\n", .{
-                        table_idx,
-                        all_right_zero,
-                        suffixes_left[0].toBytesBE()[24..32].*,
-                    });
                 }
-
-                eval_0 = eval_0.add(combined_0);
-                eval_0_per_table[table_idx] = eval_0_per_table[table_idx].add(combined_0);
-                eval_2_left = eval_2_left.add(combined_2_left);
-                eval_2_right = eval_2_right.add(combined_2_right);
-                eval_2_left_per_table[table_idx] = eval_2_left_per_table[table_idx].add(combined_2_left);
-                eval_2_right_per_table[table_idx] = eval_2_right_per_table[table_idx].add(combined_2_right);
             }
+            return acc;
         }
-    }
+    }.map;
+
+    const rc_reduce = struct {
+        fn reduce(a: [3]F, b_: [3]F) [3]F {
+            return .{ a[0].add(b_[0]), a[1].add(b_[1]), a[2].add(b_[2]) };
+        }
+    }.reduce;
+
+    const identity = [3]F{ F.zero(), F.zero(), F.zero() };
+    const result = if (tp) |pool|
+        pool.parallelReduce([3]F, half_len, identity, rc_ctx, rc_map, rc_reduce)
+    else
+        rc_map(rc_ctx, 0, half_len);
+
+    const eval_0 = result[0];
+    const eval_2_left = result[1];
+    const eval_2_right = result[2];
 
     // Quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left
     const eval_2 = eval_2_right.add(eval_2_right).sub(eval_2_left);
@@ -545,43 +510,38 @@ pub fn proverMsgReadChecking(
         }
     }
 
-    if (round == 0) {
-        dbg("[READ_CHECK R0] eval_2_left={x}\n", .{eval_2_left.toBytesBE()[16..32].*});
-        dbg("[READ_CHECK R0] eval_2_right={x}\n", .{eval_2_right.toBytesBE()[16..32].*});
-        dbg("[READ_CHECK R0] eval_2_right==0: {}\n", .{eval_2_right.eql(F.zero())});
-        // Also compute eval_1 independently to verify the total sum
-        var eval_1_indep = F.zero();
-        for (0..half_len) |b_idx2| {
-            const b2 = LookupBits(128).new(@as(u128, b_idx2), log_len - 1);
-            var prefixes_c1: [Prefixes.COUNT]F = undefined;
-            for (0..Prefixes.COUNT) |i| {
-                const prefix2: Prefixes = @enumFromInt(i);
-                var b_copy2 = b2;
-                prefixes_c1[i] = prefixes_mod.prefixMle(F, prefix2, &prefix_checkpoints.checkpoints, r_x, 1, &b_copy2, round);
-            }
-            for (0..NUM_TABLES) |table_idx2| {
-                if (suffix_polys.tables[table_idx2]) |table2| {
-                    const ts2 = tableSuffixes(table_idx2);
-                    var suf_l2: [MAX_SUFFIXES_PER_TABLE]F = undefined;
-                    var suf_r2: [MAX_SUFFIXES_PER_TABLE]F = undefined;
-                    for (ts2, 0..) |_, s_idx2| {
-                        suf_l2[s_idx2] = table2.polys[s_idx2][b_idx2];
-                        suf_r2[s_idx2] = table2.polys[s_idx2][b_idx2 + half_len];
+    if (comptime debug_verbose) {
+        if (round == 0) {
+            dbg("[READ_CHECK R0] eval_2_left={x}\n", .{eval_2_left.toBytesBE()[16..32].*});
+            dbg("[READ_CHECK R0] eval_2_right={x}\n", .{eval_2_right.toBytesBE()[16..32].*});
+            dbg("[READ_CHECK R0] eval_2_right==0: {}\n", .{eval_2_right.eql(F.zero())});
+            var eval_1_indep = F.zero();
+            for (0..half_len) |b_idx2| {
+                const b2 = LookupBits(128).new(@as(u128, b_idx2), log_len - 1);
+                var pfx_c1: [Prefixes.COUNT]F = undefined;
+                for (0..Prefixes.COUNT) |i| {
+                    const prefix2: Prefixes = @enumFromInt(i);
+                    var b_copy2 = b2;
+                    pfx_c1[i] = prefixes_mod.prefixMle(F, prefix2, &prefix_checkpoints.checkpoints, r_x, 1, &b_copy2, round);
+                }
+                for (0..NUM_TABLES) |table_idx2| {
+                    if (suffix_polys.tables[table_idx2]) |table2| {
+                        const ts2 = tableSuffixes(table_idx2);
+                        var suf_r2: [MAX_SUFFIXES_PER_TABLE]F = undefined;
+                        for (ts2, 0..) |_, s_idx2| {
+                            suf_r2[s_idx2] = table2.polys[s_idx2][b_idx2 + half_len];
+                        }
+                        const combined_1 = tableCombine(F, table_idx2, &pfx_c1, suf_r2[0..ts2.len]);
+                        eval_1_indep = eval_1_indep.add(combined_1);
                     }
-                    // At c=1, suffix value is: Q_left * (1-1) + Q_right * 1 = Q_right  -- wait no
-                    // Actually at c=1, the linear interpolation is: Q[b_idx] * (1 - 1) + Q[b_idx + half_len] * 1 = Q_right
-                    // But that's only if binding convention is: new[i] = old[i]*(1-r) + old[i+half]*r
-                    // At c=1: new[i] = old[i+half] = Q_right
-                    const combined_1 = tableCombine(F, table_idx2, &prefixes_c1, suf_r2[0..ts2.len]);
-                    eval_1_indep = eval_1_indep.add(combined_1);
                 }
             }
+            const total_read_check = eval_0.add(eval_1_indep);
+            dbg("[READ_CHECK ROUND 0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
+            dbg("[READ_CHECK ROUND 0] eval_1_indep={x}\n", .{eval_1_indep.toBytesBE()[16..32].*});
+            dbg("[READ_CHECK ROUND 0] eval_0+eval_1={x}\n", .{total_read_check.toBytesBE()[16..32].*});
+            dbg("[READ_CHECK ROUND 0] eval_2={x}\n", .{eval_2.toBytesBE()[16..32].*});
         }
-        const total_read_check = eval_0.add(eval_1_indep);
-        dbg("[READ_CHECK ROUND 0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
-        dbg("[READ_CHECK ROUND 0] eval_1_indep={x}\n", .{eval_1_indep.toBytesBE()[16..32].*});
-        dbg("[READ_CHECK ROUND 0] eval_0+eval_1={x}\n", .{total_read_check.toBytesBE()[16..32].*});
-        dbg("[READ_CHECK ROUND 0] eval_2={x}\n", .{eval_2.toBytesBE()[16..32].*});
     }
 
     return .{ eval_0, eval_2 };
@@ -1299,10 +1259,9 @@ pub fn initQRaf(
         const r_index: usize = @intCast(prefix_bits);
 
         if (is_interleaved_operands[j]) {
-            // Operand path: accumulate ShiftHalf * u and operand suffix * u
-            // ShiftHalf contribution: u * 2^{suffix_len/2}
-            left.Q[0][r_index] = left.Q[0][r_index].add(u.mul(shift_half_f));
-            right.Q[0][r_index] = right.Q[0][r_index].add(u.mul(shift_half_f));
+            // Operand path: accumulate raw u (defer shift multiply to after loop)
+            left.Q[0][r_index] = left.Q[0][r_index].add(u);
+            right.Q[0][r_index] = right.Q[0][r_index].add(u);
 
             // Uninterleave suffix bits to get left and right operand suffixes
             const lo_bits = uninterleaveBitsLeft(suffix_bits, suffix_len);
@@ -1315,9 +1274,8 @@ pub fn initQRaf(
                 right.Q[1][r_index] = right.Q[1][r_index].add(u.mul(F.fromU64(ro_bits)));
             }
         } else {
-            // Identity path: accumulate ShiftFull * u and identity suffix * u
-            // ShiftFull contribution: u * 2^{suffix_len}
-            identity.Q[0][r_index] = identity.Q[0][r_index].add(u.mul(shift_full_f));
+            // Identity path: accumulate raw u (defer shift multiply to after loop)
+            identity.Q[0][r_index] = identity.Q[0][r_index].add(u);
 
             // Identity suffix contribution
             if (suffix_bits != 0) {
@@ -1329,40 +1287,48 @@ pub fn initQRaf(
             }
         }
     }
+
+    // Deferred shift multiply: apply shift constants once per bucket instead of per cycle.
+    // This converts O(T) field muls into O(poly_len) field muls.
+    if (shift_half != 1) {
+        for (0..poly_len) |i| {
+            left.Q[0][i] = left.Q[0][i].mul(shift_half_f);
+            right.Q[0][i] = right.Q[0][i].mul(shift_half_f);
+        }
+    }
+    if (shift_full != 1) {
+        for (0..poly_len) |i| {
+            identity.Q[0][i] = identity.Q[0][i].mul(shift_full_f);
+        }
+    }
+}
+
+/// Compact every-other-bit extraction via parallel shift-and-mask.
+/// Extracts bits at even positions (0, 2, 4, ...) from a u128, packing them into a u64.
+/// Used for deinterleaving operand bits. O(log n) instead of O(n).
+inline fn compactEvenBits(x_in: u128) u64 {
+    var x = x_in & 0x55555555555555555555555555555555; // keep even-position bits
+    x = (x | (x >> 1)) & 0x33333333333333333333333333333333;
+    x = (x | (x >> 2)) & 0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f;
+    x = (x | (x >> 4)) & 0x00ff00ff00ff00ff00ff00ff00ff00ff;
+    x = (x | (x >> 8)) & 0x0000ffff0000ffff0000ffff0000ffff;
+    x = (x | (x >> 16)) & 0x00000000ffffffff00000000ffffffff;
+    x = (x | (x >> 32)) & 0x0000000000000000ffffffffffffffff;
+    return @truncate(x);
 }
 
 /// Uninterleave bits to get the left operand (Jolt's OperandSide::Left).
-/// In Jolt: interleave_bits(x, y) places x at ODD positions, y at EVEN positions.
-/// uninterleave_bits returns (x=odd_positions, y=even_positions) = (left, right).
-/// So OperandSide::Left = ODD positions (1, 3, 5, ...).
-fn uninterleaveBitsLeft(bits: u128, num_bits: usize) u64 {
-    var left: u64 = 0;
-    const half_bits = num_bits / 2;
-    var i: usize = 0;
-    while (i < half_bits and i < 64) : (i += 1) {
-        // Left operand at ODD positions (1, 3, 5, ...)
-        const shift_amt: u7 = @intCast(@min(2 * i + 1, 127));
-        const bit = (bits >> shift_amt) & 1;
-        left |= @as(u64, @truncate(bit)) << @as(u6, @intCast(i));
-    }
-    return left;
+/// Left = ODD positions (1, 3, 5, ...).
+inline fn uninterleaveBitsLeft(bits: u128, num_bits: usize) u64 {
+    _ = num_bits;
+    return compactEvenBits(bits >> 1);
 }
 
 /// Uninterleave bits to get the right operand (Jolt's OperandSide::Right).
-/// In Jolt: interleave_bits(x, y) places x at ODD positions, y at EVEN positions.
-/// uninterleave_bits returns (x=odd_positions, y=even_positions) = (left, right).
-/// So OperandSide::Right = EVEN positions (0, 2, 4, ...).
-fn uninterleaveBitsRight(bits: u128, num_bits: usize) u64 {
-    var right: u64 = 0;
-    const half_bits = num_bits / 2;
-    var i: usize = 0;
-    while (i < half_bits and i < 64) : (i += 1) {
-        // Right operand at EVEN positions (0, 2, 4, ...)
-        const shift_amt: u7 = @intCast(@min(2 * i, 127));
-        const bit = (bits >> shift_amt) & 1;
-        right |= @as(u64, @truncate(bit)) << @as(u6, @intCast(i));
-    }
-    return right;
+/// Right = EVEN positions (0, 2, 4, ...).
+inline fn uninterleaveBitsRight(bits: u128, num_bits: usize) u64 {
+    _ = num_bits;
+    return compactEvenBits(bits);
 }
 
 /// Compute prover message for RAF (Read-Address-Flag) contribution
@@ -1391,11 +1357,12 @@ pub fn proverMsgRaf(
     identity_ps: *const RafDecomposition(F),
     gamma: F,
     gamma_sqr: F,
+    tp: ?*ThreadPool,
 ) [2]F {
     const len = identity_ps.QLen();
     const half_len = len / 2;
 
-    // Debug: show state at round 0 and 1
+    if (comptime debug_verbose) {
     if (left_ps.round == 0 or left_ps.round == 1) {
         dbg("[RAF_DEBUG R{}] Q_size={}, bound_value_left={x}\n", .{
             left_ps.round,
@@ -1523,88 +1490,95 @@ pub fn proverMsgRaf(
             explicit_raf_0.toBytesBE()[16..32].*,
         });
     }
+    } // end comptime debug_verbose
 
-    // Accumulators for the sums
-    var left_sum_0 = F.zero();
-    var left_sum_2_left = F.zero();
-    var left_sum_2_right = F.zero();
-    var right_sum_0 = F.zero();
-    var right_sum_2_left = F.zero();
-    var right_sum_2_right = F.zero();
+    // Parallel reduce over half-index b for RAF evaluations
+    const RafCtx = struct {
+        left_ps: *const RafDecomposition(F),
+        right_ps: *const RafDecomposition(F),
+        identity_ps: *const RafDecomposition(F),
+        half_len: usize,
+    };
+    const raf_ctx = RafCtx{
+        .left_ps = left_ps,
+        .right_ps = right_ps,
+        .identity_ps = identity_ps,
+        .half_len = half_len,
+    };
 
-    // For each half-index b, compute sumcheck evaluations
-    for (0..half_len) |b| {
-        // Get Q values at left (b) and right (b + half_len) positions
-        // Q[0] = shift*u accumulator (prefix = constant 1)
-        // Q[1] = suffix*u accumulator (prefix = OperandPolynomial/IdentityPolynomial)
-        const l_q0_left = left_ps.Q[0][b];
-        const l_q0_right = left_ps.Q[0][b + half_len];
-        const l_q1_left = left_ps.Q[1][b];
-        const l_q1_right = left_ps.Q[1][b + half_len];
+    const raf_map = struct {
+        fn map(ctx: RafCtx, start: usize, end: usize) [6]F {
+            var acc = [6]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
+            for (start..end) |b| {
+                const l_q0_left = ctx.left_ps.Q[0][b];
+                const l_q0_right = ctx.left_ps.Q[0][b + ctx.half_len];
+                const l_q1_left = ctx.left_ps.Q[1][b];
+                const l_q1_right = ctx.left_ps.Q[1][b + ctx.half_len];
 
-        const r_q0_left = right_ps.Q[0][b];
-        const r_q0_right = right_ps.Q[0][b + half_len];
-        const r_q1_left = right_ps.Q[1][b];
-        const r_q1_right = right_ps.Q[1][b + half_len];
+                const r_q0_left = ctx.right_ps.Q[0][b];
+                const r_q0_right = ctx.right_ps.Q[0][b + ctx.half_len];
+                const r_q1_left = ctx.right_ps.Q[1][b];
+                const r_q1_right = ctx.right_ps.Q[1][b + ctx.half_len];
 
-        const i_q0_left = identity_ps.Q[0][b];
-        const i_q0_right = identity_ps.Q[0][b + half_len];
-        const i_q1_left = identity_ps.Q[1][b];
-        const i_q1_right = identity_ps.Q[1][b + half_len];
+                const i_q0_left = ctx.identity_ps.Q[0][b];
+                const i_q0_right = ctx.identity_ps.Q[0][b + ctx.half_len];
+                const i_q1_left = ctx.identity_ps.Q[1][b];
+                const i_q1_right = ctx.identity_ps.Q[1][b + ctx.half_len];
 
-        // Compute prefix evaluations at c=0 and c=2
-        // In Jolt's PrefixSuffixDecomposition with ORDER=2:
-        //   P[0] = Some(prefix polynomial), Q[0] = shift suffix accumulator
-        //   P[1] = None (constant 1),       Q[1] = operand/identity suffix accumulator
-        // So prefix evals multiply Q[0], and constant 1 multiplies Q[1].
-        const l_prefix = left_ps.prefixEvals(b);
-        const r_prefix = right_ps.prefixEvals(b);
-        const i_prefix = identity_ps.prefixEvals(b);
+                const l_prefix = ctx.left_ps.prefixEvals(b);
+                const r_prefix = ctx.right_ps.prefixEvals(b);
+                const i_prefix = ctx.identity_ps.prefixEvals(b);
 
-        // Left operand contribution: sum of (prefix, Q[0]) and (1, Q[1]) pairs
-        // Pair 0: P = LeftOperand prefix, Q = Q[0] (shift half accumulator)
-        const l_pair0_0 = l_prefix[0].mul(l_q0_left);
-        const l_pair0_2_left = l_prefix[1].mul(l_q0_left);
-        const l_pair0_2_right = l_prefix[1].mul(l_q0_right);
-        // Pair 1: P = constant 1, Q = Q[1] (operand suffix accumulator)
-        const l_pair1_0 = l_q1_left;
-        const l_pair1_2_left = l_q1_left;
-        const l_pair1_2_right = l_q1_right;
+                // Left operand: (prefix, Q[0]) + (1, Q[1])
+                const l_pair0_0 = l_prefix[0].mul(l_q0_left);
+                const l_pair0_2_left = l_prefix[1].mul(l_q0_left);
+                const l_pair0_2_right = l_prefix[1].mul(l_q0_right);
 
-        // Right operand contribution
-        // Pair 0: P = RightOperand prefix, Q = Q[0] (shift half accumulator)
-        const r_pair0_0 = r_prefix[0].mul(r_q0_left);
-        const r_pair0_2_left = r_prefix[1].mul(r_q0_left);
-        const r_pair0_2_right = r_prefix[1].mul(r_q0_right);
-        // Pair 1: P = constant 1, Q = Q[1] (operand suffix accumulator)
-        const r_pair1_0 = r_q1_left;
-        const r_pair1_2_left = r_q1_left;
-        const r_pair1_2_right = r_q1_right;
+                // Right operand: (prefix, Q[0]) + (1, Q[1])
+                const r_pair0_0 = r_prefix[0].mul(r_q0_left);
+                const r_pair0_2_left = r_prefix[1].mul(r_q0_left);
+                const r_pair0_2_right = r_prefix[1].mul(r_q0_right);
 
-        // Identity contribution
-        // Pair 0: P = Identity prefix, Q = Q[0] (shift full accumulator)
-        const i_pair0_0 = i_prefix[0].mul(i_q0_left);
-        const i_pair0_2_left = i_prefix[1].mul(i_q0_left);
-        const i_pair0_2_right = i_prefix[1].mul(i_q0_right);
-        // Pair 1: P = constant 1, Q = Q[1] (identity suffix accumulator)
-        const i_pair1_0 = i_q1_left;
-        const i_pair1_2_left = i_q1_left;
-        const i_pair1_2_right = i_q1_right;
+                // Identity: (prefix, Q[0]) + (1, Q[1])
+                const i_pair0_0 = i_prefix[0].mul(i_q0_left);
+                const i_pair0_2_left = i_prefix[1].mul(i_q0_left);
+                const i_pair0_2_right = i_prefix[1].mul(i_q0_right);
 
-        // Accumulate left operand totals
-        left_sum_0 = left_sum_0.add(l_pair0_0).add(l_pair1_0);
-        left_sum_2_left = left_sum_2_left.add(l_pair0_2_left).add(l_pair1_2_left);
-        left_sum_2_right = left_sum_2_right.add(l_pair0_2_right).add(l_pair1_2_right);
+                // Left totals
+                acc[0] = acc[0].add(l_pair0_0).add(l_q1_left);
+                acc[1] = acc[1].add(l_pair0_2_left).add(l_q1_left);
+                acc[2] = acc[2].add(l_pair0_2_right).add(l_q1_right);
 
-        // Accumulate (identity + right) totals
-        const combo_0 = i_pair0_0.add(i_pair1_0).add(r_pair0_0).add(r_pair1_0);
-        const combo_2_left = i_pair0_2_left.add(i_pair1_2_left).add(r_pair0_2_left).add(r_pair1_2_left);
-        const combo_2_right = i_pair0_2_right.add(i_pair1_2_right).add(r_pair0_2_right).add(r_pair1_2_right);
+                // Right+Identity totals
+                acc[3] = acc[3].add(i_pair0_0).add(i_q1_left).add(r_pair0_0).add(r_q1_left);
+                acc[4] = acc[4].add(i_pair0_2_left).add(i_q1_left).add(r_pair0_2_left).add(r_q1_left);
+                acc[5] = acc[5].add(i_pair0_2_right).add(i_q1_right).add(r_pair0_2_right).add(r_q1_right);
+            }
+            return acc;
+        }
+    }.map;
 
-        right_sum_0 = right_sum_0.add(combo_0);
-        right_sum_2_left = right_sum_2_left.add(combo_2_left);
-        right_sum_2_right = right_sum_2_right.add(combo_2_right);
-    }
+    const raf_reduce = struct {
+        fn reduce(a: [6]F, b_: [6]F) [6]F {
+            return .{
+                a[0].add(b_[0]), a[1].add(b_[1]), a[2].add(b_[2]),
+                a[3].add(b_[3]), a[4].add(b_[4]), a[5].add(b_[5]),
+            };
+        }
+    }.reduce;
+
+    const raf_identity = [6]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
+    const raf_result = if (tp) |pool|
+        pool.parallelReduce([6]F, half_len, raf_identity, raf_ctx, raf_map, raf_reduce)
+    else
+        raf_map(raf_ctx, 0, half_len);
+
+    const left_sum_0 = raf_result[0];
+    const left_sum_2_left = raf_result[1];
+    const left_sum_2_right = raf_result[2];
+    const right_sum_0 = raf_result[3];
+    const right_sum_2_left = raf_result[4];
+    const right_sum_2_right = raf_result[5];
 
     // Apply quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left
     const left_sum_2 = left_sum_2_right.add(left_sum_2_right).sub(left_sum_2_left);

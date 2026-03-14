@@ -15,6 +15,7 @@ const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
+// const stage5_inner_timing = true; // removed: Zig can't track vars across 7000-line functions
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -34,6 +35,7 @@ const tracer = @import("../../tracer/mod.zig");
 const ExecutionTrace = tracer.ExecutionTrace;
 const ram = @import("../ram/mod.zig");
 const jolt_device = @import("../jolt_device.zig");
+const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
 
 // Import prefix-suffix decomposition modules
 const lookup_table_mod = @import("../lookup_table/mod.zig");
@@ -2548,6 +2550,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // DIAGNOSTIC: Recompute combined values using R1CS-style formula
                 // and compare against Stage 5's trace-derived combined_vals.
+                if (comptime debug_verbose) {
                 // The R1CS witness computes:
                 //   For AddOperands: LeftLookup=0, RightLookup=left_input+right_input (FIELD arithmetic)
                 //   For interleaved: LeftLookup=left_input, RightLookup=right_input
@@ -2718,6 +2721,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         dbg("[DIAG R1CS vs S5] per_cycle_mismatches: {}\n", .{per_cycle_mismatches});
                     }
                 }
+                } // end comptime debug_verbose for R1CS diagnostic
 
                 // Now compute total from Q polynomials directly
                 // For each table that has non-zero Q, sum Q values across all entries
@@ -2843,11 +2847,29 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var split_eq_E_out_len: usize = 0;
             var split_eq_initialized = false;
 
+            var s5_addr_ns: u64 = 0;
+            var s5_cycle_ns: u64 = 0;
+            var s5_compute_ns: u64 = 0;
+            var s5_bind_ns: u64 = 0;
+            var s5_phase_init_ns: u64 = 0;
+            var s5_condense_ns: u64 = 0;
+            var s5_suffix_init_ns: u64 = 0;
+            var s5_raf_init_ns: u64 = 0;
+            var s5_transcript_ns: u64 = 0;
+            var s5_claims_ns: u64 = 0;
+            var s5_inst01_ns: u64 = 0;
+            var s5_misc_ns: u64 = 0;
+            var s5_round_timer = std.time.Timer.start() catch unreachable;
+            var s5_sub_timer = std.time.Timer.start() catch unreachable;
+            var s5_sub2_timer = std.time.Timer.start() catch unreachable;
+
             for (0..max_num_rounds) |round| {
+                s5_round_timer.reset();
                 const remaining_rounds = max_num_rounds - round;
 
                 var combined_poly = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
 
+                s5_sub_timer.reset();
                 // Instance 0: RegistersValEvaluation (8 rounds)
                 if (remaining_rounds > regs_val_num_rounds) {
                     // Not started yet - constant polynomial where p(0) + p(1) = scaled_claim
@@ -3233,21 +3255,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
                 }
 
+                s5_inst01_ns += s5_sub_timer.read();
                 // Instance 2: LookupsReadRaf (136 rounds)
                 // Since lookups_num_rounds = max_num_rounds, this instance is always active
-                //
-                // The sumcheck proves: Σ_j Σ_k eq(j, r_reduction) * ra(k, j) * combined(k, j) = input
-                // Since ra(k, j) = 1 only when k = lookup_index(j), this simplifies to:
-                // Σ_j eq(j, r_reduction) * combined(lookup_index(j), j)
-                //
-                // First 128 rounds (address variables):
-                //   For round i, we bind address bit i.
-                //   p(0) = sum over cycles j where bit i of lookup_index(j) = 0
-                //   p(1) = sum over cycles j where bit i of lookup_index(j) = 1
-                //   Each cycle contributes: eq_reduction[j] * ra_weights[j] * combined[j]
-                //
-                // Last 8 rounds (cycle variables):
-                //   Standard sumcheck over the remaining cycle polynomial.
                 if (round < LOOKUPS_LOG_K) {
                     // Address round: use Jolt's prefix-suffix decomposition
                     // The polynomial is split into:
@@ -3261,11 +3271,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const r_x: ?F = if (round % 2 == 1) challenges[round - 1] else null;
 
                     // Compute read-checking contribution via prefix-suffix decomposition
-                    const read_checking_evals = proverMsgReadChecking(F, round, &suffix_polys, &prefix_checkpoints, r_x);
+                    s5_sub_timer.reset();
+                    const read_checking_evals = proverMsgReadChecking(F, round, &suffix_polys, &prefix_checkpoints, r_x, self.thread_pool);
 
                     // Compute RAF contribution via prefix-suffix decomposition
                     // gamma_raf = γ, gamma_raf2 = γ²
-                    const raf_evals = proverMsgRaf(F, &left_raf, &right_raf, &identity_raf, gamma_raf, gamma_raf2);
+                    const raf_evals = proverMsgRaf(F, &left_raf, &right_raf, &identity_raf, gamma_raf, gamma_raf2, self.thread_pool);
+                    s5_compute_ns += s5_sub_timer.read();
 
                     // Combined: read_checking + raf
                     const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
@@ -3876,10 +3888,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Append to transcript: 2 coefficients for degree-2 polynomial
                     // Matches Jolt's CompressedUniPoly::append_to_transcript which iterates
                     // over coeffs_except_linear_term (length = degree of polynomial)
+                    s5_sub_timer.reset();
                     transcript.appendScalars("sumcheck_poly", coeffs);
 
                     const challenge = transcript.challengeScalar();
                     challenges[round] = challenge;
+                    s5_transcript_ns += s5_sub_timer.read();
 
                     // DEBUG: Print challenge and coefficients for comparison with Jolt verifier
                     if (comptime debug_verbose) if (round < 4 or round == 7 or round == 127 or round == 128) {
@@ -3890,6 +3904,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         print("[ZOLT S5V R{}] challenge={any}\n", .{ round, challenge.toBytes()[0..16].* });
                     };
 
+                    s5_sub_timer.reset();
                     // Update current_batched_claim by evaluating degree-2 polynomial at challenge
                     // p(r) = c0 + r*c1 + r^2*c2
                     // where c1 = claim - 2*c0 - c2 (from p(0)+p(1) = claim)
@@ -4248,7 +4263,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Update prefix-suffix decomposition state after receiving challenge
                     // ===================================================================
 
+                    s5_claims_ns += s5_sub_timer.read();
                     // Bind challenge to all suffix polynomials
+                    s5_sub_timer.reset();
                     if (self.thread_pool) |tp| {
                         suffix_polys.bindAllParallel(challenge, tp);
                     } else {
@@ -4259,8 +4276,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     left_raf.bind(challenge);
                     right_raf.bind(challenge);
                     identity_raf.bind(challenge);
+                    s5_bind_ns += s5_sub_timer.read();
 
                     // Update the current phase's expanding table with this challenge
+                    s5_sub_timer.reset();
                     expanding_tables[current_phase].update(challenge);
 
                     // Update prefix checkpoints every 2 rounds (after binding X and Y)
@@ -4272,6 +4291,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const suffix_len = LOOKUPS_LOG_K - (current_phase + 1) * log_m;
                         prefix_checkpoints.update(checkpoint_r_x, r_y, round, suffix_len);
                     }
+                    s5_misc_ns += s5_sub_timer.read();
 
                     // Check for phase transition (every log_m = 16 rounds)
                     if ((round + 1) % log_m == 0 and round + 1 < LOOKUPS_LOG_K) {
@@ -4353,7 +4373,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Condense u_evals (lookups_eq_evals) using the expanding table from the previous phase
                         // This is the CRITICAL step that was missing!
                         // u_evals[j] *= v[prev_phase][k_bound] where k_bound = prefix & m_mask
+                        s5_sub_timer.reset();
+                        s5_sub2_timer.reset();
                         condenseUEvals(F, lookups_eq_evals, &expanding_tables[prev_phase], lookup_indices_u128, current_phase, num_phases, self.thread_pool);
+                        s5_condense_ns += s5_sub2_timer.read();
                         if (comptime debug_verbose) {
                             dbg("[STAGE5] Phase {} condense done, now calling initPhase...\n", .{current_phase});
                         }
@@ -4375,13 +4398,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
 
-                        // Re-initialize suffix polys and RAF for new phase with condensed u_evals
-                        try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
-                        if (comptime debug_verbose) {
-                            dbg("[STAGE5] Phase {} initPhase done, now calling initQRaf...\n", .{current_phase});
-                        }
                         // Save prefix checkpoints before resetting RAF decompositions
-                        // After chunk_len rounds, the prefix MLE has been bound down to a single value
                         left_raf.updateCheckpoint();
                         right_raf.updateCheckpoint();
                         identity_raf.updateCheckpoint();
@@ -4390,112 +4407,112 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         left_raf.resetForPhase(current_phase, initial_m);
                         right_raf.resetForPhase(current_phase, initial_m);
                         identity_raf.resetForPhase(current_phase, initial_m);
-                        initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
+
+                        // Run initPhase and initQRaf concurrently (they're independent —
+                        // initPhase writes to suffix polys, initQRaf writes to RAF Q arrays,
+                        // both only read from u_evals and lookup_indices).
+                        s5_sub2_timer.reset();
+                        if (self.thread_pool) |tp| {
+                            const SuffixInitCtx = struct {
+                                polys: *AllSuffixPolys(F),
+                                phase: usize,
+                                phases: usize,
+                                eq: []const F,
+                                indices: []const u128,
+                                table_indices: []const i8,
+                            };
+                            const suffix_ctx = SuffixInitCtx{
+                                .polys = &suffix_polys,
+                                .phase = current_phase,
+                                .phases = num_phases,
+                                .eq = lookups_eq_evals,
+                                .indices = lookup_indices_u128,
+                                .table_indices = cycle_table_indices,
+                            };
+                            const RafInitCtx = struct {
+                                left_raf: *@TypeOf(left_raf),
+                                right_raf: *@TypeOf(right_raf),
+                                identity_raf: *@TypeOf(identity_raf),
+                                eq: []const F,
+                                indices: []const u128,
+                                is_interleaved: []const bool,
+                            };
+                            const raf_ctx = RafInitCtx{
+                                .left_raf = &left_raf,
+                                .right_raf = &right_raf,
+                                .identity_raf = &identity_raf,
+                                .eq = lookups_eq_evals,
+                                .indices = lookup_indices_u128,
+                                .is_interleaved = is_interleaved_operands,
+                            };
+                            _ = tp.join(
+                                void,
+                                void,
+                                suffix_ctx,
+                                struct {
+                                    fn f(c: SuffixInitCtx) void {
+                                        c.polys.initPhase(c.phase, c.phases, c.eq, c.indices, c.table_indices) catch unreachable;
+                                    }
+                                }.f,
+                                raf_ctx,
+                                struct {
+                                    fn f(c: RafInitCtx) void {
+                                        initQRaf(F, c.left_raf, c.right_raf, c.identity_raf, c.eq, c.indices, c.is_interleaved);
+                                    }
+                                }.f,
+                            );
+                        } else {
+                            try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
+                            initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
+                        }
+                        s5_suffix_init_ns += s5_sub2_timer.read();
 
                         // Materialize prefix MLE tables for new phase
+                        s5_sub2_timer.reset();
                         left_raf.initPrefix();
                         right_raf.initPrefix();
                         identity_raf.initPrefix();
+                        s5_raf_init_ns += s5_sub2_timer.read();
                         if (comptime debug_verbose) {
                             dbg("[STAGE5] Phase {} initQRaf + initPrefix done\n", .{current_phase});
                         }
 
                         // Reset the new phase's expanding table to 1
                         expanding_tables[current_phase].reset(F.one());
+                        s5_phase_init_ns += s5_sub_timer.read();
 
                         if (comptime debug_verbose) {
                             dbg("[STAGE5] Condensed u_evals with expanding table, reset phase {} table\n", .{current_phase});
                         }
                     }
 
-                    // Also update legacy ra_weights for cycle rounds (needed for the last 8 rounds)
-                    const bit_index = LOOKUPS_LOG_K - 1 - round;
-                    const one_minus_r = F.one().sub(challenge);
-                    const chunk_idx = round / lookups_ra_virtual_log_k_chunk;
+                    // ra_weights and ra_chunk_weights are NOT needed during address rounds.
+                    // They are fully rematerialized from expanding tables at cycle round start (round 128).
+                    // Skipping incremental updates saves ~130ms of parallelForForce dispatch overhead.
+                    if (comptime debug_verbose) {
+                        const bit_index = LOOKUPS_LOG_K - 1 - round;
+                        const one_minus_r = F.one().sub(challenge);
+                        const chunk_idx = round / lookups_ra_virtual_log_k_chunk;
 
-                    // Debug: print round info for rounds 0-3 and 63-65
-                    if (round < 4 or (round >= 63 and round <= 65)) {
-                        if (comptime debug_verbose) {
-                            dbg("[STAGE5 ADDR] Round {} challenge (full) = {any}\n", .{
-                                round,
-                                challenge.toBytesBE(),
-                            });
-                        }
-                    }
+                        dbg("[STAGE5 ADDR] Round {} challenge (full) = {any}\n", .{
+                            round,
+                            challenge.toBytesBE(),
+                        });
 
-                    // Debug: print round info for first round of each chunk
-                    if (round % lookups_ra_virtual_log_k_chunk == 0 and (round < 64 or round >= 64)) {
-                        if (comptime debug_verbose) {
-                            dbg("[STAGE5 RA_CHUNK] Starting chunk {} (rounds {}-{})\n", .{
-                                chunk_idx,
-                                round,
-                                round + lookups_ra_virtual_log_k_chunk - 1,
-                            });
-                            dbg("  bit_index = {} (bit {} of lookup_index)\n", .{ bit_index, bit_index });
-                            dbg("  challenge = {x}\n", .{challenge.toBytesBE()[16..32].*});
-                        }
-                        // Print lookup_indices for first 4 cycles
-                        for (0..@min(4, T)) |jj| {
-                            const idx_lo = lookups_indices_lo[jj];
-                            const idx_hi = lookups_indices_hi[jj];
-                            const bit_val = getBit128(idx_lo, idx_hi, bit_index);
-                            if (comptime debug_verbose) {
-                                dbg("  cycle[{}]: lookup_idx=({x:016},{x:016}), bit[{}]={}\n", .{
-                                    jj, idx_hi, idx_lo, bit_index, bit_val,
-                                });
-                            }
-                        }
-                    }
-
-                    if (self.thread_pool) |tp| {
-                        const RaWeightCtx = struct {
-                            ra_weights: []F,
-                            chunk_weights: ?[]F,
-                            indices_lo: []const u64,
-                            indices_hi: []const u64,
-                            bit_idx: usize,
-                            omr: F,
-                            chal: F,
-                        };
-                        const rwctx = RaWeightCtx{
-                            .ra_weights = lookups_ra_weights,
-                            .chunk_weights = if (chunk_idx < ra_num_chunks) ra_chunk_weights[chunk_idx] else null,
-                            .indices_lo = lookups_indices_lo,
-                            .indices_hi = lookups_indices_hi,
-                            .bit_idx = bit_index,
-                            .omr = one_minus_r,
-                            .chal = challenge,
-                        };
-                        tp.parallelForForce(T, rwctx, struct {
-                            fn f(c: RaWeightCtx, j: usize) void {
-                                const bit = getBit128(c.indices_lo[j], c.indices_hi[j], c.bit_idx);
-                                const factor = if (bit == 0) c.omr else c.chal;
-                                c.ra_weights[j] = c.ra_weights[j].mul(factor);
-                                if (c.chunk_weights) |cw| {
-                                    cw[j] = cw[j].mul(factor);
-                                }
-                            }
-                        }.f);
-                    } else {
                         for (0..T) |j| {
                             const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
                             const factor = if (bit == 0) one_minus_r else challenge;
                             lookups_ra_weights[j] = lookups_ra_weights[j].mul(factor);
-                            if (comptime debug_verbose) bf_weights[j] = bf_weights[j].mul(factor);
+                            bf_weights[j] = bf_weights[j].mul(factor);
 
                             if (chunk_idx < ra_num_chunks) {
                                 ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
                             }
                         }
-                    }
 
-                    // Debug: print ra_chunk values after last round of each chunk
-                    if ((round + 1) % lookups_ra_virtual_log_k_chunk == 0) {
-                        if (comptime debug_verbose) {
+                        if ((round + 1) % lookups_ra_virtual_log_k_chunk == 0) {
                             dbg("[STAGE5 RA_CHUNK] Finished chunk {} after round {}\n", .{ chunk_idx, round });
-                        }
-                        for (0..@min(4, T)) |jj| {
-                            if (comptime debug_verbose) {
+                            for (0..@min(4, T)) |jj| {
                                 dbg("  ra_chunk[{}][{}] = {x}\n", .{
                                     chunk_idx, jj, ra_chunk_weights[chunk_idx][jj].toBytesBE()[16..32].*,
                                 });
@@ -4513,6 +4530,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
+                    s5_addr_ns += s5_round_timer.read();
                     continue; // Skip the rest of the loop for address rounds
                 } else {
                     // Cycle rounds: actual sumcheck over eq_reduction * Π_c ra_chunk[c] * combined_vals
@@ -4543,11 +4561,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     //     combined_val[j] = table_eval[j] + raf_identity
                     if (lookups_round == 0) {
                         // DEBUG: Check sum BEFORE rematerialization
+                        if (comptime debug_verbose) {
                         var pre_remat_sum = F.zero();
                         for (0..T) |jj| {
                             pre_remat_sum = pre_remat_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
                         }
-                        if (comptime debug_verbose) {
                             dbg("[PRE-REMAT] sum(eq*combined_vals) = {x}\n", .{pre_remat_sum.toBytesBE()[16..32].*});
                             dbg("[PRE-REMAT] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                             dbg("[PRE-REMAT] match = {}\n", .{pre_remat_sum.eql(lookups_claim)});
@@ -5225,7 +5243,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
 
                         // DIAGNOSTIC: Check sum with ORIGINAL combined_vals before rematerialization
-                        {
+                        if (comptime debug_verbose) {
                             var sum_with_original = F.zero();
                             for (0..T) |fj| {
                                 const fj_eq = computeEqAtIndex(r_reduction, fj);
@@ -5235,11 +5253,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 }
                                 sum_with_original = sum_with_original.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[fj]));
                             }
-                            if (comptime debug_verbose) {
-                                dbg("[PRE_REMAT_SUM] sum_with_ORIGINAL_cv = {x}\n", .{sum_with_original.toBytesBE()[16..32].*});
-                                dbg("[PRE_REMAT_SUM] lookups_claim         = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                                dbg("[PRE_REMAT_SUM] MATCH: {}\n", .{sum_with_original.eql(lookups_claim)});
-                            }
+                            dbg("[PRE_REMAT_SUM] sum_with_ORIGINAL_cv = {x}\n", .{sum_with_original.toBytesBE()[16..32].*});
+                            dbg("[PRE_REMAT_SUM] lookups_claim         = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            dbg("[PRE_REMAT_SUM] MATCH: {}\n", .{sum_with_original.eql(lookups_claim)});
                         }
 
                         // Rematerialize combined_vals using the correct formula
@@ -6499,18 +6515,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // CRITICAL DIAGNOSTIC: Compare lookups_claim with bound array computation
                         // After binding, compute: current_scalar * Σ_j (eq_prefix(j) * Π_c ra_c[j] * cv[j])
                         // where the sum is over remaining (unbound) elements
-                        const bound_half_size = T >> @intCast(lookups_round + 1);
-                        const bound_remaining = n_cycle_vars - lookups_round - 1;
                         var bound_array_sum = F.zero();
-                        for (0..bound_half_size) |bj| {
-                            const bj_eq = computeEqAtIndexPartial(r_reduction, bj, bound_remaining);
-                            var bj_ra = F.one();
-                            for (0..ra_num_chunks) |bc| {
-                                bj_ra = bj_ra.mul(ra_chunk_weights[bc][bj]);
+                        if (comptime debug_verbose) {
+                            const bound_half_size = T >> @intCast(lookups_round + 1);
+                            const bound_remaining = n_cycle_vars - lookups_round - 1;
+                            for (0..bound_half_size) |bj| {
+                                const bj_eq = computeEqAtIndexPartial(r_reduction, bj, bound_remaining);
+                                var bj_ra = F.one();
+                                for (0..ra_num_chunks) |bc| {
+                                    bj_ra = bj_ra.mul(ra_chunk_weights[bc][bj]);
+                                }
+                                bound_array_sum = bound_array_sum.add(bj_eq.mul(bj_ra).mul(lookups_combined_vals[bj]));
                             }
-                            bound_array_sum = bound_array_sum.add(bj_eq.mul(bj_ra).mul(lookups_combined_vals[bj]));
+                            bound_array_sum = bound_array_sum.mul(lookups_current_scalar);
                         }
-                        bound_array_sum = bound_array_sum.mul(lookups_current_scalar);
                         if (comptime debug_verbose) {
                             dbg("  BOUND_ARRAY_SUM = {x}\n", .{bound_array_sum.toBytesBE()[16..32].*});
                             dbg("  lookups_claim   = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
@@ -6518,9 +6536,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
+                    s5_cycle_ns += s5_round_timer.read();
                     continue; // Skip the rest of the loop (we handled everything)
                 }
+                s5_addr_ns += s5_round_timer.read();
             }
+
+            // Stage 5 round timing summary
+            std.debug.print("[STAGE5 TIMING] addr={}ms(inst01={}ms compute={}ms transcript={}ms claims={}ms bind={}ms misc={}ms phase_init={}ms[cond={}ms suf={}ms raf={}ms]) cycle={}ms\n", .{
+                s5_addr_ns / 1_000_000,
+                s5_inst01_ns / 1_000_000,
+                s5_compute_ns / 1_000_000,
+                s5_transcript_ns / 1_000_000,
+                s5_claims_ns / 1_000_000,
+                s5_bind_ns / 1_000_000,
+                s5_misc_ns / 1_000_000,
+                s5_phase_init_ns / 1_000_000,
+                s5_condense_ns / 1_000_000,
+                s5_suffix_init_ns / 1_000_000,
+                s5_raf_init_ns / 1_000_000,
+                s5_cycle_ns / 1_000_000,
+            });
 
             // Debug: print final batched claim (this is output_claim from verifier's perspective)
             if (comptime debug_verbose) {
@@ -6577,13 +6613,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // =================================================================
             // BRUTE FORCE Instance 1 expected output claim
-            // Upstream cycle-only formula:
-            //   expected = eq_combined * ra_claim_reduced
-            //   eq_combined = eq(r_cycle_raf, r_reduced) + gamma*eq(r_cycle_rw, r_reduced) + gamma^2*eq(r_cycle_val, r_reduced)
-            //   ra_claim_reduced = Σ_{(addr,cycle)} eq(addr, r_address) * eq(cycle, r_cycle_reduced)
-            //   r_address is FIXED from opening claims, r_cycle_reduced = reversed(sumcheck_challenges)
             // =================================================================
-            {
+            if (comptime debug_verbose) {
                 const inst1_start = max_num_rounds - ram_ra_num_rounds; // 128
                 const cycle_chal = challenges[inst1_start .. inst1_start + ram_ra_num_rounds]; // 8 challenges
 
@@ -7467,7 +7498,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [4]F {
-                    var r = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                    var r_u: [4]UnreducedProductAccum = .{UnreducedProductAccum.zero()} ** 4;
                     for (start..end) |i| {
                         const inc_0 = c.inc_p[2 * i];
                         const wa_0 = c.wa_p[2 * i];
@@ -7476,12 +7507,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const wa_1 = c.wa_p[2 * i + 1];
                         const lt_1 = c.lt_p[2 * i + 1];
 
-                        r[0] = r[0].add(inc_0.mul(wa_0).mul(lt_0));
-                        r[1] = r[1].add(inc_1.mul(wa_1).mul(lt_1));
-                        r[2] = r[2].add(inc_1.add(inc_1).sub(inc_0).mul(wa_1.add(wa_1).sub(wa_0)).mul(lt_1.add(lt_1).sub(lt_0)));
-                        r[3] = r[3].add(inc_1.sub(inc_0).mul(wa_1.sub(wa_0)).mul(lt_1.sub(lt_0)));
+                        r_u[0].addAssign(inc_0.mul(wa_0).mulToProductAccum(lt_0));
+                        r_u[1].addAssign(inc_1.mul(wa_1).mulToProductAccum(lt_1));
+                        r_u[2].addAssign(inc_1.add(inc_1).sub(inc_0).mul(wa_1.add(wa_1).sub(wa_0)).mulToProductAccum(lt_1.add(lt_1).sub(lt_0)));
+                        r_u[3].addAssign(inc_1.sub(inc_0).mul(wa_1.sub(wa_0)).mulToProductAccum(lt_1.sub(lt_0)));
                     }
-                    return r;
+                    return [4]F{ r_u[0].reduce(), r_u[1].reduce(), r_u[2].reduce(), r_u[3].reduce() };
                 }
             }.f;
             const reduceFn = struct {
@@ -7570,18 +7601,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [4]F {
-                    var r = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                    var r_u: [4]UnreducedProductAccum = .{UnreducedProductAccum.zero()} ** 4;
                     for (start..end) |i| {
                         const eq_0 = c.eq[2 * i];
                         const eq_1 = c.eq[2 * i + 1];
                         const c_0 = c.comb[2 * i];
                         const c_1 = c.comb[2 * i + 1];
-                        r[0] = r[0].add(eq_0.mul(c_0));
-                        r[1] = r[1].add(eq_1.mul(c_1));
-                        r[2] = r[2].add(eq_1.add(eq_1).sub(eq_0).mul(c_1.add(c_1).sub(c_0)));
-                        r[3] = r[3].add(eq_1.sub(eq_0).mul(c_1.sub(c_0)));
+                        r_u[0].addAssign(eq_0.mulToProductAccum(c_0));
+                        r_u[1].addAssign(eq_1.mulToProductAccum(c_1));
+                        r_u[2].addAssign(eq_1.add(eq_1).sub(eq_0).mulToProductAccum(c_1.add(c_1).sub(c_0)));
+                        r_u[3].addAssign(eq_1.sub(eq_0).mulToProductAccum(c_1.sub(c_0)));
                     }
-                    return r;
+                    return [4]F{ r_u[0].reduce(), r_u[1].reduce(), r_u[2].reduce(), r_u[3].reduce() };
                 }
             }.f;
             const reduceFn = struct {
@@ -7661,7 +7692,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [4]F {
-                    var r = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                    var r_u: [4]UnreducedProductAccum = .{UnreducedProductAccum.zero()} ** 4;
                     for (start..end) |i| {
                         const eq_0 = c.eq[2 * i];
                         const eq_1 = c.eq[2 * i + 1];
@@ -7669,12 +7700,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const ra_1 = c.ra[2 * i + 1];
                         const c_0 = c.comb[2 * i];
                         const c_1 = c.comb[2 * i + 1];
-                        r[0] = r[0].add(eq_0.mul(ra_0).mul(c_0));
-                        r[1] = r[1].add(eq_1.mul(ra_1).mul(c_1));
-                        r[2] = r[2].add(eq_1.add(eq_1).sub(eq_0).mul(ra_1.add(ra_1).sub(ra_0)).mul(c_1.add(c_1).sub(c_0)));
-                        r[3] = r[3].add(eq_1.sub(eq_0).mul(ra_1.sub(ra_0)).mul(c_1.sub(c_0)));
+                        r_u[0].addAssign(eq_0.mul(ra_0).mulToProductAccum(c_0));
+                        r_u[1].addAssign(eq_1.mul(ra_1).mulToProductAccum(c_1));
+                        r_u[2].addAssign(eq_1.add(eq_1).sub(eq_0).mul(ra_1.add(ra_1).sub(ra_0)).mulToProductAccum(c_1.add(c_1).sub(c_0)));
+                        r_u[3].addAssign(eq_1.sub(eq_0).mul(ra_1.sub(ra_0)).mulToProductAccum(c_1.sub(c_0)));
                     }
-                    return r;
+                    return [4]F{ r_u[0].reduce(), r_u[1].reduce(), r_u[2].reduce(), r_u[3].reduce() };
                 }
             }.f;
             const reduceFn = struct {

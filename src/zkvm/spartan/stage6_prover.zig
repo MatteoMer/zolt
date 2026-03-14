@@ -44,6 +44,7 @@ const InstructionFlags = instruction_mod.InstructionFlags;
 const preprocessing = @import("../preprocessing.zig");
 const BytecodePCMapper = preprocessing.BytecodePCMapper;
 const ra_poly_mod = @import("ra_poly.zig");
+const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
 
 /// Bytecode entry properties needed for BytecodeReadRaf Val polynomial computation.
 /// One entry per bytecode address k. Indexed by the expanded PC (bytecode array index).
@@ -2103,8 +2104,6 @@ fn HammingBooleanityProver(comptime F: type) type {
             // pair, which dominates the cache cost for typical sizes.
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [4]F {
-                    const two = F.fromU64(2);
-                    const three = F.fromU64(3);
                     var e0 = F.zero();
                     var e1 = F.zero();
                     var e2 = F.zero();
@@ -2127,12 +2126,12 @@ fn HammingBooleanityProver(comptime F: type) type {
                             e0 = e0.add(eq0.mul(h0.mul(h0).sub(h0)));
                             e1 = e1.add(eq1.mul(h1.mul(h1).sub(h1)));
 
-                            const h_at_2 = h0.add(two.mul(h_delta));
-                            const e_at_2 = eq0.add(two.mul(e_delta));
+                            const h_at_2 = h1.add(h_delta);
+                            const e_at_2 = eq1.add(e_delta);
                             e2 = e2.add(e_at_2.mul(h_at_2.mul(h_at_2).sub(h_at_2)));
 
-                            const h_at_3 = h0.add(three.mul(h_delta));
-                            const e_at_3 = eq0.add(three.mul(e_delta));
+                            const h_at_3 = h_at_2.add(h_delta);
+                            const e_at_3 = e_at_2.add(e_delta);
                             e3 = e3.add(e_at_3.mul(h_at_3.mul(h_at_3).sub(h_at_3)));
                         }
                     }
@@ -2164,8 +2163,6 @@ fn HammingBooleanityProver(comptime F: type) type {
 
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [4]F {
-                    const two = F.fromU64(2);
-                    const three = F.fromU64(3);
                     var e0 = F.zero();
                     var e1 = F.zero();
                     var e2 = F.zero();
@@ -2182,12 +2179,12 @@ fn HammingBooleanityProver(comptime F: type) type {
                         e0 = e0.add(eq0.mul(h0.mul(h0).sub(h0)));
                         e1 = e1.add(eq1.mul(h1.mul(h1).sub(h1)));
 
-                        const h_at_2 = h0.add(two.mul(h_delta));
-                        const e_at_2 = eq0.add(two.mul(e_delta));
+                        const h_at_2 = h1.add(h_delta);
+                        const e_at_2 = eq1.add(e_delta);
                         e2 = e2.add(e_at_2.mul(h_at_2.mul(h_at_2).sub(h_at_2)));
 
-                        const h_at_3 = h0.add(three.mul(h_delta));
-                        const e_at_3 = eq0.add(three.mul(e_delta));
+                        const h_at_3 = h_at_2.add(h_delta);
+                        const e_at_3 = e_at_2.add(e_delta);
                         e3 = e3.add(e_at_3.mul(h_at_3.mul(h_at_3).sub(h_at_3)));
                     }
                     return [4]F{ e0, e1, e2, e3 };
@@ -2307,8 +2304,14 @@ fn RamRaVirtualProver(comptime F: type) type {
 
         /// Compressed ra polynomials (u8 indices in round 1, dense after bind)
         ra_polys: []RaPoly,
-        /// eq(r_cycle_reduced, .) evaluations
-        eq: []F,
+        /// Factored eq: eq(r_cycle, x) = e_out[x >> m] * e_in[x & mask]
+        /// During first m rounds, e_in is halved. After m rounds, e_in is absorbed
+        /// into e_out, and e_out is halved for the remaining rounds.
+        e_out: []F,
+        e_in: []F,
+        e_in_len: usize,
+        e_out_len: usize,
+        m: usize, // split point (n_vars / 2)
         d: usize,
         current_len: usize,
         allocator: Allocator,
@@ -2427,11 +2430,16 @@ fn RamRaVirtualProver(comptime F: type) type {
             var r_cycle_rev = try allocator.alloc(F, n_vars);
             defer allocator.free(r_cycle_rev);
             for (0..n_vars) |i| r_cycle_rev[i] = r_cycle[n_vars - 1 - i];
+
             const eq_arr = try computeEqTableParallel(F, allocator, r_cycle_rev, n_vars, init_pool);
 
             return Self{
                 .ra_polys = ra_polys,
-                .eq = eq_arr,
+                .e_out = eq_arr,
+                .e_in = &[_]F{},
+                .e_in_len = 0,
+                .e_out_len = T,
+                .m = 0,
                 .d = d,
                 .current_len = T,
                 .allocator = allocator,
@@ -2442,56 +2450,63 @@ fn RamRaVirtualProver(comptime F: type) type {
         pub fn deinit(self: *Self) void {
             for (self.ra_polys) |*rp| rp.deinit(self.allocator);
             self.allocator.free(self.ra_polys);
-            self.allocator.free(self.eq);
+            self.allocator.free(self.e_out);
+            if (self.e_in_len > 0) self.allocator.free(self.e_in);
         }
 
         /// Compute round polynomial evaluations
         /// f(x) = eq(x) * Prod_i ra_i(x), degree = d + 1
         /// Need d+2 evaluation points: [0, 1, 2, ..., d, inf]
         pub fn computeRoundPoly(self: *Self, allocator: Allocator) ![]F {
-            const half = self.current_len / 2;
             const n_evals = self.d + 2;
 
-            var x_vals: [MAX_RA_EVALS]F = undefined;
-            for (0..n_evals) |i| {
-                x_vals[i] = F.fromU64(@intCast(i));
-            }
+            return self.computeRoundPolyFlat(allocator, n_evals);
+        }
+
+        /// Flat iteration using e_out as the eq array.
+        fn computeRoundPolyFlat(self: *Self, allocator: Allocator, n_evals: usize) ![]F {
+            const half = self.e_out_len / 2;
 
             const Ctx = struct {
                 ra_polys: []RaPoly,
-                eq: []F,
+                eq: []const F,
                 d: usize,
                 n_evals: usize,
-                x_vals: [MAX_RA_EVALS]F,
             };
             const ctx = Ctx{
                 .ra_polys = self.ra_polys,
-                .eq = self.eq,
+                .eq = self.e_out,
                 .d = self.d,
                 .n_evals = n_evals,
-                .x_vals = x_vals,
             };
 
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
+                    const MAX_D = 8;
                     var acc: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
                     for (start..end) |j| {
                         const eq0 = c.eq[2 * j];
                         const eq1 = c.eq[2 * j + 1];
                         const eq_delta = eq1.sub(eq0);
 
-                        for (0..c.n_evals) |pt_idx| {
-                            const x = c.x_vals[pt_idx];
-                            var product = F.one();
+                        var cur: [MAX_D]F = undefined;
+                        var delta: [MAX_D]F = undefined;
+                        for (0..c.d) |i| {
+                            cur[i] = c.ra_polys[i].getBoundCoeff(2 * j);
+                            delta[i] = c.ra_polys[i].getBoundCoeff(2 * j + 1).sub(cur[i]);
+                        }
 
-                            for (0..c.d) |i| {
-                                const v0 = c.ra_polys[i].getBoundCoeff(2 * j);
-                                const v1 = c.ra_polys[i].getBoundCoeff(2 * j + 1);
-                                product = product.mul(v0.add(x.mul(v1.sub(v0))));
-                            }
-                            product = product.mul(eq0.add(x.mul(eq_delta)));
+                        var product = eq0;
+                        for (0..c.d) |i| product = product.mul(cur[i]);
+                        acc[0] = acc[0].add(product);
 
-                            acc[pt_idx] = acc[pt_idx].add(product);
+                        var eq_cur = eq0;
+                        for (1..c.n_evals) |pt| {
+                            for (0..c.d) |i| cur[i] = cur[i].add(delta[i]);
+                            eq_cur = eq_cur.add(eq_delta);
+                            product = eq_cur;
+                            for (0..c.d) |i| product = product.mul(cur[i]);
+                            acc[pt] = acc[pt].add(product);
                         }
                     }
                     return acc;
@@ -2531,29 +2546,27 @@ fn RamRaVirtualProver(comptime F: type) type {
             }
 
             if (all_dense and self.pool != null) {
-                // Parallel bind: d ra_poly dense arrays + 1 eq array
-                const total = self.d + 1;
-                const RaBindCtx = struct { ra: []RaPoly, eq: []F, d: usize, half: usize, r: F };
-                const ctx = RaBindCtx{ .ra = self.ra_polys, .eq = self.eq, .d = self.d, .half = half, .r = r };
-                self.pool.?.parallelForForce(total, ctx, struct {
+                // Parallel bind: d ra_poly dense arrays (eq is O(√T), done separately below)
+                const RaBindCtx = struct { ra: []RaPoly, d: usize, half: usize, r: F };
+                const ctx = RaBindCtx{ .ra = self.ra_polys, .d = self.d, .half = half, .r = r };
+                self.pool.?.parallelForForce(self.d, ctx, struct {
                     fn f(c: RaBindCtx, idx: usize) void {
-                        if (idx < c.d) {
-                            std.debug.assert(c.ra[idx] == .dense);
-                            bindSlice(c.ra[idx].dense.coeffs[0 .. c.half * 2], c.half, c.r);
-                            c.ra[idx].dense.current_len = c.half;
-                        } else {
-                            bindSlice(c.eq, c.half, c.r);
-                        }
+                        std.debug.assert(c.ra[idx] == .dense);
+                        bindSlice(c.ra[idx].dense.coeffs[0 .. c.half * 2], c.half, c.r);
+                        c.ra[idx].dense.current_len = c.half;
                     }
                 }.f);
             } else {
                 // First round (round1→dense transition) or no pool: sequential.
-                // TODO: parallelize round1→dense materialization across d polys for large T.
-                bindSlice(self.eq, half, r);
                 for (self.ra_polys) |*rp| {
                     try rp.bind(r, self.allocator);
                 }
             }
+
+            // Flat eq bind
+            const out_half = self.e_out_len / 2;
+            bindSlice(self.e_out, out_half, r);
+            self.e_out_len = out_half;
 
             self.current_len = half;
         }
@@ -2603,6 +2616,8 @@ fn BooleanityProver(comptime F: type) type {
         eq_cycle: []F,
         /// γ^{2i} powers for batching
         gamma_powers_sq: []F,
+        /// γ^i powers for pre-scaling (used in Phase 2 Gruen optimization)
+        gamma_powers: []F,
         /// Number of RA polynomials
         N: usize,
         /// K = 2^log_k_chunk (address table size)
@@ -2617,9 +2632,19 @@ fn BooleanityProver(comptime F: type) type {
         eq_r_r: F,
         /// H tables for Phase 2: H[i][j] = eq(r_addr_bound, chunk_i(j))
         /// Initialized at Phase 1→2 transition. Halved each Phase 2 round.
+        /// null during lazy rounds (first 3 Phase 2 rounds).
         H: ?[][]F,
         /// Current table length for Phase 2 (T, then T/2, etc.)
         phase2_len: usize,
+        /// Chunk indices for lazy H evaluation: chunk_indices[i][j] = chunk index for poly i, cycle j
+        /// Only allocated during lazy rounds (first 3 Phase 2 rounds).
+        chunk_indices: ?[][]u8,
+        /// Lookup tables for lazy H evaluation. In round1: tables[0][k] = F_table[k].
+        /// In round2: tables[0][k]=(1-r)*F[k], tables[1][k]=r*F[k].
+        /// In round3: tables[0..4][k] = (1-r1)(1-r0)F[k], (1-r1)(r0)F[k], etc.
+        lazy_tables: [4][]F,
+        /// Number of valid tables in lazy_tables (1=round1, 2=round2, 4=round3, 0=dense)
+        lazy_num_tables: u8,
         /// Trace reference for building H tables at transition
         trace: *const ExecutionTrace,
         /// Parameters needed for H table construction
@@ -2637,6 +2662,7 @@ fn BooleanityProver(comptime F: type) type {
             r_addr_le: []F,
             eq_cycle_table: []F,
             gamma_sq: []F,
+            gamma_unsq: []F,
             N_val: usize,
             log_k: usize,
             n_cycle: usize,
@@ -2688,6 +2714,7 @@ fn BooleanityProver(comptime F: type) type {
                 .B_scalar = F.one(),
                 .eq_cycle = eq_cycle_table,
                 .gamma_powers_sq = gamma_sq,
+                .gamma_powers = gamma_unsq,
                 .N = N_val,
                 .K = K_val,
                 .log_k_chunk = log_k,
@@ -2696,6 +2723,9 @@ fn BooleanityProver(comptime F: type) type {
                 .eq_r_r = F.zero(),
                 .H = null,
                 .phase2_len = 0,
+                .chunk_indices = null,
+                .lazy_tables = .{ &.{}, &.{}, &.{}, &.{} },
+                .lazy_num_tables = 0,
                 .trace = trace,
                 .instruction_d = instr_d,
                 .bytecode_d = bc_d,
@@ -2713,9 +2743,17 @@ fn BooleanityProver(comptime F: type) type {
             self.allocator.free(self.r_address_le);
             self.allocator.free(self.eq_cycle);
             self.allocator.free(self.gamma_powers_sq);
+            self.allocator.free(self.gamma_powers);
             if (self.H) |ht| {
                 for (ht) |h| self.allocator.free(h);
                 self.allocator.free(ht);
+            }
+            if (self.chunk_indices) |ci| {
+                for (ci) |c| self.allocator.free(c);
+                self.allocator.free(ci);
+            }
+            for (0..@as(usize, self.lazy_num_tables)) |i| {
+                if (self.lazy_tables[i].len > 0) self.allocator.free(self.lazy_tables[i]);
             }
         }
 
@@ -2727,9 +2765,11 @@ fn BooleanityProver(comptime F: type) type {
             if (self.H) |ht| {
                 var all_same_claims = true;
                 for (0..self.N) |i| {
-                    claims[i] = ht[i][0];
+                    // H[i] is pre-scaled by γ^i, so unscale to get the actual ra value
+                    const gamma_inv = self.gamma_powers[i].inverse().?;
+                    claims[i] = ht[i][0].mul(gamma_inv);
                     if (i < 5 or i >= self.N - 5 or (i >= 28 and i < 34)) {
-                        const hbe = ht[i][0].toBytesBE();
+                        const hbe = claims[i].toBytesBE();
                         dbg("[BOOL_CLAIMS] H[{}][0]_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
                             i, hbe[31], hbe[30], hbe[29], hbe[28], hbe[27], hbe[26], hbe[25], hbe[24],
                         });
@@ -2863,107 +2903,110 @@ fn BooleanityProver(comptime F: type) type {
             evals[3] = eq_eval_3.mul(q3);
         }
 
-        fn computePhase2Poly(self: *Self, evals: []F, _: F) void {
-            // Phase 2: Gruen poly deg 3 approach (matching Jolt's compute_phase2_message)
-            //
-            // The polynomial is:
-            //   p(X) = eq_r_r * Σ_j d_j(X) * Q_j(X)
-            // where d_j(X) is the linear eq_cycle factor, Q_j(X) = Σ_i γ^{2i} * h_i(X)*(h_i(X)-1)
-            //
-            // The D polynomial (eq_cycle) plays the role of the Gruen split-eq.
-            // We compute c = Q_weighted(0) and e (X² coeff of Q_weighted), then use gruen approach.
+        /// Look up the bound coefficient for poly i at position pos in lazy state.
+        /// In round1 (1 table): h = tables[0][chunk_indices[i][pos]]
+        /// In round2 (2 tables): h = tables[0][ci[i][2*pos]] + tables[1][ci[i][2*pos+1]]
+        /// In round3 (4 tables): h = sum of tables[t][ci[i][4*pos+t]] for t=0..3
+        inline fn lazyGetCoeff(
+            ci: []const []const u8,
+            tables: [4][]const F,
+            num_tables: u8,
+            i: usize,
+            pos: usize,
+        ) F {
+            switch (num_tables) {
+                1 => return tables[0][ci[i][pos]],
+                2 => return tables[0][ci[i][2 * pos]].add(tables[1][ci[i][2 * pos + 1]]),
+                4 => return tables[0][ci[i][4 * pos]].add(tables[1][ci[i][4 * pos + 1]])
+                    .add(tables[2][ci[i][4 * pos + 2]]).add(tables[3][ci[i][4 * pos + 3]]),
+                else => unreachable,
+            }
+        }
 
-            const ht = self.H orelse return;
+        fn computePhase2Poly(self: *Self, evals: []F, previous_claim: F) void {
             const half = self.phase2_len / 2;
 
-            // Compute c (constant of quadratic, weighted by eq_cycle) and e (X² coeff)
-            // c = Σ_j d0_j * Σ_i γ²ⁱ * h0_i*(h0_i-1)
-            // e = Σ_j Σ_i γ²ⁱ * (h1_i-h0_i)²  (X² coefficient, NOT weighted by eq_cycle slope)
-            //
-            // Wait - the D.gruen_poly_deg_3 in Jolt uses par_fold_out_in_unreduced which weights
-            // both c and e by the E_out * E_in tables. So both c and e ARE weighted by eq_cycle.
-            //
-            // Actually no: Jolt uses the split-eq D for the cycle direction. The per_g_values
-            // closure returns [c_per_j_prime, e_per_j_prime] and then fold_out_in multiplies
-            // by e_out * e_in. So c and e are both weighted by the outer eq factors.
-            // The gruen_poly_deg_3 then uses the current linear eq factor (innermost) to build
-            // the cubic s(X) = l(X) * Q(X).
-            //
-            // But in our simplified approach (no Gruen split-eq, just halving eq_cycle),
-            // we can compute c and e using the full eq_cycle halving:
-            // The eq_cycle has entries for j = 0..phase2_len-1, paired as (d0, d1).
-            // The linear factor is l_j(X) = d0_j + (d1_j - d0_j)*X for each pair j.
-            //
-            // The sumcheck variable is the FIRST bit, so:
-            //   For pair j: j_pair_index = j, d0 = eq_cycle[2j], d1 = eq_cycle[2j+1]
-            //   Q_j(X) = Σ_i γ²ⁱ * h_i_j(X) * (h_i_j(X) - 1)
-            //   h_i_j(X) = ht[i][2j] + (ht[i][2j+1] - ht[i][2j]) * X
-            //
-            // Total: s(X) = eq_r_r * Σ_j l_j(X) * Q_j(X)
-            //
-            // For the gruen approach, we need to express this as s(X) = eq_r_r * [sum of l*Q].
-            // But each j pair has a different l_j. This is NOT a simple l*Q factorization.
-            //
-            // In Jolt, the D split-eq handles this by having E_out and E_in weight the j_prime
-            // groups, and the current variable's eq factor is handled by gruen_poly_deg_3.
-            //
-            // For our approach (direct halving), we compute s(0), s(1), s(2) directly and
-            // also compute p_inf (X³ coefficient). Then s(0)+s(1) should equal claim.
-            // Let's keep the direct computation approach but verify against claim.
+            if (self.chunk_indices != null) {
+                // Lazy evaluation: use chunk_indices + lookup tables
+                self.computePhase2PolyLazy(evals, half, previous_claim);
+            } else {
+                // Dense evaluation: use materialized H arrays (Gruen c/e optimization)
+                self.computePhase2PolyDense(evals, half, previous_claim);
+            }
+        }
 
-            const BoolP2Ctx = struct {
-                ht: [][]F,
+        fn computePhase2PolyLazy(self: *Self, evals: []F, half: usize, previous_claim: F) void {
+            const ci = self.chunk_indices.?;
+            const num_tables = self.lazy_num_tables;
+            const tables = [4][]const F{
+                self.lazy_tables[0],
+                if (num_tables >= 2) self.lazy_tables[1] else &.{},
+                if (num_tables >= 4) self.lazy_tables[2] else &.{},
+                if (num_tables >= 4) self.lazy_tables[3] else &.{},
+            };
+
+            // Gruen c/e approach (without pre-scaling since lazy tables are shared):
+            // Compute only Q(0) constant and x² coefficient, then derive Q(1) from claim.
+            // Saves from 4 muls per poly to 2 muls per poly in inner loop.
+            const LazyCtx = struct {
+                ci: []const []const u8,
+                tables: [4][]const F,
+                num_tables: u8,
                 eq_cycle: []const F,
                 gamma_powers_sq: []const F,
                 N: usize,
             };
-            const ctx = BoolP2Ctx{
-                .ht = ht,
+            const ctx = LazyCtx{
+                .ci = ci,
+                .tables = tables,
+                .num_tables = num_tables,
                 .eq_cycle = self.eq_cycle,
                 .gamma_powers_sq = self.gamma_powers_sq,
                 .N = self.N,
             };
 
             const mapFn = struct {
-                fn f(c: BoolP2Ctx, start: usize, end: usize) [4]F {
-                    var ev = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                fn f(c: LazyCtx, start: usize, end: usize) [4]F {
+                    const UPA = UnreducedProductAccum;
+                    var c_weighted = F.zero(); // Σ eq[2j] * Q_j(0)
+                    var e_weighted = F.zero(); // Σ eq[2j] * e_j
+                    var eq_sum_0 = F.zero(); // Σ eq[2j]
+                    var eq_sum_1 = F.zero(); // Σ eq[2j+1]
                     for (start..end) |j| {
                         const d0 = c.eq_cycle[2 * j];
                         const d1 = c.eq_cycle[2 * j + 1];
 
-                        // Evaluate at points 0, 1, 2, 3
-                        var q0 = F.zero();
-                        var q1 = F.zero();
-                        var q2 = F.zero();
-                        var q3 = F.zero();
+                        var acc_c = UPA.zero();
+                        var acc_e = UPA.zero();
                         for (0..c.N) |i| {
-                            const h0 = c.ht[i][2 * j];
-                            const h1 = c.ht[i][2 * j + 1];
-                            const h_delta = h1.sub(h0);
+                            const h0 = lazyGetCoeff(c.ci, c.tables, c.num_tables, i, 2 * j);
+                            const h1 = lazyGetCoeff(c.ci, c.tables, c.num_tables, i, 2 * j + 1);
+                            const slope = h1.sub(h0);
                             const gp = c.gamma_powers_sq[i];
 
-                            q0 = q0.add(gp.mul(h0.mul(h0).sub(h0)));
-                            q1 = q1.add(gp.mul(h1.mul(h1).sub(h1)));
-
-                            const h2 = h0.add(F.fromU64(2).mul(h_delta));
-                            q2 = q2.add(gp.mul(h2.mul(h2).sub(h2)));
-
-                            const h3 = h0.add(F.fromU64(3).mul(h_delta));
-                            q3 = q3.add(gp.mul(h3.mul(h3).sub(h3)));
+                            // c: γ^{2i} * h0 * (h0 - 1)
+                            acc_c.addAssign(gp.mulToProductAccum(h0.mul(h0).sub(h0)));
+                            // e: γ^{2i} * slope²
+                            acc_e.addAssign(gp.mulToProductAccum(slope.mul(slope)));
                         }
-                        const d_delta = d1.sub(d0);
-                        ev[0] = ev[0].add(d0.mul(q0));
-                        ev[1] = ev[1].add(d1.mul(q1));
-                        ev[2] = ev[2].add(d0.add(F.fromU64(2).mul(d_delta)).mul(q2));
-                        ev[3] = ev[3].add(d0.add(F.fromU64(3).mul(d_delta)).mul(q3));
+                        const q_c = acc_c.reduce();
+                        const q_e = acc_e.reduce();
+
+                        c_weighted = c_weighted.add(d0.mul(q_c));
+                        e_weighted = e_weighted.add(d0.mul(q_e));
+                        eq_sum_0 = eq_sum_0.add(d0);
+                        eq_sum_1 = eq_sum_1.add(d1);
                     }
-                    return ev;
+                    return [4]F{ c_weighted, e_weighted, eq_sum_0, eq_sum_1 };
                 }
             }.f;
 
             const reduceFn = struct {
                 fn f(a: [4]F, b: [4]F) [4]F {
-                    return [4]F{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]), a[3].add(b[3]) };
+                    return [4]F{
+                        a[0].add(b[0]), a[1].add(b[1]),
+                        a[2].add(b[2]), a[3].add(b[3]),
+                    };
                 }
             }.f;
 
@@ -2972,14 +3015,146 @@ fn BooleanityProver(comptime F: type) type {
             else
                 mapFn(ctx, 0, half);
 
-            for (0..4) |k| {
-                evals[k] = result[k];
-            }
+            const c_weighted = result[0];
+            const e_weighted = result[1];
+            const eq_eval_0 = result[2];
+            const eq_eval_1 = result[3];
 
-            // Scale by eq_r_r
-            for (0..4) |k| {
-                evals[k] = evals[k].mul(self.eq_r_r);
-            }
+            // Gruen derivation (same as dense path)
+            const adjusted_claim = previous_claim.mul(self.eq_r_r.inverse().?);
+            const s0_inner = c_weighted;
+            const s1_inner = adjusted_claim.sub(c_weighted);
+            const eq0_inv = eq_eval_0.inverse().?;
+            const eq1_inv = eq_eval_1.inverse().?;
+            const q_total_0 = c_weighted.mul(eq0_inv);
+            const q_total_1 = s1_inner.mul(eq1_inv);
+            const q_total_e = e_weighted.mul(eq0_inv);
+            const e_times_2 = q_total_e.add(q_total_e);
+            const q_total_2 = q_total_1.add(q_total_1).sub(q_total_0).add(e_times_2);
+            const q_total_3 = q_total_2.add(q_total_1).sub(q_total_0).add(e_times_2.add(e_times_2));
+            const eq_slope = eq_eval_1.sub(eq_eval_0);
+            const eq_eval_2 = eq_eval_1.add(eq_slope);
+            const eq_eval_3 = eq_eval_2.add(eq_slope);
+
+            evals[0] = s0_inner.mul(self.eq_r_r);
+            evals[1] = s1_inner.mul(self.eq_r_r);
+            evals[2] = eq_eval_2.mul(q_total_2).mul(self.eq_r_r);
+            evals[3] = eq_eval_3.mul(q_total_3).mul(self.eq_r_r);
+        }
+
+        fn computePhase2PolyDense(self: *Self, evals: []F, half: usize, previous_claim: F) void {
+            const ht = self.H orelse return;
+
+            // Gruen c/e approach with pre-scaled H tables:
+            //   H[i][j] is pre-scaled by γ^i, so:
+            //   γ^{2i} * h*(h-1) = (γ^i*h) * (γ^i*h - γ^i) = h_scaled * (h_scaled - rho)
+            //   γ^{2i} * slope² = (γ^i*slope)² = b * b
+            //
+            // Inner loop computes only c (Q(0) constant) and e (x² coeff) per j,
+            // weighted by eq[2j]. Also accumulates eq_sum_0 and eq_sum_1 for Gruen derivation.
+            // This is 2 UPA muls per (j,i) instead of the 12 field muls in the 4-point approach.
+            const BoolP2Ctx = struct {
+                ht: [][]F,
+                eq_cycle: []const F,
+                gamma_powers: []const F,
+                N: usize,
+            };
+            const ctx = BoolP2Ctx{
+                .ht = ht,
+                .eq_cycle = self.eq_cycle,
+                .gamma_powers = self.gamma_powers,
+                .N = self.N,
+            };
+
+            const mapFn = struct {
+                fn f(c: BoolP2Ctx, start: usize, end: usize) [4]F {
+                    const UPA = UnreducedProductAccum;
+                    var c_weighted = F.zero(); // Σ eq[2j] * Q_j(0) = s(0)_inner
+                    var e_weighted = F.zero(); // Σ eq[2j] * e_j
+                    var eq_sum_0 = F.zero(); // Σ eq[2j]
+                    var eq_sum_1 = F.zero(); // Σ eq[2j+1]
+                    for (start..end) |j| {
+                        const d0 = c.eq_cycle[2 * j];
+                        const d1 = c.eq_cycle[2 * j + 1];
+
+                        var acc_c = UPA.zero();
+                        var acc_e = UPA.zero();
+                        for (0..c.N) |i| {
+                            const h0 = c.ht[i][2 * j]; // γ^i * h(0)
+                            const h1 = c.ht[i][2 * j + 1]; // γ^i * h(1)
+                            const b = h1.sub(h0); // γ^i * slope
+                            const rho = c.gamma_powers[i]; // γ^i
+
+                            // c: h0_scaled * (h0_scaled - rho) = γ^{2i} * h(0) * (h(0)-1)
+                            acc_c.addAssign(h0.mulToProductAccum(h0.sub(rho)));
+                            // e: b² = (γ^i * slope)² = γ^{2i} * slope²
+                            acc_e.addAssign(b.mulToProductAccum(b));
+                        }
+                        const q_c = acc_c.reduce();
+                        const q_e = acc_e.reduce();
+
+                        c_weighted = c_weighted.add(d0.mul(q_c));
+                        e_weighted = e_weighted.add(d0.mul(q_e));
+                        eq_sum_0 = eq_sum_0.add(d0);
+                        eq_sum_1 = eq_sum_1.add(d1);
+                    }
+                    return [4]F{ c_weighted, e_weighted, eq_sum_0, eq_sum_1 };
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: [4]F, b: [4]F) [4]F {
+                    return [4]F{
+                        a[0].add(b[0]), a[1].add(b[1]),
+                        a[2].add(b[2]), a[3].add(b[3]),
+                    };
+                }
+            }.f;
+
+            const result = if (self.pool) |pool|
+                pool.parallelReduce([4]F, half, [4]F{ F.zero(), F.zero(), F.zero(), F.zero() }, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
+
+            const c_weighted = result[0]; // Σ eq[2j] * c_j = s(0)_inner
+            const e_weighted = result[1]; // Σ eq[2j] * e_j = eq_eval_0 * Q_total_e
+            const eq_eval_0 = result[2]; // Σ eq[2j]
+            const eq_eval_1 = result[3]; // Σ eq[2j+1]
+
+            // Gruen derivation (matches Jolt's gruen_poly_deg_3):
+            // Divide out eq_r_r to get the "inner" claim (cycle-only part)
+            const adjusted_claim = previous_claim.mul(self.eq_r_r.inverse().?);
+
+            // s(0)_inner = c_weighted, s(1)_inner = adjusted_claim - c_weighted
+            const s0_inner = c_weighted;
+            const s1_inner = adjusted_claim.sub(c_weighted);
+
+            // Q_total(0) = c_weighted / eq_eval_0
+            // Q_total(1) = s1_inner / eq_eval_1
+            // Q_total_e = e_weighted / eq_eval_0
+            const eq0_inv = eq_eval_0.inverse().?;
+            const eq1_inv = eq_eval_1.inverse().?;
+            const q_total_0 = c_weighted.mul(eq0_inv);
+            const q_total_1 = s1_inner.mul(eq1_inv);
+            const q_total_e = e_weighted.mul(eq0_inv);
+
+            // Forward-difference extrapolation:
+            // Q(2) = 2*Q(1) - Q(0) + 2*e
+            // Q(3) = Q(2) + Q(1) - Q(0) + 4*e
+            const e_times_2 = q_total_e.add(q_total_e);
+            const q_total_2 = q_total_1.add(q_total_1).sub(q_total_0).add(e_times_2);
+            const q_total_3 = q_total_2.add(q_total_1).sub(q_total_0).add(e_times_2.add(e_times_2));
+
+            // Linear eq evaluations at X=2,3
+            const eq_slope = eq_eval_1.sub(eq_eval_0);
+            const eq_eval_2 = eq_eval_1.add(eq_slope);
+            const eq_eval_3 = eq_eval_2.add(eq_slope);
+
+            // s(X) = eq(X) * Q_total(X), scaled by eq_r_r
+            evals[0] = s0_inner.mul(self.eq_r_r);
+            evals[1] = s1_inner.mul(self.eq_r_r);
+            evals[2] = eq_eval_2.mul(q_total_2).mul(self.eq_r_r);
+            evals[3] = eq_eval_3.mul(q_total_3).mul(self.eq_r_r);
         }
 
         pub fn bindChallenge(self: *Self, r: F) !void {
@@ -3006,7 +3181,7 @@ fn BooleanityProver(comptime F: type) type {
                     try self.transitionToPhase2();
                 }
             } else {
-                // Phase 2: bind cycle variable, halve H tables and eq_cycle
+                // Phase 2: bind cycle variable
                 const half = self.phase2_len / 2;
 
                 const bindOne = struct {
@@ -3017,9 +3192,69 @@ fn BooleanityProver(comptime F: type) type {
                     }
                 }.f;
 
-                if (self.H) |ht| {
+                if (self.chunk_indices != null) {
+                    // Lazy state: split tables, don't bind dense arrays
+                    const one_minus_r = F.one().sub(r);
+                    const K = self.K;
+
+                    if (self.lazy_num_tables == 1) {
+                        // Round1 → Round2: split into tables_0 = (1-r)*table, tables_1 = r*table
+                        const old_table = self.lazy_tables[0];
+                        const tbl_len = K + 1; // includes sentinel entry
+                        const t0 = try self.allocator.alloc(F, tbl_len);
+                        const t1 = try self.allocator.alloc(F, tbl_len);
+                        for (0..K) |k| {
+                            t0[k] = one_minus_r.mul(old_table[k]);
+                            t1[k] = r.mul(old_table[k]);
+                        }
+                        t0[K] = F.zero(); // sentinel stays zero
+                        t1[K] = F.zero();
+                        self.allocator.free(old_table);
+                        self.lazy_tables[0] = t0;
+                        self.lazy_tables[1] = t1;
+                        self.lazy_num_tables = 2;
+                    } else if (self.lazy_num_tables == 2) {
+                        // Round2 → Round3: split each of 2 tables into 2
+                        // After Round1→Round2: tables[0]=(1-r0)*F, tables[1]=r0*F
+                        // Binding with r1, the position offset within a group of 4 encodes:
+                        //   bit 0 = r0 selector, bit 1 = r1 selector
+                        // So tables must be ordered by [bit1, bit0] matching position offsets:
+                        //   [0]=pos0=(1-r1)(1-r0), [1]=pos1=(1-r1)*r0,
+                        //   [2]=pos2=r1*(1-r0),    [3]=pos3=r1*r0
+                        const old_t0 = self.lazy_tables[0]; // (1-r0)*F
+                        const old_t1 = self.lazy_tables[1]; // r0*F
+                        const tbl_len = K + 1;
+                        const t_pos0 = try self.allocator.alloc(F, tbl_len); // (1-r1)(1-r0)
+                        const t_pos1 = try self.allocator.alloc(F, tbl_len); // (1-r1)*r0
+                        const t_pos2 = try self.allocator.alloc(F, tbl_len); // r1*(1-r0)
+                        const t_pos3 = try self.allocator.alloc(F, tbl_len); // r1*r0
+                        for (0..K) |k| {
+                            t_pos0[k] = one_minus_r.mul(old_t0[k]); // (1-r1)(1-r0)*F
+                            t_pos1[k] = one_minus_r.mul(old_t1[k]); // (1-r1)*r0*F
+                            t_pos2[k] = r.mul(old_t0[k]);           // r1*(1-r0)*F
+                            t_pos3[k] = r.mul(old_t1[k]);           // r1*r0*F
+                        }
+                        t_pos0[K] = F.zero();
+                        t_pos1[K] = F.zero();
+                        t_pos2[K] = F.zero();
+                        t_pos3[K] = F.zero();
+                        self.allocator.free(old_t0);
+                        self.allocator.free(old_t1);
+                        self.lazy_tables[0] = t_pos0;
+                        self.lazy_tables[1] = t_pos1;
+                        self.lazy_tables[2] = t_pos2;
+                        self.lazy_tables[3] = t_pos3;
+                        self.lazy_num_tables = 4;
+                    } else {
+                        // Round3 → Dense: materialize H[N][T/8] and free indices/tables
+                        try self.materializeDense(r);
+                    }
+
+                    // Bind eq_cycle only (no H arrays to bind in lazy state)
+                    bindOne(self.eq_cycle, half, r);
+                } else if (self.H) |ht| {
+                    // Dense state: bind H arrays and eq_cycle in parallel
                     if (self.pool) |pool| {
-                        // N+1 independent arrays: N H tables + 1 eq_cycle
                         const total = self.N + 1;
                         const Ctx2 = struct { ht: [][]F, eq_cycle: []F, n: usize, half: usize, challenge: F };
                         const ctx2 = Ctx2{ .ht = ht, .eq_cycle = self.eq_cycle, .n = self.N, .half = half, .challenge = r };
@@ -3046,9 +3281,80 @@ fn BooleanityProver(comptime F: type) type {
             self.round += 1;
         }
 
+        /// Materialize dense H[N][dense_len] from Round3 (4 tables) + chunk_indices,
+        /// binding with challenge r in the process. After this, chunk_indices and
+        /// lazy_tables are freed, and self.H is set.
+        fn materializeDense(self: *Self, r: F) !void {
+            const ci = self.chunk_indices.?;
+            const one_minus_r = F.one().sub(r);
+            const K = self.K;
+            const T_orig = ci[0].len;
+            // After 3 lazy rounds, the "current length" is T/4 (phase2_len was already
+            // halved 2 times; this is the 3rd bind). The dense materialization performs
+            // the bind as part of the materialization, producing T/8 entries.
+            const dense_len = T_orig / 8;
+
+            // Build 8 combined tables for the 8 original positions within each group.
+            // Position offset g within group of 8 has bits [b2, b1, b0]:
+            //   b0 = r0 selector, b1 = r1 selector, b2 = r2 selector (current bind)
+            // lazy_tables[0..4] are already ordered by position offset (matching bit pattern):
+            //   [0]=(1-r1)(1-r0), [1]=(1-r1)*r0, [2]=r1*(1-r0), [3]=r1*r0
+            // The current bind with r2 adds the b2 dimension:
+            //   combined[g] = ((g & 4) ? r2 : (1-r2)) * lazy_tables[g & 3]
+            const tbl_len = K + 1; // includes sentinel
+            var combined_tables: [8][]F = undefined;
+            for (0..8) |g| {
+                combined_tables[g] = try self.allocator.alloc(F, tbl_len);
+            }
+            errdefer for (combined_tables) |ct| self.allocator.free(ct);
+
+            for (0..K) |k| {
+                inline for (0..4) |g| {
+                    combined_tables[g][k] = one_minus_r.mul(self.lazy_tables[g][k]);
+                    combined_tables[g + 4][k] = r.mul(self.lazy_tables[g][k]);
+                }
+            }
+            // Sentinel entries stay zero
+            inline for (0..8) |g| {
+                combined_tables[g][K] = F.zero();
+            }
+
+            // Materialize dense H arrays, pre-scaled by γ^i for Gruen optimization
+            var ht = try self.allocator.alloc([]F, self.N);
+            for (0..self.N) |i| {
+                ht[i] = try self.allocator.alloc(F, dense_len);
+                const idx = ci[i];
+                const rho = self.gamma_powers[i]; // γ^i
+                for (0..dense_len) |j| {
+                    const base = j * 8;
+                    var val = F.zero();
+                    inline for (0..8) |g| {
+                        val = val.add(combined_tables[g][idx[base + g]]);
+                    }
+                    ht[i][j] = val.mul(rho); // Pre-scale by γ^i
+                }
+            }
+
+            // Free chunk indices and lazy tables
+            for (ci) |c| self.allocator.free(c);
+            self.allocator.free(ci);
+            self.chunk_indices = null;
+            for (0..4) |i| {
+                self.allocator.free(self.lazy_tables[i]);
+                self.lazy_tables[i] = &.{};
+            }
+            self.lazy_num_tables = 0;
+            for (combined_tables) |ct| self.allocator.free(ct);
+
+            self.H = ht;
+        }
+
         fn transitionToPhase2(self: *Self) !void {
             // F_table now has K entries: F[k] = eq(r_challenges, k) for k ∈ [0, K)
-            // Build H tables: for each cycle j, H[i][j] = F[chunk_i(j)] = eq(r_addr_bound, chunk_i(j))
+            // Instead of materializing full H[N][T] dense arrays (76MB for N=38, T=65536),
+            // store u8 chunk indices (2.5MB) and look up F_table values lazily.
+            // This reduces working set from 76MB to ~2.5MB, fitting in L2 cache.
+            // After 3 Phase 2 rounds, materialize dense arrays of size T/8 (9.4MB).
             const T_val = @as(usize, 1) << @intCast(self.n_cycle_vars);
             const trace = self.trace;
             const instr_d = self.instruction_d;
@@ -3056,28 +3362,31 @@ fn BooleanityProver(comptime F: type) type {
             const ram_d_val = self.ram_d;
             const K = self.K;
 
-            var ht = try self.allocator.alloc([]F, self.N);
+            // Allocate chunk index arrays: N arrays of T u8 entries.
+            // Use K as sentinel for "no value" (F.zero()), with tables extended by 1 entry.
+            std.debug.assert(K <= 255); // K+1 must fit in u8
+            const sentinel: u8 = @intCast(K);
+            var ci = try self.allocator.alloc([]u8, self.N);
+            errdefer {
+                for (ci[0..self.N]) |c| self.allocator.free(c);
+                self.allocator.free(ci);
+            }
             for (0..self.N) |i| {
-                ht[i] = try self.allocator.alloc(F, T_val);
-                @memset(ht[i], F.zero());
+                ci[i] = try self.allocator.alloc(u8, T_val);
+                @memset(ci[i], sentinel); // default = sentinel (zero value)
             }
 
-            const dbg_nonzero_chunks: usize = 0;
             for (0..T_val) |j| {
                 const step = trace.steps.items[j];
 
                 // InstructionRa chunks
-                // Use the centralized computeLookupIndex to ensure consistency
-                // across all sumcheck instances (Stage 6 virtualization, booleanity, Stage 7).
                 {
                     const lookup_idx = computeLookupIndex(step);
                     for (0..instr_d) |i| {
                         const shift = self.log_k_chunk * (instr_d - 1 - i);
                         const mask: u128 = (@as(u128, 1) << @intCast(self.log_k_chunk)) - 1;
                         const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
-                        if (chunk_val < K) {
-                            ht[i][j] = self.F_table[chunk_val];
-                        }
+                        ci[i][j] = if (chunk_val < K) @intCast(chunk_val) else sentinel;
                     }
                 }
 
@@ -3086,9 +3395,7 @@ fn BooleanityProver(comptime F: type) type {
                     const pc_idx: u64 = @intCast(self.pc_map.getPCForStep(step));
                     for (0..bc_d) |i| {
                         const chunk_val = extractChunkMSB(pc_idx, i, bc_d, self.log_k_chunk);
-                        if (chunk_val < K) {
-                            ht[instr_d + i][j] = self.F_table[chunk_val];
-                        }
+                        ci[instr_d + i][j] = if (chunk_val < K) @intCast(chunk_val) else sentinel;
                     }
                 }
 
@@ -3099,9 +3406,7 @@ fn BooleanityProver(comptime F: type) type {
                             if (self.memory_layout.remapAddress(addr)) |raddr| {
                                 for (0..ram_d_val) |i| {
                                     const chunk_val = extractChunkMSB(raddr, i, ram_d_val, self.log_k_chunk);
-                                    if (chunk_val < K) {
-                                        ht[instr_d + bc_d + i][j] = self.F_table[chunk_val];
-                                    }
+                                    ci[instr_d + bc_d + i][j] = if (chunk_val < K) @intCast(chunk_val) else sentinel;
                                 }
                             }
                         }
@@ -3109,69 +3414,22 @@ fn BooleanityProver(comptime F: type) type {
                 }
             }
 
-            self.H = ht;
+            self.chunk_indices = ci;
+            // Copy F_table as the initial lazy lookup table (round1 state)
+            // Extra entry at index K = F.zero() for sentinel "no value" positions
+            const lt = try self.allocator.alloc(F, K + 1);
+            @memcpy(lt[0..K], self.F_table[0..K]);
+            lt[K] = F.zero();
+            self.lazy_tables[0] = lt;
+            self.lazy_num_tables = 1;
+
+            self.H = null;
             self.phase2_len = T_val;
 
-            // Debug: check if all H tables are identical
-            {
-                var all_same = true;
-                for (1..self.N) |i| {
-                    if (!std.mem.eql(u8, &ht[0][0].toBytesBE(), &ht[i][0].toBytesBE())) {
-                        all_same = false;
-                        break;
-                    }
-                }
-                dbg("[BOOL_H_INIT] T={}, all_H[i][0]_same={}, dbg_nonzero_chunks={}\n", .{ T_val, @intFromBool(all_same), dbg_nonzero_chunks });
-                // Print first few H entries for different i at interesting cycles
-                // Check that H tables differ across polynomials at non-noop cycles
-                {
-                    var first_nontrivial_j: usize = 0;
-                    for (0..T_val) |jj| {
-                        if (!ht[0][jj].eql(ht[0][0])) {
-                            first_nontrivial_j = jj;
-                            break;
-                        }
-                    }
-                    dbg("[BOOL_H_INIT] first non-trivial j={}\n", .{first_nontrivial_j});
-                    // Print H[i][j] at this cycle for first few polynomials
-                    for (0..@min(4, self.N)) |i| {
-                        const hj = ht[i][first_nontrivial_j].toBytesBE();
-                        const h0 = ht[i][0].toBytesBE();
-                        dbg("[BOOL_H_INIT] H[{}][0]_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}] H[{}][{}]_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
-                            i, h0[31], h0[30], h0[29], h0[28],
-                            i, first_nontrivial_j, hj[31], hj[30], hj[29], hj[28],
-                        });
-                    }
-                    // Count how many cycles have non-F[0] values for each poly
-                    // Check MSB chunks (0..4) AND LSB chunks (instr_d-4..instr_d) AND bytecode/ram
-                    const check_indices = [_]usize{ 0, 1, 2, 3, instr_d - 4, instr_d - 3, instr_d - 2, instr_d - 1, instr_d, instr_d + 1, instr_d + bc_d, instr_d + bc_d + 1 };
-                    for (check_indices) |i| {
-                        if (i >= self.N) continue;
-                        var nontrivial: usize = 0;
-                        var nonzero: usize = 0;
-                        for (0..T_val) |jj| {
-                            if (!ht[i][jj].eql(F.zero())) nonzero += 1;
-                            if (!ht[i][jj].eql(F.zero()) and !ht[i][jj].eql(self.F_table[0])) {
-                                nontrivial += 1;
-                            }
-                        }
-                        dbg("[BOOL_H_INIT] poly {} nontrivial_cycles={} nonzero={}\n", .{ i, nontrivial, nonzero });
-                    }
-                    // Also show distinct values for poly instr_d-1 (LSB chunk)
-                    {
-                        const lsb_i = instr_d - 1;
-                        if (lsb_i < self.N) {
-                            dbg("[BOOL_H_INIT] LSB poly {} first 8 values:", .{lsb_i});
-                            for (0..@min(8, T_val)) |jj| {
-                                const hv = ht[lsb_i][jj].toBytesBE();
-                                dbg(" [{x:0>2}{x:0>2}{x:0>2}{x:0>2}]", .{ hv[31], hv[30], hv[29], hv[28] });
-                            }
-                            dbg("\n", .{});
-                        }
-                    }
-                }
-                // Check F_table state
-                dbg("[BOOL_H_INIT] F_size={}\n", .{ self.F_size });
+            // Debug: print F_table values at transition
+            if (comptime debug_verbose) {
+                dbg("[BOOL_H_INIT] T={}, using lazy chunk indices\n", .{T_val});
+                dbg("[BOOL_H_INIT] F_size={}\n", .{self.F_size});
                 for (0..@min(self.F_size, 8)) |fi| {
                     const fb = self.F_table[fi].toBytesBE();
                     dbg("[BOOL_H_INIT] F[{}]_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
@@ -3180,47 +3438,10 @@ fn BooleanityProver(comptime F: type) type {
                 }
             }
 
-            // Debug: compute Phase 2 full sum and compare with what the claim should be
-            {
-                var phase2_sum = F.zero();
-                for (0..T_val) |jj| {
-                    var q_j = F.zero();
-                    for (0..self.N) |i| {
-                        const h_val = ht[i][jj];
-                        q_j = q_j.add(self.gamma_powers_sq[i].mul(h_val.mul(h_val).sub(h_val)));
-                    }
-                    phase2_sum = phase2_sum.add(self.eq_cycle[jj].mul(q_j));
-                }
-                phase2_sum = phase2_sum.mul(self.eq_r_r);
-                const ps_be = phase2_sum.toBytesBE();
-                dbg("[BOOL_TRANSITION] phase2_full_sum LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
-                    ps_be[31], ps_be[30], ps_be[29], ps_be[28], ps_be[27], ps_be[26], ps_be[25], ps_be[24],
-                });
-
-                // Also compute Phase 1 full sum (using F_table directly)
-                var phase1_sum = F.zero();
-                for (0..T_val) |jj| {
-                    var q_j_ph1 = F.zero();
-                    for (0..self.N) |i| {
-                        // H[i][jj] = F_table[chunk_i(jj)] which should equal the raw value
-                        const h_val_ph1 = ht[i][jj]; // Same as F_table[chunk_i(j)]
-                        q_j_ph1 = q_j_ph1.add(self.gamma_powers_sq[i].mul(h_val_ph1.mul(h_val_ph1).sub(h_val_ph1)));
-                    }
-                    phase1_sum = phase1_sum.add(self.eq_cycle[jj].mul(q_j_ph1));
-                }
-                phase1_sum = phase1_sum.mul(self.eq_r_r);
-                // This should be the same as phase2_sum
-            }
-
             dbg("[BOOL_PROVER] Phase 1→2 transition: eq_r_r=", .{});
             const err_be = self.eq_r_r.toBytesBE();
             for (0..8) |bi| dbg("{x:0>2}", .{err_be[31 - bi]});
-            dbg(", H[0][0..3]=", .{});
-            for (0..@min(3, T_val)) |jj| {
-                const hv = ht[0][jj].toBytesBE();
-                dbg("[{x:0>2}{x:0>2}{x:0>2}{x:0>2}]", .{ hv[31], hv[30], hv[29], hv[28] });
-            }
-            dbg("\n", .{});
+            dbg(", lazy_num_tables={}\n", .{self.lazy_num_tables});
         }
 
         /// Get opening claims: ra_i(r_addr_bound, r_cycle_bound)
@@ -3252,6 +3473,8 @@ fn BooleanityProver(comptime F: type) type {
 // per-index scaling, not a single shared eq_table scale. Future optimization could
 // store separate gamma-scaled and unscaled eq_tables per batch.
 fn LookupsRaVirtualProver(comptime F: type) type {
+    const RaPoly = ra_poly_mod.RaPolynomial(F);
+
     return struct {
         const Self = @This();
 
@@ -3262,11 +3485,14 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             }
         }
 
-        /// ra_bound[i][j] - pre-bound to address chunks
-        /// First poly in each virtual batch pre-scaled by gamma^batch
-        ra_bound: [][]F,
-        /// eq(r_cycle, .) evaluations
-        eq: []F,
+        /// Compressed RA polynomials (lazy materialization through round1→round2→round3→dense)
+        ra_polys: []RaPoly,
+        /// Factored eq: eq(r_cycle, x) = e_out[x >> m] * e_in[x & mask]
+        e_out: []F,
+        e_in: []F,
+        e_in_len: usize,
+        e_out_len: usize,
+        m_split: usize, // split point (n_vars / 2)
         M: usize,
         N: usize,
         total_committed: usize,
@@ -3286,76 +3512,45 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             instruction_d: usize,
             init_pool: ?*ThreadPool,
         ) !Self {
+            std.debug.assert(log_k_chunk <= ra_poly_mod.MAX_LOG_K_CHUNK);
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
             const total_committed = M * N;
             const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
 
-            var ra_bound_arr = try allocator.alloc([]F, total_committed);
-            errdefer {
-                for (ra_bound_arr[0..total_committed]) |arr| allocator.free(arr);
-                allocator.free(ra_bound_arr);
-            }
+            // Build RaPolynomials with compressed u8 indices + small eq tables
+            var ra_polys_arr = try allocator.alloc(RaPoly, total_committed);
+            errdefer allocator.free(ra_polys_arr);
 
-            // Pre-allocate eq_tables and gamma scales for parallel materialization
-            var lk_eq_tables = try allocator.alloc([]F, total_committed);
-            defer allocator.free(lk_eq_tables);
-            var gamma_scales = try allocator.alloc(F, total_committed);
-            defer allocator.free(gamma_scales);
+            // Pre-allocate index arrays for all committed polys
+            var indices_arr = try allocator.alloc([]?u8, total_committed);
+            defer allocator.free(indices_arr);
 
             for (0..total_committed) |i| {
-                ra_bound_arr[i] = try allocator.alloc(F, T);
-                var r_chunk_rev = try allocator.alloc(F, log_k_chunk);
-                defer allocator.free(r_chunk_rev);
-                for (0..log_k_chunk) |ci| r_chunk_rev[ci] = r_addr_chunks[i][log_k_chunk - 1 - ci];
-                lk_eq_tables[i] = try computeEqTable(F, allocator, r_chunk_rev, log_k_chunk);
-
-                const virtual_batch = i / M;
-                const is_first_in_batch = (i % M == 0);
-                gamma_scales[i] = if (is_first_in_batch) gamma_powers[virtual_batch] else F.one();
-
-                if (comptime debug_verbose) {
-                    const et0_le = lk_eq_tables[i][0].toBytes();
-                    if (i < 16) {
-                        dbg("[EQ_TABLE_DBG] chunk[{}] eq_table[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] scale={}\n", .{
-                            i, et0_le[0], et0_le[1], et0_le[2], et0_le[3], et0_le[4], et0_le[5], et0_le[6], et0_le[7],
-                            @intFromBool(is_first_in_batch),
-                        });
-                    }
-                }
+                indices_arr[i] = try allocator.alloc(?u8, T);
             }
 
-            // Parallel fill: compute ra_bound[i][j] = eq_table[chunk_val] * scale
+            // Parallel fill: compute index arrays
             const LkRaInitCtx = struct {
                 steps: []const tracer.TraceStep,
-                ra_bound: [][]F,
-                lk_eq_tables: [][]F,
-                gamma_scales: []const F,
+                indices: [][]?u8,
                 log_k_chunk: usize,
                 k_chunk: usize,
                 instruction_d: usize,
             };
             const lk_ra_ctx = LkRaInitCtx{
                 .steps = trace.steps.items,
-                .ra_bound = ra_bound_arr,
-                .lk_eq_tables = lk_eq_tables,
-                .gamma_scales = gamma_scales,
+                .indices = indices_arr,
                 .log_k_chunk = log_k_chunk,
                 .k_chunk = k_chunk,
                 .instruction_d = instruction_d,
             };
             const lkRaInitFn = struct {
                 fn f(c: LkRaInitCtx, i: usize) void {
-                    const eq_t = c.lk_eq_tables[i];
-                    const scl = c.gamma_scales[i];
                     for (0..c.steps.len) |j| {
                         const step = c.steps[j];
                         const chunk_val = getLookupChunkInterleaved(step, i, c.log_k_chunk, c.instruction_d);
-                        if (chunk_val < c.k_chunk) {
-                            c.ra_bound[i][j] = eq_t[chunk_val].mul(scl);
-                        } else {
-                            c.ra_bound[i][j] = F.zero();
-                        }
+                        c.indices[i][j] = if (chunk_val < c.k_chunk) @intCast(chunk_val) else null;
                     }
                 }
             }.f;
@@ -3365,20 +3560,35 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 for (0..total_committed) |i| lkRaInitFn(lk_ra_ctx, i);
             }
 
-            // Free eq_tables (values already materialized into ra_bound)
+            // Build eq tables and create RaPolynomials
             for (0..total_committed) |i| {
-                allocator.free(lk_eq_tables[i]);
+                var r_chunk_rev = try allocator.alloc(F, log_k_chunk);
+                defer allocator.free(r_chunk_rev);
+                for (0..log_k_chunk) |ci| r_chunk_rev[ci] = r_addr_chunks[i][log_k_chunk - 1 - ci];
+                const eq_table = try computeEqTable(F, allocator, r_chunk_rev, log_k_chunk);
+
+                const virtual_batch = i / M;
+                const is_first_in_batch = (i % M == 0);
+                const gamma_scale = if (is_first_in_batch) gamma_powers[virtual_batch] else F.one();
+
+                // initRound1 takes ownership of indices and eq_table, prescales by gamma_scale
+                ra_polys_arr[i] = RaPoly.initRound1(indices_arr[i], eq_table, gamma_scale);
             }
 
             // r_cycle is in BE order; reverse for LE computeEqTable
             var r_cycle_rev = try allocator.alloc(F, n_vars);
             defer allocator.free(r_cycle_rev);
             for (0..n_vars) |i| r_cycle_rev[i] = r_cycle[n_vars - 1 - i];
+
             const eq_arr = try computeEqTableParallel(F, allocator, r_cycle_rev, n_vars, init_pool);
 
             return Self{
-                .ra_bound = ra_bound_arr,
-                .eq = eq_arr,
+                .ra_polys = ra_polys_arr,
+                .e_out = eq_arr,
+                .e_in = &[_]F{},
+                .e_in_len = 0,
+                .e_out_len = T,
+                .m_split = 0,
                 .M = M,
                 .N = N,
                 .total_committed = total_committed,
@@ -3389,65 +3599,184 @@ fn LookupsRaVirtualProver(comptime F: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            for (self.ra_bound) |arr| self.allocator.free(arr);
-            self.allocator.free(self.ra_bound);
-            self.allocator.free(self.eq);
+            for (self.ra_polys) |*p| p.deinit(self.allocator);
+            self.allocator.free(self.ra_polys);
+            self.allocator.free(self.e_out);
+            if (self.e_in_len > 0) self.allocator.free(self.e_in);
         }
 
         /// f(x) = eq(x) * Sum_v Prod_{j=0}^{M-1} ra_{v*M+j}(x)
         /// Degree = M + 1
         pub fn computeRoundPoly(self: *Self, allocator: Allocator) ![]F {
-            const half = self.current_len / 2;
             const n_evals = self.M + 2;
 
-            var x_vals: [MAX_RA_EVALS]F = undefined;
-            for (0..n_evals) |i| {
-                x_vals[i] = F.fromU64(@intCast(i));
-            }
+            return self.computeRoundPolyFlat(allocator, n_evals);
+        }
+
+        /// Factored iteration: parallel over E_out, sequential over E_in pairs.
+        fn computeRoundPolyFactored(self: *Self, allocator: Allocator, n_evals: usize) ![]F {
+            const out_len = self.e_out_len;
+            const in_half = self.e_in_len / 2;
 
             const Ctx = struct {
-                ra_bound: [][]F,
-                eq: []F,
+                ra_polys: []RaPoly,
+                e_out: []const F,
+                e_in: []const F,
+                in_half: usize,
                 M: usize,
                 N: usize,
                 n_evals: usize,
-                x_vals: [MAX_RA_EVALS]F,
             };
             const ctx = Ctx{
-                .ra_bound = self.ra_bound,
-                .eq = self.eq,
+                .ra_polys = self.ra_polys,
+                .e_out = self.e_out,
+                .e_in = self.e_in,
+                .in_half = in_half,
                 .M = self.M,
                 .N = self.N,
                 .n_evals = n_evals,
-                .x_vals = x_vals,
             };
 
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
                     var acc: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
+                    const tc = c.N * c.M;
+
+                    for (start..end) |x_out| {
+                        var inner: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
+
+                        for (0..c.in_half) |x_in_pair| {
+                            const j = x_out * c.in_half + x_in_pair;
+
+                            const e_in_0 = c.e_in[2 * x_in_pair];
+                            const e_in_1 = c.e_in[2 * x_in_pair + 1];
+                            const e_in_delta = e_in_1.sub(e_in_0);
+
+                            var cur: [MAX_RA_EVALS * MAX_RA_EVALS]F = undefined;
+                            var delta_arr: [MAX_RA_EVALS * MAX_RA_EVALS]F = undefined;
+                            for (0..tc) |idx| {
+                                const lo = c.ra_polys[idx].getBoundCoeff(2 * j);
+                                const hi = c.ra_polys[idx].getBoundCoeff(2 * j + 1);
+                                cur[idx] = lo;
+                                delta_arr[idx] = hi.sub(lo);
+                            }
+
+                            // x=0
+                            {
+                                var virtual_sum = F.zero();
+                                for (0..c.N) |v| {
+                                    var product = F.one();
+                                    for (0..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
+                                    virtual_sum = virtual_sum.add(product);
+                                }
+                                inner[0] = inner[0].add(e_in_0.mul(virtual_sum));
+                            }
+
+                            // x=1..n_evals-1
+                            var e_in_cur = e_in_0;
+                            for (1..c.n_evals) |pt| {
+                                for (0..tc) |idx| cur[idx] = cur[idx].add(delta_arr[idx]);
+                                e_in_cur = e_in_cur.add(e_in_delta);
+                                var virtual_sum = F.zero();
+                                for (0..c.N) |v| {
+                                    var product = F.one();
+                                    for (0..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
+                                    virtual_sum = virtual_sum.add(product);
+                                }
+                                inner[pt] = inner[pt].add(e_in_cur.mul(virtual_sum));
+                            }
+                        }
+
+                        // Weight by E_out[x_out]
+                        const e_out_val = c.e_out[x_out];
+                        for (0..c.n_evals) |pt| {
+                            acc[pt] = acc[pt].add(e_out_val.mul(inner[pt]));
+                        }
+                    }
+                    return acc;
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: [MAX_RA_EVALS]F, b: [MAX_RA_EVALS]F) [MAX_RA_EVALS]F {
+                    var r: [MAX_RA_EVALS]F = undefined;
+                    for (0..MAX_RA_EVALS) |i| {
+                        r[i] = a[i].add(b[i]);
+                    }
+                    return r;
+                }
+            }.f;
+
+            const result = if (self.pool) |pool|
+                pool.parallelReduce([MAX_RA_EVALS]F, out_len, .{F.zero()} ** MAX_RA_EVALS, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, out_len);
+
+            var evals = try allocator.alloc(F, n_evals);
+            for (0..n_evals) |i| {
+                evals[i] = result[i];
+            }
+            return evals;
+        }
+
+        /// Flat iteration using e_out as eq array (after E_in absorbed).
+        fn computeRoundPolyFlat(self: *Self, allocator: Allocator, n_evals: usize) ![]F {
+            const half = self.e_out_len / 2;
+
+            const Ctx = struct {
+                ra_polys: []RaPoly,
+                eq: []const F,
+                M: usize,
+                N: usize,
+                n_evals: usize,
+            };
+            const ctx = Ctx{
+                .ra_polys = self.ra_polys,
+                .eq = self.e_out,
+                .M = self.M,
+                .N = self.N,
+                .n_evals = n_evals,
+            };
+
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
+                    var acc: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
+                    const tc = c.N * c.M;
                     for (start..end) |j| {
                         const eq0 = c.eq[2 * j];
                         const eq1 = c.eq[2 * j + 1];
                         const eq_delta = eq1.sub(eq0);
 
-                        for (0..c.n_evals) |pt_idx| {
-                            const x = c.x_vals[pt_idx];
-                            var virtual_sum = F.zero();
+                        var cur: [MAX_RA_EVALS * MAX_RA_EVALS]F = undefined;
+                        var delta_arr: [MAX_RA_EVALS * MAX_RA_EVALS]F = undefined;
+                        for (0..tc) |idx| {
+                            const lo = c.ra_polys[idx].getBoundCoeff(2 * j);
+                            const hi = c.ra_polys[idx].getBoundCoeff(2 * j + 1);
+                            cur[idx] = lo;
+                            delta_arr[idx] = hi.sub(lo);
+                        }
 
+                        {
+                            var virtual_sum = F.zero();
                             for (0..c.N) |v| {
                                 var product = F.one();
-
-                                for (0..c.M) |m| {
-                                    const idx = v * c.M + m;
-                                    const v0 = c.ra_bound[idx][2 * j];
-                                    const v1 = c.ra_bound[idx][2 * j + 1];
-                                    product = product.mul(v0.add(x.mul(v1.sub(v0))));
-                                }
-
+                                for (0..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
                                 virtual_sum = virtual_sum.add(product);
                             }
+                            acc[0] = acc[0].add(eq0.mul(virtual_sum));
+                        }
 
-                            acc[pt_idx] = acc[pt_idx].add(eq0.add(x.mul(eq_delta)).mul(virtual_sum));
+                        var eq_cur = eq0;
+                        for (1..c.n_evals) |pt| {
+                            for (0..tc) |idx| cur[idx] = cur[idx].add(delta_arr[idx]);
+                            eq_cur = eq_cur.add(eq_delta);
+                            var virtual_sum = F.zero();
+                            for (0..c.N) |v| {
+                                var product = F.one();
+                                for (0..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
+                                virtual_sum = virtual_sum.add(product);
+                            }
+                            acc[pt] = acc[pt].add(eq_cur.mul(virtual_sum));
                         }
                     }
                     return acc;
@@ -3476,29 +3805,38 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             return evals;
         }
 
-        pub fn bindChallenge(self: *Self, r: F) void {
+        pub fn bindChallenge(self: *Self, r: F) !void {
             const half = self.current_len / 2;
 
-            if (self.pool) |pool| {
-                // total_committed+1 independent arrays: total_committed ra_bound + 1 eq
-                const total = self.total_committed + 1;
-                const BindCtx = struct { ra: [][]F, eq: []F, tc: usize, half: usize, r: F };
-                const ctx = BindCtx{ .ra = self.ra_bound, .eq = self.eq, .tc = self.total_committed, .half = half, .r = r };
-                pool.parallelForForce(total, ctx, struct {
-                    fn f(c: BindCtx, idx: usize) void {
-                        if (idx < c.tc) {
-                            bindSlice(c.ra[idx], c.half, c.r);
-                        } else {
-                            bindSlice(c.eq, c.half, c.r);
+            // Bind RA polynomials — O(K) for compressed states, O(T/2^round) for dense
+            const all_dense = self.ra_polys[0].isDense();
+            if (all_dense) {
+                // Dense state: parallel bind across ra_polys only (eq is O(√T), done below)
+                if (self.pool) |pool| {
+                    const BindCtx = struct { ra: []RaPoly, tc: usize, half: usize, r: F };
+                    const ctx = BindCtx{ .ra = self.ra_polys, .tc = self.total_committed, .half = half, .r = r };
+                    pool.parallelForForce(self.total_committed, ctx, struct {
+                        fn f(c: BindCtx, idx: usize) void {
+                            const dense = &c.ra[idx].dense;
+                            const h = dense.current_len / 2;
+                            for (0..h) |jj| {
+                                dense.coeffs[jj] = dense.coeffs[2 * jj].add(c.r.mul(dense.coeffs[2 * jj + 1].sub(dense.coeffs[2 * jj])));
+                            }
+                            dense.current_len = h;
                         }
-                    }
-                }.f);
-            } else {
-                for (0..self.total_committed) |i| {
-                    bindSlice(self.ra_bound[i], half, r);
+                    }.f);
+                } else {
+                    for (self.ra_polys) |*p| try p.bind(r, self.allocator);
                 }
-                bindSlice(self.eq, half, r);
+            } else {
+                // Compressed state: bind is O(K) per poly — sequential is fine
+                for (self.ra_polys) |*p| try p.bind(r, self.allocator);
             }
+
+            // Flat eq bind
+            const out_half = self.e_out_len / 2;
+            bindSlice(self.e_out, out_half, r);
+            self.e_out_len = out_half;
 
             self.current_len = half;
         }
@@ -3506,7 +3844,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
         pub fn getOpeningClaims(self: *const Self, allocator: Allocator, gamma_powers: []const F) ![]F {
             var claims = try allocator.alloc(F, self.total_committed);
             for (0..self.total_committed) |i| {
-                var claim = self.ra_bound[i][0];
+                var claim = self.ra_polys[i].finalClaim();
                 // Undo gamma pre-scaling for first poly in each batch
                 const is_first_in_batch = (i % self.M == 0);
                 if (is_first_in_batch) {
@@ -3984,8 +4322,8 @@ fn BytecodeReadRafProver(comptime F: type) type {
             const eq_addr = try computeEqTableParallel(F, self.allocator, r_address_be, self.bytecode_log_k, self.pool);
             defer self.allocator.free(eq_addr);
 
-            // Debug: eq_addr entries (ALWAYS ON, full 32 bytes)
-            {
+            // Debug: eq_addr entries
+            if (comptime debug_verbose) {
                 for (0..bytecode_K) |ek| {
                     const eab = eq_addr[ek].toBytesBE();
                     dbg("[ZOLT_EQ_ADDR] eq[{d}]_LE=[", .{ek});
@@ -3994,8 +4332,8 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 }
             }
 
-            // Debug: val_polys entries (ALWAYS ON for debugging)
-            {
+            // Debug: val_polys entries
+            if (comptime debug_verbose) {
                 for (0..5) |vs| {
                     for (0..bytecode_K) |kk| {
                         const vpk = self.val_polys[vs][kk].toBytesBE();
@@ -4011,17 +4349,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 var val_eval = F.zero();
                 const max_k = @min(self.val_polys[s].len, bytecode_K);
                 for (0..max_k) |k| {
-                    const term = self.val_polys[s][k].mul(eq_addr[k]);
-                    val_eval = val_eval.add(term);
-                    if (s == 0) {
-                        const t_be = term.toBytesBE();
-                        const ps_be = val_eval.toBytesBE();
-                        dbg("[DOTPROD] s=0 k={d} term_LE=[", .{k});
-                        for (0..8) |bi| dbg("{x:0>2}", .{t_be[31 - bi]});
-                        dbg("] partial_sum_LE=[", .{});
-                        for (0..8) |bi| dbg("{x:0>2}", .{ps_be[31 - bi]});
-                        dbg("]\n", .{});
-                    }
+                    val_eval = val_eval.add(self.val_polys[s][k].mul(eq_addr[k]));
                 }
 
                 // Add RAF terms (identity polynomial contribution)
@@ -4071,34 +4399,9 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 self.bound_vals_stored[s] = bound_vals[s];
 
                 // DIAGNOSTIC: compare re-computed val_eval with Phase 1 bound val_with_raf[s][0]
-                {
+                if (comptime debug_verbose) {
                     const phase1_bound = self.val_with_raf[s][0];
-                    const match_p1 = val_eval.eql(phase1_bound);
-                    const p1b = phase1_bound.toBytesBE();
-                    const ve_b = val_eval.toBytesBE();
-                    dbg("[TRANS_CHECK] stage[{}]: val_eval_recomp_LE=[", .{s});
-                    for (0..32) |bi| dbg("{x:0>2}", .{ve_b[31 - bi]});
-                    dbg("] phase1_bound_LE=[", .{});
-                    for (0..32) |bi| dbg("{x:0>2}", .{p1b[31 - bi]});
-                    dbg("] match={}\n", .{@as(u8, if (match_p1) 1 else 0)});
-
-                    // Also print F_s[0] for this stage (the eq contribution after Phase 1 binding)
-                    const fs0 = self.F_s_arrs[s][0];
-                    const fs0b = fs0.toBytesBE();
-                    dbg("[TRANS_CHECK] stage[{}]: F_s[0]_LE=[", .{s});
-                    for (0..32) |bi| dbg("{x:0>2}", .{fs0b[31 - bi]});
-                    dbg("]\n", .{});
-
-                    // Print stage_claims[s] = F_s[0] * val_with_raf[s][0] (should match)
-                    const sc = self.stage_claims[s];
-                    const sc_recomp = fs0.mul(phase1_bound);
-                    const scb = sc.toBytesBE();
-                    dbg("[TRANS_CHECK] stage[{}]: stage_claim_LE=[", .{s});
-                    for (0..32) |bi| dbg("{x:0>2}", .{scb[31 - bi]});
-                    dbg("] F_s*val_bound=[", .{});
-                    const src = sc_recomp.toBytesBE();
-                    for (0..32) |bi| dbg("{x:0>2}", .{src[31 - bi]});
-                    dbg("] match={}\n", .{@as(u8, if (sc.eql(sc_recomp)) 1 else 0)});
+                    dbg("[TRANS_CHECK] stage[{}]: match={}\n", .{ s, @as(u8, if (val_eval.eql(phase1_bound)) 1 else 0) });
                 }
 
                 // Debug: Print val_eval and bound_val for comparison with Jolt verifier
@@ -4593,6 +4896,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             booleanity_gammas[0] = F.one(); // γ^0 = 1
             for (1..total_d) |i| {
                 booleanity_gammas[i] = booleanity_gammas[i - 1].mul(booleanity_gamma_sq); // γ^(2i)
+            }
+            // Also compute γ^i powers for Phase 2 pre-scaling optimization
+            const booleanity_gamma_unsq = try self.allocator.alloc(F, total_d);
+            booleanity_gamma_unsq[0] = F.one(); // γ^0 = 1
+            for (1..total_d) |i| {
+                booleanity_gamma_unsq[i] = booleanity_gamma_unsq[i - 1].mul(booleanity_gamma_f); // γ^i
             }
 
             // LookupsRa::new() - gamma powers for virtual RA batching
@@ -5112,6 +5421,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     r_address_bool_le,
                     eq_cycle_bool_phase2,
                     gamma_sq,
+                    booleanity_gamma_unsq,
                     total_bool_polys,
                     log_k_chunk,
                     n_cycle_vars,
@@ -6179,6 +6489,11 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             var bytecode_addr_challenges = try self.allocator.alloc(F, bytecode_log_k);
             defer self.allocator.free(bytecode_addr_challenges);
 
+            // Per-instance timing accumulators (nanoseconds)
+            var inst_time_ns: [6]u64 = .{0} ** 6;
+            var bind_time_ns: u64 = 0;
+            var inst_timer = std.time.Timer.start() catch unreachable;
+
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
 
@@ -6206,6 +6521,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var dbg_inst_p1: [6]F = .{F.zero()} ** 6;
 
                 // Instance 0: BytecodeReadRaf - REAL prover
+                inst_timer.reset();
                 {
                     const inst = 0;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6274,6 +6590,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
+                inst_time_ns[0] += inst_timer.read();
                 dbg_inst_p0[0] = combined_evals[0];
                 dbg_inst_p1[0] = combined_evals[1];
 
@@ -6287,6 +6604,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 1: Booleanity - REAL prover (degree 3)
+                inst_timer.reset();
                 var cached_booleanity: ?[]F = null;
                 {
                     const inst = 1;
@@ -6316,6 +6634,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addFixedEvalsToCombibed(F, combined_evals, polys, 4, batch[inst], num_evals);
                     }
                 }
+                inst_time_ns[1] += inst_timer.read();
                 dbg_inst_p0[1] = combined_evals[0];
                 dbg_inst_p1[1] = combined_evals[1];
 
@@ -6329,6 +6648,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 2: HammingBooleanity - REAL prover
+                inst_timer.reset();
                 {
                     const inst = 2;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6346,6 +6666,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addFixedEvalsToCombibed(F, combined_evals, &polys, 4, batch[inst], num_evals);
                     }
                 }
+                inst_time_ns[2] += inst_timer.read();
                 dbg_inst_p0[2] = combined_evals[0];
                 dbg_inst_p1[2] = combined_evals[1];
 
@@ -6359,6 +6680,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 3: RamRaVirtual - REAL prover
+                inst_timer.reset();
                 {
                     const inst = 3;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6394,6 +6716,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
+                inst_time_ns[3] += inst_timer.read();
                 dbg_inst_p0[3] = combined_evals[0];
                 dbg_inst_p1[3] = combined_evals[1];
 
@@ -6407,6 +6730,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 4: LookupsRaVirtual - REAL prover
+                inst_timer.reset();
                 {
                     const inst = 4;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6441,6 +6765,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
+                inst_time_ns[4] += inst_timer.read();
                 dbg_inst_p0[4] = combined_evals[0];
                 dbg_inst_p1[4] = combined_evals[1];
 
@@ -6454,6 +6779,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Instance 5: IncClaimReduction - REAL prover
+                inst_timer.reset();
                 {
                     const inst = 5;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -6498,6 +6824,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         }
                     }
                 }
+                inst_time_ns[5] += inst_timer.read();
                 dbg_inst_p0[5] = combined_evals[0];
                 dbg_inst_p1[5] = combined_evals[1];
 
@@ -6548,7 +6875,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Debug: check sumcheck invariant p(0)+p(1)=claim for ALL rounds
-                {
+                if (comptime debug_verbose) {
                     const p01_sum = combined_evals[0].add(combined_evals[1]);
                     const p01_match = p01_sum.eql(current_batched_claim);
                     if (!p01_match) {
@@ -6609,23 +6936,24 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Debug: print Vandermonde evaluations for round 7
-                if (round == 7) {
-                    dbg("  [S6P] R7 Vandermonde evals:\n", .{});
-                    for (0..num_evals) |ev_idx| {
-                        const ev_le = combined_evals[ev_idx].toBytes();
-                        dbg("    p({})=[", .{ev_idx});
-                        for (0..32) |bi| dbg("{x:0>2}", .{ev_le[bi]});
-                        dbg("]\n", .{});
+                if (comptime debug_verbose) {
+                    if (round == 7) {
+                        dbg("  [S6P] R7 Vandermonde evals:\n", .{});
+                        for (0..num_evals) |ev_idx| {
+                            const ev_le = combined_evals[ev_idx].toBytes();
+                            dbg("    p({})=[", .{ev_idx});
+                            for (0..32) |bi| dbg("{x:0>2}", .{ev_le[bi]});
+                            dbg("]\n", .{});
+                        }
+                        const sum01 = combined_evals[0].add(combined_evals[1]);
+                        const sum_le = sum01.toBytes();
+                        const hint_le = current_batched_claim.toBytes();
+                        dbg("    p(0)+p(1)=[", .{});
+                        for (0..32) |bi| dbg("{x:0>2}", .{sum_le[bi]});
+                        dbg("]\n    hint    =[", .{});
+                        for (0..32) |bi| dbg("{x:0>2}", .{hint_le[bi]});
+                        dbg("]\n    match={}\n", .{sum01.eql(current_batched_claim)});
                     }
-                    // Verify p(0)+p(1) = current_batched_claim (hint)
-                    const sum01 = combined_evals[0].add(combined_evals[1]);
-                    const sum_le = sum01.toBytes();
-                    const hint_le = current_batched_claim.toBytes();
-                    dbg("    p(0)+p(1)=[", .{});
-                    for (0..32) |bi| dbg("{x:0>2}", .{sum_le[bi]});
-                    dbg("]\n    hint    =[", .{});
-                    for (0..32) |bi| dbg("{x:0>2}", .{hint_le[bi]});
-                    dbg("]\n    match={}\n", .{sum01.eql(current_batched_claim)});
                 }
 
                 // Compress and append to transcript (Vandermonde format)
@@ -6633,7 +6961,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 defer self.allocator.free(compressed);
 
                 // Debug: print compressed coefficients LE for ALL rounds
-                {
+                if (comptime debug_verbose) {
                     var c_idx: usize = 0;
                     while (c_idx < compressed.len) : (c_idx += 1) {
                         const le = compressed[c_idx].toBytes();
@@ -6654,15 +6982,16 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 });
 
                 // Write diagnostic data to file for R0 - BEFORE appending to transcript
-                if (round == 0) {
-                    const diag_file = std.fs.cwd().createFile("/tmp/s6p_diag.bin", .{}) catch null;
-                    if (diag_file) |f| {
-                        defer f.close();
-                        // Write: transcript state BEFORE append (32 bytes), then 5 compressed coefficients (5*32=160 bytes)
-                        f.writeAll(&transcript.state) catch {};
-                        for (0..num_compressed) |j| {
-                            const le = coeffs[j].toBytes();
-                            f.writeAll(&le) catch {};
+                if (comptime debug_verbose) {
+                    if (round == 0) {
+                        const diag_file = std.fs.cwd().createFile("/tmp/s6p_diag.bin", .{}) catch null;
+                        if (diag_file) |f| {
+                            defer f.close();
+                            f.writeAll(&transcript.state) catch {};
+                            for (0..num_compressed) |j| {
+                                const le = coeffs[j].toBytes();
+                                f.writeAll(&le) catch {};
+                            }
                         }
                     }
                 }
@@ -6670,15 +6999,16 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 transcript.appendScalars("sumcheck_poly", coeffs[0..num_compressed]);
 
                 // Dump transcript state AFTER appending R0 polynomial
-                if (round == 0) {
-                    const diag_after = std.fs.cwd().createFile("/tmp/s6p_state_after_r0.bin", .{}) catch null;
-                    if (diag_after) |fa| {
-                        defer fa.close();
-                        fa.writeAll(&transcript.state) catch {};
-                        // Also write n_rounds as u32 LE
-                        var nr_buf: [4]u8 = undefined;
-                        std.mem.writeInt(u32, &nr_buf, transcript.n_rounds, .little);
-                        fa.writeAll(&nr_buf) catch {};
+                if (comptime debug_verbose) {
+                    if (round == 0) {
+                        const diag_after = std.fs.cwd().createFile("/tmp/s6p_state_after_r0.bin", .{}) catch null;
+                        if (diag_after) |fa| {
+                            defer fa.close();
+                            fa.writeAll(&transcript.state) catch {};
+                            var nr_buf: [4]u8 = undefined;
+                            std.mem.writeInt(u32, &nr_buf, transcript.n_rounds, .little);
+                            fa.writeAll(&nr_buf) catch {};
+                        }
                     }
                 }
 
@@ -6686,12 +7016,14 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 challenges[round] = challenge;
 
                 // Write R0 challenge to diagnostic file
-                if (round == 0) {
-                    const diag2 = std.fs.cwd().createFile("/tmp/s6p_r0_challenge.bin", .{}) catch null;
-                    if (diag2) |f2| {
-                        defer f2.close();
-                        const ch_le = challenge.toBytes();
-                        f2.writeAll(&ch_le) catch {};
+                if (comptime debug_verbose) {
+                    if (round == 0) {
+                        const diag2 = std.fs.cwd().createFile("/tmp/s6p_r0_challenge.bin", .{}) catch null;
+                        if (diag2) |f2| {
+                            defer f2.close();
+                            const ch_le = challenge.toBytes();
+                            f2.writeAll(&ch_le) catch {};
+                        }
                     }
                 }
 
@@ -6699,20 +7031,16 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 current_batched_claim = try UniPoly(F).evaluateVandermondeAt(self.allocator, combined_evals, challenge);
 
                 // VERIFY: eval_from_hint should match evaluateVandermondeAt for ALL rounds
-                {
-                    // Simulate verifier's eval_from_hint using stored compressed coefficients
-                    // hint = p(0) + p(1) = combined_evals[0] + combined_evals[1]
+                if (comptime debug_verbose) {
                     const hint_val = combined_evals[0].add(combined_evals[1]);
-                    // Use the STORED coeffs (which may be padded to num_compressed=5)
-                    var c1_efh = hint_val.sub(coeffs[0]).sub(coeffs[0]); // hint - 2*c0
+                    var c1_efh = hint_val.sub(coeffs[0]).sub(coeffs[0]);
                     for (1..num_compressed) |ci| {
                         c1_efh = c1_efh.sub(coeffs[ci]);
                     }
-                    // Evaluate: c0 + c1*x + c2*x^2 + ...
-                    var running_point_efh = challenge; // x
-                    var running_sum_efh = coeffs[0].add(challenge.mul(c1_efh)); // c0 + x*c1
+                    var running_point_efh = challenge;
+                    var running_sum_efh = coeffs[0].add(challenge.mul(c1_efh));
                     for (1..num_compressed) |ci| {
-                        running_point_efh = running_point_efh.mul(challenge); // x^(ci+1)
+                        running_point_efh = running_point_efh.mul(challenge);
                         running_sum_efh = running_sum_efh.add(coeffs[ci].mul(running_point_efh));
                     }
                     const efh_match = running_sum_efh.eql(current_batched_claim);
@@ -6724,7 +7052,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         dbg("]\n  [S6P] R{} EVAL_MISMATCH! vandermonde  =[", .{round});
                         for (0..32) |bi| dbg("{x:0>2}", .{vdm_le[bi]});
                         dbg("]\n", .{});
-                        // Print hint, coeffs, challenge for diagnosing
                         const h_le = hint_val.toBytes();
                         dbg("  [S6P] R{} hint=[", .{round});
                         for (0..32) |bi| dbg("{x:0>2}", .{h_le[bi]});
@@ -6732,13 +7059,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         const c1_le = c1_efh.toBytes();
                         for (0..32) |bi| dbg("{x:0>2}", .{c1_le[bi]});
                         dbg("]\n", .{});
-                        // Also print stored coefficients count vs compressed count
                         dbg("  [S6P] R{} num_compressed={}, compressed.len={}\n", .{ round, num_compressed, compressed.len });
                     }
                     dbg("  [S6P] R{} efh_match={}\n", .{ round, @intFromBool(efh_match) });
                 }
 
-                {
+                if (comptime debug_verbose) {
                     const ch_le = challenge.toBytes();
                     const cl_le = current_batched_claim.toBytes();
                     dbg("  [S6P] R{} challenge_LE=[", .{round});
@@ -6750,6 +7076,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Update per-instance claims from CACHED round polys and bind challenge
+                inst_timer.reset();
                 // Instance 0: BytecodeReadRaf
                 if (inst_active[0]) {
                     if (bytecode_prover.phase == 0) {
@@ -6758,7 +7085,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         const bc_a1 = cached_bc_phase1_coeffs[1];
                         const bc_a2 = cached_bc_phase1_coeffs[2];
                         instance_claims[0] = bc_a0.add(challenge.mul(bc_a1.add(challenge.mul(bc_a2))));
-                        {
+                        if (comptime debug_verbose) {
                             const ic_le = instance_claims[0].toBytes();
                             dbg("  [S6P] R{} inst0_from_poly_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                                 round, ic_le[0], ic_le[1], ic_le[2], ic_le[3], ic_le[4], ic_le[5], ic_le[6], ic_le[7],
@@ -6766,15 +7093,14 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         }
                         bytecode_addr_challenges[bytecode_prover.addr_rounds_done] = challenge;
                         bytecode_prover.bindChallengePhase1(challenge, cached_bc_phase1_per_stage);
-                        // Check invariant: instance_claims[0] == Σ gamma^s * stage_claims[s]
-                        {
+                        if (comptime debug_verbose) {
+                            // Check invariant: instance_claims[0] == Σ gamma^s * stage_claims[s]
                             var agg_check = F.zero();
                             for (0..5) |si| {
                                 agg_check = agg_check.add(bytecode_prover.gamma_powers[si].mul(bytecode_prover.stage_claims[si]));
                             }
                             const ac_le = agg_check.toBytes();
                             const ic_le2 = instance_claims[0].toBytes();
-                            // Also print per-stage stage_claims after bind
                             for (0..5) |si| {
                                 const scl = bytecode_prover.stage_claims[si].toBytes();
                                 dbg("[INVARIANT_CHECK] R{} stage[{}]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
@@ -6788,12 +7114,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 ic_le2[0], ic_le2[1], ic_le2[2], ic_le2[3], ic_le2[4], ic_le2[5], ic_le2[6], ic_le2[7],
                                 @as(u8, if (agg_check.eql(instance_claims[0])) 1 else 0),
                             });
-                            // Verify by computing Σ gamma^s * per_stage_p(r)_s directly
-                            // where p(r)_s = old_stage_claims[s] evaluated at r
-                            // We don't have old claims here, but let's re-aggregate from coefficients:
-                            // Note: cached_bc_phase1_coeffs is the AGGREGATED a0,a1,a2
-                            // Let's evaluate it manually:
-                            const manual_eval = bc_a0.add(challenge.mul(bc_a1.add(challenge.mul(bc_a2))));
+                            const bc_a0_ = cached_bc_phase1_coeffs[0];
+                            const bc_a1_ = cached_bc_phase1_coeffs[1];
+                            const bc_a2_ = cached_bc_phase1_coeffs[2];
+                            const manual_eval = bc_a0_.add(challenge.mul(bc_a1_.add(challenge.mul(bc_a2_))));
                             const me_le = manual_eval.toBytes();
                             dbg("[INVARIANT_CHECK] R{} manual_eval_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] match_inst={}\n", .{
                                 round,
@@ -6802,8 +7126,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             });
                         }
                         if (bytecode_prover.addr_rounds_done == bytecode_log_k) {
-                            // BEFORE transition: check Σ_s gamma^s * stage_claims[s] vs instance_claims[0]
-                            {
+                            if (comptime debug_verbose) {
+                                // BEFORE transition: check Σ_s gamma^s * stage_claims[s] vs instance_claims[0]
                                 var agg_from_stages = F.zero();
                                 for (0..5) |si| {
                                     agg_from_stages = agg_from_stages.add(bytecode_prover.gamma_powers[si].mul(bytecode_prover.stage_claims[si]));
@@ -6815,7 +7139,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                     ic0_le[0], ic0_le[1], ic0_le[2], ic0_le[3], ic0_le[4], ic0_le[5], ic0_le[6], ic0_le[7],
                                     @as(u8, if (agg_from_stages.eql(instance_claims[0])) 1 else 0),
                                 });
-                                // Print per-stage claims
                                 for (0..5) |si| {
                                     const sc_le2 = bytecode_prover.stage_claims[si].toBytes();
                                     dbg("[PHASE_TRANSITION_PRE] stage[{}]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
@@ -6824,30 +7147,27 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 }
                             }
                             try bytecode_prover.transitionToPhase2(bytecode_addr_challenges);
-                            // After transition, check Phase 2 polynomial sum
-                            // Phase 2 sum = Σ_c combined[c] * Π_i ra_chunks[i][c]
-                            const bc_combined = bytecode_prover.combined.?;
-                            const bc_ra_chunks = bytecode_prover.ra_chunks.?;
-                            const bc_T = bytecode_prover.current_len;
-                            var phase2_sum = F.zero();
-                            for (0..bc_T) |c| {
-                                var ra_prod = F.one();
-                                for (0..bytecode_prover.bytecode_d) |di| {
-                                    ra_prod = ra_prod.mul(bc_ra_chunks[di][c]);
+                            if (comptime debug_verbose) {
+                                // After transition, check Phase 2 polynomial sum
+                                const bc_combined = bytecode_prover.combined.?;
+                                const bc_ra_chunks = bytecode_prover.ra_chunks.?;
+                                const bc_T = bytecode_prover.current_len;
+                                var phase2_sum = F.zero();
+                                for (0..bc_T) |c| {
+                                    var ra_prod = F.one();
+                                    for (0..bytecode_prover.bytecode_d) |di| {
+                                        ra_prod = ra_prod.mul(bc_ra_chunks[di][c]);
+                                    }
+                                    phase2_sum = phase2_sum.add(bc_combined[c].mul(ra_prod));
                                 }
-                                phase2_sum = phase2_sum.add(bc_combined[c].mul(ra_prod));
+                                const ic_old_le = instance_claims[0].toBytes();
+                                const p2_le = phase2_sum.toBytes();
+                                dbg("[PHASE_TRANSITION] inst0 claim match={}\n", .{
+                                    @as(u8, if (instance_claims[0].eql(phase2_sum)) 1 else 0),
+                                });
+                                _ = ic_old_le;
+                                _ = p2_le;
                             }
-                            const ic_old_le = instance_claims[0].toBytes();
-                            const p2_le = phase2_sum.toBytes();
-                            dbg("[PHASE_TRANSITION] inst0 claim_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] phase2_sum_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] match={}\n", .{
-                                ic_old_le[0], ic_old_le[1], ic_old_le[2], ic_old_le[3], ic_old_le[4], ic_old_le[5], ic_old_le[6], ic_old_le[7],
-                                p2_le[0], p2_le[1], p2_le[2], p2_le[3], p2_le[4], p2_le[5], p2_le[6], p2_le[7],
-                                @as(u8, if (instance_claims[0].eql(phase2_sum)) 1 else 0),
-                            });
-                            // DO NOT overwrite instance_claims[0] - keep the value from Phase 1 evaluation
-                            // The phase2_sum is just the sum over Phase 2 arrays, which SHOULD match but
-                            // if it doesn't, the Phase 1 claim is what's in the transcript.
-                            // instance_claims[0] = phase2_sum;
                         }
                     } else {
                         // Phase 2: evaluate from cached evals using Lagrange interpolation
@@ -6855,28 +7175,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         self.allocator.free(cached_bc_phase2.?);
                         cached_bc_phase2 = null;
                         bytecode_prover.bindChallengePhase2(challenge);
-
-                        // BRUTE FORCE CHECK: recompute Σ_c combined[c] * Π_i ra[i][c] after bind
-                        {
-                            const bc_combined_dbg = bytecode_prover.combined.?;
-                            const bc_ra_dbg = bytecode_prover.ra_chunks.?;
-                            const bc_T_dbg = bytecode_prover.current_len;
-                            var bf_sum = F.zero();
-                            for (0..bc_T_dbg) |c_dbg| {
-                                var ra_prod_dbg = F.one();
-                                for (0..bytecode_prover.bytecode_d) |di_dbg| {
-                                    ra_prod_dbg = ra_prod_dbg.mul(bc_ra_dbg[di_dbg][c_dbg]);
-                                }
-                                bf_sum = bf_sum.add(bc_combined_dbg[c_dbg].mul(ra_prod_dbg));
-                            }
-                            const bf_be = bf_sum.toBytesBE();
-                            const ic_be2 = instance_claims[0].toBytesBE();
-                            dbg("[BF_CHECK] R{} Phase2 T={} inst0_LE=[", .{ round, bc_T_dbg });
-                            for (0..8) |bi| dbg("{x:0>2}", .{ic_be2[31 - bi]});
-                            dbg("] bf_sum_LE=[", .{});
-                            for (0..8) |bi| dbg("{x:0>2}", .{bf_be[31 - bi]});
-                            dbg("] match={}\n", .{@as(u8, if (bf_sum.eql(instance_claims[0])) 1 else 0)});
-                        }
                     }
                 }
 
@@ -6890,12 +7188,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         cached_booleanity = null;
                     }
                     try booleanity_prover.bindChallenge(challenge);
-                    // Debug: print claim after Phase 1→2 transition
-                    if (booleanity_prover.round == booleanity_prover.log_k_chunk) {
-                        const ic1_be = instance_claims[1].toBytesBE();
-                        dbg("[BOOL_TRANSITION] inst_claim[1] after Ph1 LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
-                            ic1_be[31], ic1_be[30], ic1_be[29], ic1_be[28], ic1_be[27], ic1_be[26], ic1_be[25], ic1_be[24],
-                        });
+                    if (comptime debug_verbose) {
+                        if (booleanity_prover.round == booleanity_prover.log_k_chunk) {
+                            const ic1_be = instance_claims[1].toBytesBE();
+                            dbg("[BOOL_TRANSITION] inst_claim[1] after Ph1 LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                                ic1_be[31], ic1_be[30], ic1_be[29], ic1_be[28], ic1_be[27], ic1_be[26], ic1_be[25], ic1_be[24],
+                            });
+                        }
                     }
                 }
 
@@ -6918,7 +7217,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     instance_claims[4] = evaluatePolyFromEvals(F, cached_lookups_ra.?, challenge);
                     self.allocator.free(cached_lookups_ra.?);
                     cached_lookups_ra = null;
-                    lookups_ra_prover.bindChallenge(challenge);
+                    try lookups_ra_prover.bindChallenge(challenge);
                 }
 
                 // Instance 5: IncClaimReduction
@@ -6937,12 +7236,25 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     try inc_prover.bindChallenge(challenge);
                 }
 
+                bind_time_ns += inst_timer.read();
+
                 // NOTE: Instance claims for inactive instances are NOT halved here.
                 // In Zolt, instance_claims starts at the UNSCALED input_claims (not 2^offset-scaled),
                 // and the inactive round contributions are computed directly from input_claims with
                 // the correct power-of-2 scaling. When an instance first becomes active,
                 // instance_claims[i] = input_claims[i] = the correct unscaled claim.
             }
+
+            // Per-instance timing summary
+            std.debug.print("[STAGE6 TIMING] inst0_bc={d:.1}ms inst1_bool={d:.1}ms inst2_ham={d:.1}ms inst3_ram={d:.1}ms inst4_lkp={d:.1}ms inst5_inc={d:.1}ms bind={d:.1}ms\n", .{
+                @as(f64, @floatFromInt(inst_time_ns[0])) / 1_000_000.0,
+                @as(f64, @floatFromInt(inst_time_ns[1])) / 1_000_000.0,
+                @as(f64, @floatFromInt(inst_time_ns[2])) / 1_000_000.0,
+                @as(f64, @floatFromInt(inst_time_ns[3])) / 1_000_000.0,
+                @as(f64, @floatFromInt(inst_time_ns[4])) / 1_000_000.0,
+                @as(f64, @floatFromInt(inst_time_ns[5])) / 1_000_000.0,
+                @as(f64, @floatFromInt(bind_time_ns)) / 1_000_000.0,
+            });
 
             // Debug: print final instance claims after sumcheck (ALWAYS ON)
             {

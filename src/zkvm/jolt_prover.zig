@@ -22,6 +22,7 @@ const ThreadPool = @import("../utils/thread_pool.zig").ThreadPool;
 
 const jolt_types = @import("jolt_types.zig");
 const field_mod = @import("../field/mod.zig");
+const UnreducedProductAccum = field_mod.UnreducedProductAccum;
 const r1cs = @import("r1cs/mod.zig");
 const streaming_outer = @import("spartan/streaming_outer.zig");
 const product_remainder = @import("spartan/product_remainder.zig");
@@ -126,6 +127,7 @@ pub fn JoltProver(comptime F: type) type {
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             tau: []const F,
             transcript: *Blake2bTranscript(F),
+            compact_witnesses: ?[]const @import("r1cs/evaluators.zig").CompactWitness,
         ) !Stage1Result {
             const StreamingOuterProver = streaming_outer.StreamingOuterProver(F);
             const LagrangePoly = r1cs.univariate_skip.LagrangePolynomial(F);
@@ -175,7 +177,12 @@ pub fn JoltProver(comptime F: type) type {
                 try self.generateZeroSumcheckProof(proof, num_rounds, 3);
                 return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = F.zero(), .allocator = self.allocator };
             };
-            defer outer_prover.deinit();
+            // Set pre-built compact witnesses (not owned — don't free on deinit)
+            outer_prover.compact_witnesses = compact_witnesses;
+            defer {
+                outer_prover.compact_witnesses = null; // prevent double-free
+                outer_prover.deinit();
+            }
 
             // Compute the UnivariateSkip claim: evaluation of UniSkip polynomial at r0
             const uni_skip_claim = evaluatePolyAtChallenge(uniskip_proof.uni_poly, r0);
@@ -746,8 +753,6 @@ pub fn JoltProver(comptime F: type) type {
                 // DEBUG: Print challenge (LE bytes for Jolt comparison)
 
                 // Bind challenge and update claim
-                // Use raw_evals for internal claim tracking (matches Jolt's prover behavior)
-                // The proof contains scaled polynomials, but the prover tracks unscaled internally
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
                 outer_prover.updateClaim(raw_evals, challenge);
             }
@@ -1154,6 +1159,7 @@ pub fn JoltProver(comptime F: type) type {
             self: *Self,
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             tau: []const F,
+            compact_witnesses: ?[]const @import("r1cs/evaluators.zig").CompactWitness,
         ) !?UniSkipFirstRoundProof(F) {
             if (cycle_witnesses.len == 0) {
                 return self.createUniSkipProofStage1();
@@ -1165,19 +1171,6 @@ pub fn JoltProver(comptime F: type) type {
                 return self.createUniSkipProofStage1();
             }
 
-            // Use the StreamingOuterProver which properly handles both FIRST_GROUP
-            // and SECOND_GROUP constraints in the UniSkip computation.
-            //
-            // Key differences from the old SpartanOuterProver:
-            // 1. Uses full_tau for UniSkip eq computation (dropping tau_high internally)
-            // 2. Iterates over both constraint groups (not just FIRST_GROUP)
-            // 3. Properly handles the cycle/group interleaving
-            //
-            // The StreamingOuterProver.initWithScaling takes:
-            // - cycle_witnesses: actual witness values per cycle
-            // - tau: FULL tau vector (num_cycle_vars + 2 elements)
-            // - lagrange_tau_r0: Lagrange kernel L(tau_high, r0) - but for UniSkip we use null
-            //   because the Lagrange kernel multiplication is done in interpolateFirstRoundPoly
             var outer_prover = try streaming_outer.StreamingOuterProver(F).initWithScaling(
                 self.allocator,
                 cycle_witnesses,
@@ -1185,7 +1178,12 @@ pub fn JoltProver(comptime F: type) type {
                 null, // No scaling for initial UniSkip - will be applied in interpolation
             );
             outer_prover.thread_pool = self.thread_pool;
-            defer outer_prover.deinit();
+            // Set pre-built compact witnesses (not owned — don't free on deinit)
+            outer_prover.compact_witnesses = compact_witnesses;
+            defer {
+                outer_prover.compact_witnesses = null; // prevent double-free
+                outer_prover.deinit();
+            }
 
             // Compute the univariate skip polynomial using the fixed implementation
             // that properly handles both constraint groups
@@ -1314,11 +1312,17 @@ pub fn JoltProver(comptime F: type) type {
             // Per-stage timing
             var stage_timer = std.time.Timer.start() catch unreachable;
 
+            // Build compact integer witnesses for fast evaluation
+            const r1cs_evaluators = @import("r1cs/evaluators.zig");
+            const compact_witnesses = try r1cs_evaluators.buildCompactWitnesses(F, padded_witnesses, self.allocator);
+            defer self.allocator.free(compact_witnesses);
+
             // Create UniSkip proof for Stage 1 with actual constraint evaluations
             // Use padded witnesses so that NoOp cycles are included in the polynomial evaluation
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
                 padded_witnesses,
                 tau,
+                compact_witnesses,
             );
 
             // Stage 1: Outer Spartan Remaining - use streaming prover with transcript
@@ -1331,6 +1335,7 @@ pub fn JoltProver(comptime F: type) type {
                     padded_witnesses,
                     tau,
                     transcript,
+                    compact_witnesses,
                 );
             } else {
                 // Fallback to zero proofs
@@ -3814,7 +3819,6 @@ pub fn JoltProver(comptime F: type) type {
                 }
             }
 
-
             // Debug: Verify batched_claim equals sum of (coeff * prover_claim)
             var expected_batched = F.zero();
             // Instance 0: RWC
@@ -4186,105 +4190,41 @@ pub fn JoltProver(comptime F: type) type {
             var factor_evals = [8]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
 
             // Compute MLE evaluation: Σ_t eq(r_cycle, t) * factor_value[t]
+            // Uses UnreducedProductAccum to defer Montgomery reduction across all cycles.
             const num_cycles = @min(eq_evals.len, cycle_witnesses.len);
+            const UPA = UnreducedProductAccum;
 
-            // Debug: Print witness values for several cycles
+            // Factor indices into R1CSCycleInputs.values
+            const factor_indices = [8]usize{
+                r1cs.R1CSInputIndex.LeftInstructionInput.toIndex(),
+                r1cs.R1CSInputIndex.RightInstructionInput.toIndex(),
+                r1cs.R1CSInputIndex.FlagJump.toIndex(),
+                r1cs.R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex(),
+                r1cs.R1CSInputIndex.LookupOutput.toIndex(),
+                r1cs.R1CSInputIndex.FlagBranch.toIndex(),
+                0, // placeholder for NextIsNoop (computed separately)
+                r1cs.R1CSInputIndex.FlagVirtualInstruction.toIndex(),
+            };
 
-            // Count non-zero LeftInstructionInput values
-            var nonzero_left_count: usize = 0;
-            for (0..@min(256, cycle_witnesses.len)) |t| {
-                const val = cycle_witnesses[t].values[r1cs.R1CSInputIndex.LeftInstructionInput.toIndex()];
-                if (!val.eql(F.zero())) {
-                    nonzero_left_count += 1;
-                    if (nonzero_left_count <= 3) {
-                    }
-                }
-            }
-
-            // Track per-cycle contributions for debugging
-            var cycle_count_with_nonzero_branch: usize = 0;
-            var cycle_count_with_nonzero_lookup_output: usize = 0;
-
-            // Diagnostic: print per-cycle flag values for first 32 cycles
-            {
-                var printed: usize = 0;
-                for (0..@min(256, num_cycles)) |t2| {
-                    const w = &cycle_witnesses[t2];
-                    const is_noop = w.values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()];
-                    // Only print non-noop cycles or first few
-                    if (printed < 32 and (is_noop.eql(F.zero()) or t2 < 4)) {
-                        printed += 1;
-                    }
-                }
-            }
-
+            var accum: [8]UPA = .{UPA.zero()} ** 8;
             for (0..num_cycles) |t| {
                 const eq_val = eq_evals[t];
                 const witness = &cycle_witnesses[t];
 
-                // Debug: Track non-zero values
-                const branch_val = witness.values[r1cs.R1CSInputIndex.FlagBranch.toIndex()];
-                const lookup_output_val = witness.values[r1cs.R1CSInputIndex.LookupOutput.toIndex()];
-                if (!branch_val.eql(F.zero())) {
-                    cycle_count_with_nonzero_branch += 1;
-                    if (cycle_count_with_nonzero_branch <= 5) {
-                    }
-                }
-                if (!lookup_output_val.eql(F.zero())) {
-                    cycle_count_with_nonzero_lookup_output += 1;
+                // Factors 0-5, 7: direct witness lookup
+                inline for ([_]usize{ 0, 1, 2, 3, 4, 5, 7 }) |fi| {
+                    accum[fi].addAssign(eq_val.mulToProductAccum(witness.values[factor_indices[fi]]));
                 }
 
-                // Extract the 8 factor values from the witness
-                // Must match PRODUCT_UNIQUE_FACTOR_VIRTUALS order:
-                // [0] LeftInstructionInput, [1] RightInstructionInput,
-                // [2] OpFlags(Jump), [3] OpFlags(WriteLookupOutputToRD),
-                // [4] LookupOutput, [5] InstructionFlags(Branch),
-                // [6] NextIsNoop, [7] OpFlags(VirtualInstruction)
-
-                // 0: LeftInstructionInput
-                factor_evals[0] = factor_evals[0].add(eq_val.mul(
-                    witness.values[r1cs.R1CSInputIndex.LeftInstructionInput.toIndex()],
-                ));
-
-                // 1: RightInstructionInput
-                factor_evals[1] = factor_evals[1].add(eq_val.mul(
-                    witness.values[r1cs.R1CSInputIndex.RightInstructionInput.toIndex()],
-                ));
-
-                // 2: OpFlags(Jump)
-                factor_evals[2] = factor_evals[2].add(eq_val.mul(
-                    witness.values[r1cs.R1CSInputIndex.FlagJump.toIndex()],
-                ));
-
-                // 3: OpFlags(WriteLookupOutputToRD)
-                factor_evals[3] = factor_evals[3].add(eq_val.mul(
-                    witness.values[r1cs.R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()],
-                ));
-
-                // 4: LookupOutput
-                factor_evals[4] = factor_evals[4].add(eq_val.mul(
-                    witness.values[r1cs.R1CSInputIndex.LookupOutput.toIndex()],
-                ));
-
-                // 5: InstructionFlags(Branch)
-                factor_evals[5] = factor_evals[5].add(eq_val.mul(
-                    witness.values[r1cs.R1CSInputIndex.FlagBranch.toIndex()],
-                ));
-
-                // 6: NextIsNoop - check if next instruction is a noop
-                const next_is_noop = blk: {
-                    if (t + 1 < cycle_witnesses.len) {
-                        break :blk cycle_witnesses[t + 1].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()];
-                    }
-                    // For last cycle: not_next_noop = false (hardcoded), so NextIsNoop = true
-                    break :blk F.one();
-                };
-                factor_evals[6] = factor_evals[6].add(eq_val.mul(next_is_noop));
-
-                // 7: OpFlags(VirtualInstruction)
-                factor_evals[7] = factor_evals[7].add(eq_val.mul(
-                    witness.values[r1cs.R1CSInputIndex.FlagVirtualInstruction.toIndex()],
-                ));
+                // Factor 6: NextIsNoop
+                const next_is_noop = if (t + 1 < cycle_witnesses.len)
+                    cycle_witnesses[t + 1].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()]
+                else
+                    F.one();
+                accum[6].addAssign(eq_val.mulToProductAccum(next_is_noop));
+            }
+            inline for (0..8) |fi| {
+                factor_evals[fi] = accum[fi].reduce();
             }
 
             // Debug: Print counts

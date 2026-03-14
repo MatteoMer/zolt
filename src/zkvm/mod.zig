@@ -1035,25 +1035,16 @@ pub fn JoltProver(comptime F: type) type {
                 // Sparse onehot_indices: [0..inst_d]=InstructionRa, [inst_d..inst_d+ram_d]=RamRa, [inst_d+ram_d..]=BytecodeRa
                 // Jolt Stage 8 gamma order: [0]=RamInc, [1]=RdInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+bc_d]=BytecodeRa, [2+inst_d+bc_d..]=RamRa
 
-                // RamInc: gamma_powers[0] maps to witness_polys[1] (dense, padded to k_chunk*T)
+                // RamInc + RdInc: accumulate both dense polys in a single pass.
+                // No zero-check branch — unconditional mul+add is faster than branch misprediction.
                 {
                     const ram_inc_wp = witness_polys[1];
-                    const gamma = gamma_powers[0];
-                    for (0..@min(ram_inc_wp.len, total_poly_size)) |j| {
-                        if (!ram_inc_wp[j].eql(F.zero())) {
-                            joint_poly[j] = joint_poly[j].add(ram_inc_wp[j].mul(gamma));
-                        }
-                    }
-                }
-
-                // RdInc: gamma_powers[1] maps to witness_polys[0] (dense, padded to k_chunk*T)
-                {
                     const rd_inc_wp = witness_polys[0];
-                    const gamma = gamma_powers[1];
-                    for (0..@min(rd_inc_wp.len, total_poly_size)) |j| {
-                        if (!rd_inc_wp[j].eql(F.zero())) {
-                            joint_poly[j] = joint_poly[j].add(rd_inc_wp[j].mul(gamma));
-                        }
+                    const gamma_ram = gamma_powers[0];
+                    const gamma_rd = gamma_powers[1];
+                    const dense_len = @min(@min(ram_inc_wp.len, rd_inc_wp.len), total_poly_size);
+                    for (0..dense_len) |j| {
+                        joint_poly[j] = ram_inc_wp[j].mul(gamma_ram).add(rd_inc_wp[j].mul(gamma_rd));
                     }
                 }
 

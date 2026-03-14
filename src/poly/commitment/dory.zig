@@ -653,24 +653,50 @@ fn computeEvaluationVectors(comptime F: type, point: []const F, nu: u32, sigma: 
 
 /// Compute vector-matrix product: v = L^T * M
 /// Treats coefficients as a 2^nu x 2^sigma matrix.
+/// Parallelizable version: each column is independent.
 fn computeVectorMatrixProduct(comptime F: type, evals: []const F, left_vec: []const F, nu: u32, sigma: u32, allocator: Allocator) ![]F {
     const num_cols = @as(usize, 1) << @intCast(sigma);
     const num_rows = @as(usize, 1) << @intCast(nu);
 
     const result = try allocator.alloc(F, num_cols);
-    @memset(result, F.zero());
 
-    // For each column j: v[j] = sum_i left_vec[i] * M[i][j]
-    for (0..num_rows) |row| {
-        if (row >= left_vec.len) break;
-        const coeff = left_vec[row];
+    const Ctx = struct {
+        evals_ptr: []const F,
+        left_ptr: []const F,
+        out: []F,
+        n_cols: usize,
+        n_rows: usize,
+        left_len: usize,
+        evals_len: usize,
+    };
+    const ctx = Ctx{
+        .evals_ptr = evals,
+        .left_ptr = left_vec,
+        .out = result,
+        .n_cols = num_cols,
+        .n_rows = num_rows,
+        .left_len = left_vec.len,
+        .evals_len = evals.len,
+    };
 
-        for (0..num_cols) |col| {
-            const idx = row * num_cols + col;
-            if (idx < evals.len) {
-                result[col] = result[col].add(coeff.mul(evals[idx]));
+    const computeCol = struct {
+        fn f(c: Ctx, col: usize) void {
+            var acc = F.zero();
+            for (0..c.n_rows) |row| {
+                if (row >= c.left_len) break;
+                const idx = row * c.n_cols + col;
+                if (idx < c.evals_len) {
+                    acc = acc.add(c.left_ptr[row].mul(c.evals_ptr[idx]));
+                }
             }
+            c.out[col] = acc;
         }
+    }.f;
+
+    if (ThreadPool.getPool()) |pool| {
+        pool.parallelFor(num_cols, ctx, computeCol);
+    } else {
+        for (0..num_cols) |col| computeCol(ctx, col);
     }
 
     return result;
@@ -758,8 +784,8 @@ fn multiPairG1G2WithPool(g1_vec: []const G1Point, g2_vec: []const G2Point, tp: ?
         fn map(c: Ctx, start: usize, end: usize) pairing.Fp12 {
             const chunk_len = end - start;
             // Convert G1 points to Fp for batched Miller loop
-            var stack_g1: [64]G1PointFp = undefined;
-            const use_heap = chunk_len > 64;
+            var stack_g1: [256]G1PointFp = undefined;
+            const use_heap = chunk_len > 256;
             var heap_g1: ?[]G1PointFp = null;
             defer if (heap_g1) |h| std.heap.page_allocator.free(h);
 
@@ -804,7 +830,6 @@ fn multiPairG1G2WithPool(g1_vec: []const G1Point, g2_vec: []const G2Point, tp: ?
     else
         mapFn(ctx, 0, n);
 
-    if (miller_acc.eql(pairing.Fp12.one())) return GT.one();
     return pairing.finalExponentiation(miller_acc);
 }
 
@@ -819,8 +844,8 @@ fn multiPairG1G2Prepared(g1_vec: []const G1Point, g2_prep: []const G2Prepared, t
     const mapFn = struct {
         fn map(c: Ctx, start: usize, end: usize) pairing.Fp12 {
             const chunk_len = end - start;
-            var stack_g1: [64]G1PointFp = undefined;
-            const use_heap = chunk_len > 64;
+            var stack_g1: [256]G1PointFp = undefined;
+            const use_heap = chunk_len > 256;
             var heap_g1: ?[]G1PointFp = null;
             defer if (heap_g1) |h| std.heap.page_allocator.free(h);
 
@@ -864,7 +889,6 @@ fn multiPairG1G2Prepared(g1_vec: []const G1Point, g2_prep: []const G2Prepared, t
     else
         mapFn(ctx, 0, n);
 
-    if (miller_acc.eql(pairing.Fp12.one())) return GT.one();
     return pairing.finalExponentiation(miller_acc);
 }
 
@@ -879,8 +903,8 @@ fn multiPairG1G2PreparedAffine(g1_vec: []const G1Point, g2_affine: []const G2Pre
     const mapFn = struct {
         fn map(c: Ctx, start: usize, end: usize) pairing.Fp12 {
             const chunk_len = end - start;
-            var stack_g1: [64]G1PointFp = undefined;
-            const use_heap = chunk_len > 64;
+            var stack_g1: [256]G1PointFp = undefined;
+            const use_heap = chunk_len > 256;
             var heap_g1: ?[]G1PointFp = null;
             defer if (heap_g1) |h| std.heap.page_allocator.free(h);
 
@@ -924,7 +948,6 @@ fn multiPairG1G2PreparedAffine(g1_vec: []const G1Point, g2_affine: []const G2Pre
     else
         mapFn(ctx, 0, n);
 
-    if (miller_acc.eql(pairing.Fp12.one())) return GT.one();
     return pairing.finalExponentiation(miller_acc);
 }
 
@@ -982,8 +1005,8 @@ pub fn multiPairBatched(comptime N: comptime_int, groups: [N]PairGroup, tp: ?*Th
                 const local_lo = lo - group_start;
 
                 // Convert G1 points to Fp and batch Miller loop
-                var stack_g1: [64]G1PointFp = undefined;
-                const use_heap = chunk_len > 64;
+                var stack_g1: [256]G1PointFp = undefined;
+                const use_heap = chunk_len > 256;
                 var heap_g1: ?[]G1PointFp = null;
                 defer if (heap_g1) |h| std.heap.page_allocator.free(h);
 
@@ -1728,8 +1751,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     if (chunk_len == 0) return pairing.Fp12.one();
 
                     // Phase 1: compute all MSM results for rows in chunk
-                    var stack_g1: [64]G1PointFp = undefined;
-                    const use_heap = chunk_len > 64;
+                    var stack_g1: [256]G1PointFp = undefined;
+                    const use_heap = chunk_len > 256;
                     var heap_g1: ?[]G1PointFp = null;
                     defer if (heap_g1) |h| std.heap.page_allocator.free(h);
 
@@ -1790,8 +1813,6 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             else
                 mapFn(ctx, 0, num_rows);
 
-            // Check if any non-trivial contribution
-            if (miller_acc.isOne()) return GT.one();
             return pairing.finalExponentiation(miller_acc);
         }
 
@@ -1990,8 +2011,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     const chunk_len = @min(end, c.row_comms.len) - @min(start, c.row_comms.len);
                     if (chunk_len == 0) return pairing.Fp12.one();
 
-                    var stack_g1: [64]G1PointFp = undefined;
-                    const use_heap = chunk_len > 64;
+                    var stack_g1: [256]G1PointFp = undefined;
+                    const use_heap = chunk_len > 256;
                     var heap_g1: ?[]G1PointFp = null;
                     defer if (heap_g1) |h| std.heap.page_allocator.free(h);
 
@@ -2048,14 +2069,14 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             else
                 mapFn(ctx, 0, num_rows);
 
-            if (miller_acc.isOne()) return GT.one();
             return pairing.finalExponentiation(miller_acc);
         }
 
         /// Combine row commitment hints from multiple polynomials using homomorphic combination.
         /// Given row commitments for each polynomial and gamma coefficients, computes:
         ///   joint_rows[i] = Σ_k γ^k · rows_k[i]
-        /// This avoids recomputing row commitments for the joint polynomial from scratch.
+        /// Uses per-row MSM (Pippenger) instead of individual GLV scalar muls for better
+        /// performance when num_hints is large (typically ~40 polynomials).
         pub fn combineRowCommitmentHints(
             hints: []const []const G1Point,
             coeffs: []const F,
@@ -2066,28 +2087,51 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const result = try allocator.alloc(G1Point, num_rows);
             errdefer allocator.free(result);
 
-            const G1Proj = msm.ProjectivePoint(Fp);
+            const num_hints = hints.len;
             const Ctx = struct {
                 hints_ptr: []const []const G1Point,
                 coeffs_ptr: []const F,
                 out: []G1Point,
+                n_hints: usize,
             };
             const ctx = Ctx{
                 .hints_ptr = hints,
                 .coeffs_ptr = coeffs,
                 .out = result,
+                .n_hints = num_hints,
             };
 
             const combineFn = struct {
                 fn f(c: Ctx, row: usize) void {
-                    var acc = G1Proj.identity();
-                    for (0..c.hints_ptr.len) |k| {
+                    // Collect non-identity bases and scalars for this row
+                    var stack_bases: [64]G1Point = undefined;
+                    var stack_scalars: [64]F = undefined;
+                    var count: usize = 0;
+                    for (0..c.n_hints) |k| {
                         if (row < c.hints_ptr[k].len and !c.hints_ptr[k][row].infinity) {
-                            const scaled = glv.glvScalarMulG1(c.hints_ptr[k][row], c.coeffs_ptr[k]);
-                            acc = acc.add(scaled);
+                            if (count < 64) {
+                                stack_bases[count] = c.hints_ptr[k][row];
+                                stack_scalars[count] = c.coeffs_ptr[k];
+                                count += 1;
+                            } else {
+                                // Overflow: fall back to GLV accumulation for remaining
+                                const G1Proj = msm.ProjectivePoint(Fp);
+                                var acc = G1Proj.fromAffine(msm.MSM(F, Fp).compute(stack_bases[0..count], stack_scalars[0..count]));
+                                for (k..c.n_hints) |k2| {
+                                    if (row < c.hints_ptr[k2].len and !c.hints_ptr[k2][row].infinity) {
+                                        acc = acc.add(glv.glvScalarMulG1(c.hints_ptr[k2][row], c.coeffs_ptr[k2]));
+                                    }
+                                }
+                                c.out[row] = acc.toAffine();
+                                return;
+                            }
                         }
                     }
-                    c.out[row] = acc.toAffine();
+                    if (count == 0) {
+                        c.out[row] = G1Point.identity();
+                    } else {
+                        c.out[row] = msm.MSM(F, Fp).compute(stack_bases[0..count], stack_scalars[0..count]);
+                    }
                 }
             }.f;
 
@@ -2626,18 +2670,17 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const num_rounds = @max(nu, sigma);
 
             // Step 1: Get or compute row commitments
-            const row_commitments = if (row_commitments_opt) |rc| blk: {
-                const owned = try allocator.alloc(G1Point, rc.len);
-                @memcpy(owned, rc);
-                break :blk owned;
-            } else blk: {
+            const row_commitments = if (row_commitments_opt) |rc|
+                rc
+            else blk: {
                 if (tp) |pool| {
                     break :blk try computeRowCommitmentsWithColsParallel(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator, pool);
                 } else {
                     break :blk try computeRowCommitmentsWithCols(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator);
                 }
             };
-            defer allocator.free(row_commitments);
+            // Only free if we allocated (not passed in)
+            defer if (row_commitments_opt == null) allocator.free(row_commitments);
 
             // Step 2: Compute evaluation vectors
             const left_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(nu));
@@ -2651,29 +2694,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const v_vec = try computeVectorMatrixProduct(F, evals, left_vec, nu, sigma, allocator);
             defer allocator.free(v_vec);
 
-            // Pad row_commitments to match v_vec length (2^sigma)
-            const v_vec_len = @as(usize, 1) << @intCast(sigma);
-            const padded_row_commitments = blk: {
-                if (row_commitments.len >= v_vec_len) {
-                    const padded = try allocator.alloc(G1Point, v_vec_len);
-                    @memcpy(padded, row_commitments[0..v_vec_len]);
-                    break :blk padded;
-                } else {
-                    const padded = try allocator.alloc(G1Point, v_vec_len);
-                    @memcpy(padded[0..row_commitments.len], row_commitments);
-                    for (row_commitments.len..v_vec_len) |i| {
-                        padded[i] = G1Point.identity();
-                    }
-                    break :blk padded;
-                }
-            };
-            defer allocator.free(padded_row_commitments);
+            // Step 4: Build v1_work (padded row_commitments) — single allocation, used
+            // for VMV message, then mutated in-place during IPA rounds.
+            const vec_len = @as(usize, 1) << @intCast(sigma);
+            const v1_work = try allocator.alloc(G1Point, vec_len);
+            defer allocator.free(v1_work);
+            const rc_copy_len = @min(row_commitments.len, vec_len);
+            @memcpy(v1_work[0..rc_copy_len], row_commitments[0..rc_copy_len]);
+            for (rc_copy_len..vec_len) |i| {
+                v1_work[i] = G1Point.identity();
+            }
 
-            // Step 4: Compute VMV message
-            // C = e(MSM(row_comms, v_vec), Γ₂₀)
-            // Upstream uses g2_fin = setup.g2_vec[0] (NOT h2)
+            // Compute VMV message using v1_work directly (no extra padded_row_commitments copy)
+            // C = e(MSM(v1_work, v_vec), Γ₂₀)
             const g2_fin = params.g2_vec[0];
-            const t_vec_v = msm.MSM(F, Fp).computeWithPool(padded_row_commitments, v_vec, tp);
+            const t_vec_v = msm.MSM(F, Fp).computeWithPool(v1_work, v_vec, tp);
             const t_vec_v_fp = G1PointFp{
                 .x = t_vec_v.x,
                 .y = t_vec_v.y,
@@ -2692,21 +2727,12 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const d2 = pairing.pairingFp(gamma1_v_fp, g2_fin);
 
             // e1 = MSM(row_commitments, left_vec)
-            // row_commitments may have different length than left_vec (2^nu)
-            // Pad or truncate to match
             const left_vec_len = @as(usize, 1) << @intCast(nu);
-            const e1: G1Point = blk: {
-                if (row_commitments.len >= left_vec_len) {
-                    break :blk msm.MSM(F, Fp).computeWithPool(row_commitments[0..left_vec_len], left_vec, tp);
-                } else {
-                    const padded = try allocator.alloc(G1Point, left_vec_len);
-                    defer allocator.free(padded);
-                    @memcpy(padded[0..row_commitments.len], row_commitments);
-                    for (row_commitments.len..left_vec_len) |i| {
-                        padded[i] = G1Point.identity();
-                    }
-                    break :blk msm.MSM(F, Fp).computeWithPool(padded, left_vec, tp);
-                }
+            const e1: G1Point = if (row_commitments.len >= left_vec_len)
+                msm.MSM(F, Fp).computeWithPool(row_commitments[0..left_vec_len], left_vec, tp)
+            else blk: {
+                // Use v1_work[0..left_vec_len] which is already padded
+                break :blk msm.MSM(F, Fp).computeWithPool(v1_work[0..left_vec_len], left_vec, tp);
             };
 
             const vmv_message = VMVMessage{
@@ -2716,22 +2742,9 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             };
 
             // Append VMV message to transcript
-            // NOTE: Dory uses JoltToDoryTranscript which calls transcript.append_bytes()
-            // directly (no reversal), unlike appendGT/appendG1Compressed which reverse.
-            // We must match this: serialize_compressed → append_bytes (no reversal).
             doryAppendGT(transcript, vmv_message.c);
             doryAppendGT(transcript, vmv_message.d2);
             doryAppendG1(transcript, vmv_message.e1);
-
-
-            // Initialize working arrays
-            const vec_len = @as(usize, 1) << @intCast(sigma);
-            const v1_work = try allocator.alloc(G1Point, vec_len);
-            defer allocator.free(v1_work);
-            @memcpy(v1_work[0..padded_row_commitments.len], padded_row_commitments);
-            for (padded_row_commitments.len..vec_len) |i| {
-                v1_work[i] = G1Point.identity();
-            }
 
             // v2 = v_vec * Γ₂₀ (each entry is v_vec[i] * g2_vec[0])
             // Upstream: let v2 = M2::fixed_base_vector_scalar_mul(g2_fin, &v_vec)
@@ -2828,35 +2841,42 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             while (round < num_rounds) : (round += 1) {
                 const n2 = current_len / 2;
 
-                // Compute first reduce message
-                const d1_left = if (params.g2_prepared_affine) |affine|
-                    multiPairG1G2PreparedAffine(v1_work[0..n2], affine[0..n2], tp)
-                else if (params.g2_prepared) |prep|
-                    multiPairG1G2Prepared(v1_work[0..n2], prep[0..n2], tp)
-                else
-                    multiPairG1G2WithPool(v1_work[0..n2], params.g2_vec[0..n2], tp);
-                const d1_right = if (params.g2_prepared_affine) |affine|
-                    multiPairG1G2PreparedAffine(v1_work[n2..current_len], affine[0..n2], tp)
-                else if (params.g2_prepared) |prep|
-                    multiPairG1G2Prepared(v1_work[n2..current_len], prep[0..n2], tp)
-                else
-                    multiPairG1G2WithPool(v1_work[n2..current_len], params.g2_vec[0..n2], tp);
-                const d2_left, const d2_right = if (round == 0) blk: {
-                    // First-round optimization: v2_work[i] = g2_fin * v_vec[i]
-                    // So multiPair(g1[0..n2], v2[0..n2]) = e(MSM(g1[0..n2], v_vec[0..n2]), g2_fin)
+                // Compute first reduce message: D1L, D1R, D2L, D2R
+                // Batch all 4 pairings together for shared parallelism and fewer finalExps.
+                // First round uses MSM+pair optimization for D2 (v2 = scalars · g2_fin).
+                var d1_left: GT = undefined;
+                var d1_right: GT = undefined;
+                var d2_left: GT = undefined;
+                var d2_right: GT = undefined;
+                if (round == 0) {
+                    // D1L/D1R: batched multi-pairing
+                    const d1_batch = multiPairBatched(2, .{
+                        PairGroup{ .g1 = v1_work[0..n2], .g2 = params.g2_vec[0..n2] },
+                        PairGroup{ .g1 = v1_work[n2..current_len], .g2 = params.g2_vec[0..n2] },
+                    }, tp);
+                    d1_left = d1_batch[0];
+                    d1_right = d1_batch[1];
+                    // D2L/D2R: first-round MSM+pair optimization
                     std.debug.assert(v_vec.len >= current_len);
                     const sum_left = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], tp);
                     const sum_right = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], tp);
                     const sum_left_fp = G1PointFp{ .x = sum_left.x, .y = sum_left.y, .infinity = sum_left.infinity };
                     const sum_right_fp = G1PointFp{ .x = sum_right.x, .y = sum_right.y, .infinity = sum_right.infinity };
-                    break :blk .{ pairing.pairingFp(sum_left_fp, g2_fin), pairing.pairingFp(sum_right_fp, g2_fin) };
-                } else blk: {
-                    const d2_batch = multiPairBatched(2, .{
+                    d2_left = pairing.pairingFp(sum_left_fp, g2_fin);
+                    d2_right = pairing.pairingFp(sum_right_fp, g2_fin);
+                } else {
+                    // All 4 pairings batched together
+                    const batch = multiPairBatched(4, .{
+                        PairGroup{ .g1 = v1_work[0..n2], .g2 = params.g2_vec[0..n2] },
+                        PairGroup{ .g1 = v1_work[n2..current_len], .g2 = params.g2_vec[0..n2] },
                         PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_work[0..n2] },
                         PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_work[n2..current_len] },
                     }, tp);
-                    break :blk .{ d2_batch[0], d2_batch[1] };
-                };
+                    d1_left = batch[0];
+                    d1_right = batch[1];
+                    d2_left = batch[2];
+                    d2_right = batch[3];
+                }
                 const e1_beta, const e2_beta = if (tp) |pool| blk: {
                     const EBetaCtx = struct {
                         g1: []const G1Point,

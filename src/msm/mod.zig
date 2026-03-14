@@ -221,7 +221,8 @@ pub fn ProjectivePoint(comptime F: type) type {
             const eight_C = four_C.add(four_C);
             const Y3 = E.mul(D.sub(X3)).sub(eight_C);
             // Z3 = 2*Y*Z
-            const Z3 = self.y.mul(self.z).add(self.y.mul(self.z));
+            const yz = self.y.mul(self.z);
+            const Z3 = yz.add(yz);
 
             return .{
                 .x = X3,
@@ -481,8 +482,11 @@ pub fn BucketPoint(comptime F: type) type {
 
         pub fn toAffine(self: Self) AffinePoint(F) {
             if (self.empty) return AffinePoint(F).identity();
-            const zz_inv = self.zz.inverse() orelse return AffinePoint(F).identity();
-            const zzz_inv = self.zzz.inverse() orelse return AffinePoint(F).identity();
+            // Batch inverse trick: 1 inversion + 3 muls instead of 2 inversions
+            const product = self.zz.mul(self.zzz);
+            const product_inv = product.inverse() orelse return AffinePoint(F).identity();
+            const zz_inv = product_inv.mul(self.zzz);
+            const zzz_inv = product_inv.mul(self.zz);
             return AffinePoint(F).fromCoords(
                 self.x.mul(zz_inv),
                 self.y.mul(zzz_inv),
@@ -637,21 +641,9 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                 break :blk heap_buckets.?;
             };
 
-            var final_result = Projective.identity();
-
-            // Process windows from most significant to least significant
-            var window_idx: usize = num_windows;
-            while (window_idx > 0) {
-                window_idx -= 1;
-
-                // Double the result c times
-                if (!final_result.isIdentity()) {
-                    var k: usize = 0;
-                    while (k < c) : (k += 1) {
-                        final_result = final_result.double();
-                    }
-                }
-
+            // Phase 1: Compute all window sums in XYZZ form
+            var window_sums: [MAX_DIGITS]Bucket = undefined;
+            for (0..num_windows) |wi| {
                 // Reset buckets
                 for (0..num_buckets) |j| {
                     buckets_slice[j] = Bucket.identity();
@@ -661,7 +653,7 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                 for (bases, 0..) |base, idx| {
                     if (base.isIdentity()) continue;
 
-                    const digit = all_digits[idx][window_idx];
+                    const digit = all_digits[idx][wi];
                     if (digit > 0) {
                         const bidx: usize = @intCast(digit - 1);
                         buckets_slice[bidx] = buckets_slice[bidx].addAffine(base);
@@ -682,7 +674,83 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                     window_sum = window_sum.add(running_sum);
                 }
 
-                final_result = final_result.add(window_sum.toProjective());
+                window_sums[wi] = window_sum;
+            }
+
+            // Phase 2: Batch convert window sums to affine using Montgomery's trick
+            // (1 inversion + O(n) muls instead of 2n inversions)
+            var window_sums_affine: [MAX_DIGITS]Affine = undefined;
+            var products: [MAX_DIGITS]G = undefined; // zz * zzz per non-empty window
+            var non_empty_indices: [MAX_DIGITS]usize = undefined;
+            var num_non_empty: usize = 0;
+
+            for (0..num_windows) |wi| {
+                if (window_sums[wi].empty) {
+                    window_sums_affine[wi] = Affine.identity();
+                } else {
+                    products[num_non_empty] = window_sums[wi].zz.mul(window_sums[wi].zzz);
+                    non_empty_indices[num_non_empty] = wi;
+                    num_non_empty += 1;
+                }
+            }
+
+            if (num_non_empty > 0) {
+                // Build prefix products
+                var prefix: [MAX_DIGITS]G = undefined;
+                prefix[0] = products[0];
+                for (1..num_non_empty) |i| {
+                    prefix[i] = prefix[i - 1].mul(products[i]);
+                }
+
+                // Single inversion of the total product
+                var running_inv = prefix[num_non_empty - 1].inverse() orelse G.one();
+
+                // Backtrack to recover individual inverses
+                var i = num_non_empty;
+                while (i > 1) {
+                    i -= 1;
+                    const product_inv = prefix[i - 1].mul(running_inv);
+                    running_inv = running_inv.mul(products[i]);
+                    const wi = non_empty_indices[i];
+                    const zz_inv = product_inv.mul(window_sums[wi].zzz);
+                    const zzz_inv = product_inv.mul(window_sums[wi].zz);
+                    window_sums_affine[wi] = Affine.fromCoords(
+                        window_sums[wi].x.mul(zz_inv),
+                        window_sums[wi].y.mul(zzz_inv),
+                    );
+                }
+                // Handle first element
+                {
+                    const wi = non_empty_indices[0];
+                    const zz_inv = running_inv.mul(window_sums[wi].zzz);
+                    const zzz_inv = running_inv.mul(window_sums[wi].zz);
+                    window_sums_affine[wi] = Affine.fromCoords(
+                        window_sums[wi].x.mul(zz_inv),
+                        window_sums[wi].y.mul(zzz_inv),
+                    );
+                }
+            }
+
+            // Phase 3: Combine windows (MSB to LSB) using addAffine (cheaper than generic add)
+            var final_result = Projective.identity();
+            var window_idx: usize = num_windows;
+            while (window_idx > 0) {
+                window_idx -= 1;
+
+                if (!final_result.isIdentity()) {
+                    var k: usize = 0;
+                    while (k < c) : (k += 1) {
+                        final_result = final_result.double();
+                    }
+                }
+
+                if (!window_sums_affine[window_idx].isIdentity()) {
+                    if (final_result.isIdentity()) {
+                        final_result = Projective.fromAffine(window_sums_affine[window_idx]);
+                    } else {
+                        final_result = final_result.addAffine(window_sums_affine[window_idx]);
+                    }
+                }
             }
 
             return final_result.toAffine();

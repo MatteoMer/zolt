@@ -2716,24 +2716,57 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             };
             const c = pairing.pairingFp(t_vec_v_fp, g2_fin);
 
-            // D₂ = e(MSM(Γ₁[..sigma], v_vec), Γ₂₀)
+            // D₂ and e1 are independent of each other and of C — compute in parallel
             const num_cols = @as(usize, 1) << @intCast(sigma);
-            const gamma1_v = msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], tp);
+            const left_vec_len = @as(usize, 1) << @intCast(nu);
+            const e1_bases = if (row_commitments.len >= left_vec_len)
+                row_commitments[0..left_vec_len]
+            else
+                v1_work[0..left_vec_len]; // already padded
+
+            const gamma1_v, const e1 = if (tp) |pool| blk: {
+                const VmvCtx = struct {
+                    g1: []const G1Point,
+                    v: []const F,
+                    e1b: []const G1Point,
+                    lv: []const F,
+                    nc: usize,
+                };
+                const vmv_ctx = VmvCtx{
+                    .g1 = params.g1_vec,
+                    .v = v_vec,
+                    .e1b = e1_bases,
+                    .lv = left_vec,
+                    .nc = num_cols,
+                };
+                break :blk pool.join(
+                    G1Point,
+                    G1Point,
+                    vmv_ctx,
+                    struct {
+                        fn f(cx: VmvCtx) G1Point {
+                            return msm.MSM(F, Fp).computeWithPool(cx.g1[0..cx.nc], cx.v[0..cx.nc], ThreadPool.getPool());
+                        }
+                    }.f,
+                    vmv_ctx,
+                    struct {
+                        fn f(cx: VmvCtx) G1Point {
+                            return msm.MSM(F, Fp).computeWithPool(cx.e1b, cx.lv, ThreadPool.getPool());
+                        }
+                    }.f,
+                );
+            } else .{
+                msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], null),
+                msm.MSM(F, Fp).computeWithPool(e1_bases, left_vec, null),
+            };
+
+            // D₂ = e(gamma1_v, Γ₂₀)
             const gamma1_v_fp = G1PointFp{
                 .x = gamma1_v.x,
                 .y = gamma1_v.y,
                 .infinity = gamma1_v.infinity,
             };
             const d2 = pairing.pairingFp(gamma1_v_fp, g2_fin);
-
-            // e1 = MSM(row_commitments, left_vec)
-            const left_vec_len = @as(usize, 1) << @intCast(nu);
-            const e1: G1Point = if (row_commitments.len >= left_vec_len)
-                msm.MSM(F, Fp).computeWithPool(row_commitments[0..left_vec_len], left_vec, tp)
-            else blk: {
-                // Use v1_work[0..left_vec_len] which is already padded
-                break :blk msm.MSM(F, Fp).computeWithPool(v1_work[0..left_vec_len], left_vec, tp);
-            };
 
             const vmv_message = VMVMessage{
                 .c = c,

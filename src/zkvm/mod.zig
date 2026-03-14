@@ -1043,8 +1043,29 @@ pub fn JoltProver(comptime F: type) type {
                     const gamma_ram = gamma_powers[0];
                     const gamma_rd = gamma_powers[1];
                     const dense_len = @min(@min(ram_inc_wp.len, rd_inc_wp.len), total_poly_size);
-                    for (0..dense_len) |j| {
-                        joint_poly[j] = ram_inc_wp[j].mul(gamma_ram).add(rd_inc_wp[j].mul(gamma_rd));
+                    if (self.thread_pool) |pool| {
+                        const DenseCtx = struct {
+                            jp: []F,
+                            ram: []const F,
+                            rd: []const F,
+                            gr: F,
+                            gd: F,
+                        };
+                        pool.parallelFor(dense_len, DenseCtx{
+                            .jp = joint_poly,
+                            .ram = ram_inc_wp,
+                            .rd = rd_inc_wp,
+                            .gr = gamma_ram,
+                            .gd = gamma_rd,
+                        }, struct {
+                            fn f(cx: DenseCtx, j: usize) void {
+                                cx.jp[j] = cx.ram[j].mul(cx.gr).add(cx.rd[j].mul(cx.gd));
+                            }
+                        }.f);
+                    } else {
+                        for (0..dense_len) |j| {
+                            joint_poly[j] = ram_inc_wp[j].mul(gamma_ram).add(rd_inc_wp[j].mul(gamma_rd));
+                        }
                     }
                 }
 

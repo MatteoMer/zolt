@@ -1921,9 +1921,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 }
                 return .{ .az = az_sum, .bz = bz_sum };
             } else {
-                // Second group: use Az from compact (small integers, always correct)
-                // but reconstruct Bz from field witnesses for correctness
-                // (i128 bz_second values can have overflow issues during conversion)
+                // Second group
                 const g2_size = comptime @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
                 var az_sum = F.zero();
                 inline for (0..g2_size) |i| {
@@ -1937,17 +1935,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         az_sum = az_sum.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
                     }
                 }
-                // For Bz, we need field witnesses — return az only, caller handles bz
-                // Actually, we can't easily get field witnesses here. Convert i128 carefully.
                 var bz_sum = F.zero();
                 inline for (0..g2_size) |i| {
                     const w = self.lagrange_evals_r0[i];
                     const bz_i = cw.bz_second[i];
                     if (bz_i != 0) {
-                        const bz_f = if (bz_i >= 0)
-                            F.fromU128(@as(u128, @intCast(bz_i)))
-                        else
-                            F.fromU128(@as(u128, @intCast(-bz_i))).neg();
+                        const bz_f = evaluators.fieldFromI128(F, bz_i);
                         bz_sum = bz_sum.add(w.mul(bz_f));
                     }
                 }

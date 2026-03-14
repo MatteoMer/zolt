@@ -3440,19 +3440,6 @@ fn BooleanityProver(comptime F: type) type {
             dbg(", lazy_num_tables={}\n", .{self.lazy_num_tables});
         }
 
-        /// Get opening claims: ra_i(r_addr_bound, r_cycle_bound)
-        /// After all rounds, H[i][0] = eq(r_addr_bound, chunk_i(r_cycle_bound)) = ra_i(r_addr_bound, r_cycle_bound).
-        pub fn getOpeningClaims(self: *const Self, allocator: std.mem.Allocator) ![]F {
-            const claims = try allocator.alloc(F, self.N);
-            if (self.H) |ht| {
-                for (0..self.N) |i| {
-                    claims[i] = ht[i][0];
-                }
-            } else {
-                @memset(claims, F.zero());
-            }
-            return claims;
-        }
     };
 }
 

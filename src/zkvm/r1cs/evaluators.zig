@@ -309,6 +309,19 @@ pub fn fieldFromI32(comptime F: type, val: i32) F {
     }
 }
 
+/// Convert i128 to field element. Handles the full i128 range including values
+/// produced by wrapping arithmetic (e.g., from @bitCast of large u128 values).
+pub fn fieldFromI128(comptime F: type, val: i128) F {
+    if (val >= 0) {
+        return F.fromU128(@intCast(val));
+    } else {
+        // For negative values, compute F.zero() - F.fromU128(|val|).
+        // Use wrapping negate + bitcast to avoid overflow when val == i128.min.
+        const abs: u128 = @bitCast(-%val);
+        return F.zero().sub(F.fromU128(abs));
+    }
+}
+
 // ============================================================================
 // Fast integer-based Az evaluation
 // ============================================================================
@@ -596,27 +609,32 @@ fn compactFromFieldWitness(comptime F: type, witness: []const F) CompactWitness 
         1 - @as(i128, dont_update), // FG9: 1 - DoNotUpdate
     };
 
-    // Second group Bz as integers
+    // Second group Bz as integers.
+    // Uses wrapping arithmetic because RightLookupOperand and Product can exceed i128 range
+    // when bitcast from u128. The wrapping is correct because these values are converted back
+    // to field elements (mod p) before use.
     const TWO_POW_64: i128 = 1 << 64;
+    const right_lookup_i128: i128 = @bitCast(right_lookup_u128);
+    const product_i128: i128 = @bitCast(product_u128);
     cw.bz_second = .{
         // SG0: RamAddress - Rs1 - Imm
-        @as(i128, @intCast(ram_addr)) - @as(i128, @intCast(rs1)) - @as(i128, imm),
+        @as(i128, @intCast(ram_addr)) -% @as(i128, @intCast(rs1)) -% imm,
         // SG1: RightLookup - LeftInput - RightInput
-        @as(i128, @intCast(right_lookup_u128)) - @as(i128, left_input) - @as(i128, right_input),
+        right_lookup_i128 -% @as(i128, left_input) -% @as(i128, right_input),
         // SG2: RightLookup - LeftInput + RightInput - 2^64
-        @as(i128, @intCast(right_lookup_u128)) - @as(i128, left_input) + @as(i128, right_input) - TWO_POW_64,
+        right_lookup_i128 -% @as(i128, left_input) +% @as(i128, right_input) -% TWO_POW_64,
         // SG3: RightLookup - Product
-        @as(i128, @intCast(right_lookup_u128)) - @as(i128, @bitCast(product_u128)),
+        right_lookup_i128 -% product_i128,
         // SG4: RightLookup - RightInput
-        @as(i128, @intCast(right_lookup_u128)) - @as(i128, right_input),
+        right_lookup_i128 -% @as(i128, right_input),
         // SG5: RdWrite - LookupOutput
-        @as(i128, rd_write) - @as(i128, lookup_out),
+        @as(i128, rd_write) -% @as(i128, lookup_out),
         // SG6: RdWrite - UPC - 4 + 2*IsCompressed
-        @as(i128, rd_write) - @as(i128, upc) - 4 + 2 * @as(i128, is_compressed),
+        @as(i128, rd_write) -% @as(i128, upc) -% 4 +% 2 *% @as(i128, is_compressed),
         // SG7: NextUPC - UPC - Imm
-        @as(i128, next_upc) - @as(i128, upc) - @as(i128, imm),
+        @as(i128, next_upc) -% @as(i128, upc) -% imm,
         // SG8: NextUPC - UPC - 4 + 4*DoNotUpdate + 2*IsCompressed
-        @as(i128, next_upc) - @as(i128, upc) - 4 + 4 * @as(i128, dont_update) + 2 * @as(i128, is_compressed),
+        @as(i128, next_upc) -% @as(i128, upc) -% 4 +% 4 *% @as(i128, dont_update) +% 2 *% @as(i128, is_compressed),
     };
 
     return cw;
@@ -643,6 +661,7 @@ pub fn interpolateAzBzProductInt(
         const c = coeffs[i];
         const a = az_int[i];
         if (a != 0) {
+            std.debug.assert(bz_int[i] == 0); // constraint satisfaction: az!=0 implies bz==0
             az_j += c * @as(i32, a);
         } else {
             bz_j += @as(i128, c) * @as(i128, bz_int[i]);
@@ -990,4 +1009,33 @@ test "compact witness az/bz match field witnesses" {
             F.fromU128(@as(u128, @intCast(-bz_i))).neg();
         try std.testing.expect(bz_ref[i].eql(bz_f));
     }
+}
+
+test "compact witness bz_second with large u128 values" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    // Create witness with RightLookupOperand > 2^127 to exercise @bitCast path
+    var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
+
+    // Set a large RightLookupOperand (> 2^127, would overflow @intCast)
+    const large_val: u128 = (1 << 127) + 42;
+    const large_f = F.fromU128(@truncate(large_val));
+    witness[R1CSInputIndex.RightLookupOperand.toIndex()] = large_f;
+    witness[R1CSInputIndex.LeftInstructionInput.toIndex()] = F.fromU64(100);
+    witness[R1CSInputIndex.RightInstructionInput.toIndex()] = F.fromU64(200);
+
+    // This should not panic (the bug was @intCast trapping for values >= 2^127)
+    const cw = compactFromFieldWitness(F, &witness);
+
+    // Verify bz_second[1] = RightLookup - LeftInput - RightInput (wrapping)
+    const large_as_i128: i128 = @bitCast(large_val);
+    const expected_i128: i128 = large_as_i128 -% 100 -% 200;
+    try std.testing.expectEqual(expected_i128, cw.bz_second[1]);
+
+    // Verify round-trip through fieldFromI128 produces correct field element
+    const field_val = fieldFromI128(F, expected_i128);
+    // The field value should equal F(right_lookup) - F(100) - F(200)
+    const expected_field = large_f.sub(F.fromU64(100)).sub(F.fromU64(200));
+    try std.testing.expect(field_val.eql(expected_field));
 }

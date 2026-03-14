@@ -195,6 +195,7 @@ pub fn RaPolynomial(comptime F: type) type {
                     const F_10 = try allocator.alloc(F, K);
                     errdefer allocator.free(F_10);
                     const F_11 = try allocator.alloc(F, K);
+                    errdefer allocator.free(F_11);
 
                     for (0..K) |k| {
                         F_00[k] = one_minus_r.mul(s.F_0[k]);

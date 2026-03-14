@@ -3236,7 +3236,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
                 }
 
-
                 // Instance 2: LookupsReadRaf (136 rounds)
                 // Since lookups_num_rounds = max_num_rounds, this instance is always active
                 if (round < LOOKUPS_LOG_K) {
@@ -6501,7 +6500,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     continue; // Skip the rest of the loop (we handled everything)
                 }
             }
-
 
             // Debug: print final batched claim (this is output_claim from verifier's perspective)
             if (comptime debug_verbose) {

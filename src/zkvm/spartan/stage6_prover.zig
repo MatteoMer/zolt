@@ -2750,15 +2750,20 @@ fn BooleanityProver(comptime F: type) type {
 
         /// Get the opening claims from the final H state after all sumcheck rounds.
         /// H[i][0] gives ra_i(ρ_addr, ρ_cycle) after all bindings.
+        /// H tables are pre-scaled by γ^i, so we unscale via γ^{-i} = (γ^{-1})^i.
+        /// This uses 1 inversion + (N-1) muls instead of N inversions.
         pub fn getBooleanityClaims(self: *const Self, allocator: std.mem.Allocator) ![]F {
             const claims = try allocator.alloc(F, self.N);
             dbg("[BOOL_CLAIMS] phase2_len={}, round={}, N={}\n", .{ self.phase2_len, self.round, self.N });
             if (self.H) |ht| {
+                // gamma_powers[1] = γ, so γ^{-1} is a single inversion
+                const gamma_inv = self.gamma_powers[1].inverse().?;
+                var gamma_inv_i = F.one(); // γ^{-0} = 1
+
                 var all_same_claims = true;
                 for (0..self.N) |i| {
-                    // H[i] is pre-scaled by γ^i, so unscale to get the actual ra value
-                    const gamma_inv = self.gamma_powers[i].inverse().?;
-                    claims[i] = ht[i][0].mul(gamma_inv);
+                    claims[i] = ht[i][0].mul(gamma_inv_i);
+                    gamma_inv_i = gamma_inv_i.mul(gamma_inv);
                     if (i < 5 or i >= self.N - 5 or (i >= 28 and i < 34)) {
                         const hbe = claims[i].toBytesBE();
                         dbg("[BOOL_CLAIMS] H[{}][0]_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
@@ -6367,8 +6372,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             var bytecode_addr_challenges = try self.allocator.alloc(F, bytecode_log_k);
             defer self.allocator.free(bytecode_addr_challenges);
 
-            // Per-instance timing accumulators (nanoseconds)
-
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
 
@@ -7098,14 +7101,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     try inc_prover.bindChallenge(challenge);
                 }
 
-
                 // NOTE: Instance claims for inactive instances are NOT halved here.
                 // In Zolt, instance_claims starts at the UNSCALED input_claims (not 2^offset-scaled),
                 // and the inactive round contributions are computed directly from input_claims with
                 // the correct power-of-2 scaling. When an instance first becomes active,
                 // instance_claims[i] = input_claims[i] = the correct unscaled claim.
             }
-
 
             // Debug: print final instance claims after sumcheck (ALWAYS ON)
             {

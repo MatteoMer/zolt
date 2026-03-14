@@ -870,3 +870,124 @@ test "fast second-group Bz direct matches field Bz" {
         try std.testing.expect(bz_field.values[i].eql(bz_direct[i]));
     }
 }
+
+test "interpolateAzBzProductInt matches brute force for satisfied constraints" {
+    const univariate_skip = @import("univariate_skip.zig");
+
+    // Simulate a satisfied constraint: when az[i] != 0, bz[i] must be 0.
+    // This is the invariant that interpolateAzBzProductInt exploits.
+    const az = [FIRST_GROUP_SIZE]i8{ 1, 0, 0, -1, 0, 0, 0, 2, 0, 0 };
+    const bz = [FIRST_GROUP_SIZE]i128{
+        0, // az[0]=1, so bz must be 0 (satisfied)
+        42, // az[1]=0, so bz can be non-zero
+        -100, // az[2]=0
+        0, // az[3]=-1, so bz must be 0 (satisfied)
+        999, // az[4]=0
+        -@as(i128, 0x7FFFFFFF_FFFFFFFF), // large negative
+        @as(i128, 0xFFFFFFFF_FFFFFFFE), // large positive
+        0, // az[7]=2, so bz must be 0 (satisfied)
+        0, // az[8]=0
+        12345, // az[9]=0
+    };
+
+    for (0..univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE) |j| {
+        const coeffs = &univariate_skip.COEFFS_PER_J[j];
+
+        // Brute-force: az_j = Σ c[i]*az[i], bz_j = Σ c[i]*bz[i], product = az_j * bz_j
+        var az_j_bf: i64 = 0;
+        var bz_j_bf: i128 = 0;
+        for (0..FIRST_GROUP_SIZE) |i| {
+            az_j_bf += @as(i64, coeffs[i]) * @as(i64, az[i]);
+            bz_j_bf += @as(i128, coeffs[i]) * bz[i];
+        }
+        const bf_product = @as(i128, az_j_bf) * bz_j_bf;
+
+        // Optimized path
+        const opt_product = interpolateAzBzProductInt(&az, &bz, coeffs);
+
+        // Must match because az[i]!=0 implies bz[i]==0
+        try std.testing.expectEqual(bf_product, opt_product);
+    }
+}
+
+test "interpolateAzBzProductInt matches field path for satisfied constraints" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+    const univariate_skip = @import("univariate_skip.zig");
+
+    // Same satisfied-constraint data, but compare against field-arithmetic path
+    const az = [FIRST_GROUP_SIZE]i8{ 0, 1, 0, 0, -1, 0, 0, 0, 3, 0 };
+    const bz_int = [FIRST_GROUP_SIZE]i128{
+        @as(i128, 0xFFFFFFFF_FFFFFFFE), // large value (az=0)
+        0, // az=1, bz must be 0
+        -55555, // az=0
+        @as(i128, 1) << 64, // 2^64 (az=0)
+        0, // az=-1, bz must be 0
+        42, // az=0
+        -1, // az=0
+        0, // az=0
+        0, // az=3, bz must be 0
+        999999, // az=0
+    };
+
+    // Convert bz_int to field values for the reference path
+    var bz_field: [FIRST_GROUP_SIZE]F = undefined;
+    for (0..FIRST_GROUP_SIZE) |i| {
+        bz_field[i] = if (bz_int[i] >= 0)
+            F.fromU128(@intCast(bz_int[i]))
+        else
+            F.fromU128(@intCast(-bz_int[i])).neg();
+    }
+
+    for (0..univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE) |j| {
+        const coeffs = &univariate_skip.COEFFS_PER_J[j];
+
+        // Field-based reference
+        const field_product = interpolateAzBzProduct(F, &az, &bz_field, coeffs, FIRST_GROUP_SIZE);
+
+        // Integer-based optimized path
+        const int_product = interpolateAzBzProductInt(&az, &bz_int, coeffs);
+        const int_as_field = if (int_product >= 0)
+            F.fromU128(@intCast(int_product))
+        else
+            F.fromU128(@intCast(-int_product)).neg();
+
+        try std.testing.expect(field_product.eql(int_as_field));
+    }
+}
+
+test "compact witness az/bz match field witnesses" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
+    witness[R1CSInputIndex.FlagLoad.toIndex()] = F.one();
+    witness[R1CSInputIndex.RamAddress.toIndex()] = F.fromU64(500);
+    witness[R1CSInputIndex.RamReadValue.toIndex()] = F.fromU64(42);
+    witness[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(42);
+
+    const cw = compactFromFieldWitness(F, &witness);
+
+    // Verify az_first matches computeAzFirstGroupInt
+    const az_ref = computeAzFirstGroupInt(F, &witness);
+    for (0..FIRST_GROUP_SIZE) |i| {
+        try std.testing.expectEqual(az_ref[i], cw.az_first[i]);
+    }
+
+    // Verify az_second matches computeAzSecondGroupInt
+    const az2_ref = computeAzSecondGroupInt(F, &witness);
+    for (0..SECOND_GROUP_SIZE) |i| {
+        try std.testing.expectEqual(az2_ref[i], cw.az_second[i]);
+    }
+
+    // Verify bz_first integer values match field Bz when converted back
+    const bz_ref = computeBzFirstGroupDirect(F, &witness);
+    for (0..FIRST_GROUP_SIZE) |i| {
+        const bz_i = cw.bz_first[i];
+        const bz_f = if (bz_i >= 0)
+            F.fromU128(@as(u128, @intCast(bz_i)))
+        else
+            F.fromU128(@as(u128, @intCast(-bz_i))).neg();
+        try std.testing.expect(bz_ref[i].eql(bz_f));
+    }
+}

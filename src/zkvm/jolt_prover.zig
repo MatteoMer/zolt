@@ -4248,26 +4248,9 @@ pub fn JoltProver(comptime F: type) type {
         }
 
         /// Evaluate polynomial at challenge using Jolt's eval_from_hint formula
-        /// This is the verifier's computation from compressed coefficients [c0, c2, c3] and hint
+        /// Delegates to the shared UniPoly implementation.
         fn evalFromHint(compressed: [3]F, hint: F, x: F) F {
-            const c0 = compressed[0];
-            const c2 = compressed[1];
-            const c3 = compressed[2];
-
-            // Recover c1 = hint - 2*c0 - c2 - c3
-            const c1 = hint.sub(c0).sub(c0).sub(c2).sub(c3);
-
-            // P(x) = c0 + c1*x + c2*x^2 + c3*x^3
-            const x2 = x.mul(x);
-            const x3 = x2.mul(x);
-            const result = c0.add(c1.mul(x)).add(c2.mul(x2)).add(c3.mul(x3));
-
-            // Debug: Print intermediate values for Stage 4 first round
-            // Stage 4 Round 0 challenge has limbs[2] = 0xb5ba64b08cc4cef5
-            if (x.limbs[2] == 0xb5ba64b08cc4cef5) {
-            }
-
-            return result;
+            return poly_mod.UniPoly(F).evalFromHint(compressed, hint, x);
         }
 
         /// Compute eq(r, idx) where r is in BIG_ENDIAN order (MSB first).
@@ -4376,18 +4359,9 @@ pub fn JoltProver(comptime F: type) type {
         }
 
         /// Evaluate cubic polynomial at a challenge point from Toom-Cook evaluations
-        /// Input: evals = [p(0), p(1), p(2), p_inf] where p_inf is the leading coefficient c3
+        /// Delegates to the shared UniPoly implementation.
         fn evaluateCubicAtChallengeFromEvals(evals: [4]F, x: F) F {
-            // Convert Toom-Cook format to coefficients first
-            // evals = [p(0), p(1), p(2), p_inf] where p_inf = c3
-            const coeffs = poly_mod.UniPoly(F).toomCookToCoeffs(evals);
-
-            // Evaluate p(x) = c0 + c1*x + c2*x^2 + c3*x^3 using Horner's method
-            var result = coeffs[3];
-            result = result.mul(x).add(coeffs[2]);
-            result = result.mul(x).add(coeffs[1]);
-            result = result.mul(x).add(coeffs[0]);
-            return result;
+            return poly_mod.UniPoly(F).evaluateToomCookAt(evals, x);
         }
 
         /// Evaluate quadratic polynomial at a challenge point using Lagrange interpolation

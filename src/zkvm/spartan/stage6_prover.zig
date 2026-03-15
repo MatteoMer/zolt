@@ -6878,10 +6878,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                // Evaluate combined polynomial at challenge (Vandermonde format)
-                current_batched_claim = try UniPoly(F).evaluateVandermondeAt(self.allocator, combined_evals, challenge);
+                // Evaluate combined polynomial at challenge using evalFromHintGeneral (no allocation)
+                current_batched_claim = UniPoly(F).evalFromHintGeneral(coeffs[0..num_compressed], current_batched_claim, challenge);
 
-                // VERIFY: eval_from_hint should match evaluateVandermondeAt for ALL rounds
                 if (comptime debug_verbose) {
                     const hint_val = combined_evals[0].add(combined_evals[1]);
                     var c1_efh = hint_val.sub(coeffs[0]).sub(coeffs[0]);
@@ -7021,7 +7020,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         }
                     } else {
                         // Phase 2: evaluate from cached evals using Lagrange interpolation
-                        instance_claims[0] = evaluatePolyFromEvals(F, cached_bc_phase2.?, challenge);
+                        instance_claims[0] = UniPoly(F).evalFromEvalsGeneral(cached_bc_phase2.?, challenge);
                         self.allocator.free(cached_bc_phase2.?);
                         cached_bc_phase2 = null;
                         bytecode_prover.bindChallengePhase2(challenge);
@@ -7033,7 +7032,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     if (cached_booleanity) |polys| {
                         // Evaluate degree-3 poly at challenge from Vandermonde [p(0), p(1), p(2), p(3)]
                         const evals_arr = [4]F{ polys[0], polys[1], polys[2], polys[3] };
-                        instance_claims[1] = evaluateDeg3FromEvals(F, evals_arr, challenge);
+                        instance_claims[1] = UniPoly(F).evalFromEvalsDeg3(evals_arr, challenge);
                         self.allocator.free(polys);
                         cached_booleanity = null;
                     }
@@ -7050,13 +7049,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
                 // Instance 2: HammingBooleanity
                 if (inst_active[2]) {
-                    instance_claims[2] = evaluateDeg3FromEvals(F, cached_hamming, challenge);
+                    instance_claims[2] = UniPoly(F).evalFromEvalsDeg3(cached_hamming, challenge);
                     hamming_prover.bindChallenge(challenge);
                 }
 
                 // Instance 3: RamRaVirtual
                 if (inst_active[3]) {
-                    instance_claims[3] = evaluatePolyFromEvals(F, cached_ram_ra.?, challenge);
+                    instance_claims[3] = UniPoly(F).evalFromEvalsGeneral(cached_ram_ra.?, challenge);
                     self.allocator.free(cached_ram_ra.?);
                     cached_ram_ra = null;
                     try ram_ra_prover.bindChallenge(challenge);
@@ -7064,7 +7063,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
                 // Instance 4: LookupsRaVirtual
                 if (inst_active[4]) {
-                    instance_claims[4] = evaluatePolyFromEvals(F, cached_lookups_ra.?, challenge);
+                    instance_claims[4] = UniPoly(F).evalFromEvalsGeneral(cached_lookups_ra.?, challenge);
                     self.allocator.free(cached_lookups_ra.?);
                     cached_lookups_ra = null;
                     try lookups_ra_prover.bindChallenge(challenge);
@@ -7072,16 +7071,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
                 // Instance 5: IncClaimReduction
                 if (inst_active[5]) {
-                    const p0 = cached_inc[0];
-                    const p1_val = cached_inc[1]; // Vandermonde format: polys[1] = p(1) directly
-                    const p2_val = cached_inc[2]; // Vandermonde format: polys[2] = p(2) directly
-                    // Interpolate coefficients: p(x) = a0 + a1*x + a2*x^2
-                    const a0 = p0;
-                    const inc_two = F.fromU64(2);
-                    const inc_two_inv = inc_two.inverse().?;
-                    const a2 = p2_val.sub(p1_val.add(p1_val)).add(p0).mul(inc_two_inv);
-                    const a1 = p1_val.sub(a0).sub(a2);
-                    instance_claims[5] = a0.add(challenge.mul(a1.add(challenge.mul(a2))));
+                    instance_claims[5] = UniPoly(F).evalFromEvalsDeg2(cached_inc, challenge);
 
                     try inc_prover.bindChallenge(challenge);
                 }

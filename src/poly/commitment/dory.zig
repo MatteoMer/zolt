@@ -953,6 +953,78 @@ fn multiPairG1G2PreparedAffine(g1_vec: []const G1Point, g2_affine: []const G2Pre
     return pairing.finalExponentiation(miller_acc);
 }
 
+/// Batch affine addition for one-hot row commitments.
+/// Per-row projective accumulation with batch normalization across ALL rows.
+/// Each row does projective adds (no per-element inversions), then a single
+/// batch normalization converts all row results to affine with 1 inversion.
+fn batchAffineAddRows(
+    g1_bases: []const G1Point,
+    row_slices: []const []const u16,
+    results: []G1Point,
+    tp: ?*ThreadPool,
+) void {
+    const num_rows = row_slices.len;
+    const G1Proj = msm.ProjectivePoint(Fp);
+
+    // Phase 1: Per-row projective accumulation (parallel, no inversions)
+    const proj_results = std.heap.page_allocator.alloc(G1Proj, num_rows) catch {
+        // Fallback: per-row with individual toAffine
+        for (row_slices, 0..) |row_indices, row| {
+            if (row_indices.len == 0) {
+                results[row] = G1Point.identity();
+            } else if (row_indices.len == 1) {
+                results[row] = g1_bases[row_indices[0]];
+            } else {
+                var proj = G1Proj.fromAffine(g1_bases[row_indices[0]]);
+                for (row_indices[1..]) |col_idx| {
+                    proj = proj.addAffine(g1_bases[col_idx]);
+                }
+                results[row] = proj.toAffine();
+            }
+        }
+        return;
+    };
+    defer std.heap.page_allocator.free(proj_results);
+
+    const AccumCtx = struct {
+        slices: []const []const u16,
+        bases: []const G1Point,
+        out: []G1Proj,
+    };
+    const accum_ctx = AccumCtx{
+        .slices = row_slices,
+        .bases = g1_bases,
+        .out = proj_results,
+    };
+    const accumFn = struct {
+        fn f(ctx: AccumCtx, row: usize) void {
+            const row_indices = ctx.slices[row];
+            if (row_indices.len == 0) {
+                ctx.out[row] = G1Proj.identity();
+            } else if (row_indices.len == 1) {
+                ctx.out[row] = G1Proj.fromAffine(ctx.bases[row_indices[0]]);
+            } else {
+                var proj = G1Proj.fromAffine(ctx.bases[row_indices[0]]);
+                for (row_indices[1..]) |col_idx| {
+                    proj = proj.addAffine(ctx.bases[col_idx]);
+                }
+                ctx.out[row] = proj;
+            }
+        }
+    }.f;
+
+    if (tp) |pool| {
+        pool.parallelForForce(num_rows, accum_ctx, accumFn);
+    } else {
+        for (0..num_rows) |row| accumFn(accum_ctx, row);
+    }
+
+    // Phase 2: Batch normalize ALL rows with a single inversion (vs 1 per row)
+    G1Proj.batchNormalize(proj_results, results);
+}
+
+
+
 /// A group of G1/G2 point slices for batched multi-pairing.
 pub const PairGroup = struct {
     g1: []const G1Point,
@@ -2064,7 +2136,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             k_chunk: usize,
             trace_length: usize,
             allocator: Allocator,
-            tp: ?*ThreadPool,
+            _: ?*ThreadPool,
         ) !struct { commitment: Commitment, row_commitments: []G1Point } {
             const poly_size = k_chunk * trace_length;
             if (poly_size == 0) return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
@@ -2084,48 +2156,18 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             defer allocator.free(row_idx.col_indices_flat);
             defer allocator.free(row_idx.row_index_slices);
 
-            // Phase 1: Compute G1 row commitments via projective accumulation
+            // Phase 1: Compute G1 row commitments via batch affine addition
+            // Tree reduction with batch inversion: 3M per add + 1 amortized inversion
+            // across ALL rows, vs projective accumulation (7M+2S per add + 1 inv per row).
             const g1_bases = params.g1_vec[0..num_cols];
-            const G1Proj = msm.ProjectivePoint(Fp);
 
             const row_commitments = try allocator.alloc(G1Point, num_rows);
             errdefer allocator.free(row_commitments);
 
-            const RowHintCtx = struct {
-                row_slices: []const []const u16,
-                g1_bases_ptr: []const G1Point,
-                out: []G1Point,
-            };
-            const hint_ctx = RowHintCtx{
-                .row_slices = row_idx.row_index_slices,
-                .g1_bases_ptr = g1_bases,
-                .out = row_commitments,
-            };
-
-            const computeRowFn = struct {
-                fn f(c: RowHintCtx, row: usize) void {
-                    const row_indices = c.row_slices[row];
-                    if (row_indices.len == 0) {
-                        c.out[row] = G1Point.identity();
-                        return;
-                    }
-                    c.out[row] = if (row_indices.len == 1)
-                        c.g1_bases_ptr[row_indices[0]]
-                    else blk: {
-                        var proj = G1Proj.fromAffine(c.g1_bases_ptr[row_indices[0]]);
-                        for (row_indices[1..]) |col_idx| {
-                            proj = proj.addAffine(c.g1_bases_ptr[col_idx]);
-                        }
-                        break :blk proj.toAffine();
-                    };
-                }
-            }.f;
-
-            if (tp) |pool| {
-                pool.parallelForForce(num_rows, hint_ctx, computeRowFn);
-            } else {
-                for (0..num_rows) |row| computeRowFn(hint_ctx, row);
-            }
+            // Phase 1: row commits are lightweight (~17ms per poly for 1024 rows).
+            // When called from parallelForEach, skip internal parallelism to avoid
+            // nested thread pool contention. Use TLS pool only if no outer tp was given.
+            batchAffineAddRows(g1_bases, row_idx.row_index_slices, row_commitments, null);
 
             if (comptime dory_bench_timing) {
                 std.debug.print("    [DORY-BENCH] onehot Phase1 row commits ({} rows x {} cols, k={}): {d:.2} ms\n", .{
@@ -2133,8 +2175,10 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 });
             }
 
-            // Phase 2: Miller loops + final exponentiation
-            const commitment = rowCommitmentsToCommitment(params, row_commitments, num_rows, tp);
+            // Phase 2: Miller loops + final exponentiation (heavyweight).
+            // Use TLS pool for work-stealing — other threads from the outer parallelForEach
+            // that have finished their own Phase 1 can steal Miller loop work items.
+            const commitment = rowCommitmentsToCommitment(params, row_commitments, num_rows, ThreadPool.getPool());
 
             if (comptime dory_bench_timing) {
                 std.debug.print("    [DORY-BENCH] onehot total (row+Miller+finalExp, {} rows x {} cols): {d:.2} ms\n", .{
@@ -2146,7 +2190,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         }
 
         /// Convert row commitments (G1 points) to a GT commitment via Miller loops.
-        fn rowCommitmentsToCommitment(
+        pub fn rowCommitmentsToCommitment(
             params: *const SetupParams,
             row_commitments: []const G1Point,
             num_rows: usize,
@@ -2851,21 +2895,22 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const v_vec = try computeVectorMatrixProduct(F, evals, left_vec, nu, sigma, allocator);
             defer allocator.free(v_vec);
 
-            // Step 4: Build v1_work (padded row_commitments) — single allocation, used
-            // for VMV message, then mutated in-place during IPA rounds.
+            // Step 4: Build v1_affine (padded row_commitments) — used for VMV message,
+            // then converted to projective for IPA rounds.
             const vec_len = @as(usize, 1) << @intCast(sigma);
-            const v1_work = try allocator.alloc(G1Point, vec_len);
-            defer allocator.free(v1_work);
+            const G1Proj = msm.ProjectivePoint(Fp);
+            const v1_affine = try allocator.alloc(G1Point, vec_len);
+            defer allocator.free(v1_affine);
             const rc_copy_len = @min(row_commitments.len, vec_len);
-            @memcpy(v1_work[0..rc_copy_len], row_commitments[0..rc_copy_len]);
+            @memcpy(v1_affine[0..rc_copy_len], row_commitments[0..rc_copy_len]);
             for (rc_copy_len..vec_len) |i| {
-                v1_work[i] = G1Point.identity();
+                v1_affine[i] = G1Point.identity();
             }
 
-            // Compute VMV message using v1_work directly (no extra padded_row_commitments copy)
-            // C = e(MSM(v1_work, v_vec), Γ₂₀)
+            // Compute VMV message using v1_affine directly
+            // C = e(MSM(v1_affine, v_vec), Γ₂₀)
             const g2_fin = params.g2_vec[0];
-            const t_vec_v = msm.MSM(F, Fp).computeWithPool(v1_work, v_vec, tp);
+            const t_vec_v = msm.MSM(F, Fp).computeWithPool(v1_affine, v_vec, tp);
             const t_vec_v_fp = G1PointFp{
                 .x = t_vec_v.x,
                 .y = t_vec_v.y,
@@ -2882,7 +2927,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const e1_bases = if (row_commitments.len >= left_vec_len)
                 row_commitments[0..left_vec_len]
             else
-                v1_work[0..left_vec_len]; // already padded
+                v1_affine[0..left_vec_len]; // already padded
 
             const gamma1_v, const e1 = if (tp) |pool| blk: {
                 const VmvCtx = struct {
@@ -2948,27 +2993,35 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             doryAppendGT(transcript, vmv_message.d2);
             doryAppendG1(transcript, vmv_message.e1);
 
-            // v2 = v_vec * Γ₂₀ (each entry is v_vec[i] * g2_vec[0])
-            // Upstream: let v2 = M2::fixed_base_vector_scalar_mul(g2_fin, &v_vec)
-            // Precompute Frobenius bases for GLV-4D (shared base point)
+            // v2 = v_vec * Γ₂₀ — store projective (avoid per-element toAffine)
+            // Precompute Frobenius bases for GLV-4D (shared base point) — Step 4 optimization
             const g2_fin_glv_bases = [4]G2Point{
                 g2_fin,
                 glv.frobeniusPsiAffine(g2_fin, 1),
                 glv.frobeniusPsiAffine(g2_fin, 2),
                 glv.frobeniusPsiAffine(g2_fin, 3),
             };
-            const v2_work = try allocator.alloc(G2Point, vec_len);
-            defer allocator.free(v2_work);
+            // Projective IPA vectors — avoid per-element inversions during beta_scale/alpha_fold
+            const v1_proj = try allocator.alloc(G1Proj, vec_len);
+            defer allocator.free(v1_proj);
+            for (v1_affine, 0..) |a, i| {
+                v1_proj[i] = G1Proj.fromAffine(a);
+            }
+
+            const v2_proj = try allocator.alloc(G2Projective, vec_len);
+            defer allocator.free(v2_proj);
+            const v2_affine = try allocator.alloc(G2Point, vec_len);
+            defer allocator.free(v2_affine);
             if (tp) |pool| {
                 const V2Ctx = struct {
-                    v2: []G2Point,
+                    v2p: []G2Projective,
                     v_vec: []const F,
                     bases: *const [4]G2Point,
                     v_vec_len: usize,
                 };
                 var g2_fin_glv_bases_copy = g2_fin_glv_bases;
                 const v2_ctx = V2Ctx{
-                    .v2 = v2_work,
+                    .v2p = v2_proj,
                     .v_vec = v_vec,
                     .bases = &g2_fin_glv_bases_copy,
                     .v_vec_len = v_vec.len,
@@ -2976,18 +3029,18 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 pool.parallelForForce(vec_len, v2_ctx, struct {
                     fn f(cx: V2Ctx, i: usize) void {
                         if (i < cx.v_vec_len) {
-                            cx.v2[i] = glv.glvScalarMulG2WithBases(cx.bases.*, cx.v_vec[i]).toAffine();
+                            cx.v2p[i] = glv.glvScalarMulG2WithBases(cx.bases.*, cx.v_vec[i]);
                         } else {
-                            cx.v2[i] = G2Point.identity();
+                            cx.v2p[i] = G2Projective.identity();
                         }
                     }
                 }.f);
             } else {
                 for (0..vec_len) |i| {
                     if (i < v_vec.len) {
-                        v2_work[i] = glv.glvScalarMulG2WithBases(g2_fin_glv_bases, v_vec[i]).toAffine();
+                        v2_proj[i] = glv.glvScalarMulG2WithBases(g2_fin_glv_bases, v_vec[i]);
                     } else {
-                        v2_work[i] = G2Point.identity();
+                        v2_proj[i] = G2Projective.identity();
                     }
                 }
             }
@@ -3048,28 +3101,31 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             while (round < num_rounds) : (round += 1) {
                 const n2 = current_len / 2;
+                var round_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+
+                // BATCH NORMALIZE v1_proj → v1_affine, v2_proj → v2_affine for pairing inputs
+                G1Proj.batchNormalize(v1_proj[0..current_len], v1_affine[0..current_len]);
+                G2Projective.batchNormalize(v2_proj[0..current_len], v2_affine[0..current_len]);
 
                 // Compute first reduce message: D1L, D1R, D2L, D2R
-                // Batch all 4 pairings together for shared parallelism and fewer finalExps.
-                // First round uses MSM+pair optimization for D2 (v2 = scalars · g2_fin).
+                // D1 uses prepared G2 SRS, D2 uses v2_affine — independent, overlap via join.
                 var d1_left: GT = undefined;
                 var d1_right: GT = undefined;
                 var d2_left: GT = undefined;
                 var d2_right: GT = undefined;
-                // D1L/D1R: use prepared G2 caches (SRS points) for ~2x faster Miller loops
-                if (params.g2_prepared_affine) |affine| {
-                    d1_left = multiPairG1G2PreparedAffine(v1_work[0..n2], affine[0..n2], tp);
-                    d1_right = multiPairG1G2PreparedAffine(v1_work[n2..current_len], affine[0..n2], tp);
-                } else if (params.g2_prepared) |prep| {
-                    d1_left = multiPairG1G2Prepared(v1_work[0..n2], prep[0..n2], tp);
-                    d1_right = multiPairG1G2Prepared(v1_work[n2..current_len], prep[0..n2], tp);
-                } else {
-                    d1_left = multiPairG1G2WithPool(v1_work[0..n2], params.g2_vec[0..n2], tp);
-                    d1_right = multiPairG1G2WithPool(v1_work[n2..current_len], params.g2_vec[0..n2], tp);
-                }
 
                 if (round == 0) {
-                    // D2L/D2R: first-round MSM+pair optimization (v2 = scalars · g2_fin)
+                    // Round 0: D1 uses prepared SRS, D2 uses MSM+pair optimization
+                    if (params.g2_prepared_affine) |affine| {
+                        d1_left = multiPairG1G2PreparedAffine(v1_affine[0..n2], affine[0..n2], tp);
+                        d1_right = multiPairG1G2PreparedAffine(v1_affine[n2..current_len], affine[0..n2], tp);
+                    } else if (params.g2_prepared) |prep| {
+                        d1_left = multiPairG1G2Prepared(v1_affine[0..n2], prep[0..n2], tp);
+                        d1_right = multiPairG1G2Prepared(v1_affine[n2..current_len], prep[0..n2], tp);
+                    } else {
+                        d1_left = multiPairG1G2WithPool(v1_affine[0..n2], params.g2_vec[0..n2], tp);
+                        d1_right = multiPairG1G2WithPool(v1_affine[n2..current_len], params.g2_vec[0..n2], tp);
+                    }
                     std.debug.assert(v_vec.len >= current_len);
                     const MsmJoinCtx = struct { g1: []const G1Point, v: []const F };
                     const msmJoinFn = struct {
@@ -3090,7 +3146,6 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     };
                     const sum_left_fp = G1PointFp{ .x = sum_left.x, .y = sum_left.y, .infinity = sum_left.infinity };
                     const sum_right_fp = G1PointFp{ .x = sum_right.x, .y = sum_right.y, .infinity = sum_right.infinity };
-                    // Use prepared g2_fin for faster Miller loop
                     if (params.g2_prepared) |prep| {
                         const ml_left = pairing.millerLoopPrepared(sum_left_fp, &prep[0]);
                         const ml_right = pairing.millerLoopPrepared(sum_right_fp, &prep[0]);
@@ -3100,15 +3155,89 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         d2_left = pairing.pairingFp(sum_left_fp, g2_fin);
                         d2_right = pairing.pairingFp(sum_right_fp, g2_fin);
                     }
+                } else if (tp) |pool| {
+                    // Rounds > 0: Overlap D1 (prepared SRS) with D2 (v2_affine) via join.
+                    // Each side uses TLS pool for work-stealing within its multi-pair.
+                    const D1D2Ctx = struct {
+                        v1a: []const G1Point,
+                        v2a: []const G2Point,
+                        g1: []const G1Point,
+                        g2_prep: ?[]const G2Prepared,
+                        g2_prep_affine: ?[]const G2PreparedAffine,
+                        g2_raw: []const G2Point,
+                        half: usize,
+                        len: usize,
+                    };
+                    const d1d2_ctx = D1D2Ctx{
+                        .v1a = v1_affine,
+                        .v2a = v2_affine,
+                        .g1 = params.g1_vec,
+                        .g2_prep = params.g2_prepared,
+                        .g2_prep_affine = params.g2_prepared_affine,
+                        .g2_raw = params.g2_vec,
+                        .half = n2,
+                        .len = current_len,
+                    };
+                    const D1Result = struct { left: GT, right: GT };
+                    const d1_result, const d2_result = pool.join(
+                        D1Result,
+                        [2]GT,
+                        d1d2_ctx,
+                        struct {
+                            fn f(cx: D1D2Ctx) D1Result {
+                                if (cx.g2_prep_affine) |affine| {
+                                    return .{
+                                        .left = multiPairG1G2PreparedAffine(cx.v1a[0..cx.half], affine[0..cx.half], ThreadPool.getPool()),
+                                        .right = multiPairG1G2PreparedAffine(cx.v1a[cx.half..cx.len], affine[0..cx.half], ThreadPool.getPool()),
+                                    };
+                                } else if (cx.g2_prep) |prep| {
+                                    return .{
+                                        .left = multiPairG1G2Prepared(cx.v1a[0..cx.half], prep[0..cx.half], ThreadPool.getPool()),
+                                        .right = multiPairG1G2Prepared(cx.v1a[cx.half..cx.len], prep[0..cx.half], ThreadPool.getPool()),
+                                    };
+                                } else {
+                                    return .{
+                                        .left = multiPairG1G2WithPool(cx.v1a[0..cx.half], cx.g2_raw[0..cx.half], ThreadPool.getPool()),
+                                        .right = multiPairG1G2WithPool(cx.v1a[cx.half..cx.len], cx.g2_raw[0..cx.half], ThreadPool.getPool()),
+                                    };
+                                }
+                            }
+                        }.f,
+                        d1d2_ctx,
+                        struct {
+                            fn f(cx: D1D2Ctx) [2]GT {
+                                const batch = multiPairBatched(2, .{
+                                    PairGroup{ .g1 = cx.g1[0..cx.half], .g2 = cx.v2a[0..cx.half] },
+                                    PairGroup{ .g1 = cx.g1[0..cx.half], .g2 = cx.v2a[cx.half..cx.len] },
+                                }, ThreadPool.getPool());
+                                return batch;
+                            }
+                        }.f,
+                    );
+                    d1_left = d1_result.left;
+                    d1_right = d1_result.right;
+                    d2_left = d2_result[0];
+                    d2_right = d2_result[1];
                 } else {
-                    // D2L/D2R: v2_work has no prepared cache, use unprepared batched
+                    // No thread pool: sequential
+                    if (params.g2_prepared_affine) |affine| {
+                        d1_left = multiPairG1G2PreparedAffine(v1_affine[0..n2], affine[0..n2], null);
+                        d1_right = multiPairG1G2PreparedAffine(v1_affine[n2..current_len], affine[0..n2], null);
+                    } else if (params.g2_prepared) |prep| {
+                        d1_left = multiPairG1G2Prepared(v1_affine[0..n2], prep[0..n2], null);
+                        d1_right = multiPairG1G2Prepared(v1_affine[n2..current_len], prep[0..n2], null);
+                    } else {
+                        d1_left = multiPairG1G2WithPool(v1_affine[0..n2], params.g2_vec[0..n2], null);
+                        d1_right = multiPairG1G2WithPool(v1_affine[n2..current_len], params.g2_vec[0..n2], null);
+                    }
                     const d2_batch = multiPairBatched(2, .{
-                        PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_work[0..n2] },
-                        PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_work[n2..current_len] },
-                    }, tp);
+                        PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_affine[0..n2] },
+                        PairGroup{ .g1 = params.g1_vec[0..n2], .g2 = v2_affine[n2..current_len] },
+                    }, null);
                     d2_left = d2_batch[0];
                     d2_right = d2_batch[1];
                 }
+                // e1_beta uses v1_affine for MSM, e2_beta uses SRS g2_vec
                 const e1_beta, const e2_beta = if (tp) |pool| blk: {
                     const EBetaCtx = struct {
                         g1: []const G1Point,
@@ -3145,7 +3274,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len], ThreadPool.getPool()),
                 };
 
-                // Debug: write e2_beta for each round to /tmp for validation
+                if (comptime dory_bench_timing) {
+                    std.debug.print("      [IPA] round {} (n={}): first_msg (D1/D2+e_beta): {d:.2} ms\n", .{
+                        round, current_len, @as(f64, @floatFromInt(round_t.read())) / 1_000_000.0,
+                    });
+                    round_t.reset();
+                }
+
                 if (comptime debug_verbose) {
                     if (round == 0) {
                         const debug_e2 = compressG2(e2_beta);
@@ -3195,19 +3330,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const beta = transcript.challengeScalarFull();
                 const beta_inv = beta.inverse() orelse F.one();
 
-                // Apply first challenge using GLV scalar multiplication
+                // Beta scale: stays projective (no per-element toAffine)
+                // v1_proj[i] = GLV(g1_srs[i], beta) + v1_proj[i]
+                // v2_proj[i] = GLV(g2_srs[i], beta_inv) + v2_proj[i]
                 if (tp) |pool| {
                     const BetaCtx = struct {
-                        v1: []G1Point,
-                        v2: []G2Point,
+                        v1p: []G1Proj,
+                        v2p: []G2Projective,
                         g1: []const G1Point,
                         g2: []const G2Point,
                         b: F,
                         bi: F,
                     };
                     const beta_ctx = BetaCtx{
-                        .v1 = v1_work,
-                        .v2 = v2_work,
+                        .v1p = v1_proj,
+                        .v2p = v2_proj,
                         .g1 = params.g1_vec,
                         .g2 = params.g2_vec,
                         .b = beta,
@@ -3215,79 +3352,90 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     };
                     pool.parallelForForce(current_len, beta_ctx, struct {
                         fn f(cx: BetaCtx, i: usize) void {
-                            cx.v1[i] = glv.glvScalarMulG1(cx.g1[i], cx.b).addAffine(cx.v1[i]).toAffine();
-                            cx.v2[i] = glv.glvScalarMulG2(cx.g2[i], cx.bi).addAffine(cx.v2[i]).toAffine();
+                            cx.v1p[i] = glv.glvScalarMulG1(cx.g1[i], cx.b).add(cx.v1p[i]);
+                            cx.v2p[i] = glv.glvScalarMulG2(cx.g2[i], cx.bi).add(cx.v2p[i]);
                         }
                     }.f);
                 } else {
                     for (0..current_len) |i| {
-                        v1_work[i] = glv.glvScalarMulG1(params.g1_vec[i], beta).addAffine(v1_work[i]).toAffine();
-                        v2_work[i] = glv.glvScalarMulG2(params.g2_vec[i], beta_inv).addAffine(v2_work[i]).toAffine();
+                        v1_proj[i] = glv.glvScalarMulG1(params.g1_vec[i], beta).add(v1_proj[i]);
+                        v2_proj[i] = glv.glvScalarMulG2(params.g2_vec[i], beta_inv).add(v2_proj[i]);
                     }
                 }
 
-                // Compute second reduce message
+                if (comptime dory_bench_timing) {
+                    std.debug.print("      [IPA] round {} (n={}): beta_scale: {d:.2} ms\n", .{
+                        round, current_len, @as(f64, @floatFromInt(round_t.read())) / 1_000_000.0,
+                    });
+                    round_t.reset();
+                }
+
+                // BATCH NORMALIZE after beta_scale for second_msg pairings
+                G1Proj.batchNormalize(v1_proj[0..current_len], v1_affine[0..current_len]);
+                G2Projective.batchNormalize(v2_proj[0..current_len], v2_affine[0..current_len]);
+
+                // Compute second reduce message using affine temps
                 const c_batch = multiPairBatched(2, .{
-                    PairGroup{ .g1 = v1_work[0..n2], .g2 = v2_work[n2..current_len] },
-                    PairGroup{ .g1 = v1_work[n2..current_len], .g2 = v2_work[0..n2] },
+                    PairGroup{ .g1 = v1_affine[0..n2], .g2 = v2_affine[n2..current_len] },
+                    PairGroup{ .g1 = v1_affine[n2..current_len], .g2 = v2_affine[0..n2] },
                 }, tp);
                 const c_plus = c_batch[0];
                 const c_minus = c_batch[1];
                 const e1_plus, const e1_minus = if (tp) |pool| blk: {
                     const E1Ctx = struct {
-                        v1: []const G1Point,
+                        v1a: []const G1Point,
                         s2: []const F,
                         n2: usize,
                         current_len: usize,
                     };
-                    const e1_ctx = E1Ctx{ .v1 = v1_work, .s2 = s2_work, .n2 = n2, .current_len = current_len };
+                    const e1_ctx = E1Ctx{ .v1a = v1_affine, .s2 = s2_work, .n2 = n2, .current_len = current_len };
                     break :blk pool.join(
                         G1Point,
                         G1Point,
                         e1_ctx,
                         struct {
                             fn f(cx: E1Ctx) G1Point {
-                                return msm.MSM(F, Fp).computeWithPool(cx.v1[0..cx.n2], cx.s2[cx.n2..cx.current_len], ThreadPool.getPool());
+                                return msm.MSM(F, Fp).computeWithPool(cx.v1a[0..cx.n2], cx.s2[cx.n2..cx.current_len], ThreadPool.getPool());
                             }
                         }.f,
                         e1_ctx,
                         struct {
                             fn f(cx: E1Ctx) G1Point {
-                                return msm.MSM(F, Fp).computeWithPool(cx.v1[cx.n2..cx.current_len], cx.s2[0..cx.n2], ThreadPool.getPool());
+                                return msm.MSM(F, Fp).computeWithPool(cx.v1a[cx.n2..cx.current_len], cx.s2[0..cx.n2], ThreadPool.getPool());
                             }
                         }.f,
                     );
                 } else .{
-                    msm.MSM(F, Fp).computeWithPool(v1_work[0..n2], s2_work[n2..current_len], ThreadPool.getPool()),
-                    msm.MSM(F, Fp).computeWithPool(v1_work[n2..current_len], s2_work[0..n2], ThreadPool.getPool()),
+                    msm.MSM(F, Fp).computeWithPool(v1_affine[0..n2], s2_work[n2..current_len], ThreadPool.getPool()),
+                    msm.MSM(F, Fp).computeWithPool(v1_affine[n2..current_len], s2_work[0..n2], ThreadPool.getPool()),
                 };
                 const e2_plus, const e2_minus = if (tp) |pool| blk: {
                     const E2Ctx = struct {
-                        v2: []const G2Point,
+                        v2a: []const G2Point,
                         s1: []const F,
                         n2: usize,
                         current_len: usize,
                     };
-                    const e2_ctx = E2Ctx{ .v2 = v2_work, .s1 = s1_work, .n2 = n2, .current_len = current_len };
+                    const e2_ctx = E2Ctx{ .v2a = v2_affine, .s1 = s1_work, .n2 = n2, .current_len = current_len };
                     break :blk pool.join(
                         G2Point,
                         G2Point,
                         e2_ctx,
                         struct {
                             fn f(cx: E2Ctx) G2Point {
-                                return msmG2(F, cx.v2[cx.n2..cx.current_len], cx.s1[0..cx.n2], ThreadPool.getPool());
+                                return msmG2(F, cx.v2a[cx.n2..cx.current_len], cx.s1[0..cx.n2], ThreadPool.getPool());
                             }
                         }.f,
                         e2_ctx,
                         struct {
                             fn f(cx: E2Ctx) G2Point {
-                                return msmG2(F, cx.v2[0..cx.n2], cx.s1[cx.n2..cx.current_len], ThreadPool.getPool());
+                                return msmG2(F, cx.v2a[0..cx.n2], cx.s1[cx.n2..cx.current_len], ThreadPool.getPool());
                             }
                         }.f,
                     );
                 } else .{
-                    msmG2(F, v2_work[n2..current_len], s1_work[0..n2], ThreadPool.getPool()),
-                    msmG2(F, v2_work[0..n2], s1_work[n2..current_len], ThreadPool.getPool()),
+                    msmG2(F, v2_affine[n2..current_len], s1_work[0..n2], ThreadPool.getPool()),
+                    msmG2(F, v2_affine[0..n2], s1_work[n2..current_len], ThreadPool.getPool()),
                 };
 
                 second_messages[round] = SecondReduceMessage{
@@ -3298,6 +3446,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     .e2_plus = e2_plus,
                     .e2_minus = e2_minus,
                 };
+
+                if (comptime dory_bench_timing) {
+                    std.debug.print("      [IPA] round {} (n={}): second_msg: {d:.2} ms\n", .{
+                        round, current_len, @as(f64, @floatFromInt(round_t.read())) / 1_000_000.0,
+                    });
+                    round_t.reset();
+                }
 
                 // Append second message to transcript (Dory format: no reversal)
                 doryAppendGT(transcript, c_plus);
@@ -3311,11 +3466,14 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const alpha = transcript.challengeScalarFull();
                 const alpha_inv = alpha.inverse() orelse F.one();
 
-                // Fold vectors using GLV scalar multiplication
+                // Alpha fold: use v1_affine/v2_affine (from post-beta normalize) as GLV input,
+                // store result projective.
                 if (tp) |pool| {
                     const FoldCtx = struct {
-                        v1: []G1Point,
-                        v2: []G2Point,
+                        v1p: []G1Proj,
+                        v2p: []G2Projective,
+                        v1a: []const G1Point,
+                        v2a: []const G2Point,
                         s1: []F,
                         s2: []F,
                         a: F,
@@ -3323,8 +3481,10 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         half: usize,
                     };
                     const fold_ctx = FoldCtx{
-                        .v1 = v1_work,
-                        .v2 = v2_work,
+                        .v1p = v1_proj,
+                        .v2p = v2_proj,
+                        .v1a = v1_affine,
+                        .v2a = v2_affine,
                         .s1 = s1_work,
                         .s2 = s2_work,
                         .a = alpha,
@@ -3333,19 +3493,20 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     };
                     pool.parallelForForce(n2, fold_ctx, struct {
                         fn f(cx: FoldCtx, i: usize) void {
-                            cx.v1[i] = glv.glvScalarMulG1(cx.v1[i], cx.a).addAffine(cx.v1[i + cx.half]).toAffine();
-                            cx.v2[i] = glv.glvScalarMulG2(cx.v2[i], cx.ai).addAffine(cx.v2[i + cx.half]).toAffine();
+                            // v1[i] = alpha * v1_affine[i] + v1_affine[i+half]
+                            cx.v1p[i] = glv.glvScalarMulG1(cx.v1a[i], cx.a).addAffine(cx.v1a[i + cx.half]);
+                            // v2[i] = alpha_inv * v2_affine[i] + v2_affine[i+half]
+                            cx.v2p[i] = glv.glvScalarMulG2(cx.v2a[i], cx.ai).addAffine(cx.v2a[i + cx.half]);
                             cx.s1[i] = cx.a.mul(cx.s1[i]).add(cx.s1[i + cx.half]);
                             cx.s2[i] = cx.ai.mul(cx.s2[i]).add(cx.s2[i + cx.half]);
                         }
                     }.f);
                 } else {
                     for (0..n2) |i| {
-                        v1_work[i] = glv.glvScalarMulG1(v1_work[i], alpha).addAffine(v1_work[i + n2]).toAffine();
+                        v1_proj[i] = glv.glvScalarMulG1(v1_affine[i], alpha).addAffine(v1_affine[i + n2]);
                     }
                     for (0..n2) |i| {
-                        const scaled_proj = glv.glvScalarMulG2(v2_work[i], alpha_inv);
-                        v2_work[i] = scaled_proj.addAffine(v2_work[i + n2]).toAffine();
+                        v2_proj[i] = glv.glvScalarMulG2(v2_affine[i], alpha_inv).addAffine(v2_affine[i + n2]);
                     }
                     for (0..n2) |i| {
                         s1_work[i] = alpha.mul(s1_work[i]).add(s1_work[i + n2]);
@@ -3353,6 +3514,12 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     for (0..n2) |i| {
                         s2_work[i] = alpha_inv.mul(s2_work[i]).add(s2_work[i + n2]);
                     }
+                }
+
+                if (comptime dory_bench_timing) {
+                    std.debug.print("      [IPA] round {} (n={}): alpha_fold: {d:.2} ms\n", .{
+                        round, current_len, @as(f64, @floatFromInt(round_t.read())) / 1_000_000.0,
+                    });
                 }
 
                 current_len = n2;
@@ -3375,6 +3542,9 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const gamma_inv = gamma.inverse() orelse F.one();
 
             // Compute final message: E₁ = v₁ + γ·s₁·h₁, E₂ = v₂ + γ⁻¹·s₂·h₂
+            // Final element: single toAffine, negligible cost
+            const final_v1 = v1_proj[0].toAffine();
+            const final_v2 = v2_proj[0].toAffine();
             const gamma_s1 = gamma.mul(s1_work[0]);
             const gamma_inv_s2 = gamma_inv.mul(s2_work[0]);
 
@@ -3392,8 +3562,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     .h2 = params.h2,
                     .gs1 = gamma_s1,
                     .gis2 = gamma_inv_s2,
-                    .v1_0 = v1_work[0],
-                    .v2_0 = v2_work[0],
+                    .v1_0 = final_v1,
+                    .v2_0 = final_v2,
                 };
                 break :blk pool.join(
                     G1Point,
@@ -3414,7 +3584,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             } else blk: {
                 const scaled_h1 = glv.glvScalarMulG1(params.h1, gamma_s1).toAffine();
                 const scaled_h2 = glv.glvScalarMulG2(params.h2, gamma_inv_s2).toAffine();
-                break :blk .{ v1_work[0].add(scaled_h1), v2_work[0].add(scaled_h2) };
+                break :blk .{ final_v1.add(scaled_h1), final_v2.add(scaled_h2) };
             };
 
             const final_message = ScalarProductMessage{

@@ -20,8 +20,11 @@ const common = @import("../common/mod.zig");
 const field = @import("../field/mod.zig");
 const tracer = @import("../tracer/mod.zig");
 const transcripts = @import("../transcripts/mod.zig");
+const msm = @import("../msm/mod.zig");
 const poly_commitment = @import("../poly/commitment/mod.zig");
 const Dory = poly_commitment.dory;
+const Fp = field.BN254BaseField;
+const Fr = field.BN254Scalar;
 
 pub const bytecode = @import("bytecode/mod.zig");
 pub const claim_reductions = @import("claim_reductions/mod.zig");
@@ -612,218 +615,278 @@ pub fn JoltProver(comptime F: type) type {
             // Guard: k_chunk must fit in u8 for sparse one-hot index arrays
             std.debug.assert(k_chunk <= 256);
 
-            // ===== Phase A: Build all polynomial data upfront (sequential) =====
-            // Polynomial construction is fast (simple field arithmetic over trace).
-            // The expensive part is the Dory commitment which we parallelize in Phase B.
+            // ===== Phase A: Build polynomials + streaming dense commit =====
+            // Dense polynomials (RdInc, RamInc) are built as unpadded F arrays (length T)
+            // and committed via streaming row-by-row i128 MSM — no full k_chunk×T i128 alloc.
+            // One-hot indices are built in a single trace scan (1 pass, not 32+).
 
-            // --- Dense polynomials (RdInc, RamInc) ---
-            // CRITICAL: Must pad to k_chunk*trace_length for Dory commitment.
-            // Jolt commits ALL polynomials using the same matrix layout (K*T sized).
-            // Build both F (for later stages) and i128 (for fast 128-bit MSM commits) in one pass.
-            const rd_inc_dual = try self.buildRdIncDual(&emulator.trace, trace_length);
-            defer self.allocator.free(rd_inc_dual.ints);
-            const rd_inc_poly = try self.allocator.alloc(F, k_chunk * trace_length);
+            // --- Dense: streaming commit + build unpadded F polys ---
+            // Compute Dory layout for the padded polynomial size (k_chunk * T)
+            const dense_poly_size = k_chunk * trace_length;
+            const dense_num_vars: usize = if (dense_poly_size <= 1) 1 else std.math.log2_int(usize, dense_poly_size);
+            const dense_sigma: usize = (dense_num_vars + 1) / 2;
+            const dense_nu: usize = dense_num_vars - dense_sigma;
+            const dense_num_cols = @as(usize, 1) << @intCast(dense_sigma);
+            const dense_num_rows = @as(usize, 1) << @intCast(dense_nu);
+            const active_rows = (trace_length + dense_num_cols - 1) / dense_num_cols;
+
+            // Allocate unpadded F polys (T elements, not k_chunk×T)
+            const rd_inc_poly = try self.allocator.alloc(F, trace_length);
             @memset(rd_inc_poly, F.zero());
-            @memcpy(rd_inc_poly[0..rd_inc_dual.field.len], rd_inc_dual.field);
-            self.allocator.free(rd_inc_dual.field);
             witness_polys[0] = rd_inc_poly;
 
-            // Pad i128 array to same size for Dory commit
-            const rd_inc_i128 = try self.allocator.alloc(i128, k_chunk * trace_length);
-            defer self.allocator.free(rd_inc_i128);
-            @memset(rd_inc_i128, 0);
-            @memcpy(rd_inc_i128[0..rd_inc_dual.ints.len], rd_inc_dual.ints);
-
-            const ram_inc_dual = try self.buildRamIncDual(&emulator.trace, trace_length);
-            defer self.allocator.free(ram_inc_dual.ints);
-            const ram_inc_poly = try self.allocator.alloc(F, k_chunk * trace_length);
+            const ram_inc_poly = try self.allocator.alloc(F, trace_length);
             @memset(ram_inc_poly, F.zero());
-            @memcpy(ram_inc_poly[0..ram_inc_dual.field.len], ram_inc_dual.field);
-            self.allocator.free(ram_inc_dual.field);
             witness_polys[1] = ram_inc_poly;
 
-            const ram_inc_i128 = try self.allocator.alloc(i128, k_chunk * trace_length);
-            defer self.allocator.free(ram_inc_i128);
-            @memset(ram_inc_i128, 0);
-            @memcpy(ram_inc_i128[0..ram_inc_dual.ints.len], ram_inc_dual.ints);
+            // Allocate row commitments for streaming dense commit
+            const rd_row_commits = try self.allocator.alloc(G1Point, dense_num_rows);
+            errdefer self.allocator.free(rd_row_commits);
+            const ram_row_commits = try self.allocator.alloc(G1Point, dense_num_rows);
+            errdefer self.allocator.free(ram_row_commits);
 
-            // --- One-hot index arrays (InstructionRa, RamRa, BytecodeRa) ---
-            for (0..instruction_d) |idx| {
-                const shift = log_k_chunk * (instruction_d - 1 - idx);
-                const chunk_values = try self.buildInstructionRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift);
-                defer self.allocator.free(chunk_values);
-                const oh_indices = try self.allocator.alloc(?u8, trace_length);
-                for (0..trace_length) |cycle| {
-                    const addr = chunk_values[cycle].toU64();
-                    oh_indices[cycle] = if (addr < k_chunk) @intCast(addr) else null;
+            // Phase A1: Streaming dense commit — scan trace row-by-row,
+            // build F values + i128 row buffer, MSM per row, no full i128 alloc.
+            // RdInc needs sequential register tracking, so we do it sequentially per row.
+            {
+                const K_INC = 128;
+                var register_values: [K_INC]u64 = [_]u64{0} ** K_INC;
+                const steps = emulator.trace.steps.items;
+
+                // Row buffers for i128 values (reused across rows, tiny vs eliminated full-size arrays)
+                const rd_buf = try self.allocator.alloc(i128, dense_num_cols);
+                defer self.allocator.free(rd_buf);
+                const ram_buf = try self.allocator.alloc(i128, dense_num_cols);
+                defer self.allocator.free(ram_buf);
+
+                for (0..active_rows) |row| {
+                    const row_start = row * dense_num_cols;
+                    const row_end = @min(row_start + dense_num_cols, trace_length);
+                    const row_len = row_end - row_start;
+
+                    // Fill i128 buffers and F polys for this row
+                    @memset(rd_buf[0..row_len], 0);
+                    @memset(ram_buf[0..row_len], 0);
+
+                    for (row_start..row_end) |i| {
+                        const col = i - row_start;
+                        if (i < steps.len) {
+                            const step = steps[i];
+                            // RdInc: sequential register tracking
+                            if (!step.is_noop and step.rd_written and step.rd_index != 0) {
+                                const rd = step.rd_index;
+                                const pre_value = register_values[rd];
+                                const post_value = step.rd_value;
+                                const inc: i128 = @as(i128, post_value) - @as(i128, pre_value);
+                                rd_buf[col] = inc;
+                                rd_inc_poly[i] = if (inc >= 0)
+                                    F.fromU64(@intCast(inc))
+                                else
+                                    F.fromU64(@intCast(-inc)).neg();
+                                register_values[rd] = post_value;
+                            }
+                            // RamInc: per-cycle independent
+                            if (step.is_memory_write) {
+                                const pre_value: i128 = @intCast(step.memory_pre_value orelse 0);
+                                const post_value: i128 = @intCast(step.memory_value orelse 0);
+                                const inc = post_value - pre_value;
+                                ram_buf[col] = inc;
+                                ram_inc_poly[i] = if (inc >= 0)
+                                    F.fromU64(@intCast(inc))
+                                else
+                                    F.fromU64(@intCast(-inc)).neg();
+                            }
+                        }
+                    }
+
+                    // Zero-pad if row is partial (row_len < dense_num_cols)
+                    if (row_len < dense_num_cols) {
+                        @memset(rd_buf[row_len..dense_num_cols], 0);
+                        @memset(ram_buf[row_len..dense_num_cols], 0);
+                    }
+
+                    // MSM for this row
+                    const g1_slice = dory_srs.g1_vec[0..dense_num_cols];
+                    rd_row_commits[row] = msm.MSM(Fr, Fp).computeI128(g1_slice, rd_buf[0..dense_num_cols], null);
+                    ram_row_commits[row] = msm.MSM(Fr, Fp).computeI128(g1_slice, ram_buf[0..dense_num_cols], null);
                 }
-                onehot_indices[idx] = oh_indices;
+
+                // Zero-padded rows (beyond active data)
+                for (active_rows..dense_num_rows) |row| {
+                    rd_row_commits[row] = G1Point.identity();
+                    ram_row_commits[row] = G1Point.identity();
+                }
             }
 
-            for (0..ram_d) |idx| {
-                const shift = log_k_chunk * (ram_d - 1 - idx);
-                const chunk_values = try self.buildRamRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &device.memory_layout);
-                defer self.allocator.free(chunk_values);
-                const oh_indices = try self.allocator.alloc(?u8, trace_length);
-                for (0..trace_length) |cycle| {
-                    const addr = chunk_values[cycle].toU64();
-                    oh_indices[cycle] = if (addr < k_chunk) @intCast(addr) else null;
-                }
-                onehot_indices[instruction_d + idx] = oh_indices;
-            }
-
+            // --- One-hot index arrays: single-scan build ---
             var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address, null);
             defer bytecode_prep_for_ra.deinit();
 
-            for (0..bytecode_d) |idx| {
-                const shift = log_k_chunk * (bytecode_d - 1 - idx);
-                const chunk_values = try self.buildBytecodeRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &bytecode_prep_for_ra.pc_map);
-                defer self.allocator.free(chunk_values);
-                const oh_indices = try self.allocator.alloc(?u8, trace_length);
-                for (0..trace_length) |cycle| {
-                    const addr = chunk_values[cycle].toU64();
-                    oh_indices[cycle] = if (addr < k_chunk) @intCast(addr) else null;
+            {
+                const stage6_mod = @import("spartan/stage6_prover.zig");
+                const oh_mask: u128 = (@as(u128, 1) << @intCast(log_k_chunk)) - 1;
+                const ram_mask: u64 = (@as(u64, 1) << @intCast(log_k_chunk)) - 1;
+                const steps = emulator.trace.steps.items;
+
+                // Pre-allocate all one-hot index arrays
+                for (0..num_onehot) |idx| {
+                    onehot_indices[idx] = try self.allocator.alloc(?u8, trace_length);
+                    @memset(onehot_indices[idx], null);
+                    onehot_idx = idx + 1;
                 }
-                onehot_indices[instruction_d + ram_d + idx] = oh_indices;
+
+                // Single scan over trace — compute each index ONCE
+                for (0..trace_length) |cycle| {
+                    if (cycle >= steps.len) break;
+                    const step = steps[cycle];
+
+                    // Instruction Ra: compute lookup index ONCE (was 32× before)
+                    const lookup_idx = stage6_mod.computeLookupIndex(step);
+                    for (0..instruction_d) |dim| {
+                        const shift = log_k_chunk * (instruction_d - 1 - dim); // MSB-first
+                        const chunk: u128 = (lookup_idx >> @intCast(shift)) & oh_mask;
+                        onehot_indices[dim][cycle] = if (chunk < k_chunk) @as(?u8, @intCast(chunk)) else null;
+                    }
+
+                    // Ram Ra: compute remapped address ONCE (was ram_d× before)
+                    if (step.memory_addr) |addr| {
+                        if (addr != 0) {
+                            if (device.memory_layout.remapAddress(addr)) |raddr| {
+                                for (0..ram_d) |dim| {
+                                    const shift = log_k_chunk * (ram_d - 1 - dim);
+                                    const chunk: u64 = (raddr >> @intCast(shift)) & ram_mask;
+                                    onehot_indices[instruction_d + dim][cycle] = if (chunk < k_chunk) @as(?u8, @intCast(chunk)) else null;
+                                }
+                            }
+                        }
+                    }
+
+                    // Bytecode Ra: compute PC index ONCE (was bytecode_d× before)
+                    const bc_idx: u64 = @intCast(bytecode_prep_for_ra.pc_map.getPCForStep(step));
+                    for (0..bytecode_d) |dim| {
+                        const shift = log_k_chunk * (bytecode_d - 1 - dim);
+                        const chunk: u64 = (bc_idx >> @intCast(shift)) & ram_mask;
+                        onehot_indices[instruction_d + ram_d + dim][cycle] = if (chunk < k_chunk) @as(?u8, @intCast(chunk)) else null;
+                    }
+                }
             }
             onehot_idx = num_onehot; // all built
 
-            // ===== Phase B: Parallel Dory commits =====
-            // All polynomials are independent — commit them in parallel.
-            // Each commit is its own work item (parallelForEach) for optimal
-            // load balancing between heavyweight dense and lightweight one-hot commits.
-            // Inner commit functions receive the ThreadPool for internal parallelism
-            // (MSM, Miller loops). Nested waitAndWork provides work-stealing behavior.
-
-            // Pre-allocate output arrays (written by parallel workers at distinct indices)
-            const commitments_out = try self.allocator.alloc(GT, num_total_polys);
-            defer self.allocator.free(commitments_out);
-            @memset(commitments_out, GT.one()); // safe default for error cleanup
+            // ===== Phase B: Dory commits =====
+            // Dense row commits already computed in Phase A (streaming).
+            // Convert row commits → GT via Miller loops, then commit one-hot polys.
 
             // Initialize row_commitments_cache entries to empty for safe error cleanup
             for (row_commitments_cache) |*rc| rc.* = &[_]G1Point{};
 
-            // Atomic error flag for parallel workers
+            // Dense: row commits → GT commitment (already have row_commits from Phase A)
+            row_commitments_cache[0] = rd_row_commits;
+            rc_idx = 1;
+            row_commitments_cache[1] = ram_row_commits;
+            rc_idx = 2;
+
+            // Compute GT commitments from row commits (join for concurrency)
+            var rd_gt: GT = undefined;
+            var ram_gt: GT = undefined;
+            if (self.thread_pool) |tp| {
+                const DenseGTCtx = struct {
+                    srs: *const DoryScheme.SetupParams,
+                    rd_rc: []const G1Point,
+                    ram_rc: []const G1Point,
+                    n_rows: usize,
+                    rd_out: *GT,
+                    ram_out: *GT,
+                };
+                const gt_ctx = DenseGTCtx{
+                    .srs = &dory_srs,
+                    .rd_rc = rd_row_commits,
+                    .ram_rc = ram_row_commits,
+                    .n_rows = dense_num_rows,
+                    .rd_out = &rd_gt,
+                    .ram_out = &ram_gt,
+                };
+                _ = tp.join(void, void, gt_ctx, struct {
+                    fn f(c: DenseGTCtx) void {
+                        c.rd_out.* = DoryScheme.rowCommitmentsToCommitment(c.srs, c.rd_rc, c.n_rows, null);
+                    }
+                }.f, gt_ctx, struct {
+                    fn f(c: DenseGTCtx) void {
+                        c.ram_out.* = DoryScheme.rowCommitmentsToCommitment(c.srs, c.ram_rc, c.n_rows, null);
+                    }
+                }.f);
+            } else {
+                rd_gt = DoryScheme.rowCommitmentsToCommitment(&dory_srs, rd_row_commits, dense_num_rows, null);
+                ram_gt = DoryScheme.rowCommitmentsToCommitment(&dory_srs, ram_row_commits, dense_num_rows, null);
+            }
+            try all_commitments.append(self.allocator, rd_gt);
+            try all_commitments.append(self.allocator, ram_gt);
+
+            // One-hot commits: parallel (inner parallelism also active via nested dispatch)
+            const oh_commitments_out = try self.allocator.alloc(GT, num_onehot);
+            defer self.allocator.free(oh_commitments_out);
+            @memset(oh_commitments_out, GT.one());
+
             var parallel_error: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-            // i128 arrays for dense polynomial commits (RdInc=0, RamInc=1)
-            const dense_i128_polys: [2][]const i128 = .{ rd_inc_i128, ram_inc_i128 };
-
-            const CommitCtx = struct {
+            const OhCommitCtx = struct {
                 dory_srs: *const DoryScheme.SetupParams,
-                wp: []const []F,
-                dense_i128: [2][]const i128,
                 oh: []const []?u8,
                 k_chunk: usize,
                 trace_length: usize,
-                num_dense: usize,
                 alloc: Allocator,
                 tp: ?*ThreadPool,
                 c_out: []GT,
                 rc_out: [][]G1Point,
+                rc_base: usize,
                 err_flag: *std.atomic.Value(bool),
             };
 
-            const commit_ctx = CommitCtx{
+            const oh_ctx = OhCommitCtx{
                 .dory_srs = &dory_srs,
-                .wp = witness_polys,
-                .dense_i128 = dense_i128_polys,
                 .oh = onehot_indices,
                 .k_chunk = k_chunk,
                 .trace_length = trace_length,
-                .num_dense = num_dense,
                 .alloc = self.allocator,
                 .tp = self.thread_pool,
-                .c_out = commitments_out,
+                .c_out = oh_commitments_out,
                 .rc_out = row_commitments_cache,
+                .rc_base = num_dense,
                 .err_flag = &parallel_error,
             };
 
-            const commitOnePoly = struct {
-                fn f(ctx: CommitCtx, poly_idx: usize) void {
-                    // Early exit if another worker already failed
+            const commitOneHot = struct {
+                fn f(ctx: OhCommitCtx, oh_idx: usize) void {
                     if (ctx.err_flag.load(.acquire)) return;
-
-                    if (poly_idx < ctx.num_dense) {
-                        // Dense commit using i128 small-scalar MSM (~2x faster)
-                        const r = DoryScheme.commitWithPoolAndHintsI128(
-                            ctx.dory_srs,
-                            ctx.dense_i128[poly_idx],
-                            ctx.alloc,
-                            ctx.tp,
-                        ) catch {
-                            ctx.err_flag.store(true, .release);
-                            return;
-                        };
-                        ctx.c_out[poly_idx] = r.commitment;
-                        ctx.rc_out[poly_idx] = r.row_commitments;
-                    } else {
-                        // One-hot commit
-                        const oh_idx = poly_idx - ctx.num_dense;
-                        const r = DoryScheme.commitOneHotWithPoolAndHints(
-                            ctx.dory_srs,
-                            ctx.oh[oh_idx],
-                            ctx.k_chunk,
-                            ctx.trace_length,
-                            ctx.alloc,
-                            ctx.tp,
-                        ) catch {
-                            ctx.err_flag.store(true, .release);
-                            return;
-                        };
-                        ctx.c_out[poly_idx] = r.commitment;
-                        ctx.rc_out[poly_idx] = r.row_commitments;
-                    }
+                    const r = DoryScheme.commitOneHotWithPoolAndHints(
+                        ctx.dory_srs,
+                        ctx.oh[oh_idx],
+                        ctx.k_chunk,
+                        ctx.trace_length,
+                        ctx.alloc,
+                        ctx.tp,
+                    ) catch {
+                        ctx.err_flag.store(true, .release);
+                        return;
+                    };
+                    ctx.c_out[oh_idx] = r.commitment;
+                    ctx.rc_out[ctx.rc_base + oh_idx] = r.row_commitments;
                 }
             }.f;
 
-            // Dense commits: run both concurrently via join(), each gets ~half the threads
-            // for inner row-MSM parallelism. Nested parallelism is supported.
             if (self.thread_pool) |tp| {
-                if (num_dense == 2) {
-                    const JoinCtx = struct { cc: CommitCtx };
-                    _ = tp.join(void, void, JoinCtx{ .cc = commit_ctx }, struct {
-                        fn f(c: JoinCtx) void {
-                            commitOnePoly(c.cc, 0);
-                        }
-                    }.f, JoinCtx{ .cc = commit_ctx }, struct {
-                        fn f(c: JoinCtx) void {
-                            commitOnePoly(c.cc, 1);
-                        }
-                    }.f);
-                } else {
-                    for (0..num_dense) |i| commitOnePoly(commit_ctx, i);
-                }
+                tp.parallelForEach(num_onehot, oh_ctx, commitOneHot);
             } else {
-                for (0..num_dense) |i| commitOnePoly(commit_ctx, i);
+                for (0..num_onehot) |i| commitOneHot(oh_ctx, i);
             }
 
-            // One-hot commits: run in parallel (inner parallelism also active via nested dispatch)
-            if (self.thread_pool) |tp| {
-                const OhCtx = struct {
-                    cc: CommitCtx,
-                    off: usize,
-                };
-                tp.parallelForEach(num_onehot, OhCtx{ .cc = commit_ctx, .off = num_dense }, struct {
-                    fn f(c: OhCtx, idx: usize) void {
-                        commitOnePoly(c.cc, c.off + idx);
-                    }
-                }.f);
-            } else {
-                for (num_dense..num_total_polys) |i| commitOnePoly(commit_ctx, i);
-            }
-
-            // Check for errors from parallel workers
             if (parallel_error.load(.acquire)) {
-                // Clean up any successfully allocated row commitments
                 for (row_commitments_cache) |rc| {
                     if (rc.len > 0) self.allocator.free(rc);
                 }
                 return error.OutOfMemory;
             }
 
-            // Copy commitments to the ordered list for transcript
-            for (commitments_out) |c| {
+            for (oh_commitments_out) |c| {
                 try all_commitments.append(self.allocator, c);
             }
             rc_idx = num_total_polys;
@@ -838,7 +901,7 @@ pub fn JoltProver(comptime F: type) type {
             result.log_k_chunk = log_k_chunk;
 
             const commit_time = phase_timer.read();
-            if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] Dory commits: {d:.1} ms ({} commitments)\n", .{ @as(f64, @floatFromInt(commit_time)) / 1_000_000.0, all_commitments.items.len });
+            std.debug.print("    [DORY-COMMIT] {d:.1} ms ({} commitments)\n", .{ @as(f64, @floatFromInt(commit_time)) / 1_000_000.0, all_commitments.items.len });
             phase_timer.reset();
             dbg("[DORY] All {} commitments computed.\n", .{all_commitments.items.len});
             // Debug: print first 3 commitment bytes
@@ -1041,43 +1104,28 @@ pub fn JoltProver(comptime F: type) type {
                 defer self.allocator.free(gamma_powers);
 
                 // 4. Build joint polynomial: Σ γ^i * poly_i
-                // All witness polynomials need to be evaluated at the same point.
-                // Dense polys (RdInc, RamInc) are trace_length-sized and need to be
-                // embedded into k_chunk * trace_length space (padded with zeros at
-                // address > 0). This is equivalent to multiplying the evaluation by
-                // the Lagrange factor, which we already did for the claims.
+                // Dense polys (RdInc, RamInc) are stored unpadded (length T).
+                // They occupy only the first T elements of the k_chunk*T joint poly.
+                // Elements [T..k_chunk*T] are zero for dense, non-zero only for sparse one-hot.
                 //
-                // For the joint polynomial, we need to physically embed dense polys
-                // into the larger k_chunk*T space so they can be combined with sparse polys.
-                //
-                // The witness_polys order is: RdInc, RamInc, InstructionRa[0..inst_d], RamRa[0..ram_d], BytecodeRa[0..bc_d]
-                // But Jolt Stage 8 collects: RamInc, RdInc, InstructionRa[0..inst_d], BytecodeRa[0..bc_d], RamRa[0..ram_d]
-                // These orderings differ! The gamma powers map to the Jolt ordering, but witness_polys uses Zolt ordering.
+                // Jolt Stage 8 gamma order: [0]=RamInc, [1]=RdInc, [2..2+inst_d]=InstructionRa,
+                //   [2+inst_d..2+inst_d+bc_d]=BytecodeRa, [2+inst_d+bc_d..]=RamRa
 
-                // Determine the total polynomial size: k_chunk * trace_length for the sparse polys
                 dbg("[STAGE8] Building joint polynomial (k_chunk={}, trace_length={})...\n", .{ k_chunk, trace_length });
                 const total_poly_size = k_chunk * trace_length;
                 var joint_poly = try self.allocator.alloc(F, total_poly_size);
                 defer self.allocator.free(joint_poly);
-                // Only zero the sparse region; the dense region [0..dense_len) will be overwritten by the dense pass
-                const dense_len_est = @min(@min(witness_polys[1].len, witness_polys[0].len), total_poly_size);
-                if (dense_len_est < total_poly_size) {
-                    @memset(joint_poly[dense_len_est..], F.zero());
-                }
+                // Zero entire joint poly — dense writes only [0..T), sparse adds at scattered positions
+                @memset(joint_poly, F.zero());
 
-                // Map each claim's gamma to the corresponding polynomial
-                // Dense witness_polys: [0]=RdInc, [1]=RamInc (padded to k_chunk*T)
-                // Sparse onehot_indices: [0..inst_d]=InstructionRa, [inst_d..inst_d+ram_d]=RamRa, [inst_d+ram_d..]=BytecodeRa
-                // Jolt Stage 8 gamma order: [0]=RamInc, [1]=RdInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+bc_d]=BytecodeRa, [2+inst_d+bc_d..]=RamRa
-
-                // RamInc + RdInc: accumulate both dense polys in a single pass.
-                // No zero-check branch — unconditional mul+add is faster than branch misprediction.
+                // RamInc + RdInc: accumulate both unpadded dense polys over [0..T).
+                // Elements [T..k_chunk*T] remain zero (dense polys are zero-padded implicitly).
                 {
                     const ram_inc_wp = witness_polys[1];
                     const rd_inc_wp = witness_polys[0];
                     const gamma_ram = gamma_powers[0];
                     const gamma_rd = gamma_powers[1];
-                    const dense_len = @min(@min(ram_inc_wp.len, rd_inc_wp.len), total_poly_size);
+                    const dense_len = trace_length; // unpadded length
                     if (self.thread_pool) |pool| {
                         const DenseCtx = struct {
                             jp: []F,
@@ -1371,238 +1419,6 @@ pub fn JoltProver(comptime F: type) type {
         }
 
 
-        // ===== Ra Polynomial Helpers =====
-
-        /// Build RdInc polynomial: rd_inc[i] = post_value[rd] - pre_value[rd]
-        /// Uses step.rd_index (u8, supports virtual registers 0-127) and step.rd_written
-        /// to match stage4_gruen_prover and stage6 IncClaimReduction.
-        fn buildRdIncPolynomial(
-            self: *Self,
-            trace: *const tracer.ExecutionTrace,
-            poly_size: usize,
-        ) ![]F {
-            const poly = try self.allocator.alloc(F, poly_size);
-            errdefer self.allocator.free(poly);
-            @memset(poly, F.zero());
-
-            // Track register values across cycles using 128 registers (virtual register support).
-            // Must match stage4_gruen_prover and stage6 IncClaimReduction which use step.rd_index
-            // (u8, supports indices 0-127 for virtual instruction decomposition).
-            const K_INC = 128;
-            var register_values: [K_INC]u64 = [_]u64{0} ** K_INC;
-
-            for (trace.steps.items, 0..) |step, i| {
-                if (i >= poly_size) break;
-
-                // Use step.rd_written and step.rd_index to match stage4_gruen_prover
-                if (!step.is_noop and step.rd_written and step.rd_index != 0) {
-                    const rd = step.rd_index;
-                    const pre_value = register_values[rd];
-                    const post_value = step.rd_value;
-                    poly[i] = F.fromU64(post_value).sub(F.fromU64(pre_value));
-                    register_values[rd] = post_value;
-                }
-                // else: RdInc = 0 (already zeroed by @memset)
-            }
-
-            return poly;
-        }
-
-        /// Build RamInc polynomial: ram_inc[i] = post_value[addr] - pre_value[addr]
-        /// Iterates through execution trace cycles (like Jolt does) and uses pre/post values from TraceStep
-        fn buildRamIncPolynomial(
-            self: *Self,
-            trace: *const tracer.ExecutionTrace,
-            poly_size: usize,
-        ) ![]F {
-            const poly = try self.allocator.alloc(F, poly_size);
-            errdefer self.allocator.free(poly);
-            @memset(poly, F.zero());
-
-            // Iterate through execution trace cycles (NOT memory trace accesses!)
-            // This matches Jolt's approach: iterate through cycles, compute increment for each
-            // See: jolt-core/src/zkvm/witness.rs:79-89
-            for (trace.steps.items, 0..) |step, i| {
-                if (i >= poly_size) break;
-
-                // Check if this cycle has a memory write
-                // TraceStep now stores both memory_pre_value and memory_value (post), just like Jolt's RAMWrite
-                if (step.is_memory_write) {
-                    const pre_value: i128 = @intCast(step.memory_pre_value orelse 0);
-                    const post_value: i128 = @intCast(step.memory_value orelse 0);
-                    const increment = post_value - pre_value;
-
-                    // Store increment as field element (handle negative numbers)
-                    poly[i] = if (increment >= 0)
-                        F.fromU64(@intCast(increment))
-                    else
-                        F.fromU64(@intCast(-increment)).neg();
-                } else {
-                    // No memory write in this cycle
-                    poly[i] = F.zero();
-                }
-            }
-
-            return poly;
-        }
-
-        /// Build RdInc as both F and i128 arrays in a single pass over the trace.
-        fn buildRdIncDual(
-            self: *Self,
-            trace: *const tracer.ExecutionTrace,
-            poly_size: usize,
-        ) !struct { field: []F, ints: []i128 } {
-            const poly = try self.allocator.alloc(F, poly_size);
-            errdefer self.allocator.free(poly);
-            @memset(poly, F.zero());
-            const ints = try self.allocator.alloc(i128, poly_size);
-            errdefer self.allocator.free(ints);
-            @memset(ints, 0);
-
-            const K_INC = 128;
-            var register_values: [K_INC]u64 = [_]u64{0} ** K_INC;
-
-            for (trace.steps.items, 0..) |step, i| {
-                if (i >= poly_size) break;
-                if (!step.is_noop and step.rd_written and step.rd_index != 0) {
-                    const rd = step.rd_index;
-                    const pre_value = register_values[rd];
-                    const post_value = step.rd_value;
-                    poly[i] = F.fromU64(post_value).sub(F.fromU64(pre_value));
-                    ints[i] = @as(i128, post_value) - @as(i128, pre_value);
-                    register_values[rd] = post_value;
-                }
-            }
-            return .{ .field = poly, .ints = ints };
-        }
-
-        /// Build RamInc as both F and i128 arrays in a single pass over the trace.
-        fn buildRamIncDual(
-            self: *Self,
-            trace: *const tracer.ExecutionTrace,
-            poly_size: usize,
-        ) !struct { field: []F, ints: []i128 } {
-            const poly = try self.allocator.alloc(F, poly_size);
-            errdefer self.allocator.free(poly);
-            @memset(poly, F.zero());
-            const ints = try self.allocator.alloc(i128, poly_size);
-            errdefer self.allocator.free(ints);
-            @memset(ints, 0);
-
-            for (trace.steps.items, 0..) |step, i| {
-                if (i >= poly_size) break;
-                if (step.is_memory_write) {
-                    const pre_value: i128 = @intCast(step.memory_pre_value orelse 0);
-                    const post_value: i128 = @intCast(step.memory_value orelse 0);
-                    const increment = post_value - pre_value;
-                    poly[i] = if (increment >= 0)
-                        F.fromU64(@intCast(increment))
-                    else
-                        F.fromU64(@intCast(-increment)).neg();
-                    ints[i] = increment;
-                }
-            }
-            return .{ .field = poly, .ints = ints };
-        }
-
-        /// Build InstructionRa chunk value polynomial from execution trace.
-        /// Uses the exact same lookup index computation as the proof converter's Stage 7,
-        /// iterating over ALL cycles (not just lookup trace entries).
-        /// CRITICAL: Must use the centralized computeLookupIndex from stage6_prover.zig
-        /// to handle virtual opcodes (0x0B, 0x2B) correctly.
-        fn buildInstructionRaPolynomial(
-            self: *Self,
-            trace: *const tracer.ExecutionTrace,
-            poly_size: usize,
-            log_k_chunk: usize,
-            shift: usize,
-        ) ![]F {
-            const stage6_mod = @import("spartan/stage6_prover.zig");
-            const poly = try self.allocator.alloc(F, poly_size);
-            errdefer self.allocator.free(poly);
-            @memset(poly, F.zero());
-
-            const k_chunk: u128 = @as(u128, 1) << @intCast(log_k_chunk);
-            const mask: u128 = k_chunk - 1;
-
-            // Iterate over ALL cycles (not just lookup entries)
-            for (trace.steps.items, 0..) |step, i| {
-                if (i >= poly_size) break;
-
-                const lookup_idx = stage6_mod.computeLookupIndex(step);
-                const chunk: u128 = (lookup_idx >> @intCast(shift)) & mask;
-                poly[i] = F.fromU64(@intCast(chunk));
-            }
-
-            return poly;
-        }
-
-        /// Build RamRa chunk value polynomial from execution trace.
-        /// Returns chunk values for each cycle, or null (represented as k_chunk, i.e. out of range)
-        /// for cycles without memory access. This matches the proof converter's G table construction
-        /// which only counts memory-access cycles.
-        fn buildRamRaPolynomial(
-            self: *Self,
-            trace: *const tracer.ExecutionTrace,
-            poly_size: usize,
-            log_k_chunk: usize,
-            shift: usize,
-            memory_layout: *const jolt_device.MemoryLayout,
-        ) ![]F {
-            const k_chunk: u64 = @as(u64, 1) << @intCast(log_k_chunk);
-            const mask: u64 = k_chunk - 1;
-
-            const poly = try self.allocator.alloc(F, poly_size);
-            errdefer self.allocator.free(poly);
-            // Default to k_chunk (out of range) for non-memory cycles
-            // This ensures they won't generate any one-hot entry
-            for (poly) |*p| p.* = F.fromU64(k_chunk);
-
-            // Extract chunks from REMAPPED RAM addresses (must match proof converter)
-            for (trace.steps.items, 0..) |step, i| {
-                if (i >= poly_size) break;
-
-                if (step.memory_addr) |addr| {
-                    if (addr != 0) {
-                        if (memory_layout.remapAddress(addr)) |raddr| {
-                            const chunk: u64 = (raddr >> @intCast(shift)) & mask;
-                            poly[i] = F.fromU64(chunk);
-                        }
-                    }
-                }
-            }
-
-            return poly;
-        }
-
-        /// Build BytecodeRa polynomial: extract chunk idx from PCs
-        fn buildBytecodeRaPolynomial(
-            self: *Self,
-            trace: *const tracer.ExecutionTrace,
-            poly_size: usize,
-            log_k_chunk: usize,
-            shift: usize,
-            pc_map: *const preprocessing.BytecodePCMapper,
-        ) ![]F {
-            const poly = try self.allocator.alloc(F, poly_size);
-            errdefer self.allocator.free(poly);
-            @memset(poly, F.zero());
-
-            const k_chunk: u64 = @as(u64, 1) << @intCast(log_k_chunk);
-            const mask: u64 = k_chunk - 1;
-
-            // Extract chunks from bytecode indices (NOT raw ELF addresses)
-            for (trace.steps.items, 0..) |step, i| {
-                if (i >= poly_size) break;
-
-                // Convert ELF address to bytecode array index
-                const bc_idx: u64 = @intCast(pc_map.getPCForStep(step));
-                const chunk: u64 = (bc_idx >> @intCast(shift)) & mask;
-                poly[i] = F.fromU64(chunk);
-            }
-
-            return poly;
-        }
     };
 }
 

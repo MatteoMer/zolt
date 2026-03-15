@@ -1107,6 +1107,34 @@ pub fn UniPoly(comptime F: type) type {
             const n = evals.len; // n = d + 1 (number of evaluation points)
             if (n == 0) return try allocator.alloc(F, 0);
 
+            // Fast path for small n using closed-form finite differences (no Gaussian elimination)
+            if (n <= 4) {
+                const inv2 = F.fromU64(2).inverse().?;
+                const compressed = try allocator.alloc(F, n - 1);
+                compressed[0] = evals[0]; // c0 = p(0)
+                if (n == 2) {
+                    // degree 1: c0 = p(0), skip c1
+                    return compressed;
+                } else if (n == 3) {
+                    // degree 2: c2 = (p(2) - 2p(1) + p(0)) / 2
+                    compressed[1] = evals[2].sub(evals[1]).sub(evals[1]).add(evals[0]).mul(inv2);
+                    return compressed;
+                } else {
+                    // degree 3: finite differences
+                    const inv6 = F.fromU64(6).inverse().?;
+                    const d1 = evals[1].sub(evals[0]);
+                    const d2 = evals[2].sub(evals[1]);
+                    const d3 = evals[3].sub(evals[2]);
+                    const dd1 = d2.sub(d1);
+                    const dd2 = d3.sub(d2);
+                    const c3 = dd2.sub(dd1).mul(inv6);
+                    const c2 = dd1.mul(inv2).sub(c3.mul(F.fromU64(3)));
+                    compressed[1] = c2;
+                    compressed[2] = c3;
+                    return compressed;
+                }
+            }
+
             const coeffs = try fromEvalsVandermonde(allocator, evals);
             defer allocator.free(coeffs);
 
@@ -1132,6 +1160,110 @@ pub fn UniPoly(comptime F: type) type {
             while (i > 0) {
                 i -= 1;
                 result = result.mul(x).add(coeffs[i]);
+            }
+            return result;
+        }
+
+        /// Evaluate cubic from compressed form [c0, c2, c3] and hint = p(0)+p(1).
+        /// Recovers c1 = hint - 2*c0 - c2 - c3, then Horner evaluation.
+        /// 4 subs + 3 muls. No allocation.
+        pub fn evalFromHint(compressed: [3]F, hint: F, x: F) F {
+            const c0 = compressed[0];
+            const c2 = compressed[1];
+            const c3 = compressed[2];
+            // c1 = hint - 2*c0 - c2 - c3
+            const c1 = hint.sub(c0).sub(c0).sub(c2).sub(c3);
+            // Horner: c0 + x*(c1 + x*(c2 + x*c3))
+            return c0.add(x.mul(c1.add(x.mul(c2.add(x.mul(c3))))));
+        }
+
+        /// Evaluate from compressed form [c0, c2, c3, ..., c_d] and hint = p(0)+p(1).
+        /// Recovers c1 = hint - 2*c0 - Σ compressed[1..], then Horner. No allocation.
+        pub fn evalFromHintGeneral(compressed: []const F, hint: F, x: F) F {
+            const c0 = compressed[0];
+            // c1 = hint - 2*c0 - c2 - c3 - ... - c_d
+            var c1 = hint.sub(c0).sub(c0);
+            for (compressed[1..]) |ci| {
+                c1 = c1.sub(ci);
+            }
+            // Horner from degree d down: result = c_d
+            // then result = result * x + c_{d-1}, ..., result * x + c1, result * x + c0
+            var result = compressed[compressed.len - 1]; // c_d
+            var i = compressed.len - 1;
+            while (i > 1) {
+                i -= 1;
+                result = result.mul(x).add(compressed[i]); // c_{i+1} since compressed[i] = c_{i+1} for i>=1
+            }
+            // Now result holds accumulated from c_d down to c_2
+            result = result.mul(x).add(c1);
+            result = result.mul(x).add(c0);
+            return result;
+        }
+
+        /// Evaluate degree-2 poly at x from Vandermonde evals [p(0), p(1), p(2)].
+        /// Uses Newton forward differences: 6 muls, no allocation.
+        pub fn evalFromEvalsDeg2(evals: [3]F, x: F) F {
+            const inv2 = F.fromU64(2).inverse().?;
+            // Newton forward differences for points 0, 1, 2:
+            // p(x) = p(0) + Δ₁·x + Δ₂·x·(x-1)/2
+            // where Δ₁ = p(1)-p(0), Δ₂ = p(2)-2p(1)+p(0)
+            const d1 = evals[1].sub(evals[0]);
+            const dd = evals[2].sub(evals[1]).sub(d1); // second difference
+            // p(x) = p(0) + x·(Δ₁ + (x-1)·Δ₂/2)
+            return evals[0].add(x.mul(d1.add(x.sub(F.one()).mul(dd).mul(inv2))));
+        }
+
+        /// Evaluate degree-3 poly at x from Vandermonde evals [p(0), p(1), p(2), p(3)].
+        /// Uses Newton forward differences: ~8 muls, no allocation.
+        pub fn evalFromEvalsDeg3(evals: [4]F, x: F) F {
+            const inv2 = F.fromU64(2).inverse().?;
+            const inv6 = F.fromU64(6).inverse().?;
+            // Newton forward differences for points 0, 1, 2, 3:
+            const d1 = evals[1].sub(evals[0]);
+            const d2 = evals[2].sub(evals[1]);
+            const d3 = evals[3].sub(evals[2]);
+            const dd1 = d2.sub(d1);
+            const dd2 = d3.sub(d2);
+            const ddd = dd2.sub(dd1);
+            // p(x) = p(0) + x·Δ₁ + x(x-1)/2·Δ₂ + x(x-1)(x-2)/6·Δ₃
+            const xm1 = x.sub(F.one());
+            const xm2 = x.sub(F.fromU64(2));
+            return evals[0].add(x.mul(d1.add(xm1.mul(dd1.mul(inv2).add(xm2.mul(ddd).mul(inv6))))));
+        }
+
+        /// Evaluate general-degree poly at x from Vandermonde evals [p(0), ..., p(d)].
+        /// Uses Newton forward differences. No allocation for d <= 15.
+        pub fn evalFromEvalsGeneral(evals: []const F, x: F) F {
+            const n = evals.len;
+            if (n == 0) return F.zero();
+            if (n == 1) return evals[0];
+            if (n == 3) return evalFromEvalsDeg2(.{ evals[0], evals[1], evals[2] }, x);
+            if (n == 4) return evalFromEvalsDeg3(.{ evals[0], evals[1], evals[2], evals[3] }, x);
+
+            // General Newton forward differences with static buffer
+            var dd: [16]F = undefined; // supports up to degree 15
+            std.debug.assert(n <= 16);
+            for (0..n) |i| dd[i] = evals[i];
+
+            // Build forward difference table in-place
+            var order: usize = 1;
+            while (order < n) : (order += 1) {
+                var i = n - 1;
+                while (i >= order) : (i -= 1) {
+                    dd[i] = dd[i].sub(dd[i - 1]);
+                    if (i == order) break;
+                }
+            }
+            // dd[k] now holds Δ^k[0] (k-th forward difference at 0)
+            // Evaluate: p(x) = Σ_k C(x,k) · Δ^k[0]
+            // where C(x,k) = x(x-1)...(x-k+1) / k!
+            var result = dd[0];
+            var falling_factorial = F.one();
+            var k_factorial: u64 = 1;
+            for (1..n) |k| {
+                falling_factorial = falling_factorial.mul(x.sub(F.fromU64(@intCast(k - 1))));
+                k_factorial *= @as(u64, @intCast(k));
+                result = result.add(falling_factorial.mul(F.fromU64(k_factorial).inverse().?).mul(dd[k]));
             }
             return result;
         }

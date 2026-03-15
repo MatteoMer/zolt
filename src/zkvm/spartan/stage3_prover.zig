@@ -36,6 +36,7 @@ const jolt_types = @import("../jolt_types.zig");
 const r1cs = @import("../r1cs/mod.zig");
 const R1CSInputIndex = r1cs.R1CSInputIndex;
 const instruction_mod = @import("../instruction/mod.zig");
+const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
 
 /// Stage 3 prover result
 pub fn Stage3Result(comptime F: type) type {
@@ -464,22 +465,21 @@ pub fn Stage3Prover(comptime F: type) type {
                     }
                 }
 
-                // Convert evaluations to coefficients
-                const combined_coeffs = try self.evalsToCoeffs(&combined_evals, 3);
-                defer self.allocator.free(combined_coeffs);
+                // Compress evaluations to [c0, c2, c3] using finite differences (no allocation for interp)
+                const inv2 = F.fromU64(2).inverse().?;
+                const inv6 = F.fromU64(6).inverse().?;
+                const d1_c = combined_evals[1].sub(combined_evals[0]);
+                const d2_c = combined_evals[2].sub(combined_evals[1]);
+                const d3_c = combined_evals[3].sub(combined_evals[2]);
+                const dd1_c = d2_c.sub(d1_c);
+                const dd2_c = d3_c.sub(d2_c);
+                const c3_val = dd2_c.sub(dd1_c).mul(inv6);
+                const c2_val = dd1_c.mul(inv2).sub(c3_val.mul(F.fromU64(3)));
 
-                // Debug: Print all coefficients including c1
-                if (comptime debug_verbose) {
-                    if (round < 3) {
-                        dbg("[ZOLT] STAGE3_ROUND_{}: c1 = {{ {any} }}\n", .{ round, combined_coeffs[1].toBytes() });
-                    }
-                }
-
-                // Compress: [c0, c2, c3] (c1 recovered from hint = combined_claim)
                 const compressed = try self.allocator.alloc(F, 3);
-                compressed[0] = combined_coeffs[0];
-                compressed[1] = combined_coeffs[2];
-                compressed[2] = combined_coeffs[3];
+                compressed[0] = combined_evals[0]; // c0
+                compressed[1] = c2_val;
+                compressed[2] = c3_val;
 
                 // Append to proof
                 try proof.compressed_polys.append(self.allocator, .{
@@ -505,40 +505,21 @@ pub fn Stage3Prover(comptime F: type) type {
                     dbg("[ZOLT] STAGE3_ROUND_{}: challenge = {{ {any} }}\n", .{ round, r_j.toBytes() });
                 }
 
-                // Evaluate combined polynomial at r_j to get next claim
-                combined_claim = self.evaluatePolyAtPoint(combined_coeffs, r_j);
+                // Evaluate combined polynomial at r_j using evalFromHint (no allocation)
+                const UniPolyF = poly_mod.UniPoly(F);
+                combined_claim = UniPolyF.evalFromHint(.{ compressed[0], compressed[1], compressed[2] }, combined_claim, r_j);
                 if (comptime debug_verbose) {
                     dbg("[ZOLT] STAGE3_ROUND_{}: next_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
                 }
 
-                // Update individual claims by evaluating their polynomials at r_j
-                const shift_coeffs = try self.evalsToCoeffs(&shift_evals, 2);
-                defer self.allocator.free(shift_coeffs);
-                current_shift_claim = self.evaluatePolyAtPoint(shift_coeffs, r_j);
-
-                const instr_coeffs = try self.evalsToCoeffs(&instr_evals, 3);
-                defer self.allocator.free(instr_coeffs);
-                current_instr_claim = self.evaluatePolyAtPoint(instr_coeffs, r_j);
-
-                const reg_coeffs = try self.evalsToCoeffs(&reg_evals, 2);
-                defer self.allocator.free(reg_coeffs);
-                current_reg_claim = self.evaluatePolyAtPoint(reg_coeffs, r_j);
+                // Update individual claims using direct evaluation from evals (no allocation)
+                current_shift_claim = UniPolyF.evalFromEvalsDeg2(shift_evals, r_j);
+                current_instr_claim = UniPolyF.evalFromEvalsDeg3(instr_evals, r_j);
+                current_reg_claim = UniPolyF.evalFromEvalsDeg2(reg_evals, r_j);
 
                 // DEBUG: Verify combined_claim equals batched sum of individual claims
                 if (comptime debug_verbose) {
                     if (round < 3) {
-                        // Test: evaluate combined poly at point 0 - should equal combined_evals[0]
-                        const test_p0 = self.evaluatePolyAtPoint(combined_coeffs, F.zero());
-                        const expect_p0 = combined_evals[0];
-                        dbg("[ZOLT] STAGE3_ROUND_{}: combined_poly(0) = {{ {any} }}, expect = {{ {any} }}, match={}\n", .{ round, test_p0.toBytes()[0..8], expect_p0.toBytes()[0..8], test_p0.eql(expect_p0) });
-
-                        // Direct sum check
-                        const direct_combined = batching_coeffs[0].mul(self.evaluatePolyAtPoint(shift_coeffs, r_j))
-                            .add(batching_coeffs[1].mul(self.evaluatePolyAtPoint(instr_coeffs, r_j)))
-                            .add(batching_coeffs[2].mul(self.evaluatePolyAtPoint(reg_coeffs, r_j)));
-                        dbg("[ZOLT] STAGE3_ROUND_{}: direct_combined = {{ {any} }}\n", .{ round, direct_combined.toBytes()[0..8] });
-                        dbg("[ZOLT] STAGE3_ROUND_{}: combined_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes()[0..8] });
-
                         const batched_sum = batching_coeffs[0].mul(current_shift_claim)
                             .add(batching_coeffs[1].mul(current_instr_claim))
                             .add(batching_coeffs[2].mul(current_reg_claim));
@@ -1664,7 +1645,6 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             // So H(0) = sum_j P[2j] * Q[2j]    (X=0)
             //    H(1) = sum_j P[2j+1] * Q[2j+1] (X=1)
             const half = self.current_prefix_size / 2;
-            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() }; // p(0), p(1), p(2)
 
             // Process all 4 (P, Q) pairs
             const pairs: [4]struct { P: []F, Q: []F } = .{
@@ -1674,25 +1654,42 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 .{ .P = self.P_1_prod, .Q = self.Q_1_prod },
             };
 
-            for (pairs) |pair| {
-                for (0..half) |i| {
-                    // Get P and Q values at indices 2i and 2i+1
-                    const p_at_0 = pair.P[2 * i];       // P evaluated when X=0
-                    const p_at_1 = pair.P[2 * i + 1];   // P evaluated when X=1
-                    const q_at_0 = pair.Q[2 * i];       // Q evaluated when X=0
-                    const q_at_1 = pair.Q[2 * i + 1];   // Q evaluated when X=1
+            // Use deferred Montgomery reduction when F supports it
+            const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
+            var evals: [3]F = undefined;
 
-                    // Linear extrapolation for X=2: f(2) = 2*f(1) - f(0)
-                    const p_at_2 = p_at_1.add(p_at_1).sub(p_at_0);
-                    const q_at_2 = q_at_1.add(q_at_1).sub(q_at_0);
+            if (use_deferred) {
+                var accum: [3]UnreducedProductAccum = .{ UnreducedProductAccum.zero(), UnreducedProductAccum.zero(), UnreducedProductAccum.zero() };
+                for (pairs) |pair| {
+                    for (0..half) |i| {
+                        const p_at_0 = pair.P[2 * i];
+                        const p_at_1 = pair.P[2 * i + 1];
+                        const q_at_0 = pair.Q[2 * i];
+                        const q_at_1 = pair.Q[2 * i + 1];
+                        const p_at_2 = p_at_1.add(p_at_1).sub(p_at_0);
+                        const q_at_2 = q_at_1.add(q_at_1).sub(q_at_0);
 
-                    // H(X) = Σ_j P_j(X) * Q_j(X)
-                    // H(0) = Σ_j P_j(0) * Q_j(0) = Σ_j P[2j] * Q[2j]
-                    // H(1) = Σ_j P_j(1) * Q_j(1) = Σ_j P[2j+1] * Q[2j+1]
-                    // H(2) = Σ_j P_j(2) * Q_j(2) (extrapolated)
-                    evals[0] = evals[0].add(p_at_0.mul(q_at_0));
-                    evals[1] = evals[1].add(p_at_1.mul(q_at_1));
-                    evals[2] = evals[2].add(p_at_2.mul(q_at_2));
+                        accum[0].addAssign(p_at_0.mulToProductAccum(q_at_0));
+                        accum[1].addAssign(p_at_1.mulToProductAccum(q_at_1));
+                        accum[2].addAssign(p_at_2.mulToProductAccum(q_at_2));
+                    }
+                }
+                evals = .{ accum[0].reduce(), accum[1].reduce(), accum[2].reduce() };
+            } else {
+                evals = .{ F.zero(), F.zero(), F.zero() };
+                for (pairs) |pair| {
+                    for (0..half) |i| {
+                        const p_at_0 = pair.P[2 * i];
+                        const p_at_1 = pair.P[2 * i + 1];
+                        const q_at_0 = pair.Q[2 * i];
+                        const q_at_1 = pair.Q[2 * i + 1];
+                        const p_at_2 = p_at_1.add(p_at_1).sub(p_at_0);
+                        const q_at_2 = q_at_1.add(q_at_1).sub(q_at_0);
+
+                        evals[0] = evals[0].add(p_at_0.mul(q_at_0));
+                        evals[1] = evals[1].add(p_at_1.mul(q_at_1));
+                        evals[2] = evals[2].add(p_at_2.mul(q_at_2));
+                    }
                 }
             }
 
@@ -2398,65 +2395,126 @@ fn InstructionInputProver(comptime F: type) type {
                 .gamma = self.gamma,
             };
 
+            const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
+
             const mapFn = struct {
                 fn map(c: Ctx, start: usize, end: usize) [3]F {
-                    var local_evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
-                    for (start..end) |j| {
-                        const left_is_rs1_0 = c.left_is_rs1[2 * j];
-                        const left_is_rs1_1 = c.left_is_rs1[2 * j + 1];
-                        const rs1_0 = c.rs1_value[2 * j];
-                        const rs1_1 = c.rs1_value[2 * j + 1];
-                        const left_is_pc_0 = c.left_is_pc[2 * j];
-                        const left_is_pc_1 = c.left_is_pc[2 * j + 1];
-                        const pc_0 = c.unexpanded_pc[2 * j];
-                        const pc_1 = c.unexpanded_pc[2 * j + 1];
-                        const right_is_rs2_0 = c.right_is_rs2[2 * j];
-                        const right_is_rs2_1 = c.right_is_rs2[2 * j + 1];
-                        const rs2_0 = c.rs2_value[2 * j];
-                        const rs2_1 = c.rs2_value[2 * j + 1];
-                        const right_is_imm_0 = c.right_is_imm[2 * j];
-                        const right_is_imm_1 = c.right_is_imm[2 * j + 1];
-                        const imm_0 = c.imm[2 * j];
-                        const imm_1 = c.imm[2 * j + 1];
-                        const eq_0 = c.eq_stage2[2 * j];
-                        const eq_1 = c.eq_stage2[2 * j + 1];
+                    if (use_deferred) {
+                        var accum: [3]UnreducedProductAccum = .{ UnreducedProductAccum.zero(), UnreducedProductAccum.zero(), UnreducedProductAccum.zero() };
+                        for (start..end) |j| {
+                            const left_is_rs1_0 = c.left_is_rs1[2 * j];
+                            const left_is_rs1_1 = c.left_is_rs1[2 * j + 1];
+                            const rs1_0 = c.rs1_value[2 * j];
+                            const rs1_1 = c.rs1_value[2 * j + 1];
+                            const left_is_pc_0 = c.left_is_pc[2 * j];
+                            const left_is_pc_1 = c.left_is_pc[2 * j + 1];
+                            const pc_0 = c.unexpanded_pc[2 * j];
+                            const pc_1 = c.unexpanded_pc[2 * j + 1];
+                            const right_is_rs2_0 = c.right_is_rs2[2 * j];
+                            const right_is_rs2_1 = c.right_is_rs2[2 * j + 1];
+                            const rs2_0 = c.rs2_value[2 * j];
+                            const rs2_1 = c.rs2_value[2 * j + 1];
+                            const right_is_imm_0 = c.right_is_imm[2 * j];
+                            const right_is_imm_1 = c.right_is_imm[2 * j + 1];
+                            const imm_0 = c.imm[2 * j];
+                            const imm_1 = c.imm[2 * j + 1];
+                            const eq_0 = c.eq_stage2[2 * j];
+                            const eq_1 = c.eq_stage2[2 * j + 1];
 
-                        const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
-                        const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
-                        const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
-                        const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
-                        const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
-                        const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
-                        const pc_2 = pc_1.add(pc_1).sub(pc_0);
-                        const pc_3 = pc_2.add(pc_1).sub(pc_0);
-                        const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
-                        const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
-                        const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
-                        const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
-                        const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
-                        const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
-                        const imm_2 = imm_1.add(imm_1).sub(imm_0);
-                        const imm_3 = imm_2.add(imm_1).sub(imm_0);
-                        const eq_2 = eq_1.add(eq_1).sub(eq_0);
-                        const eq_3 = eq_2.add(eq_1).sub(eq_0);
+                            const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
+                            const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
+                            const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
+                            const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
+                            const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
+                            const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
+                            const pc_2 = pc_1.add(pc_1).sub(pc_0);
+                            const pc_3 = pc_2.add(pc_1).sub(pc_0);
+                            const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
+                            const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
+                            const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
+                            const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
+                            const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
+                            const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
+                            const imm_2 = imm_1.add(imm_1).sub(imm_0);
+                            const imm_3 = imm_2.add(imm_1).sub(imm_0);
+                            const eq_2 = eq_1.add(eq_1).sub(eq_0);
+                            const eq_3 = eq_2.add(eq_1).sub(eq_0);
 
-                        const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
-                        const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
-                        const f_0 = eq_0.mul(right_0.add(c.gamma.mul(left_0)));
+                            const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
+                            const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
+                            const val_0 = right_0.add(c.gamma.mul(left_0));
+                            accum[0].addAssign(eq_0.mulToProductAccum(val_0));
 
-                        const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
-                        const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
-                        const f_2 = eq_2.mul(right_2.add(c.gamma.mul(left_2)));
+                            const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
+                            const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
+                            const val_2 = right_2.add(c.gamma.mul(left_2));
+                            accum[1].addAssign(eq_2.mulToProductAccum(val_2));
 
-                        const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
-                        const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
-                        const f_3 = eq_3.mul(right_3.add(c.gamma.mul(left_3)));
+                            const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
+                            const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
+                            const val_3 = right_3.add(c.gamma.mul(left_3));
+                            accum[2].addAssign(eq_3.mulToProductAccum(val_3));
+                        }
+                        return .{ accum[0].reduce(), accum[1].reduce(), accum[2].reduce() };
+                    } else {
+                        var local_evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
+                        for (start..end) |j| {
+                            const left_is_rs1_0 = c.left_is_rs1[2 * j];
+                            const left_is_rs1_1 = c.left_is_rs1[2 * j + 1];
+                            const rs1_0 = c.rs1_value[2 * j];
+                            const rs1_1 = c.rs1_value[2 * j + 1];
+                            const left_is_pc_0 = c.left_is_pc[2 * j];
+                            const left_is_pc_1 = c.left_is_pc[2 * j + 1];
+                            const pc_0 = c.unexpanded_pc[2 * j];
+                            const pc_1 = c.unexpanded_pc[2 * j + 1];
+                            const right_is_rs2_0 = c.right_is_rs2[2 * j];
+                            const right_is_rs2_1 = c.right_is_rs2[2 * j + 1];
+                            const rs2_0 = c.rs2_value[2 * j];
+                            const rs2_1 = c.rs2_value[2 * j + 1];
+                            const right_is_imm_0 = c.right_is_imm[2 * j];
+                            const right_is_imm_1 = c.right_is_imm[2 * j + 1];
+                            const imm_0 = c.imm[2 * j];
+                            const imm_1 = c.imm[2 * j + 1];
+                            const eq_0 = c.eq_stage2[2 * j];
+                            const eq_1 = c.eq_stage2[2 * j + 1];
 
-                        local_evals[0] = local_evals[0].add(f_0);
-                        local_evals[1] = local_evals[1].add(f_2);
-                        local_evals[2] = local_evals[2].add(f_3);
+                            const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
+                            const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
+                            const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
+                            const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
+                            const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
+                            const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
+                            const pc_2 = pc_1.add(pc_1).sub(pc_0);
+                            const pc_3 = pc_2.add(pc_1).sub(pc_0);
+                            const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
+                            const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
+                            const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
+                            const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
+                            const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
+                            const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
+                            const imm_2 = imm_1.add(imm_1).sub(imm_0);
+                            const imm_3 = imm_2.add(imm_1).sub(imm_0);
+                            const eq_2 = eq_1.add(eq_1).sub(eq_0);
+                            const eq_3 = eq_2.add(eq_1).sub(eq_0);
+
+                            const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
+                            const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
+                            const f_0 = eq_0.mul(right_0.add(c.gamma.mul(left_0)));
+
+                            const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
+                            const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
+                            const f_2 = eq_2.mul(right_2.add(c.gamma.mul(left_2)));
+
+                            const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
+                            const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
+                            const f_3 = eq_3.mul(right_3.add(c.gamma.mul(left_3)));
+
+                            local_evals[0] = local_evals[0].add(f_0);
+                            local_evals[1] = local_evals[1].add(f_2);
+                            local_evals[2] = local_evals[2].add(f_3);
+                        }
+                        return local_evals;
                     }
-                    return local_evals;
                 }
             }.map;
 
@@ -2749,20 +2807,36 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
         fn computeRoundEvalsPhase1(self: *Self, previous_claim: F) [3]F {
             const half = self.current_prefix_size / 2;
-            var evals: [2]F = .{ F.zero(), F.zero() }; // p(0), p(2)
+            const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
+            var evals: [2]F = undefined;
 
-            for (0..half) |i| {
-                const p_0 = self.P[2 * i];
-                const p_1 = self.P[2 * i + 1];
-                const q_0 = self.Q[2 * i];
-                const q_1 = self.Q[2 * i + 1];
+            if (use_deferred) {
+                var accum: [2]UnreducedProductAccum = .{ UnreducedProductAccum.zero(), UnreducedProductAccum.zero() };
+                for (0..half) |i| {
+                    const p_0 = self.P[2 * i];
+                    const p_1 = self.P[2 * i + 1];
+                    const q_0 = self.Q[2 * i];
+                    const q_1 = self.Q[2 * i + 1];
+                    const p_2 = p_1.add(p_1).sub(p_0);
+                    const q_2 = q_1.add(q_1).sub(q_0);
 
-                // Extrapolate to X=2
-                const p_2 = p_1.add(p_1).sub(p_0);
-                const q_2 = q_1.add(q_1).sub(q_0);
+                    accum[0].addAssign(p_0.mulToProductAccum(q_0));
+                    accum[1].addAssign(p_2.mulToProductAccum(q_2));
+                }
+                evals = .{ accum[0].reduce(), accum[1].reduce() };
+            } else {
+                evals = .{ F.zero(), F.zero() };
+                for (0..half) |i| {
+                    const p_0 = self.P[2 * i];
+                    const p_1 = self.P[2 * i + 1];
+                    const q_0 = self.Q[2 * i];
+                    const q_1 = self.Q[2 * i + 1];
+                    const p_2 = p_1.add(p_1).sub(p_0);
+                    const q_2 = q_1.add(q_1).sub(q_0);
 
-                evals[0] = evals[0].add(p_0.mul(q_0));
-                evals[1] = evals[1].add(p_2.mul(q_2));
+                    evals[0] = evals[0].add(p_0.mul(q_0));
+                    evals[1] = evals[1].add(p_2.mul(q_2));
+                }
             }
 
             const p_1 = previous_claim.sub(evals[0]);

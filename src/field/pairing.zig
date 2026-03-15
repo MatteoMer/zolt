@@ -1150,6 +1150,61 @@ pub const G2Projective = struct {
 
         return .{ .x = X3, .y = Y3, .z = Z3 };
     }
+
+    /// Batch normalize G2 projective points to affine using Montgomery's trick.
+    /// Single Fp2 inversion + ~6n Fp2 multiplications instead of n inversions.
+    pub fn batchNormalize(points: []const G2Projective, out: []G2Point) void {
+        std.debug.assert(out.len >= points.len);
+        const n = points.len;
+        if (n == 0) return;
+
+        var heap_products: ?[]Fp2 = null;
+        defer if (heap_products) |h| std.heap.page_allocator.free(h);
+
+        var stack_products: [1024]Fp2 = undefined;
+        const products: []Fp2 = if (n <= 1024)
+            stack_products[0..n]
+        else blk: {
+            heap_products = std.heap.page_allocator.alloc(Fp2, n) catch {
+                for (points, 0..) |p, i| out[i] = p.toAffine();
+                return;
+            };
+            break :blk heap_products.?;
+        };
+
+        // Forward pass: accumulate Z products
+        var acc = Fp2.one();
+        for (points, 0..) |p, i| {
+            if (p.isIdentity()) {
+                products[i] = acc;
+            } else {
+                products[i] = acc;
+                acc = acc.mul(p.z);
+            }
+        }
+
+        // Invert the accumulated product
+        var inv = acc.inverse() orelse Fp2.one();
+
+        // Backward pass: extract individual Z inverses
+        var i: usize = n;
+        while (i > 0) {
+            i -= 1;
+            if (points[i].isIdentity()) {
+                out[i] = G2Point.identity();
+            } else {
+                const z_inv = products[i].mul(inv);
+                inv = inv.mul(points[i].z);
+                const z_inv_sq = z_inv.square();
+                const z_inv_cube = z_inv_sq.mul(z_inv);
+                out[i] = .{
+                    .x = points[i].x.mul(z_inv_sq),
+                    .y = points[i].y.mul(z_inv_cube),
+                    .infinity = false,
+                };
+            }
+        }
+    }
 };
 
 // ============================================================================

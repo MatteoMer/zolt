@@ -331,6 +331,62 @@ pub fn ProjectivePoint(comptime F: type) type {
                 .z = Z3,
             };
         }
+        /// Batch normalize projective points to affine using Montgomery's trick.
+        /// Single inversion + ~6n multiplications instead of n inversions.
+        pub fn batchNormalize(points: []const Self, out: []AffinePoint(F)) void {
+            std.debug.assert(out.len >= points.len);
+            const n = points.len;
+            if (n == 0) return;
+
+            // Accumulate Z products
+            // products[i] = Z_0 * Z_1 * ... * Z_i (skipping identity points)
+            var stack_products: [2048]F = undefined;
+            var heap_products: ?[]F = null;
+            defer if (heap_products) |h| std.heap.page_allocator.free(h);
+
+            const products: []F = if (n <= 2048)
+                stack_products[0..n]
+            else blk: {
+                heap_products = std.heap.page_allocator.alloc(F, n) catch {
+                    // Fallback: individual conversions
+                    for (points, 0..) |p, i| out[i] = p.toAffine();
+                    return;
+                };
+                break :blk heap_products.?;
+            };
+
+            // Forward pass: accumulate Z products
+            var acc = F.one();
+            for (points, 0..) |p, i| {
+                if (p.isIdentity()) {
+                    products[i] = acc; // placeholder, won't be used
+                } else {
+                    products[i] = acc;
+                    acc = acc.mul(p.z);
+                }
+            }
+
+            // Invert the accumulated product
+            var inv = acc.inverse() orelse F.one();
+
+            // Backward pass: extract individual Z inverses
+            var i: usize = n;
+            while (i > 0) {
+                i -= 1;
+                if (points[i].isIdentity()) {
+                    out[i] = AffinePoint(F).identity();
+                } else {
+                    const z_inv = products[i].mul(inv);
+                    inv = inv.mul(points[i].z);
+                    const z_inv_sq = z_inv.square();
+                    const z_inv_cube = z_inv_sq.mul(z_inv);
+                    out[i] = AffinePoint(F).fromCoords(
+                        points[i].x.mul(z_inv_sq),
+                        points[i].y.mul(z_inv_cube),
+                    );
+                }
+            }
+        }
     };
 }
 

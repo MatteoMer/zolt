@@ -989,6 +989,344 @@ pub fn MSM(comptime F: type, comptime G: type) type {
 
             return result;
         }
+
+        // =====================================================================
+        // i128 small-scalar MSM (128-bit scalars instead of 256-bit)
+        // =====================================================================
+
+        const SCALAR_BITS_I128: usize = 128;
+        const MAX_DIGITS_I128: usize = (SCALAR_BITS_I128 + 2) / 3 + 1; // ceil(128/3) + 1 = 44
+
+        /// wNAF digit decomposition for 128-bit scalars (2 limbs).
+        fn makeDigitsI128(limbs: [2]u64, c: usize, num_digits: usize) [MAX_DIGITS_I128]i32 {
+            var digits: [MAX_DIGITS_I128]i32 = undefined;
+            const radix: u64 = @as(u64, 1) << @as(u6, @intCast(c));
+            const window_mask: u64 = radix - 1;
+            const half_radix: u64 = radix >> 1;
+            var carry: u64 = 0;
+
+            for (0..num_digits) |i| {
+                const bit_offset = i * c;
+                const u64_idx = bit_offset / 64;
+                const bit_idx = @as(u6, @intCast(bit_offset % 64));
+
+                var bit_buf: u64 = if (u64_idx < 2) limbs[u64_idx] >> bit_idx else 0;
+                const bit_idx_usize: usize = @as(usize, bit_idx);
+                if (bit_idx_usize + c > 64 and u64_idx + 1 < 2) {
+                    bit_buf |= limbs[u64_idx + 1] << @as(u6, @intCast(64 - bit_idx_usize));
+                }
+
+                const coef = carry + (bit_buf & window_mask);
+                carry = if (coef >= half_radix) 1 else 0;
+                const digit: i32 = @as(i32, @intCast(coef)) - @as(i32, @intCast(carry)) * @as(i32, @intCast(radix));
+
+                digits[i] = digit;
+            }
+            if (num_digits < MAX_DIGITS_I128) {
+                digits[num_digits] = @intCast(carry);
+            }
+            return digits;
+        }
+
+        /// Compute MSM with i128 scalars (128-bit). ~2x faster than 256-bit for same point count.
+        pub fn computeI128(
+            bases: []const Affine,
+            scalars: []const i128,
+            tp: ?*ThreadPool,
+        ) Affine {
+            if (bases.len == 0 or scalars.len == 0) return Affine.identity();
+            std.debug.assert(bases.len == scalars.len);
+
+            if (tp != null and bases.len >= 256) {
+                return pippengerMsmI128Parallel(bases, scalars, tp.?);
+            }
+
+            return pippengerMsmI128(bases, scalars);
+        }
+
+        /// Pippenger's bucket method MSM for i128 scalars
+        fn pippengerMsmI128(
+            bases: []const Affine,
+            scalars: []const i128,
+        ) Affine {
+            const c = optimalWindowSize(bases.len);
+            const num_scalar_windows = (SCALAR_BITS_I128 + c - 1) / c;
+            const num_windows = num_scalar_windows + 1;
+            const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2;
+
+            // Pre-compute wNAF digits and sign flags
+            const stack_threshold = 256;
+            var stack_digits: [stack_threshold][MAX_DIGITS_I128]i32 = undefined;
+            var stack_signs: [stack_threshold]bool = undefined;
+            var heap_digits: ?[][MAX_DIGITS_I128]i32 = null;
+            var heap_signs: ?[]bool = null;
+            defer if (heap_digits) |buf| std.heap.page_allocator.free(buf);
+            defer if (heap_signs) |buf| std.heap.page_allocator.free(buf);
+
+            const all_digits: [][MAX_DIGITS_I128]i32 = if (scalars.len <= stack_threshold)
+                stack_digits[0..scalars.len]
+            else blk: {
+                heap_digits = std.heap.page_allocator.alloc([MAX_DIGITS_I128]i32, scalars.len) catch
+                    return Affine.identity(); // OOM fallback
+                break :blk heap_digits.?;
+            };
+            const all_negative: []bool = if (scalars.len <= stack_threshold)
+                stack_signs[0..scalars.len]
+            else blk: {
+                heap_signs = std.heap.page_allocator.alloc(bool, scalars.len) catch
+                    return Affine.identity();
+                break :blk heap_signs.?;
+            };
+
+            for (scalars, 0..) |s, i| {
+                const is_neg = s < 0;
+                all_negative[i] = is_neg;
+                const abs_val: u128 = if (is_neg) @intCast(-s) else @intCast(s);
+                const limbs: [2]u64 = .{
+                    @truncate(abs_val),
+                    @truncate(abs_val >> 64),
+                };
+                all_digits[i] = makeDigitsI128(limbs, c, num_scalar_windows);
+            }
+
+            // Allocate buckets
+            var heap_buckets: ?[]Bucket = null;
+            defer if (heap_buckets) |buf| std.heap.page_allocator.free(buf);
+            var stack_buckets: [256]Bucket = undefined;
+            const buckets_slice: []Bucket = if (num_buckets <= 256)
+                stack_buckets[0..num_buckets]
+            else blk: {
+                heap_buckets = std.heap.page_allocator.alloc(Bucket, num_buckets) catch
+                    return Affine.identity();
+                break :blk heap_buckets.?;
+            };
+
+            // Phase 1: Compute all window sums
+            var window_sums: [MAX_DIGITS_I128]Bucket = undefined;
+            for (0..num_windows) |wi| {
+                for (0..num_buckets) |j| {
+                    buckets_slice[j] = Bucket.identity();
+                }
+
+                for (bases, 0..) |base, idx| {
+                    if (base.isIdentity()) continue;
+
+                    const digit = all_digits[idx][wi];
+                    // If scalar was negative, flip the sign of the digit contribution
+                    if (digit > 0) {
+                        const bidx: usize = @intCast(digit - 1);
+                        if (all_negative[idx]) {
+                            buckets_slice[bidx] = buckets_slice[bidx].subAffine(base);
+                        } else {
+                            buckets_slice[bidx] = buckets_slice[bidx].addAffine(base);
+                        }
+                    } else if (digit < 0) {
+                        const bidx: usize = @intCast(-digit - 1);
+                        if (all_negative[idx]) {
+                            buckets_slice[bidx] = buckets_slice[bidx].addAffine(base);
+                        } else {
+                            buckets_slice[bidx] = buckets_slice[bidx].subAffine(base);
+                        }
+                    }
+                }
+
+                var running_sum = Bucket.identity();
+                var window_sum = Bucket.identity();
+                var bucket_idx: usize = num_buckets;
+                while (bucket_idx > 0) {
+                    bucket_idx -= 1;
+                    running_sum = running_sum.add(buckets_slice[bucket_idx]);
+                    window_sum = window_sum.add(running_sum);
+                }
+                window_sums[wi] = window_sum;
+            }
+
+            // Phase 2: Batch convert to affine
+            var window_sums_affine: [MAX_DIGITS_I128]Affine = undefined;
+            var products: [MAX_DIGITS_I128]G = undefined;
+            var non_empty_indices: [MAX_DIGITS_I128]usize = undefined;
+            var num_non_empty: usize = 0;
+
+            for (0..num_windows) |wi| {
+                if (window_sums[wi].empty) {
+                    window_sums_affine[wi] = Affine.identity();
+                } else {
+                    products[num_non_empty] = window_sums[wi].zz.mul(window_sums[wi].zzz);
+                    non_empty_indices[num_non_empty] = wi;
+                    num_non_empty += 1;
+                }
+            }
+
+            if (num_non_empty > 0) {
+                var prefix: [MAX_DIGITS_I128]G = undefined;
+                prefix[0] = products[0];
+                for (1..num_non_empty) |i| {
+                    prefix[i] = prefix[i - 1].mul(products[i]);
+                }
+
+                var running_inv = prefix[num_non_empty - 1].inverse() orelse G.one();
+
+                var i = num_non_empty;
+                while (i > 1) {
+                    i -= 1;
+                    const product_inv = prefix[i - 1].mul(running_inv);
+                    running_inv = running_inv.mul(products[i]);
+                    const wi = non_empty_indices[i];
+                    const zz_inv = product_inv.mul(window_sums[wi].zzz);
+                    const zzz_inv = product_inv.mul(window_sums[wi].zz);
+                    window_sums_affine[wi] = Affine.fromCoords(
+                        window_sums[wi].x.mul(zz_inv),
+                        window_sums[wi].y.mul(zzz_inv),
+                    );
+                }
+                {
+                    const wi = non_empty_indices[0];
+                    const zz_inv = running_inv.mul(window_sums[wi].zzz);
+                    const zzz_inv = running_inv.mul(window_sums[wi].zz);
+                    window_sums_affine[wi] = Affine.fromCoords(
+                        window_sums[wi].x.mul(zz_inv),
+                        window_sums[wi].y.mul(zzz_inv),
+                    );
+                }
+            }
+
+            // Phase 3: Combine windows
+            var final_result = Projective.identity();
+            var window_idx: usize = num_windows;
+            while (window_idx > 0) {
+                window_idx -= 1;
+                if (!final_result.isIdentity()) {
+                    var k: usize = 0;
+                    while (k < c) : (k += 1) {
+                        final_result = final_result.double();
+                    }
+                }
+                if (!window_sums_affine[window_idx].isIdentity()) {
+                    if (final_result.isIdentity()) {
+                        final_result = Projective.fromAffine(window_sums_affine[window_idx]);
+                    } else {
+                        final_result = final_result.addAffine(window_sums_affine[window_idx]);
+                    }
+                }
+            }
+
+            return final_result.toAffine();
+        }
+
+        /// Parallel Pippenger's bucket method for i128 scalars
+        fn pippengerMsmI128Parallel(
+            bases: []const Affine,
+            scalars: []const i128,
+            tp: *ThreadPool,
+        ) Affine {
+            const c = optimalWindowSize(bases.len);
+            const num_scalar_windows = (SCALAR_BITS_I128 + c - 1) / c;
+            const num_windows = num_scalar_windows + 1;
+            const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2;
+
+            // Pre-compute wNAF digits and sign flags
+            const heap_digits = std.heap.page_allocator.alloc([MAX_DIGITS_I128]i32, scalars.len) catch
+                return pippengerMsmI128(bases, scalars);
+            defer std.heap.page_allocator.free(heap_digits);
+
+            const heap_signs = std.heap.page_allocator.alloc(bool, scalars.len) catch
+                return pippengerMsmI128(bases, scalars);
+            defer std.heap.page_allocator.free(heap_signs);
+
+            for (scalars, 0..) |s, i| {
+                const is_neg = s < 0;
+                heap_signs[i] = is_neg;
+                const abs_val: u128 = if (is_neg) @intCast(-s) else @intCast(s);
+                const limbs: [2]u64 = .{
+                    @truncate(abs_val),
+                    @truncate(abs_val >> 64),
+                };
+                heap_digits[i] = makeDigitsI128(limbs, c, num_scalar_windows);
+            }
+
+            // Allocate per-window buckets and window sums
+            const all_buckets = std.heap.page_allocator.alloc(Bucket, num_windows * num_buckets) catch
+                return pippengerMsmI128(bases, scalars);
+            defer std.heap.page_allocator.free(all_buckets);
+
+            const window_sums = std.heap.page_allocator.alloc(Projective, num_windows) catch
+                return pippengerMsmI128(bases, scalars);
+            defer std.heap.page_allocator.free(window_sums);
+
+            // Phase 1: Process all windows in parallel
+            const ParCtx = struct {
+                all_digits: [][MAX_DIGITS_I128]i32,
+                all_negative: []bool,
+                all_buckets: []Bucket,
+                window_sums: []Projective,
+                bases: []const Affine,
+                num_buckets: usize,
+            };
+            const ctx = ParCtx{
+                .all_digits = heap_digits,
+                .all_negative = heap_signs,
+                .all_buckets = all_buckets,
+                .window_sums = window_sums,
+                .bases = bases,
+                .num_buckets = num_buckets,
+            };
+
+            tp.parallelForForce(num_windows, ctx, struct {
+                fn f(cx: ParCtx, win_idx: usize) void {
+                    const bucket_offset = win_idx * cx.num_buckets;
+                    const buckets = cx.all_buckets[bucket_offset .. bucket_offset + cx.num_buckets];
+
+                    for (0..cx.num_buckets) |j| {
+                        buckets[j] = Bucket.identity();
+                    }
+
+                    for (cx.bases, 0..) |base, idx| {
+                        if (base.isIdentity()) continue;
+                        const digit = cx.all_digits[idx][win_idx];
+                        if (digit > 0) {
+                            const bidx: usize = @intCast(digit - 1);
+                            if (cx.all_negative[idx]) {
+                                buckets[bidx] = buckets[bidx].subAffine(base);
+                            } else {
+                                buckets[bidx] = buckets[bidx].addAffine(base);
+                            }
+                        } else if (digit < 0) {
+                            const bidx: usize = @intCast(-digit - 1);
+                            if (cx.all_negative[idx]) {
+                                buckets[bidx] = buckets[bidx].addAffine(base);
+                            } else {
+                                buckets[bidx] = buckets[bidx].subAffine(base);
+                            }
+                        }
+                    }
+
+                    var running_sum = Bucket.identity();
+                    var window_sum = Bucket.identity();
+                    var bucket_idx: usize = cx.num_buckets;
+                    while (bucket_idx > 0) {
+                        bucket_idx -= 1;
+                        running_sum = running_sum.add(buckets[bucket_idx]);
+                        window_sum = window_sum.add(running_sum);
+                    }
+
+                    cx.window_sums[win_idx] = window_sum.toProjective();
+                }
+            }.f);
+
+            // Phase 2: Combine window sums sequentially
+            var final_result = window_sums[num_windows - 1];
+            var window_idx: usize = num_windows - 1;
+            while (window_idx > 0) {
+                window_idx -= 1;
+                var k: usize = 0;
+                while (k < c) : (k += 1) {
+                    final_result = final_result.double();
+                }
+                final_result = final_result.add(window_sums[window_idx]);
+            }
+
+            return final_result.toAffine();
+        }
     };
 }
 

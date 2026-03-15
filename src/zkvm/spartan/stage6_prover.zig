@@ -3190,7 +3190,6 @@ fn BooleanityProver(comptime F: type) type {
 
                 if (self.chunk_indices != null) {
                     // Lazy state: split tables, don't bind dense arrays
-                    const one_minus_r = F.one().sub(r);
                     const K = self.K;
 
                     if (self.lazy_num_tables == 1) {
@@ -3200,8 +3199,8 @@ fn BooleanityProver(comptime F: type) type {
                         const t0 = try self.allocator.alloc(F, tbl_len);
                         const t1 = try self.allocator.alloc(F, tbl_len);
                         for (0..K) |k| {
-                            t0[k] = one_minus_r.mul(old_table[k]);
                             t1[k] = r.mul(old_table[k]);
+                            t0[k] = old_table[k].sub(t1[k]);
                         }
                         t0[K] = F.zero(); // sentinel stays zero
                         t1[K] = F.zero();
@@ -3225,10 +3224,10 @@ fn BooleanityProver(comptime F: type) type {
                         const t_pos2 = try self.allocator.alloc(F, tbl_len); // r1*(1-r0)
                         const t_pos3 = try self.allocator.alloc(F, tbl_len); // r1*r0
                         for (0..K) |k| {
-                            t_pos0[k] = one_minus_r.mul(old_t0[k]); // (1-r1)(1-r0)*F
-                            t_pos1[k] = one_minus_r.mul(old_t1[k]); // (1-r1)*r0*F
                             t_pos2[k] = r.mul(old_t0[k]);           // r1*(1-r0)*F
                             t_pos3[k] = r.mul(old_t1[k]);           // r1*r0*F
+                            t_pos0[k] = old_t0[k].sub(t_pos2[k]);  // (1-r1)(1-r0)*F
+                            t_pos1[k] = old_t1[k].sub(t_pos3[k]);  // (1-r1)*r0*F
                         }
                         t_pos0[K] = F.zero();
                         t_pos1[K] = F.zero();
@@ -3282,7 +3281,6 @@ fn BooleanityProver(comptime F: type) type {
         /// lazy_tables are freed, and self.H is set.
         fn materializeDense(self: *Self, r: F) !void {
             const ci = self.chunk_indices.?;
-            const one_minus_r = F.one().sub(r);
             const K = self.K;
             const T_orig = ci[0].len;
             // After 3 lazy rounds, the "current length" is T/4 (phase2_len was already
@@ -3306,8 +3304,8 @@ fn BooleanityProver(comptime F: type) type {
 
             for (0..K) |k| {
                 inline for (0..4) |g| {
-                    combined_tables[g][k] = one_minus_r.mul(self.lazy_tables[g][k]);
                     combined_tables[g + 4][k] = r.mul(self.lazy_tables[g][k]);
+                    combined_tables[g][k] = self.lazy_tables[g][k].sub(combined_tables[g + 4][k]);
                 }
             }
             // Sentinel entries stay zero

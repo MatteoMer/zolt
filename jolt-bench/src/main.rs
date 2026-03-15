@@ -8,6 +8,7 @@ use jolt_core::zkvm::RV64IMACProver;
 use std::fs;
 use std::time::Instant;
 use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -24,17 +25,31 @@ struct Cli {
     /// Maximum padded trace length (power of 2)
     #[arg(long, default_value = "65536")]
     max_trace: usize,
+
+    /// Enable span close timing (shows Dory sub-operation durations)
+    #[arg(long)]
+    span_timing: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
 
     // Enable tracing for stage-level timing
-    fmt()
-        .with_env_filter(EnvFilter::new("jolt_core=info"))
-        .with_target(false)
-        .with_timer(fmt::time::uptime())
-        .init();
+    if cli.span_timing {
+        // Show span close events with elapsed time for Dory sub-operations
+        fmt()
+            .with_env_filter(EnvFilter::new("jolt_core=trace"))
+            .with_target(false)
+            .with_timer(fmt::time::uptime())
+            .with_span_events(FmtSpan::CLOSE)
+            .init();
+    } else {
+        fmt()
+            .with_env_filter(EnvFilter::new("jolt_core=info"))
+            .with_target(false)
+            .with_timer(fmt::time::uptime())
+            .init();
+    }
 
     eprintln!("=== Jolt (Rust) Prover Benchmark ===");
     eprintln!("ELF: {}", cli.elf);

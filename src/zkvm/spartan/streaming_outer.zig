@@ -2210,59 +2210,145 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // 1. Bind split_eq FIRST
             self.split_eq.bind(r);
 
-            // 2. Bind t_prime_poly
-            if (self.t_prime_poly) |*t_prime| {
-                t_prime.bind(r);
-            }
+            // 2. Skip t_prime_poly bind — we rebuild it entirely during the fused Az/Bz bind below.
 
-            // 3. Bind Az/Bz polynomials LAST
-            // ALL rounds bind Az/Bz polynomials (this is critical for next_window to work!)
+            // 3. Bind Az/Bz polynomials LAST, AND fuse t_prime rebuild (window_size=1).
+            // Instead of bind → rebuildTPrimePoly (2 passes), do both in one pass.
+            // split_eq is already bound (step 1), so getWindowEqTables returns updated tables.
             if (self.az_poly != null and self.bz_poly != null) {
-                if (self.thread_pool) |tp| {
-                    // Fused bind: process both Az and Bz in a single parallelForForce call.
-                    // This halves the barrier count and keeps both arrays cache-local per worker.
-                    const az_src = self.az_poly.?.evaluations;
-                    const bz_src = self.bz_poly.?.evaluations;
-                    const az_scratch = self.az_poly.?.scratch;
-                    const bz_scratch = self.bz_poly.?.scratch;
-                    if (az_scratch != null and bz_scratch != null) {
-                        const new_size = az_src.len / 2;
-                        const FusedCtx = struct {
-                            az_s: []const F, az_d: []F,
-                            bz_s: []const F, bz_d: []F,
-                            r_val: F,
-                        };
-                        tp.parallelForForce(new_size, FusedCtx{
-                            .az_s = az_src, .az_d = az_scratch.?,
-                            .bz_s = bz_src, .bz_d = bz_scratch.?,
-                            .r_val = r,
-                        }, struct {
-                            fn f(ctx: FusedCtx, i: usize) void {
-                                const az_lo = ctx.az_s[2 * i];
-                                const az_hi = ctx.az_s[2 * i + 1];
-                                ctx.az_d[i] = az_lo.add(ctx.r_val.mul(az_hi.sub(az_lo)));
-                                const bz_lo = ctx.bz_s[2 * i];
-                                const bz_hi = ctx.bz_s[2 * i + 1];
-                                ctx.bz_d[i] = bz_lo.add(ctx.r_val.mul(bz_hi.sub(bz_lo)));
+                const window_size: usize = 1;
+                const eq_tables = self.split_eq.getWindowEqTables(0, window_size);
+                const E_out = eq_tables.E_out;
+                const E_in = eq_tables.E_in;
+                const num_xin_bits: u6 = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
+
+                const az_src = self.az_poly.?.evaluations;
+                const bz_src = self.bz_poly.?.evaluations;
+                const new_size = az_src.len / 2;
+                const total_pairs = E_out.len * E_in.len;
+
+                // Each pair reads 2 consecutive bound values: bound[2*pair], bound[2*pair+1]
+                // bound[j] = old[2*j] + r*(old[2*j+1] - old[2*j])
+                // So pair i reads old[4*i..4*i+3]
+                const FusedBindCtx = struct {
+                    az_s: []const F, az_d: []F,
+                    bz_s: []const F, bz_d: []F,
+                    r_val: F,
+                    E_out: []const F, E_in: []const F,
+                    num_xin_bits: u6,
+                    total_pairs: usize,
+                    new_size: usize,
+                };
+
+                const az_scratch = self.az_poly.?.scratch;
+                const bz_scratch = self.bz_poly.?.scratch;
+                const has_scratch = az_scratch != null and bz_scratch != null;
+                const az_dest = if (has_scratch) az_scratch.? else az_src;
+                const bz_dest = if (has_scratch) bz_scratch.? else bz_src;
+
+                const fused_ctx = FusedBindCtx{
+                    .az_s = az_src, .az_d = az_dest,
+                    .bz_s = bz_src, .bz_d = bz_dest,
+                    .r_val = r,
+                    .E_out = E_out, .E_in = E_in,
+                    .num_xin_bits = num_xin_bits,
+                    .total_pairs = total_pairs,
+                    .new_size = new_size,
+                };
+
+                const fusedMapFn = struct {
+                    fn f(ctx: FusedBindCtx, start: usize, end: usize) [3]F {
+                        var local_ans = [3]F{ F.zero(), F.zero(), F.zero() };
+
+                        for (start..end) |pair_idx| {
+                            const x_out = pair_idx / ctx.E_in.len;
+                            const x_in = pair_idx % ctx.E_in.len;
+                            const i = (@as(usize, x_out) << ctx.num_xin_bits) | x_in;
+
+                            // Compute bound values for this pair's two elements: bound[2i], bound[2i+1]
+                            const idx0 = 2 * i;
+                            const idx1 = 2 * i + 1;
+
+                            var az0: F = F.zero();
+                            var az1: F = F.zero();
+                            var bz0: F = F.zero();
+                            var bz1: F = F.zero();
+
+                            if (idx0 < ctx.new_size) {
+                                const a_lo = ctx.az_s[2 * idx0];
+                                az0 = a_lo.add(ctx.r_val.mul(ctx.az_s[2 * idx0 + 1].sub(a_lo)));
+                                ctx.az_d[idx0] = az0;
+                                const b_lo = ctx.bz_s[2 * idx0];
+                                bz0 = b_lo.add(ctx.r_val.mul(ctx.bz_s[2 * idx0 + 1].sub(b_lo)));
+                                ctx.bz_d[idx0] = bz0;
                             }
-                        }.f);
-                        // Swap evaluations and scratch (pointer swap, O(1))
-                        const az_tmp = self.az_poly.?.evaluations;
-                        self.az_poly.?.evaluations = az_scratch.?;
-                        self.az_poly.?.scratch = az_tmp;
-                        self.az_poly.?.num_vars -= 1;
-                        const bz_tmp = self.bz_poly.?.evaluations;
-                        self.bz_poly.?.evaluations = bz_scratch.?;
-                        self.bz_poly.?.scratch = bz_tmp;
-                        self.bz_poly.?.num_vars -= 1;
-                    } else {
-                        self.az_poly.?.bindLow(r);
-                        self.bz_poly.?.bindLow(r);
+                            if (idx1 < ctx.new_size) {
+                                const a_lo = ctx.az_s[2 * idx1];
+                                az1 = a_lo.add(ctx.r_val.mul(ctx.az_s[2 * idx1 + 1].sub(a_lo)));
+                                ctx.az_d[idx1] = az1;
+                                const b_lo = ctx.bz_s[2 * idx1];
+                                bz1 = b_lo.add(ctx.r_val.mul(ctx.bz_s[2 * idx1 + 1].sub(b_lo)));
+                                ctx.bz_d[idx1] = bz1;
+                            }
+
+                            // Compute t_prime products (multiquadratic expand for window_size=1)
+                            // buff_a = [az0, az1, az1-az0], buff_b = [bz0, bz1, bz1-bz0]
+                            const eq_weight = ctx.E_out[x_out].mul(ctx.E_in[x_in]);
+                            local_ans[0] = local_ans[0].add(eq_weight.mul(az0.mul(bz0)));
+                            local_ans[1] = local_ans[1].add(eq_weight.mul(az1.mul(bz1)));
+                            local_ans[2] = local_ans[2].add(eq_weight.mul(az1.sub(az0).mul(bz1.sub(bz0))));
+                        }
+                        return local_ans;
                     }
-                } else {
-                    self.az_poly.?.bindLow(r);
-                    self.bz_poly.?.bindLow(r);
+                }.f;
+
+                const fusedReduceFn = struct {
+                    fn f(a: [3]F, b: [3]F) [3]F {
+                        return [3]F{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]) };
+                    }
+                }.f;
+
+                const identity = [3]F{ F.zero(), F.zero(), F.zero() };
+                const tp_result = if (self.thread_pool) |tp|
+                    tp.parallelReduce([3]F, total_pairs, identity, fused_ctx, fusedMapFn, fusedReduceFn)
+                else
+                    fusedMapFn(fused_ctx, 0, total_pairs);
+
+                // Also bind any remaining elements not covered by pairs
+                // (pairs cover 2*total_pairs elements; if new_size > 2*total_pairs, bind the rest)
+                const covered = 2 * total_pairs;
+                if (covered < new_size) {
+                    for (covered..new_size) |idx| {
+                        const a_lo = az_src[2 * idx];
+                        az_dest[idx] = a_lo.add(r.mul(az_src[2 * idx + 1].sub(a_lo)));
+                        const b_lo = bz_src[2 * idx];
+                        bz_dest[idx] = b_lo.add(r.mul(bz_src[2 * idx + 1].sub(b_lo)));
+                    }
                 }
+
+                // Swap evaluations/scratch and update num_vars
+                if (has_scratch) {
+                    const az_tmp = self.az_poly.?.evaluations;
+                    self.az_poly.?.evaluations = az_scratch.?;
+                    self.az_poly.?.scratch = az_tmp;
+                    const bz_tmp = self.bz_poly.?.evaluations;
+                    self.bz_poly.?.evaluations = bz_scratch.?;
+                    self.bz_poly.?.scratch = bz_tmp;
+                }
+                self.az_poly.?.num_vars -= 1;
+                self.bz_poly.?.num_vars -= 1;
+
+                // Build t_prime from fused results (no separate pass needed)
+                var ans = try self.allocator.alloc(F, 3);
+                errdefer self.allocator.free(ans);
+                ans[0] = tp_result[0];
+                ans[1] = tp_result[1];
+                ans[2] = tp_result[2];
+                if (self.t_prime_poly) |*old| {
+                    old.deinit();
+                }
+                self.t_prime_poly = try MultiquadraticPolynomial(F).init(self.allocator, window_size, ans);
+                self.allocator.free(ans);
             } else {
                 if (self.az_poly) |*az| az.bindLow(r);
                 if (self.bz_poly) |*bz| bz.bindLow(r);

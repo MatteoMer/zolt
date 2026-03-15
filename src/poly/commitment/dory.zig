@@ -24,6 +24,8 @@ const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
+// Dory benchmark timing - set to true for fine-grained Dory profiling
+const dory_bench_timing = false;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -1723,6 +1725,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 return GT.one();
             }
 
+            var bench_timer = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+
             const poly_len = evals.len;
             const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
             const sigma: usize = (num_vars + 1) / 2;
@@ -1813,7 +1817,23 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             else
                 mapFn(ctx, 0, num_rows);
 
-            return pairing.finalExponentiation(miller_acc);
+            if (comptime dory_bench_timing) {
+                const msm_miller_ns = bench_timer.read();
+                std.debug.print("    [DORY-BENCH] dense commitWithPool MSM+Miller ({} rows x {} cols, {} evals): {d:.2} ms\n", .{
+                    num_rows, num_cols, poly_len, @as(f64, @floatFromInt(msm_miller_ns)) / 1_000_000.0,
+                });
+            }
+
+            const result = pairing.finalExponentiation(miller_acc);
+
+            if (comptime dory_bench_timing) {
+                const total_ns = bench_timer.read();
+                std.debug.print("    [DORY-BENCH] dense commitWithPool total (incl finalExp): {d:.2} ms\n", .{
+                    @as(f64, @floatFromInt(total_ns)) / 1_000_000.0,
+                });
+            }
+
+            return result;
         }
 
         /// Like commitWithPool, but also returns the intermediate row commitments (G1 points).
@@ -1829,6 +1849,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
             }
 
+            var bench_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+
             const poly_len = evals.len;
             const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
             const sigma: usize = (num_vars + 1) / 2;
@@ -1843,10 +1865,129 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 try computeRowCommitmentsWithCols(F, params, evals, num_cols, allocator);
             errdefer allocator.free(row_commitments);
 
+            if (comptime dory_bench_timing) {
+                std.debug.print("    [DORY-BENCH] dense hints Phase1 MSM ({} rows x {} cols, {} evals): {d:.2} ms\n", .{
+                    num_rows, num_cols, poly_len, @as(f64, @floatFromInt(bench_t.read())) / 1_000_000.0,
+                });
+            }
+
+            // Phase 2: Miller loops over row commitments + final exponentiation
+            const commitment = rowCommitmentsToCommitment(params, row_commitments, num_rows, tp);
+
+            if (comptime dory_bench_timing) {
+                std.debug.print("    [DORY-BENCH] dense hints total (MSM+Miller+finalExp, {} rows x {} cols): {d:.2} ms\n", .{
+                    num_rows, num_cols, @as(f64, @floatFromInt(bench_t.read())) / 1_000_000.0,
+                });
+            }
+
+            return .{ .commitment = commitment, .row_commitments = row_commitments };
+        }
+
+        /// Commit using i128 scalars (128-bit). ~2x faster MSMs for RdInc/RamInc polynomials.
+        pub fn commitWithPoolAndHintsI128(
+            params: *const SetupParams,
+            evals: []const i128,
+            allocator: Allocator,
+            tp: ?*ThreadPool,
+        ) !struct { commitment: Commitment, row_commitments: []G1Point } {
+            if (evals.len == 0) {
+                return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
+            }
+
+            const poly_len = evals.len;
+            const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
+            const sigma: usize = (num_vars + 1) / 2;
+            const nu: usize = num_vars - sigma;
+            const num_cols = @as(usize, 1) << @intCast(sigma);
+            const num_rows = @as(usize, 1) << @intCast(nu);
+
+            // Phase 1: Compute row commitments using i128 MSM
+            const row_commitments = if (tp) |pool|
+                try computeRowCommitmentsI128Parallel(params, evals, num_cols, allocator, pool)
+            else
+                try computeRowCommitmentsI128(params, evals, num_cols, allocator);
+            errdefer allocator.free(row_commitments);
+
             // Phase 2: Miller loops over row commitments + final exponentiation
             const commitment = rowCommitmentsToCommitment(params, row_commitments, num_rows, tp);
 
             return .{ .commitment = commitment, .row_commitments = row_commitments };
+        }
+
+        /// Compute row commitments using i128 MSM (sequential)
+        fn computeRowCommitmentsI128(
+            params: anytype,
+            evals: []const i128,
+            num_cols: usize,
+            allocator: Allocator,
+        ) ![]G1Point {
+            const num_rows = (evals.len + num_cols - 1) / num_cols;
+            const row_commitments = try allocator.alloc(G1Point, num_rows);
+            errdefer allocator.free(row_commitments);
+
+            for (0..num_rows) |row| {
+                const start = row * num_cols;
+                const end = @min(start + num_cols, evals.len);
+                if (start >= evals.len) {
+                    row_commitments[row] = G1Point.identity();
+                    continue;
+                }
+                const row_evals = evals[start..end];
+                row_commitments[row] = msm.MSM(Fr, Fp).computeI128(
+                    params.g1_vec[0..row_evals.len],
+                    row_evals,
+                    null,
+                );
+            }
+            return row_commitments;
+        }
+
+        /// Compute row commitments using i128 MSM (parallel over rows)
+        fn computeRowCommitmentsI128Parallel(
+            params: anytype,
+            evals: []const i128,
+            num_cols: usize,
+            allocator: Allocator,
+            tp: *ThreadPool,
+        ) ![]G1Point {
+            const num_rows = (evals.len + num_cols - 1) / num_cols;
+            const row_commitments = try allocator.alloc(G1Point, num_rows);
+            errdefer allocator.free(row_commitments);
+
+            const Params = @TypeOf(params.*);
+            const Ctx = struct {
+                params_ptr: *const Params,
+                evals_ptr: []const i128,
+                out: []G1Point,
+                n_cols: usize,
+                evals_len: usize,
+            };
+            const ctx = Ctx{
+                .params_ptr = params,
+                .evals_ptr = evals,
+                .out = row_commitments,
+                .n_cols = num_cols,
+                .evals_len = evals.len,
+            };
+
+            tp.parallelForForce(num_rows, ctx, struct {
+                fn f(c: Ctx, row: usize) void {
+                    const start = row * c.n_cols;
+                    const end = @min(start + c.n_cols, c.evals_len);
+                    if (start >= c.evals_len) {
+                        c.out[row] = G1Point.identity();
+                        return;
+                    }
+                    const row_evals = c.evals_ptr[start..end];
+                    c.out[row] = msm.MSM(Fr, Fp).computeI128(
+                        c.params_ptr.g1_vec[0..row_evals.len],
+                        row_evals,
+                        null,
+                    );
+                }
+            }.f);
+
+            return row_commitments;
         }
 
         const OneHotRowIndices = struct {
@@ -1928,6 +2069,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const poly_size = k_chunk * trace_length;
             if (poly_size == 0) return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
 
+            var oh_bench_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+
             const num_vars: usize = if (poly_size <= 1) 1 else std.math.log2_int(usize, poly_size);
             const sigma: usize = (num_vars + 1) / 2;
             const nu: usize = num_vars - sigma;
@@ -1984,8 +2127,20 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 for (0..num_rows) |row| computeRowFn(hint_ctx, row);
             }
 
+            if (comptime dory_bench_timing) {
+                std.debug.print("    [DORY-BENCH] onehot Phase1 row commits ({} rows x {} cols, k={}): {d:.2} ms\n", .{
+                    num_rows, num_cols, k_chunk, @as(f64, @floatFromInt(oh_bench_t.read())) / 1_000_000.0,
+                });
+            }
+
             // Phase 2: Miller loops + final exponentiation
             const commitment = rowCommitmentsToCommitment(params, row_commitments, num_rows, tp);
+
+            if (comptime dory_bench_timing) {
+                std.debug.print("    [DORY-BENCH] onehot total (row+Miller+finalExp, {} rows x {} cols): {d:.2} ms\n", .{
+                    num_rows, num_cols, @as(f64, @floatFromInt(oh_bench_t.read())) / 1_000_000.0,
+                });
+            }
 
             return .{ .commitment = commitment, .row_commitments = row_commitments };
         }
@@ -2662,6 +2817,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             allocator: Allocator,
             tp: ?*ThreadPool,
         ) !Proof {
+            var open_bench_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+
             // Compute nu/sigma from the polynomial's actual size, not from SRS params.
             // This matches Jolt's balanced_sigma_nu: sigma = ceil(num_vars/2), nu = num_vars - sigma
             const num_vars: u32 = @intCast(point.len);
@@ -2780,6 +2937,12 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .e1 = e1,
             };
 
+            if (comptime dory_bench_timing) {
+                std.debug.print("    [DORY-BENCH] opening VMV message (nu={}, sigma={}, vec_len={}): {d:.2} ms\n", .{
+                    nu, sigma, vec_len, @as(f64, @floatFromInt(open_bench_t.read())) / 1_000_000.0,
+                });
+            }
+
             // Append VMV message to transcript
             doryAppendGT(transcript, vmv_message.c);
             doryAppendGT(transcript, vmv_message.d2);
@@ -2865,6 +3028,12 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     for (0..16) |bi| dbg("{x:0>2}", .{be[31 - bi]});
                     dbg("\n", .{});
                 }
+            }
+
+            if (comptime dory_bench_timing) {
+                std.debug.print("    [DORY-BENCH] opening v2 init ({} G2 scalar muls): {d:.2} ms\n", .{
+                    vec_len, @as(f64, @floatFromInt(open_bench_t.read())) / 1_000_000.0,
+                });
             }
 
             // Allocate message arrays
@@ -3262,6 +3431,12 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             // Get final d challenge to keep transcript in sync
             _ = transcript.challengeScalarFull();
+
+            if (comptime dory_bench_timing) {
+                std.debug.print("    [DORY-BENCH] opening IPA rounds ({} rounds): {d:.2} ms\n", .{
+                    num_rounds, @as(f64, @floatFromInt(open_bench_t.read())) / 1_000_000.0,
+                });
+            }
 
             return Proof{
                 .vmv_message = vmv_message,

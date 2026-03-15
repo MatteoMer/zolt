@@ -4021,8 +4021,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         {
                             // PhaseCycle: bind polynomials (cycle-only, no PhaseAddress)
                             const cycle_round = ram_ra_round; // 0 to n_cycle_vars-1
-                            const one_minus_r = F.one().sub(challenge);
-
                             // Store cycle challenge for PhaseCycle2 eq_prefix computation
                             cycle_challenges[cycle_round] = challenge;
 
@@ -4038,9 +4036,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     const BindCtx = struct {
                                         p_raf: []F, p_rw: []F, p_val: []F,
                                         q_raf: []F, q_rw: []F, q_val: []F,
-                                        omr: F, chal_limbs: [4]u64, h: usize,
+                                        chal_limbs: [4]u64, h: usize,
                                     };
-                                    const bctx = BindCtx{ .p_raf = P_raf, .p_rw = P_rw, .p_val = P_val, .q_raf = Q_raf, .q_rw = Q_rw, .q_val = Q_val, .omr = one_minus_r, .chal_limbs = challenge.limbs, .h = half_len };
+                                    const bctx = BindCtx{ .p_raf = P_raf, .p_rw = P_rw, .p_val = P_val, .q_raf = Q_raf, .q_rw = Q_rw, .q_val = Q_val, .chal_limbs = challenge.limbs, .h = half_len };
                                     tp.parallelForForce(6, bctx, struct {
                                         fn f(c: BindCtx, arr_idx: usize) void {
                                             const arr = switch (arr_idx) {
@@ -4054,21 +4052,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                             };
                                             for (0..c.h) |j| {
                                                 const lo = arr[2 * j];
-                                                const hi = arr[2 * j + 1];
-                                                arr[j] = c.omr.mul(lo).add(hi.mulHiBigIntU128(c.chal_limbs));
+                                                arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(c.chal_limbs));
                                             }
                                         }
                                     }.f);
                                 } else {
                                     for (0..half_len) |j| {
-                                        P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(P_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(P_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        P_val[j] = one_minus_r.mul(P_val[2 * j]).add(P_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        P_raf[j] = P_raf[2 * j].add(P_raf[2 * j + 1].sub(P_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        P_rw[j] = P_rw[2 * j].add(P_rw[2 * j + 1].sub(P_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        P_val[j] = P_val[2 * j].add(P_val[2 * j + 1].sub(P_val[2 * j]).mulHiBigIntU128(challenge.limbs));
                                     }
                                     for (0..half_len) |j| {
-                                        Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(Q_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(Q_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(Q_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        Q_raf[j] = Q_raf[2 * j].add(Q_raf[2 * j + 1].sub(Q_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        Q_rw[j] = Q_rw[2 * j].add(Q_rw[2 * j + 1].sub(Q_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        Q_val[j] = Q_val[2 * j].add(Q_val[2 * j + 1].sub(Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
                                     }
                                 }
 
@@ -4101,9 +4098,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 if (self.thread_pool) |tp| {
                                     const BindCtx2 = struct {
                                         h_prime: []F, eq_raf: []F, eq_rw: []F, eq_val: []F,
-                                        omr: F, chal_limbs: [4]u64, h: usize,
+                                        chal_limbs: [4]u64, h: usize,
                                     };
-                                    const bctx2 = BindCtx2{ .h_prime = H_prime, .eq_raf = eq_raf_hi, .eq_rw = eq_rw_hi, .eq_val = eq_val_hi, .omr = one_minus_r, .chal_limbs = challenge.limbs, .h = half_len };
+                                    const bctx2 = BindCtx2{ .h_prime = H_prime, .eq_raf = eq_raf_hi, .eq_rw = eq_rw_hi, .eq_val = eq_val_hi, .chal_limbs = challenge.limbs, .h = half_len };
                                     tp.parallelForForce(4, bctx2, struct {
                                         fn f(c: BindCtx2, arr_idx: usize) void {
                                             const arr = switch (arr_idx) {
@@ -4115,19 +4112,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                             };
                                             for (0..c.h) |j| {
                                                 const lo = arr[2 * j];
-                                                const hi = arr[2 * j + 1];
-                                                arr[j] = c.omr.mul(lo).add(hi.mulHiBigIntU128(c.chal_limbs));
+                                                arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(c.chal_limbs));
                                             }
                                         }
                                     }.f);
                                 } else {
                                     for (0..half_len) |j| {
-                                        H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(H_prime[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        H_prime[j] = H_prime[2 * j].add(H_prime[2 * j + 1].sub(H_prime[2 * j]).mulHiBigIntU128(challenge.limbs));
                                     }
                                     for (0..half_len) |j| {
-                                        eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(eq_raf_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(eq_rw_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        eq_raf_hi[j] = eq_raf_hi[2 * j].add(eq_raf_hi[2 * j + 1].sub(eq_raf_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        eq_rw_hi[j] = eq_rw_hi[2 * j].add(eq_rw_hi[2 * j + 1].sub(eq_rw_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        eq_val_hi[j] = eq_val_hi[2 * j].add(eq_val_hi[2 * j + 1].sub(eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
                                     }
                                 }
 
@@ -6227,9 +6223,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     const BindCtx = struct {
                                         p_raf: []F, p_rw: []F, p_val: []F,
                                         q_raf: []F, q_rw: []F, q_val: []F,
-                                        omr: F, chal_limbs: [4]u64, h: usize,
+                                        chal_limbs: [4]u64, h: usize,
                                     };
-                                    const bctx = BindCtx{ .p_raf = P_raf, .p_rw = P_rw, .p_val = P_val, .q_raf = Q_raf, .q_rw = Q_rw, .q_val = Q_val, .omr = one_minus_r, .chal_limbs = challenge.limbs, .h = half_len };
+                                    const bctx = BindCtx{ .p_raf = P_raf, .p_rw = P_rw, .p_val = P_val, .q_raf = Q_raf, .q_rw = Q_rw, .q_val = Q_val, .chal_limbs = challenge.limbs, .h = half_len };
                                     tp.parallelForForce(6, bctx, struct {
                                         fn f(c: BindCtx, arr_idx: usize) void {
                                             const arr = switch (arr_idx) {
@@ -6243,21 +6239,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                             };
                                             for (0..c.h) |j| {
                                                 const lo = arr[2 * j];
-                                                const hi = arr[2 * j + 1];
-                                                arr[j] = c.omr.mul(lo).add(hi.mulHiBigIntU128(c.chal_limbs));
+                                                arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(c.chal_limbs));
                                             }
                                         }
                                     }.f);
                                 } else {
                                     for (0..half_len) |j| {
-                                        P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(P_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(P_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        P_val[j] = one_minus_r.mul(P_val[2 * j]).add(P_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        P_raf[j] = P_raf[2 * j].add(P_raf[2 * j + 1].sub(P_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        P_rw[j] = P_rw[2 * j].add(P_rw[2 * j + 1].sub(P_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        P_val[j] = P_val[2 * j].add(P_val[2 * j + 1].sub(P_val[2 * j]).mulHiBigIntU128(challenge.limbs));
                                     }
                                     for (0..half_len) |j| {
-                                        Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(Q_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(Q_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(Q_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        Q_raf[j] = Q_raf[2 * j].add(Q_raf[2 * j + 1].sub(Q_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        Q_rw[j] = Q_rw[2 * j].add(Q_rw[2 * j + 1].sub(Q_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        Q_val[j] = Q_val[2 * j].add(Q_val[2 * j + 1].sub(Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
                                     }
                                 }
 
@@ -6278,9 +6273,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 if (self.thread_pool) |tp| {
                                     const BindCtx2 = struct {
                                         h_prime: []F, eq_raf: []F, eq_rw: []F, eq_val: []F,
-                                        omr: F, chal_limbs: [4]u64, h: usize,
+                                        chal_limbs: [4]u64, h: usize,
                                     };
-                                    const bctx2 = BindCtx2{ .h_prime = H_prime, .eq_raf = eq_raf_hi, .eq_rw = eq_rw_hi, .eq_val = eq_val_hi, .omr = one_minus_r, .chal_limbs = challenge.limbs, .h = half_len };
+                                    const bctx2 = BindCtx2{ .h_prime = H_prime, .eq_raf = eq_raf_hi, .eq_rw = eq_rw_hi, .eq_val = eq_val_hi, .chal_limbs = challenge.limbs, .h = half_len };
                                     tp.parallelForForce(4, bctx2, struct {
                                         fn f(c: BindCtx2, arr_idx: usize) void {
                                             const arr = switch (arr_idx) {
@@ -6292,19 +6287,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                             };
                                             for (0..c.h) |j| {
                                                 const lo = arr[2 * j];
-                                                const hi = arr[2 * j + 1];
-                                                arr[j] = c.omr.mul(lo).add(hi.mulHiBigIntU128(c.chal_limbs));
+                                                arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(c.chal_limbs));
                                             }
                                         }
                                     }.f);
                                 } else {
                                     for (0..half_len) |j| {
-                                        H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(H_prime[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        H_prime[j] = H_prime[2 * j].add(H_prime[2 * j + 1].sub(H_prime[2 * j]).mulHiBigIntU128(challenge.limbs));
                                     }
                                     for (0..half_len) |j| {
-                                        eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(eq_raf_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(eq_rw_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
-                                        eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                        eq_raf_hi[j] = eq_raf_hi[2 * j].add(eq_raf_hi[2 * j + 1].sub(eq_raf_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        eq_rw_hi[j] = eq_rw_hi[2 * j].add(eq_rw_hi[2 * j + 1].sub(eq_rw_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        eq_val_hi[j] = eq_val_hi[2 * j].add(eq_val_hi[2 * j + 1].sub(eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
                                     }
                                 }
 
@@ -6366,9 +6360,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const n = poly.len >> @intCast(c.lround);
                                 const half = n / 2;
                                 if (half == 0) return;
-                                const omr = F.one().sub(c.chal);
                                 for (0..half) |i| {
-                                    poly[i] = omr.mul(poly[2 * i]).add(c.chal.mul(poly[2 * i + 1]));
+                                    poly[i] = poly[2 * i].add(c.chal.mul(poly[2 * i + 1].sub(poly[2 * i])));
                                 }
                                 for (half..n) |i| {
                                     poly[i] = F.zero();
@@ -7476,14 +7469,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const half = n / 2;
             if (half == 0) return;
 
-            const one_minus_r = F.one().sub(r);
-
             // NOTE: In-place binding has data dependencies (write[i] overlaps read[2*j] where j=i/2),
             // so we parallelize across the 3 independent arrays instead of across indices.
             if (tp) |pool| {
                 if (half >= 256) {
-                    const BindCtx = struct { inc: []F, wa: []F, lt: []F, omr: F, rv: F, h: usize };
-                    const ctx = BindCtx{ .inc = inc, .wa = wa, .lt = lt, .omr = one_minus_r, .rv = r, .h = half };
+                    const BindCtx = struct { inc: []F, wa: []F, lt: []F, rv: F, h: usize };
+                    const ctx = BindCtx{ .inc = inc, .wa = wa, .lt = lt, .rv = r, .h = half };
                     pool.parallelForForce(3, ctx, struct {
                         fn f(c: BindCtx, arr_idx: usize) void {
                             const arr = switch (arr_idx) {
@@ -7493,22 +7484,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 else => unreachable,
                             };
                             for (0..c.h) |i| {
-                                arr[i] = c.omr.mul(arr[2 * i]).add(c.rv.mul(arr[2 * i + 1]));
+                                // lo + r*(hi-lo): 1 mul instead of 2
+                                arr[i] = arr[2 * i].add(c.rv.mul(arr[2 * i + 1].sub(arr[2 * i])));
                             }
                         }
                     }.f);
                 } else {
                     for (0..half) |i| {
-                        inc[i] = one_minus_r.mul(inc[2 * i]).add(r.mul(inc[2 * i + 1]));
-                        wa[i] = one_minus_r.mul(wa[2 * i]).add(r.mul(wa[2 * i + 1]));
-                        lt[i] = one_minus_r.mul(lt[2 * i]).add(r.mul(lt[2 * i + 1]));
+                        inc[i] = inc[2 * i].add(r.mul(inc[2 * i + 1].sub(inc[2 * i])));
+                        wa[i] = wa[2 * i].add(r.mul(wa[2 * i + 1].sub(wa[2 * i])));
+                        lt[i] = lt[2 * i].add(r.mul(lt[2 * i + 1].sub(lt[2 * i])));
                     }
                 }
             } else {
                 for (0..half) |i| {
-                    inc[i] = one_minus_r.mul(inc[2 * i]).add(r.mul(inc[2 * i + 1]));
-                    wa[i] = one_minus_r.mul(wa[2 * i]).add(r.mul(wa[2 * i + 1]));
-                    lt[i] = one_minus_r.mul(lt[2 * i]).add(r.mul(lt[2 * i + 1]));
+                    inc[i] = inc[2 * i].add(r.mul(inc[2 * i + 1].sub(inc[2 * i])));
+                    wa[i] = wa[2 * i].add(r.mul(wa[2 * i + 1].sub(wa[2 * i])));
+                    lt[i] = lt[2 * i].add(r.mul(lt[2 * i + 1].sub(lt[2 * i])));
                 }
             }
 
@@ -7576,31 +7568,29 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const half = n / 2;
             if (half == 0) return;
 
-            const one_minus_r = F.one().sub(r);
-
             // Parallelize across arrays (not indices) due to in-place data dependencies
             if (tp) |pool| {
                 if (half >= 256) {
-                    const BindCtx = struct { eq: []F, comb: []F, omr: F, rv: F, h: usize };
-                    const ctx = BindCtx{ .eq = eq_evals, .comb = combined, .omr = one_minus_r, .rv = r, .h = half };
+                    const BindCtx = struct { eq: []F, comb: []F, rv: F, h: usize };
+                    const ctx = BindCtx{ .eq = eq_evals, .comb = combined, .rv = r, .h = half };
                     pool.parallelForForce(2, ctx, struct {
                         fn f(c: BindCtx, arr_idx: usize) void {
                             const arr = if (arr_idx == 0) c.eq else c.comb;
                             for (0..c.h) |i| {
-                                arr[i] = c.omr.mul(arr[2 * i]).add(c.rv.mul(arr[2 * i + 1]));
+                                arr[i] = arr[2 * i].add(c.rv.mul(arr[2 * i + 1].sub(arr[2 * i])));
                             }
                         }
                     }.f);
                 } else {
                     for (0..half) |i| {
-                        eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
-                        combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+                        eq_evals[i] = eq_evals[2 * i].add(r.mul(eq_evals[2 * i + 1].sub(eq_evals[2 * i])));
+                        combined[i] = combined[2 * i].add(r.mul(combined[2 * i + 1].sub(combined[2 * i])));
                     }
                 }
             } else {
                 for (0..half) |i| {
-                    eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
-                    combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+                    eq_evals[i] = eq_evals[2 * i].add(r.mul(eq_evals[2 * i + 1].sub(eq_evals[2 * i])));
+                    combined[i] = combined[2 * i].add(r.mul(combined[2 * i + 1].sub(combined[2 * i])));
                 }
             }
 
@@ -7669,13 +7659,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const half = n / 2;
             if (half == 0) return;
 
-            const one_minus_r = F.one().sub(r);
-
             // Parallelize across arrays (not indices) due to in-place data dependencies
             if (tp) |pool| {
                 if (half >= 256) {
-                    const BindCtx = struct { eq: []F, ra: []F, comb: []F, omr: F, rv: F, h: usize };
-                    const ctx = BindCtx{ .eq = eq_evals, .ra = ra_weights, .comb = combined, .omr = one_minus_r, .rv = r, .h = half };
+                    const BindCtx = struct { eq: []F, ra: []F, comb: []F, rv: F, h: usize };
+                    const ctx = BindCtx{ .eq = eq_evals, .ra = ra_weights, .comb = combined, .rv = r, .h = half };
                     pool.parallelForForce(3, ctx, struct {
                         fn f(c: BindCtx, arr_idx: usize) void {
                             const arr = switch (arr_idx) {
@@ -7685,22 +7673,22 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 else => unreachable,
                             };
                             for (0..c.h) |i| {
-                                arr[i] = c.omr.mul(arr[2 * i]).add(c.rv.mul(arr[2 * i + 1]));
+                                arr[i] = arr[2 * i].add(c.rv.mul(arr[2 * i + 1].sub(arr[2 * i])));
                             }
                         }
                     }.f);
                 } else {
                     for (0..half) |i| {
-                        eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
-                        ra_weights[i] = one_minus_r.mul(ra_weights[2 * i]).add(r.mul(ra_weights[2 * i + 1]));
-                        combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+                        eq_evals[i] = eq_evals[2 * i].add(r.mul(eq_evals[2 * i + 1].sub(eq_evals[2 * i])));
+                        ra_weights[i] = ra_weights[2 * i].add(r.mul(ra_weights[2 * i + 1].sub(ra_weights[2 * i])));
+                        combined[i] = combined[2 * i].add(r.mul(combined[2 * i + 1].sub(combined[2 * i])));
                     }
                 }
             } else {
                 for (0..half) |i| {
-                    eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
-                    ra_weights[i] = one_minus_r.mul(ra_weights[2 * i]).add(r.mul(ra_weights[2 * i + 1]));
-                    combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+                    eq_evals[i] = eq_evals[2 * i].add(r.mul(eq_evals[2 * i + 1].sub(eq_evals[2 * i])));
+                    ra_weights[i] = ra_weights[2 * i].add(r.mul(ra_weights[2 * i + 1].sub(ra_weights[2 * i])));
+                    combined[i] = combined[2 * i].add(r.mul(combined[2 * i + 1].sub(combined[2 * i])));
                 }
             }
 
@@ -7719,10 +7707,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const half = n / 2;
             if (half == 0) return;
 
-            const one_minus_r = F.one().sub(r);
-
             for (0..half) |i| {
-                poly[i] = one_minus_r.mul(poly[2 * i]).add(r.mul(poly[2 * i + 1]));
+                poly[i] = poly[2 * i].add(r.mul(poly[2 * i + 1].sub(poly[2 * i])));
             }
 
             // Zero out upper half

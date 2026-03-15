@@ -619,19 +619,33 @@ pub fn JoltProver(comptime F: type) type {
             // --- Dense polynomials (RdInc, RamInc) ---
             // CRITICAL: Must pad to k_chunk*trace_length for Dory commitment.
             // Jolt commits ALL polynomials using the same matrix layout (K*T sized).
-            const rd_inc_poly_raw = try self.buildRdIncPolynomial(&emulator.trace, trace_length);
-            defer self.allocator.free(rd_inc_poly_raw);
+            // Build both F (for later stages) and i128 (for fast 128-bit MSM commits) in one pass.
+            const rd_inc_dual = try self.buildRdIncDual(&emulator.trace, trace_length);
+            defer self.allocator.free(rd_inc_dual.ints);
             const rd_inc_poly = try self.allocator.alloc(F, k_chunk * trace_length);
             @memset(rd_inc_poly, F.zero());
-            @memcpy(rd_inc_poly[0..rd_inc_poly_raw.len], rd_inc_poly_raw);
+            @memcpy(rd_inc_poly[0..rd_inc_dual.field.len], rd_inc_dual.field);
+            self.allocator.free(rd_inc_dual.field);
             witness_polys[0] = rd_inc_poly;
 
-            const ram_inc_poly_raw = try self.buildRamIncPolynomial(&emulator.trace, trace_length);
-            defer self.allocator.free(ram_inc_poly_raw);
+            // Pad i128 array to same size for Dory commit
+            const rd_inc_i128 = try self.allocator.alloc(i128, k_chunk * trace_length);
+            defer self.allocator.free(rd_inc_i128);
+            @memset(rd_inc_i128, 0);
+            @memcpy(rd_inc_i128[0..rd_inc_dual.ints.len], rd_inc_dual.ints);
+
+            const ram_inc_dual = try self.buildRamIncDual(&emulator.trace, trace_length);
+            defer self.allocator.free(ram_inc_dual.ints);
             const ram_inc_poly = try self.allocator.alloc(F, k_chunk * trace_length);
             @memset(ram_inc_poly, F.zero());
-            @memcpy(ram_inc_poly[0..ram_inc_poly_raw.len], ram_inc_poly_raw);
+            @memcpy(ram_inc_poly[0..ram_inc_dual.field.len], ram_inc_dual.field);
+            self.allocator.free(ram_inc_dual.field);
             witness_polys[1] = ram_inc_poly;
+
+            const ram_inc_i128 = try self.allocator.alloc(i128, k_chunk * trace_length);
+            defer self.allocator.free(ram_inc_i128);
+            @memset(ram_inc_i128, 0);
+            @memcpy(ram_inc_i128[0..ram_inc_dual.ints.len], ram_inc_dual.ints);
 
             // --- One-hot index arrays (InstructionRa, RamRa, BytecodeRa) ---
             for (0..instruction_d) |idx| {
@@ -692,9 +706,13 @@ pub fn JoltProver(comptime F: type) type {
             // Atomic error flag for parallel workers
             var parallel_error: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
+            // i128 arrays for dense polynomial commits (RdInc=0, RamInc=1)
+            const dense_i128_polys: [2][]const i128 = .{ rd_inc_i128, ram_inc_i128 };
+
             const CommitCtx = struct {
                 dory_srs: *const DoryScheme.SetupParams,
                 wp: []const []F,
+                dense_i128: [2][]const i128,
                 oh: []const []?u8,
                 k_chunk: usize,
                 trace_length: usize,
@@ -709,6 +727,7 @@ pub fn JoltProver(comptime F: type) type {
             const commit_ctx = CommitCtx{
                 .dory_srs = &dory_srs,
                 .wp = witness_polys,
+                .dense_i128 = dense_i128_polys,
                 .oh = onehot_indices,
                 .k_chunk = k_chunk,
                 .trace_length = trace_length,
@@ -726,14 +745,13 @@ pub fn JoltProver(comptime F: type) type {
                     if (ctx.err_flag.load(.acquire)) return;
 
                     if (poly_idx < ctx.num_dense) {
-                        // Dense commit (RdInc or RamInc)
-                        const r = DoryScheme.commitWithPoolAndHints(
+                        // Dense commit using i128 small-scalar MSM (~2x faster)
+                        const r = DoryScheme.commitWithPoolAndHintsI128(
                             ctx.dory_srs,
-                            ctx.wp[poly_idx],
+                            ctx.dense_i128[poly_idx],
                             ctx.alloc,
                             ctx.tp,
                         ) catch {
-                            // Only OOM is possible; propagated as OutOfMemory below
                             ctx.err_flag.store(true, .release);
                             return;
                         };
@@ -750,7 +768,6 @@ pub fn JoltProver(comptime F: type) type {
                             ctx.alloc,
                             ctx.tp,
                         ) catch {
-                            // Only OOM is possible; propagated as OutOfMemory below
                             ctx.err_flag.store(true, .release);
                             return;
                         };
@@ -760,14 +777,28 @@ pub fn JoltProver(comptime F: type) type {
                 }
             }.f;
 
-            // Dense commits: run sequentially so each can use full thread pool for
-            // inner parallelism (1024-point MSMs × 1024 rows benefit hugely from parallel rows).
-            // parallelForEach would trigger nested dispatch detection, disabling inner parallelism.
-            for (0..num_dense) |i| commitOnePoly(commit_ctx, i);
+            // Dense commits: run both concurrently via join(), each gets ~half the threads
+            // for inner row-MSM parallelism. Nested parallelism is supported.
+            if (self.thread_pool) |tp| {
+                if (num_dense == 2) {
+                    const JoinCtx = struct { cc: CommitCtx };
+                    _ = tp.join(void, void, JoinCtx{ .cc = commit_ctx }, struct {
+                        fn f(c: JoinCtx) void {
+                            commitOnePoly(c.cc, 0);
+                        }
+                    }.f, JoinCtx{ .cc = commit_ctx }, struct {
+                        fn f(c: JoinCtx) void {
+                            commitOnePoly(c.cc, 1);
+                        }
+                    }.f);
+                } else {
+                    for (0..num_dense) |i| commitOnePoly(commit_ctx, i);
+                }
+            } else {
+                for (0..num_dense) |i| commitOnePoly(commit_ctx, i);
+            }
 
-            // One-hot commits: run in parallel since they're lightweight (point adds + pairing).
-            // Inner parallelism isn't critical for these — the outer parallelism across 38 commits
-            // provides better throughput than sequential with inner parallelism.
+            // One-hot commits: run in parallel (inner parallelism also active via nested dispatch)
             if (self.thread_pool) |tp| {
                 const OhCtx = struct {
                     cc: CommitCtx,
@@ -1413,6 +1444,65 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             return poly;
+        }
+
+        /// Build RdInc as both F and i128 arrays in a single pass over the trace.
+        fn buildRdIncDual(
+            self: *Self,
+            trace: *const tracer.ExecutionTrace,
+            poly_size: usize,
+        ) !struct { field: []F, ints: []i128 } {
+            const poly = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(poly);
+            @memset(poly, F.zero());
+            const ints = try self.allocator.alloc(i128, poly_size);
+            errdefer self.allocator.free(ints);
+            @memset(ints, 0);
+
+            const K_INC = 128;
+            var register_values: [K_INC]u64 = [_]u64{0} ** K_INC;
+
+            for (trace.steps.items, 0..) |step, i| {
+                if (i >= poly_size) break;
+                if (!step.is_noop and step.rd_written and step.rd_index != 0) {
+                    const rd = step.rd_index;
+                    const pre_value = register_values[rd];
+                    const post_value = step.rd_value;
+                    poly[i] = F.fromU64(post_value).sub(F.fromU64(pre_value));
+                    ints[i] = @as(i128, post_value) - @as(i128, pre_value);
+                    register_values[rd] = post_value;
+                }
+            }
+            return .{ .field = poly, .ints = ints };
+        }
+
+        /// Build RamInc as both F and i128 arrays in a single pass over the trace.
+        fn buildRamIncDual(
+            self: *Self,
+            trace: *const tracer.ExecutionTrace,
+            poly_size: usize,
+        ) !struct { field: []F, ints: []i128 } {
+            const poly = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(poly);
+            @memset(poly, F.zero());
+            const ints = try self.allocator.alloc(i128, poly_size);
+            errdefer self.allocator.free(ints);
+            @memset(ints, 0);
+
+            for (trace.steps.items, 0..) |step, i| {
+                if (i >= poly_size) break;
+                if (step.is_memory_write) {
+                    const pre_value: i128 = @intCast(step.memory_pre_value orelse 0);
+                    const post_value: i128 = @intCast(step.memory_value orelse 0);
+                    const increment = post_value - pre_value;
+                    poly[i] = if (increment >= 0)
+                        F.fromU64(@intCast(increment))
+                    else
+                        F.fromU64(@intCast(-increment)).neg();
+                    ints[i] = increment;
+                }
+            }
+            return .{ .field = poly, .ints = ints };
         }
 
         /// Build InstructionRa chunk value polynomial from execution trace.

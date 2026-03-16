@@ -55,6 +55,17 @@ pub fn DensePolynomial(comptime F: type) type {
             };
         }
 
+        /// Create a polynomial that takes ownership of an existing evaluations slice.
+        /// The caller must not free the slice — it will be freed by deinit().
+        pub fn initOwned(allocator: Allocator, evaluations: []F) Self {
+            const num_vars = if (evaluations.len <= 1) 0 else std.math.log2_int(usize, evaluations.len);
+            return .{
+                .evaluations = evaluations,
+                .num_vars = num_vars,
+                .allocator = allocator,
+            };
+        }
+
         /// Create a zero polynomial with n variables
         pub fn zero(allocator: Allocator, num_vars: usize) !Self {
             const size = @as(usize, 1) << num_vars;

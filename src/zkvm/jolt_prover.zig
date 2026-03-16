@@ -1314,7 +1314,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Build compact integer witnesses for fast evaluation
             const r1cs_evaluators = @import("r1cs/evaluators.zig");
-            const compact_witnesses = try r1cs_evaluators.buildCompactWitnesses(F, padded_witnesses, self.allocator);
+            const compact_witnesses = try r1cs_evaluators.buildCompactWitnesses(F, padded_witnesses, self.allocator, self.thread_pool);
             defer self.allocator.free(compact_witnesses);
 
             // Create UniSkip proof for Stage 1 with actual constraint evaluations

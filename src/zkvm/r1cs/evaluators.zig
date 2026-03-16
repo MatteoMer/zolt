@@ -17,6 +17,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const field_mod = @import("../../field/mod.zig");
 const constraints = @import("constraints.zig");
 const R1CSInputIndex = constraints.R1CSInputIndex;
 const UNIFORM_CONSTRAINTS = constraints.UNIFORM_CONSTRAINTS;
@@ -510,9 +511,11 @@ pub const CompactWitness = struct {
     /// Must be i128 (not i64) because witness values can be > i64.max
     /// (e.g., sign-extended 32-bit values stored as large u64)
     bz_first: [FIRST_GROUP_SIZE]i128,
-    /// Second-group Bz magnitudes as i128 (left - right for each constraint)
-    bz_second: [SECOND_GROUP_SIZE]i128,
+    /// Second-group Bz as S192 (signed 192-bit integer, exact arithmetic without wrapping)
+    bz_second: [SECOND_GROUP_SIZE]field_mod.S192,
 };
+
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 /// Build compact witness array from field-form cycle witnesses.
 /// This performs Montgomery de-encoding once per value, then all subsequent
@@ -521,15 +524,35 @@ pub fn buildCompactWitnesses(
     comptime F: type,
     cycle_witnesses: []const constraints.R1CSCycleInputs(F),
     allocator: Allocator,
+    thread_pool: ?*ThreadPool,
 ) ![]CompactWitness {
     const n = cycle_witnesses.len;
     const result = try allocator.alloc(CompactWitness, n);
 
-    for (0..n) |i| {
-        const ws = cycle_witnesses[i].asSlice();
-        result[i] = compactFromFieldWitness(F, ws);
-    }
+    const Ctx = struct {
+        cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+        result: []CompactWitness,
+    };
 
+    const ctx = Ctx{
+        .cycle_witnesses = cycle_witnesses,
+        .result = result,
+    };
+
+    const mapFn = struct {
+        fn f(c: Ctx, i: usize) void {
+            const ws = c.cycle_witnesses[i].asSlice();
+            c.result[i] = compactFromFieldWitness(F, ws);
+        }
+    }.f;
+
+    if (thread_pool) |tp| {
+        tp.parallelFor(n, ctx, mapFn);
+    } else {
+        for (0..n) |i| {
+            mapFn(ctx, i);
+        }
+    }
 
     return result;
 }
@@ -609,32 +632,30 @@ fn compactFromFieldWitness(comptime F: type, witness: []const F) CompactWitness 
         1 - @as(i128, dont_update), // FG9: 1 - DoNotUpdate
     };
 
-    // Second group Bz as integers.
-    // Uses wrapping arithmetic because RightLookupOperand and Product can exceed i128 range
-    // when bitcast from u128. The wrapping is correct because these values are converted back
-    // to field elements (mod p) before use.
-    const TWO_POW_64: i128 = 1 << 64;
-    const right_lookup_i128: i128 = @bitCast(right_lookup_u128);
-    const product_i128: i128 = @bitCast(product_u128);
+    // Second group Bz as S192 (signed 192-bit integers).
+    // Uses exact S192 arithmetic instead of wrapping i128 to avoid sign truncation
+    // for values where u128 > 2^127 (e.g., RightLookupOperand, Product).
+    const S192 = field_mod.S192;
+    const rl = S192.fromU128(right_lookup_u128);
     cw.bz_second = .{
         // SG0: RamAddress - Rs1 - Imm
-        @as(i128, @intCast(ram_addr)) -% @as(i128, @intCast(rs1)) -% imm,
+        S192.fromU64(ram_addr).sub(S192.fromU64(rs1)).sub(S192.fromI128(imm)),
         // SG1: RightLookup - LeftInput - RightInput
-        right_lookup_i128 -% @as(i128, left_input) -% @as(i128, right_input),
+        rl.sub(S192.fromU64(left_input)).sub(S192.fromU64(right_input)),
         // SG2: RightLookup - LeftInput + RightInput - 2^64
-        right_lookup_i128 -% @as(i128, left_input) +% @as(i128, right_input) -% TWO_POW_64,
+        rl.sub(S192.fromU64(left_input)).add(S192.fromU64(right_input)).sub(S192.fromU128(@as(u128, 1) << 64)),
         // SG3: RightLookup - Product
-        right_lookup_i128 -% product_i128,
+        rl.sub(S192.fromU128(product_u128)),
         // SG4: RightLookup - RightInput
-        right_lookup_i128 -% @as(i128, right_input),
+        rl.sub(S192.fromU64(right_input)),
         // SG5: RdWrite - LookupOutput
-        @as(i128, rd_write) -% @as(i128, lookup_out),
+        S192.fromU64(rd_write).sub(S192.fromU64(lookup_out)),
         // SG6: RdWrite - UPC - 4 + 2*IsCompressed
-        @as(i128, rd_write) -% @as(i128, upc) -% 4 +% 2 *% @as(i128, is_compressed),
+        S192.fromU64(rd_write).sub(S192.fromU64(upc)).sub(S192.fromU64(4)).add(S192.fromU64(2 * is_compressed)),
         // SG7: NextUPC - UPC - Imm
-        @as(i128, next_upc) -% @as(i128, upc) -% imm,
+        S192.fromU64(next_upc).sub(S192.fromU64(upc)).sub(S192.fromI128(imm)),
         // SG8: NextUPC - UPC - 4 + 4*DoNotUpdate + 2*IsCompressed
-        @as(i128, next_upc) -% @as(i128, upc) -% 4 +% 4 *% @as(i128, dont_update) +% 2 *% @as(i128, is_compressed),
+        S192.fromU64(next_upc).sub(S192.fromU64(upc)).sub(S192.fromU64(4)).add(S192.fromU64(4 * dont_update)).add(S192.fromU64(2 * is_compressed)),
     };
 
     return cw;
@@ -674,6 +695,34 @@ pub fn interpolateAzBzProductInt(
     // Product fits in i128: max |az_j| ≈ 10*140140 ≈ 1.4M, max |bz_j| ≈ 10*140140*2^64 ≈ 2^81
     // Product ≈ 2^21 * 2^81 = 2^102, well within i128 range
     return @as(i128, az_j) * bz_j;
+}
+
+/// Integer-based Az*Bz interpolation for the second group using S192.
+/// Returns the product as S192 (avoids wrapping i128 artifacts).
+///
+/// Same constraint-satisfaction trick as interpolateAzBzProductInt:
+/// when az_i != 0, bz_i must be 0, so Az and Bz accumulate disjointly.
+pub fn interpolateAzBzProductSecondGroupInt(
+    az_int: *const [SECOND_GROUP_SIZE]i8,
+    bz_s192: *const [SECOND_GROUP_SIZE]field_mod.S192,
+    coeffs: *const [SECOND_GROUP_SIZE]i32,
+) field_mod.S192 {
+    const S192 = field_mod.S192;
+    var az_j: i32 = 0;
+    var bz_j: S192 = S192.zero();
+
+    inline for (0..SECOND_GROUP_SIZE) |i| {
+        const c = coeffs[i];
+        const a = az_int[i];
+        if (a != 0) {
+            az_j += c * @as(i32, a);
+        } else {
+            S192.fmaddI32(&bz_j, c, bz_s192[i]);
+        }
+    }
+
+    if (az_j == 0) return S192.zero();
+    return bz_j.mulI32(az_j);
 }
 
 // ============================================================================

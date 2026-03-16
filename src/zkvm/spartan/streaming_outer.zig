@@ -39,6 +39,7 @@ const evaluators = @import("../r1cs/evaluators.zig");
 const jolt_types = @import("../jolt_types.zig");
 const poly_mod = @import("../../poly/mod.zig");
 const multiquadratic = @import("../../poly/multiquadratic.zig");
+const field_mod = @import("../../field/mod.zig");
 const GruenSplitEqPolynomial = poly_mod.GruenSplitEqPolynomial;
 const MultiquadraticPolynomial = poly_mod.MultiquadraticPolynomial;
 const utils = @import("../../utils/mod.zig");
@@ -249,6 +250,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 F,
                 self.cycle_witnesses,
                 self.allocator,
+                self.thread_pool,
             );
         }
 
@@ -345,9 +347,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             const MatCtx = struct {
                 cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+                compact: ?[]const evaluators.CompactWitness,
                 lagrange_evals_r0: *const [FIRST_GROUP_SIZE]F,
                 az_evals: []F,
                 bz_evals: []F,
+                E_out: []const F,
+                E_in: []const F,
                 num_x_in_vals: usize,
                 grid_size: usize,
                 two_pow_64: F,
@@ -355,93 +360,144 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             const mat_ctx = MatCtx{
                 .cycle_witnesses = self.cycle_witnesses,
+                .compact = self.compact_witnesses,
                 .lagrange_evals_r0 = &self.lagrange_evals_r0,
                 .az_evals = az_evals,
                 .bz_evals = bz_evals,
+                .E_out = E_out,
+                .E_in = E_in,
                 .num_x_in_vals = num_x_in_vals,
                 .grid_size = grid_size,
                 .two_pow_64 = two_pow_64_mat,
             };
 
-            const materializeOnePair = struct {
-                fn run(ctx: MatCtx, flat_i: usize) void {
-                    const x_in_val = flat_i % ctx.num_x_in_vals;
-                    const x_out_val = flat_i / ctx.num_x_in_vals;
-                    const i = x_out_val * ctx.num_x_in_vals + x_in_val;
+            // Fused materialization + t_prime accumulation:
+            // Writes az/bz arrays (side effect) AND returns [3]F t_prime contributions.
+            const matFusedMapReduce = struct {
+                fn mapFn(ctx: MatCtx, start: usize, end: usize) [3]F {
+                    @setEvalBranchQuota(10000);
+                    var local_ans = [3]F{ F.zero(), F.zero(), F.zero() };
+                    const cw_len = if (ctx.compact) |c| c.len else ctx.cycle_witnesses.len;
 
-                    var j: usize = 0;
-                    while (j < ctx.grid_size) : (j += 2) {
-                        const full_idx = ctx.grid_size * i + j;
-                        const time_step_idx = full_idx >> 1;
+                    for (start..end) |flat_i| {
+                        const x_in_val = flat_i % ctx.num_x_in_vals;
+                        const x_out_val = flat_i / ctx.num_x_in_vals;
+                        const i = x_out_val * ctx.num_x_in_vals + x_in_val;
 
-                        if (time_step_idx < ctx.cycle_witnesses.len) {
-                            const witness = ctx.cycle_witnesses[time_step_idx].asSlice();
+                        var j: usize = 0;
+                        while (j < ctx.grid_size) : (j += 2) {
+                            const full_idx = ctx.grid_size * i + j;
+                            const time_step_idx = full_idx >> 1;
 
-                            // First group: integer Az + direct Bz
-                            const az_int_fg = evaluators.computeAzFirstGroupInt(F, witness);
-                            const bz_field_fg = evaluators.computeBzFirstGroupDirect(F, witness);
+                            if (time_step_idx >= cw_len) continue;
 
-                            var az0 = F.zero();
-                            var bz0 = F.zero();
-                            for (0..FIRST_GROUP_SIZE) |t| {
-                                const w = ctx.lagrange_evals_r0[t];
-                                const az_i = az_int_fg[t];
-                                if (az_i != 0) {
-                                    if (az_i == 1) {
-                                        az0 = az0.add(w);
-                                    } else if (az_i == -1) {
-                                        az0 = az0.sub(w);
-                                    } else {
-                                        az0 = az0.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
-                                    }
+                            var az0: F = undefined;
+                            var bz0: F = undefined;
+                            var az1: F = undefined;
+                            var bz1: F = undefined;
+
+                            if (ctx.compact) |compact| {
+                                // Tiered accumulator path: avoid Montgomery muls
+                                const cw = &compact[time_step_idx];
+
+                                // First group: SmallAccumU for Az, MedAccumS for Bz (i128 safe)
+                                var az0_acc = field_mod.SmallAccumU.zero();
+                                var bz0_acc = field_mod.MedAccumS.zero();
+                                inline for (0..FIRST_GROUP_SIZE) |t| {
+                                    const w = ctx.lagrange_evals_r0[t];
+                                    az0_acc.fmaddI8(w, cw.az_first[t]);
+                                    bz0_acc.fmaddI128(w, cw.bz_first[t]);
                                 }
-                                bz0 = bz0.add(w.mul(bz_field_fg[t]));
+                                az0 = az0_acc.barrettReduce();
+                                bz0 = bz0_acc.barrettReduce();
+
+                                // Second group: SmallAccumU for Az, WideAccumS for Bz (S192)
+                                const g2_size = comptime @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+                                var az1_acc = field_mod.SmallAccumU.zero();
+                                var bz1_acc = field_mod.WideAccumS.zero();
+                                inline for (0..g2_size) |t| {
+                                    az1_acc.fmaddI8(ctx.lagrange_evals_r0[t], cw.az_second[t]);
+                                    bz1_acc.fmaddS192(ctx.lagrange_evals_r0[t], cw.bz_second[t]);
+                                }
+                                az1 = az1_acc.barrettReduce();
+                                bz1 = bz1_acc.barrettReduce();
+                            } else {
+                                // Fallback: field arithmetic path
+                                const witness = ctx.cycle_witnesses[time_step_idx].asSlice();
+
+                                const az_int_fg = evaluators.computeAzFirstGroupInt(F, witness);
+                                const bz_field_fg = evaluators.computeBzFirstGroupDirect(F, witness);
+                                az0 = F.zero();
+                                bz0 = F.zero();
+                                for (0..FIRST_GROUP_SIZE) |t| {
+                                    const w = ctx.lagrange_evals_r0[t];
+                                    const az_i = az_int_fg[t];
+                                    if (az_i != 0) {
+                                        if (az_i == 1) {
+                                            az0 = az0.add(w);
+                                        } else if (az_i == -1) {
+                                            az0 = az0.sub(w);
+                                        } else {
+                                            az0 = az0.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
+                                        }
+                                    }
+                                    bz0 = bz0.add(w.mul(bz_field_fg[t]));
+                                }
+
+                                const az_int_sg = evaluators.computeAzSecondGroupInt(F, witness);
+                                const bz_field_sg = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
+                                az1 = F.zero();
+                                bz1 = F.zero();
+                                for (0..@min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE)) |t| {
+                                    const w = ctx.lagrange_evals_r0[t];
+                                    const az_i = az_int_sg[t];
+                                    if (az_i != 0) {
+                                        if (az_i == 1) {
+                                            az1 = az1.add(w);
+                                        } else if (az_i == -1) {
+                                            az1 = az1.sub(w);
+                                        } else {
+                                            az1 = az1.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
+                                        }
+                                    }
+                                    bz1 = bz1.add(w.mul(bz_field_sg[t]));
+                                }
                             }
 
-                            // Second group: integer Az + direct Bz
-                            const az_int_sg = evaluators.computeAzSecondGroupInt(F, witness);
-                            const bz_field_sg = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
-
-                            var az1 = F.zero();
-                            var bz1 = F.zero();
-                            for (0..@min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE)) |t| {
-                                const w = ctx.lagrange_evals_r0[t];
-                                const az_i = az_int_sg[t];
-                                if (az_i != 0) {
-                                    if (az_i == 1) {
-                                        az1 = az1.add(w);
-                                    } else if (az_i == -1) {
-                                        az1 = az1.sub(w);
-                                    } else {
-                                        az1 = az1.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
-                                    }
-                                }
-                                bz1 = bz1.add(w.mul(bz_field_sg[t]));
-                            }
-
+                            // Store materialized values
                             const base_idx = ctx.grid_size * i;
                             ctx.az_evals[base_idx + j] = az0;
                             ctx.bz_evals[base_idx + j] = bz0;
                             ctx.az_evals[base_idx + j + 1] = az1;
                             ctx.bz_evals[base_idx + j + 1] = bz1;
+
+                            // Fused t_prime accumulation (window_size=1, 3 ternary points)
+                            const eq_weight = ctx.E_out[x_out_val].mul(ctx.E_in[x_in_val]);
+                            local_ans[0] = local_ans[0].add(az0.mul(bz0).mul(eq_weight));
+                            local_ans[1] = local_ans[1].add(az1.mul(bz1).mul(eq_weight));
+                            local_ans[2] = local_ans[2].add(az1.sub(az0).mul(bz1.sub(bz0)).mul(eq_weight));
                         }
                     }
+                    return local_ans;
                 }
-            }.run;
 
-            if (self.thread_pool) |tp| {
-                tp.parallelFor(total_pairs, mat_ctx, materializeOnePair);
-            } else {
-                for (0..total_pairs) |flat_i| materializeOnePair(mat_ctx, flat_i);
-            }
+                fn reduceFn(a: [3]F, b: [3]F) [3]F {
+                    return [3]F{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]) };
+                }
+            };
 
-            // Create DensePolynomials
-            self.az_poly = try poly_mod.DensePolynomial(F).init(self.allocator, az_evals);
-            self.bz_poly = try poly_mod.DensePolynomial(F).init(self.allocator, bz_evals);
+            const identity_3 = [3]F{ F.zero(), F.zero(), F.zero() };
+            const t_prime_result = if (self.thread_pool) |tp|
+                tp.parallelReduce(
+                    [3]F, total_pairs, identity_3,
+                    mat_ctx, matFusedMapReduce.mapFn, matFusedMapReduce.reduceFn,
+                )
+            else
+                matFusedMapReduce.mapFn(mat_ctx, 0, total_pairs);
 
-            // Free the temporary arrays since DensePolynomial.init copies them
-            self.allocator.free(az_evals);
-            self.allocator.free(bz_evals);
+            // Create DensePolynomials by taking ownership (no copy)
+            self.az_poly = poly_mod.DensePolynomial(F).initOwned(self.allocator, az_evals);
+            self.bz_poly = poly_mod.DensePolynomial(F).initOwned(self.allocator, bz_evals);
 
             // Allocate scratch buffers for parallel binding (double-buffer technique)
             if (self.thread_pool != null) {
@@ -459,9 +515,18 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 }
             }
 
-            // Build t_prime_poly: multiquadratic polynomial of Az * Bz products
-            // The polynomial has window_size = 1 variable, so 3^1 = 3 evaluations
-            try self.buildTPrimePoly(window_size);
+            // Build t_prime_poly from fused result (no separate buildTPrimePoly pass)
+            const three_pow_dim: usize = 3;
+            var ans = try self.allocator.alloc(F, three_pow_dim);
+            defer self.allocator.free(ans);
+            ans[0] = t_prime_result[0];
+            ans[1] = t_prime_result[1];
+            ans[2] = t_prime_result[2];
+
+            if (self.t_prime_poly) |*old| {
+                old.deinit();
+            }
+            self.t_prime_poly = try MultiquadraticPolynomial(F).init(self.allocator, window_size, ans);
         }
 
         /// Build t_prime_poly from bound Az/Bz polynomials
@@ -700,15 +765,29 @@ pub fn StreamingOuterProver(comptime F: type) type {
             };
 
             const firstRoundMapReduce = struct {
+                const Accum = field_mod.UnreducedProductAccum;
+                const accum_zero = [_]Accum{Accum.zero()} ** DEGREE;
+                const FoldedU128 = field_mod.FoldedMulU128;
+                const FoldedU128Accum = field_mod.FoldedMulU128Accum;
+                const folded_zero = [_]FoldedU128{FoldedU128.zero()} ** DEGREE;
+                const accum7_zero = [_]FoldedU128Accum{FoldedU128Accum.zero()} ** DEGREE;
+
                 fn map(ctx: FirstRoundCtx, start: usize, end: usize) [DEGREE]F {
-                    var accum: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+                    var accum_outer: [DEGREE]Accum = accum_zero;
                     const cw_len = if (ctx.compact) |c| c.len else ctx.cycle_witnesses.len;
 
                     for (start..end) |x_out| {
                         const e_out = if (x_out < ctx.E_out.len) ctx.E_out[x_out] else F.zero();
                         if (e_out.eql(F.zero())) continue;
 
-                        var inner: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+                        // Group 0 accumulators: Barrett reduction via FoldedMulU128 (6 slots)
+                        var g0_pos: [DEGREE]FoldedU128 = folded_zero;
+                        var g0_neg: [DEGREE]FoldedU128 = folded_zero;
+                        // Group 1 accumulators: S192 Barrett via FoldedMulU128Accum (7 slots)
+                        var sg_pos: [DEGREE]FoldedU128Accum = accum7_zero;
+                        var sg_neg: [DEGREE]FoldedU128Accum = accum7_zero;
+                        // Field products accumulator: fallback path only (Montgomery)
+                        var gf_accum: [DEGREE]Accum = accum_zero;
 
                         for (0..ctx.num_x_in_vals) |x_in| {
                             const e_in = if (x_in < ctx.E_in.len) ctx.E_in[x_in] else F.zero();
@@ -719,39 +798,40 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                             if (cycle < cw_len) {
                                 if (ctx.compact) |compact| {
-                                    // Fast path: integer arithmetic with compact witnesses
                                     const cw = &compact[cycle];
                                     if (group == 0) {
+                                        // Integer path: Barrett reduction via FoldedMulU128
                                         inline for (0..DEGREE) |j| {
                                             const product_int = evaluators.interpolateAzBzProductInt(
                                                 &cw.az_first,
                                                 &cw.bz_first,
                                                 &univariate_skip.COEFFS_PER_J[j],
                                             );
-                                            if (product_int != 0) {
-                                                const product_f = if (product_int >= 0)
-                                                    F.fromU128(@intCast(product_int))
-                                                else
-                                                    F.fromU128(@intCast(-product_int)).neg();
-                                                inner[j] = inner[j].add(e_in.mul(product_f));
+                                            if (product_int > 0) {
+                                                g0_pos[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(product_int)));
+                                            } else if (product_int < 0) {
+                                                g0_neg[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(-product_int)));
                                             }
                                         }
                                     } else {
-                                        // Second group: use field-based computation for correctness
-                                        // (integer interpolation has overflow issues with large bz_second values)
-                                        const witness = ctx.cycle_witnesses[cycle].asSlice();
-                                        const az_int_sg = evaluators.computeAzSecondGroupInt(F, witness);
-                                        const bz_field_sg = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
+                                        // Second group: S192 integer path, Barrett via 7-slot accum
                                         inline for (0..DEGREE) |j| {
                                             const coeffs = univariate_skip.COEFFS_PER_J[j][0..SECOND_GROUP_SIZE];
-                                            const product = evaluators.interpolateAzBzProduct(F, &az_int_sg, &bz_field_sg, coeffs, SECOND_GROUP_SIZE);
-                                            if (!product.eql(F.zero())) {
-                                                inner[j] = inner[j].add(e_in.mul(product));
+                                            const product = evaluators.interpolateAzBzProductSecondGroupInt(
+                                                &cw.az_second, &cw.bz_second, coeffs,
+                                            );
+                                            if (!product.isZero()) {
+                                                const unreduced = field_mod.mulU192Unreduced(e_in, product.magnitude);
+                                                if (product.is_positive) {
+                                                    sg_pos[j].addAssign(unreduced);
+                                                } else {
+                                                    sg_neg[j].addAssign(unreduced);
+                                                }
                                             }
                                         }
                                     }
                                 } else {
-                                    // Fallback: field arithmetic (original path)
+                                    // Fallback: field arithmetic, deferred reduction
                                     const witness = ctx.cycle_witnesses[cycle].asSlice();
                                     if (group == 0) {
                                         const az_int = evaluators.computeAzFirstGroupInt(F, witness);
@@ -761,7 +841,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                                 F, &az_int, &bz_field,
                                                 &univariate_skip.COEFFS_PER_J[j], FIRST_GROUP_SIZE,
                                             );
-                                            inner[j] = inner[j].add(e_in.mul(product));
+                                            if (!product.eql(F.zero())) {
+                                                gf_accum[j].addAssign(Accum.fromMul(e_in, product));
+                                            }
                                         }
                                     } else {
                                         const az_int = evaluators.computeAzSecondGroupInt(F, witness);
@@ -771,20 +853,33 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                                 F, &az_int, &bz_field,
                                                 &univariate_skip.COEFFS_PER_J[j], SECOND_GROUP_SIZE,
                                             );
-                                            inner[j] = inner[j].add(e_in.mul(product));
+                                            if (!product.eql(F.zero())) {
+                                                gf_accum[j].addAssign(Accum.fromMul(e_in, product));
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
 
-                        // Weight inner accumulator by e_out
+                        // Reduce inner accumulators and weight by e_out
                         inline for (0..DEGREE) |j| {
-                            accum[j] = accum[j].add(e_out.mul(inner[j]));
+                            // Group 0: Barrett reduction of integer products
+                            const int_sum = field_mod.reduceMulU128(g0_pos[j]).sub(field_mod.reduceMulU128(g0_neg[j]));
+                            // Group 1: Barrett reduction of S192 products
+                            const sg_sum = field_mod.reduceMulU128Accum(sg_pos[j]).sub(field_mod.reduceMulU128Accum(sg_neg[j]));
+                            // Fallback: field products
+                            const field_sum = gf_accum[j].reduce();
+                            const inner_total = int_sum.add(sg_sum).add(field_sum);
+                            accum_outer[j].addAssign(Accum.fromMul(e_out, inner_total));
                         }
                     }
 
-                    return accum;
+                    var result: [DEGREE]F = undefined;
+                    inline for (0..DEGREE) |j| {
+                        result[j] = accum_outer[j].reduce();
+                    }
+                    return result;
                 }
 
                 fn reduce(a: [DEGREE]F, b: [DEGREE]F) [DEGREE]F {
@@ -845,10 +940,207 @@ pub fn StreamingOuterProver(comptime F: type) type {
             return self.buildUniSkipPolynomial(&t1_vals);
         }
 
+        /// Compute the UniSkip first-round polynomial without allocating a full StreamingOuterProver.
+        /// Avoids the split_eq, r_grid, and full_tau allocations (~8MB for primes_large).
+        pub fn computeUniSkipFirstRound(
+            allocator: Allocator,
+            cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+            compact_witnesses: ?[]const evaluators.CompactWitness,
+            tau: []const F,
+            thread_pool: ?*@import("../../utils/thread_pool.zig").ThreadPool,
+        ) ![FIRST_ROUND_NUM_COEFFS]F {
+            const DEGREE = univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE;
+            const EXTENDED_SIZE = univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE;
+            const targets = univariate_skip.UNISKIP_TARGETS;
+
+            const m = tau.len / 2;
+            const wprime_len = if (tau.len > 0) tau.len - 1 else 0;
+            const num_x_out_bits = m;
+            const num_x_in_bits = if (wprime_len > m) wprime_len - m else 0;
+            const num_x_in_prime_bits = if (num_x_in_bits > 0) num_x_in_bits - 1 else 0;
+            const num_x_out_vals: usize = @as(usize, 1) << @intCast(num_x_out_bits);
+            const num_x_in_vals: usize = @as(usize, 1) << @intCast(num_x_in_bits);
+            const tau_high = if (tau.len > 0) tau[tau.len - 1] else F.zero();
+
+            const E_out = try buildEqTableAlloc(allocator, tau[0..m]);
+            defer allocator.free(E_out);
+            const E_in = try buildEqTableAlloc(allocator, tau[m .. tau.len - 1]);
+            defer allocator.free(E_in);
+
+            const two_pow_64 = blk_2p64: {
+                var bytes: [16]u8 = undefined;
+                std.mem.writeInt(u128, &bytes, 0x10000000000000000, .little);
+                break :blk_2p64 F.fromBytes(&bytes);
+            };
+
+            const FirstRoundCtx = struct {
+                num_x_in_vals: usize,
+                num_x_in_prime_bits: u6,
+                E_out: []const F,
+                E_in: []const F,
+                compact: ?[]const evaluators.CompactWitness,
+                cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+                two_pow_64: F,
+            };
+
+            const ctx = FirstRoundCtx{
+                .num_x_in_vals = num_x_in_vals,
+                .num_x_in_prime_bits = @intCast(num_x_in_prime_bits),
+                .E_out = E_out,
+                .E_in = E_in,
+                .compact = compact_witnesses,
+                .cycle_witnesses = cycle_witnesses,
+                .two_pow_64 = two_pow_64,
+            };
+
+            // Reuse the same map-reduce logic
+            const mapReduceFns = struct {
+                const Accum = field_mod.UnreducedProductAccum;
+                const accum_zero = [_]Accum{Accum.zero()} ** DEGREE;
+                const FoldedU128 = field_mod.FoldedMulU128;
+                const FoldedU128Accum = field_mod.FoldedMulU128Accum;
+                const folded_zero = [_]FoldedU128{FoldedU128.zero()} ** DEGREE;
+                const accum7_zero = [_]FoldedU128Accum{FoldedU128Accum.zero()} ** DEGREE;
+
+                fn mapFn(c: FirstRoundCtx, start: usize, end: usize) [DEGREE]F {
+                    var accum_outer: [DEGREE]Accum = accum_zero;
+                    const cw_len = if (c.compact) |cw| cw.len else c.cycle_witnesses.len;
+
+                    for (start..end) |x_out| {
+                        const e_out = if (x_out < c.E_out.len) c.E_out[x_out] else F.zero();
+                        if (e_out.eql(F.zero())) continue;
+
+                        var g0_pos: [DEGREE]FoldedU128 = folded_zero;
+                        var g0_neg: [DEGREE]FoldedU128 = folded_zero;
+                        var sg_pos: [DEGREE]FoldedU128Accum = accum7_zero;
+                        var sg_neg: [DEGREE]FoldedU128Accum = accum7_zero;
+                        var gf_accum: [DEGREE]Accum = accum_zero;
+
+                        for (0..c.num_x_in_vals) |x_in| {
+                            const e_in = if (x_in < c.E_in.len) c.E_in[x_in] else F.zero();
+                            const x_in_prime = x_in >> 1;
+                            const cycle = (x_out << c.num_x_in_prime_bits) | x_in_prime;
+                            const group: u1 = @truncate(x_in & 1);
+
+                            if (cycle < cw_len) {
+                                if (c.compact) |compact| {
+                                    const cw = &compact[cycle];
+                                    if (group == 0) {
+                                        inline for (0..DEGREE) |j| {
+                                            const product_int = evaluators.interpolateAzBzProductInt(
+                                                &cw.az_first, &cw.bz_first,
+                                                &univariate_skip.COEFFS_PER_J[j],
+                                            );
+                                            if (product_int > 0) {
+                                                g0_pos[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(product_int)));
+                                            } else if (product_int < 0) {
+                                                g0_neg[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(-product_int)));
+                                            }
+                                        }
+                                    } else {
+                                        // Second group: S192 integer path
+                                        inline for (0..DEGREE) |j| {
+                                            const coeffs = univariate_skip.COEFFS_PER_J[j][0..SECOND_GROUP_SIZE];
+                                            const product = evaluators.interpolateAzBzProductSecondGroupInt(
+                                                &cw.az_second, &cw.bz_second, coeffs,
+                                            );
+                                            if (!product.isZero()) {
+                                                const unreduced = field_mod.mulU192Unreduced(e_in, product.magnitude);
+                                                if (product.is_positive) {
+                                                    sg_pos[j].addAssign(unreduced);
+                                                } else {
+                                                    sg_neg[j].addAssign(unreduced);
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    const witness = c.cycle_witnesses[cycle].asSlice();
+                                    if (group == 0) {
+                                        const az_int = evaluators.computeAzFirstGroupInt(F, witness);
+                                        const bz_field = evaluators.computeBzFirstGroupDirect(F, witness);
+                                        inline for (0..DEGREE) |j| {
+                                            const product = evaluators.interpolateAzBzProduct(
+                                                F, &az_int, &bz_field,
+                                                &univariate_skip.COEFFS_PER_J[j], FIRST_GROUP_SIZE,
+                                            );
+                                            if (!product.eql(F.zero())) {
+                                                gf_accum[j].addAssign(Accum.fromMul(e_in, product));
+                                            }
+                                        }
+                                    } else {
+                                        const az_int = evaluators.computeAzSecondGroupInt(F, witness);
+                                        const bz_field = evaluators.computeBzSecondGroupDirect(F, witness, c.two_pow_64);
+                                        inline for (0..DEGREE) |j| {
+                                            const product = evaluators.interpolateAzBzProduct(
+                                                F, &az_int, &bz_field,
+                                                &univariate_skip.COEFFS_PER_J[j], SECOND_GROUP_SIZE,
+                                            );
+                                            if (!product.eql(F.zero())) {
+                                                gf_accum[j].addAssign(Accum.fromMul(e_in, product));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        inline for (0..DEGREE) |j| {
+                            const int_sum = field_mod.reduceMulU128(g0_pos[j]).sub(field_mod.reduceMulU128(g0_neg[j]));
+                            const sg_sum = field_mod.reduceMulU128Accum(sg_pos[j]).sub(field_mod.reduceMulU128Accum(sg_neg[j]));
+                            const field_sum = gf_accum[j].reduce();
+                            const inner_total = int_sum.add(sg_sum).add(field_sum);
+                            accum_outer[j].addAssign(Accum.fromMul(e_out, inner_total));
+                        }
+                    }
+
+                    var result: [DEGREE]F = undefined;
+                    inline for (0..DEGREE) |j| {
+                        result[j] = accum_outer[j].reduce();
+                    }
+                    return result;
+                }
+
+                fn reduceFn(a: [DEGREE]F, b: [DEGREE]F) [DEGREE]F {
+                    var result: [DEGREE]F = undefined;
+                    inline for (0..DEGREE) |i| {
+                        result[i] = a[i].add(b[i]);
+                    }
+                    return result;
+                }
+            };
+
+            const identity: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+            const target_sums = if (thread_pool) |tp|
+                tp.parallelReduceForce(
+                    [DEGREE]F, num_x_out_vals, identity,
+                    ctx, mapReduceFns.mapFn, mapReduceFns.reduceFn,
+                )
+            else
+                mapReduceFns.mapFn(ctx, 0, num_x_out_vals);
+
+            // Build t1_vals and produce final polynomial
+            var t1_vals: [EXTENDED_SIZE]F = [_]F{F.zero()} ** EXTENDED_SIZE;
+            for (targets, 0..) |z, idx| {
+                const pos: usize = @intCast(z + @as(i64, DEGREE));
+                t1_vals[pos] = target_sums[idx];
+            }
+
+            return buildUniSkipPolynomialStatic(tau_high, &t1_vals);
+        }
+
         /// Build the UniSkip polynomial s1(Y) = L(τ_high, Y) · t1(Y)
         /// from t1 evaluations on the extended domain
         fn buildUniSkipPolynomial(
             self: *const Self,
+            t1_vals: *const [univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE]F,
+        ) [FIRST_ROUND_NUM_COEFFS]F {
+            return buildUniSkipPolynomialStatic(self.tau_high, t1_vals);
+        }
+
+        /// Static version of buildUniSkipPolynomial for standalone use
+        fn buildUniSkipPolynomialStatic(
+            tau_high: F,
             t1_vals: *const [univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE]F,
         ) [FIRST_ROUND_NUM_COEFFS]F {
             const DEGREE = univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE; // 9
@@ -856,13 +1148,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const EXTENDED_SIZE = univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE; // 19
 
             // Step 3: Interpolate t1 from evaluations to coefficients (degree-18)
-            // Domain is {-DEGREE, ..., DEGREE} = {-9, ..., 9}
             var t1_coeffs: [EXTENDED_SIZE]F = [_]F{F.zero()} ** EXTENDED_SIZE;
-            self.lagrangeInterpolate(t1_vals, &t1_coeffs, EXTENDED_SIZE, DEGREE);
+            interpolateCoeffs(t1_vals, &t1_coeffs, EXTENDED_SIZE, DEGREE);
 
             // Step 4: Compute Lagrange kernel L(τ_high, Y) evaluations and coefficients
-            // Evaluate L_i(τ_high) for i ∈ {0, ..., DOMAIN_SIZE-1} where base domain is {-4, ..., 5}
-            const tau_high = self.tau_high;
             var lagrange_evals: [DOMAIN_SIZE]F = undefined;
             const base_left: i64 = -@as(i64, (DOMAIN_SIZE - 1) / 2);
 
@@ -887,7 +1176,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             // Interpolate Lagrange kernel to coefficients (degree-9)
             var lagrange_coeffs: [DOMAIN_SIZE]F = [_]F{F.zero()} ** DOMAIN_SIZE;
-            self.lagrangeInterpolate(&lagrange_evals, &lagrange_coeffs, DOMAIN_SIZE, @as(i64, (DOMAIN_SIZE - 1) / 2));
+            interpolateCoeffs(&lagrange_evals, &lagrange_coeffs, DOMAIN_SIZE, @as(i64, (DOMAIN_SIZE - 1) / 2));
 
             // Step 5: Multiply polynomials (deg-9) × (deg-18) = deg-27 → 28 coefficients
             var s1_coeffs: [FIRST_ROUND_NUM_COEFFS]F = [_]F{F.zero()} ** FIRST_ROUND_NUM_COEFFS;
@@ -900,8 +1189,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
             return s1_coeffs;
         }
 
-        /// Lagrange interpolation from evaluations to coefficients
-        /// Evaluations are at symmetric integer domain {-half_size, ..., half_size}
+        /// O(n^2) Newton divided-differences interpolation from evaluations to monomial coefficients.
+        /// Evaluations are at symmetric consecutive-integer domain {-half_size, ..., half_size}.
+        /// Ported from Jolt's interpolate_coeffs (lagrange_poly.rs:298-383).
         fn lagrangeInterpolate(
             self: *const Self,
             evals: []const F,
@@ -910,74 +1200,103 @@ pub fn StreamingOuterProver(comptime F: type) type {
             half_size: i64,
         ) void {
             _ = self;
+            interpolateCoeffs(evals, coeffs, size, half_size);
+        }
+
+        /// Static O(n^2) Newton interpolation for standalone use.
+        /// Domain: consecutive integers {start, start+1, ..., start+N-1} where start = -half_size.
+        /// Since nodes are consecutive integers, divided difference denominators are just 1/order.
+        fn interpolateCoeffs(
+            evals: []const F,
+            coeffs: []F,
+            size: usize,
+            half_size: i64,
+        ) void {
+            if (size == 0) return;
+            const d = size - 1;
+            const start = -half_size;
 
             // Initialize coeffs to zero
-            for (0..size) |k| {
-                coeffs[k] = F.zero();
+            for (0..size) |k| coeffs[k] = F.zero();
+
+            // Batch-compute inverses of 1..d using one field inversion (Montgomery's trick)
+            const MAX_N = univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE;
+            var pref: [MAX_N]F = undefined;
+            var invs: [MAX_N]F = undefined;
+            pref[0] = F.one();
+            var m: usize = 1;
+            while (m <= d) : (m += 1) {
+                pref[m] = pref[m - 1].mul(F.fromU64(@intCast(m)));
+            }
+            const inv_total = pref[d].inverse().?;
+            var right = F.one();
+            var i_idx: usize = d;
+            while (i_idx >= 1) : (i_idx -= 1) {
+                invs[i_idx] = pref[i_idx - 1].mul(right).mul(inv_total);
+                right = right.mul(F.fromU64(@intCast(i_idx)));
+                if (i_idx == 1) break;
             }
 
-            // Lagrange interpolation: p(Y) = Σ_i y_i * L_i(Y)
-            for (0..size) |i| {
-                const y_i = evals[i];
-                if (y_i.eql(F.zero())) continue;
+            // Newton divided differences: dd[i] tracks current-order differences
+            var dd: [MAX_N]F = undefined;
+            for (0..size) |idx| dd[idx] = evals[idx];
 
-                // Domain point x_i = -half_size + i
-                const x_i: i64 = -half_size + @as(i64, @intCast(i));
+            var newton: [MAX_N]F = [_]F{F.zero()} ** MAX_N;
+            newton[0] = dd[0];
+            var order: usize = 1;
+            while (order <= d) : (order += 1) {
+                const inv = invs[order];
+                var ii: usize = 0;
+                while (ii + order < size) : (ii += 1) {
+                    // Denominator (x_{i+order} - x_i) = order for consecutive nodes
+                    dd[ii] = dd[ii + 1].sub(dd[ii]).mul(inv);
+                }
+                newton[order] = dd[0];
+            }
 
-                // Compute denominator Π_{j≠i} (x_i - x_j)
-                var den = F.one();
-                for (0..size) |j| {
-                    if (i == j) continue;
-                    const x_j: i64 = -half_size + @as(i64, @intCast(j));
-                    const diff: i64 = x_i - x_j;
-                    const diff_field = if (diff >= 0)
-                        F.fromU64(@intCast(diff))
-                    else
-                        F.zero().sub(F.fromU64(@intCast(-diff)));
-                    den = den.mul(diff_field);
+            // Convert Newton form to monomial coefficients
+            // basis[j] = coefficient of x^j in product_{k=0..deg-1} (x - (start+k))
+            var basis: [MAX_N]F = [_]F{F.zero()} ** MAX_N;
+            basis[0] = F.one();
+            var deg: usize = 0;
+            var k: usize = 0;
+            while (k < size) : (k += 1) {
+                // coeffs += newton[k] * basis
+                const scale = newton[k];
+                var j: usize = 0;
+                while (j <= deg) : (j += 1) {
+                    coeffs[j] = coeffs[j].add(scale.mul(basis[j]));
                 }
 
-                const scale = y_i.mul(den.inverse().?);
+                if (k == d) break;
 
-                // Build Lagrange basis polynomial Π_{j≠i} (Y - x_j)
-                var basis: [univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE]F =
-                    [_]F{F.zero()} ** univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE;
-                basis[0] = F.one();
-                var deg: usize = 0;
+                // Update basis <- basis * (x - (start + k))
+                const a: i64 = start + @as(i64, @intCast(k));
+                const neg_a = if (a >= 0)
+                    F.zero().sub(F.fromU64(@intCast(a)))
+                else
+                    F.fromU64(@intCast(-a));
 
-                for (0..size) |j| {
-                    if (i == j) continue;
-                    const x_j: i64 = -half_size + @as(i64, @intCast(j));
-                    const neg_x_j = if (x_j >= 0)
-                        F.zero().sub(F.fromU64(@intCast(x_j)))
-                    else
-                        F.fromU64(@intCast(-x_j));
-
-                    // Multiply basis by (Y - x_j)
-                    var k: usize = deg + 1;
-                    while (k > 0) {
-                        k -= 1;
-                        const old = basis[k];
-                        if (k + 1 < coeffs.len) {
-                            basis[k + 1] = basis[k + 1].add(old);
-                        }
-                        basis[k] = old.mul(neg_x_j);
-                    }
-                    deg += 1;
+                var t: usize = deg + 1;
+                while (t >= 1) : (t -= 1) {
+                    basis[t] = basis[t - 1].add(basis[t].mul(neg_a));
+                    if (t == 1) break;
                 }
-
-                // Add scaled basis to coefficients
-                for (0..size) |k| {
-                    coeffs[k] = coeffs[k].add(basis[k].mul(scale));
-                }
+                basis[0] = basis[0].mul(neg_a);
+                deg += 1;
             }
         }
 
         /// Build an eq polynomial evaluation table over the given tau values
         /// Uses big-endian indexing: tau[0] controls MSB of index
         fn buildEqTable(self: *const Self, tau: []const F) ![]F {
+            return buildEqTableAlloc(self.allocator, tau);
+        }
+
+        /// Static version of buildEqTable for standalone use
+        fn buildEqTableAlloc(allocator: Allocator, tau: []const F) ![]F {
             const size: usize = @as(usize, 1) << @intCast(tau.len);
-            const result = try self.allocator.alloc(F, size);
+            const result = try allocator.alloc(F, size);
 
             // Start with 1
             result[0] = F.one();
@@ -1897,54 +2216,24 @@ pub fn StreamingOuterProver(comptime F: type) type {
             group: usize,
         ) struct { az: F, bz: F } {
             if (group == 0) {
-                var az_sum = F.zero();
-                var bz_sum = F.zero();
+                // Barrett accumulator path: SmallAccumU for Az (i8), MedAccumS for Bz (i128)
+                var az_acc = field_mod.SmallAccumU.zero();
+                var bz_acc = field_mod.MedAccumS.zero();
                 inline for (0..FIRST_GROUP_SIZE) |i| {
-                    const w = self.lagrange_evals_r0[i];
-                    const az_i = cw.az_first[i];
-                    if (az_i == 1) {
-                        az_sum = az_sum.add(w);
-                    } else if (az_i == -1) {
-                        az_sum = az_sum.sub(w);
-                    } else if (az_i != 0) {
-                        az_sum = az_sum.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
-                    }
-                    // Convert i128 Bz to field and accumulate
-                    const bz_i = cw.bz_first[i];
-                    if (bz_i != 0) {
-                        const bz_f = if (bz_i >= 0)
-                            F.fromU128(@as(u128, @intCast(bz_i)))
-                        else
-                            F.fromU128(@as(u128, @intCast(-bz_i))).neg();
-                        bz_sum = bz_sum.add(w.mul(bz_f));
-                    }
+                    az_acc.fmaddI8(self.lagrange_evals_r0[i], cw.az_first[i]);
+                    bz_acc.fmaddI128(self.lagrange_evals_r0[i], cw.bz_first[i]);
                 }
-                return .{ .az = az_sum, .bz = bz_sum };
+                return .{ .az = az_acc.barrettReduce(), .bz = bz_acc.barrettReduce() };
             } else {
-                // Second group
+                // Second group: SmallAccumU for Az, WideAccumS for Bz (S192)
                 const g2_size = comptime @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
-                var az_sum = F.zero();
+                var az_acc = field_mod.SmallAccumU.zero();
+                var bz_acc = field_mod.WideAccumS.zero();
                 inline for (0..g2_size) |i| {
-                    const w = self.lagrange_evals_r0[i];
-                    const az_i = cw.az_second[i];
-                    if (az_i == 1) {
-                        az_sum = az_sum.add(w);
-                    } else if (az_i == -1) {
-                        az_sum = az_sum.sub(w);
-                    } else if (az_i != 0) {
-                        az_sum = az_sum.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
-                    }
+                    az_acc.fmaddI8(self.lagrange_evals_r0[i], cw.az_second[i]);
+                    bz_acc.fmaddS192(self.lagrange_evals_r0[i], cw.bz_second[i]);
                 }
-                var bz_sum = F.zero();
-                inline for (0..g2_size) |i| {
-                    const w = self.lagrange_evals_r0[i];
-                    const bz_i = cw.bz_second[i];
-                    if (bz_i != 0) {
-                        const bz_f = evaluators.fieldFromI128(F, bz_i);
-                        bz_sum = bz_sum.add(w.mul(bz_f));
-                    }
-                }
-                return .{ .az = az_sum, .bz = bz_sum };
+                return .{ .az = az_acc.barrettReduce(), .bz = bz_acc.barrettReduce() };
             }
         }
 
@@ -2108,21 +2397,23 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             while (x_val < 2) : (x_val += 1) {
                                 const x_val_shifted = x_val << ctx.num_r_bits;
 
-                                var r_idx: usize = 0;
-                                while (r_idx < ctx.r_grid_len) : (r_idx += 1) {
-                                    const r_weight = ctx.r_grid.get(r_idx);
+                                {
+                                    // Use existing compact/field dispatch
+                                    var r_idx: usize = 0;
+                                    while (r_idx < ctx.r_grid_len) : (r_idx += 1) {
+                                        const r_weight = ctx.r_grid.get(r_idx);
+                                        const full_idx = base_idx | x_val_shifted | r_idx;
+                                        const step_idx = full_idx >> 1;
+                                        const selector: usize = full_idx & 1;
 
-                                    const full_idx = base_idx | x_val_shifted | r_idx;
-                                    const step_idx = full_idx >> 1;
-                                    const selector: usize = full_idx & 1;
-
-                                    if (step_idx < cw_len) {
-                                        const result = if (ctx.compact_witnesses) |compact|
-                                            ctx.self_ptr.computeCycleAzBzForGroupCompact(&compact[step_idx], selector)
-                                        else
-                                            ctx.self_ptr.computeCycleAzBzForGroup(&ctx.cycle_witnesses[step_idx], selector);
-                                        az_grid[x_val] = az_grid[x_val].add(r_weight.mul(result.az));
-                                        bz_grid[x_val] = bz_grid[x_val].add(r_weight.mul(result.bz));
+                                        if (step_idx < cw_len) {
+                                            const result = if (ctx.compact_witnesses) |compact|
+                                                ctx.self_ptr.computeCycleAzBzForGroupCompact(&compact[step_idx], selector)
+                                            else
+                                                ctx.self_ptr.computeCycleAzBzForGroup(&ctx.cycle_witnesses[step_idx], selector);
+                                            az_grid[x_val] = az_grid[x_val].add(r_weight.mul(result.az));
+                                            bz_grid[x_val] = bz_grid[x_val].add(r_weight.mul(result.bz));
+                                        }
                                     }
                                 }
                             }
@@ -2714,6 +3005,7 @@ test "StreamingOuterProver: expected_output_claim cross-verification" {
         testing.allocator,
         &witnesses,
         r_cycle_big_endian,
+        null,
     );
 
     // Compute Az_final and Bz_final using Jolt's formula:

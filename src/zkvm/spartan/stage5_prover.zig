@@ -913,12 +913,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 };
                 const right_is_rs2: bool = switch (opcode) {
                     0x33, 0x63, 0x3b => true,
-                    0x22 => true, // VirtualAssertEQ: right = rs2
+                    0x22 => (funct3 == 0 or funct3 == 1), // VirtualAssertEQ/ValidDiv0: right = rs2; alignment: right = imm
                     0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
+                    0x5B => step.rs2_read, // VirtualSRL/VirtualSRA R-type: rs2; VirtualSRLI/VirtualSRAI I-type: imm
                     else => false,
                 };
                 const right_is_imm: bool = switch (opcode) {
-                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                    0x22 => (funct3 == 2 or funct3 == 3), // alignment assertions: right = imm
+                    0x5B => !step.rs2_read, // I-type: imm; R-type: not imm
                     else => false,
                 };
 
@@ -934,18 +937,31 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     else => false,
                 };
                 const imm_val = if (opcode == 0x2B) blk: {
-                    // VirtualMULI: IMM = multiplier = 1 << shamt
-                    const shamt_raw2: u32 = instr >> 20;
-                    const shamt2: u6 = @truncate(shamt_raw2 & 0x3F);
-                    const multiplier2: u64 = @as(u64, 1) << shamt2;
-                    break :blk F.fromU64(multiplier2);
+                    if (funct3 == 0) {
+                        // VirtualMULI: IMM = multiplier = 1 << shamt
+                        const shamt_raw2: u32 = instr >> 20;
+                        const shamt2: u6 = @truncate(shamt_raw2 & 0x3F);
+                        const multiplier2: u64 = @as(u64, 1) << shamt2;
+                        break :blk F.fromU64(multiplier2);
+                    } else {
+                        // VirtualPow2/VirtualShiftRightBitmask: IMM = 0
+                        break :blk F.zero();
+                    }
                 } else if (opcode == 0x5B) blk: {
-                    // VirtualSRLI: IMM = bitmask computed from total shift amount
-                    const total_shift_raw2: u32 = instr >> 20;
-                    const total_shift2: u7 = @truncate(total_shift_raw2 & 0x3F);
-                    const ones2: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift2))) - 1;
-                    const bitmask2: u64 = @truncate(ones2 << total_shift2);
-                    break :blk F.fromU64(bitmask2);
+                    if (step.rs2_read) {
+                        // VirtualSRL/VirtualSRA R-type: no immediate (rs2 used instead)
+                        break :blk F.zero();
+                    } else {
+                        // VirtualSRLI/VirtualSRAI I-type: IMM = bitmask computed from total shift
+                        const total_shift_raw2: u32 = instr >> 20;
+                        const total_shift2: u7 = @truncate(total_shift_raw2 & 0x3F);
+                        const ones2: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift2))) - 1;
+                        const bitmask2: u64 = @truncate(ones2 << total_shift2);
+                        break :blk F.fromU64(bitmask2);
+                    }
+                } else if (opcode == 0x22 and (funct3 == 2 or funct3 == 3)) blk: {
+                    // VirtualAssertHalfwordAlignment/WordAlignment: IMM from I-type encoding
+                    break :blk F.fromU64(computeUnsignedImmediate(instr));
                 } else if (is_identity_add_imm) blk: {
                     // Use unsigned u64 representation (two's complement) for the immediate.
                     // E.g., imm=-1 → F(0xFFFFFFFFFFFFFFFF) instead of F(p-1).
@@ -1105,10 +1121,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         left_op = F.zero();
                         right_op = left_input.add(right_input); // rs1 + 0 = rs1
                     },
-                    0x2B => { // VirtualMULI: MultiplyOperands, left=0, right=rs1*imm
-                        // Lookup operands: (0, rs1 * imm)
-                        left_op = F.zero();
-                        right_op = left_input.mul(right_input); // Product = rs1 * multiplier
+                    0x2B => { // Virtual I-type: dispatch on funct3
+                        if (funct3 == 0) {
+                            // VirtualMULI: MultiplyOperands, left=0, right=rs1*imm
+                            left_op = F.zero();
+                            right_op = left_input.mul(right_input);
+                        } else {
+                            // VirtualPow2 (funct3=1), VirtualShiftRightBitmask (funct3=2): AddOperands
+                            // Lookup operands: (0, rs1 + 0) = (0, rs1)
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input); // rs1 + 0 = rs1
+                        }
                     },
                     0x03 => { // Load: NOT AddOperands, left=rs1, right=imm
                         // R1CS witness sets: LeftLookupOperand=left_input, RightLookupOperand=right_input
@@ -1127,10 +1150,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         left_op = F.zero();
                         right_op = F.fromU128(@as(u128, step.rd_value));
                     },
-                    0x22 => { // VirtualAssertEQ: Assert flag (interleaved)
-                        // R1CS: LeftLookupOperand=left_input(=rs1), RightLookupOperand=right_input(=rs2)
-                        left_op = left_input;
-                        right_op = right_input;
+                    0x22 => { // Virtual assert: dispatch on funct3
+                        if (funct3 == 2 or funct3 == 3) {
+                            // VirtualAssertHalfwordAlignment/WordAlignment: AddOperands
+                            // Lookup operands: (0, rs1 + imm)
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input); // rs1 + imm
+                        } else {
+                            // VirtualAssertEQ (funct3=0) / VirtualAssertValidDiv0 (funct3=1): interleaved
+                            left_op = left_input;
+                            right_op = right_input;
+                        }
                     },
                     0x42 => { // VirtualZeroExtendWord: AddOperands flag (identity path)
                         // R1CS: LeftLookupOperand=0, RightLookupOperand=F.fromU128(rs1_value)
@@ -1196,7 +1226,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     },
                     0x13 => (funct3 == 0), // ADDI (AddOperands)
                     0x0B => true, // VirtualSignExtendWord (AddOperands)
-                    0x2B => true, // VirtualMULI (MultiplyOperands)
+                    0x2B => true, // VirtualMULI/Pow2/ShiftRightBitmask: all identity path (MultiplyOperands or AddOperands)
                     0x1b => (funct3 == 0), // ADDIW (AddOperands)
                     0x3b => blk: {
                         if (funct3 == 0 and funct7 == 0) break :blk true; // ADDW (AddOperands)
@@ -1211,7 +1241,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     0x42 => true, // VirtualZeroExtendWord (AddOperands → identity path)
                     0x03 => false, // Load: uses (rs1, imm) format, NOT identity path
                     0x23 => false, // Store: uses (rs1, imm) format, NOT identity path
-                    0x22 => false, // VirtualAssertEQ: interleaved (rs1, rs2)
+                    0x22 => (funct3 == 2 or funct3 == 3), // Alignment assertions: AddOperands (identity); AssertEQ/ValidDiv0: interleaved
                     0x62 => false, // VirtualAssertValidUnsignedRemainder: interleaved (rs1, rs2)
                     else => false,
                 };
@@ -1309,17 +1339,28 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         },
                         // VirtualSignExtendWord: index = rs1 (the value to sign-extend)
                         0x0B => @as(u128, step.rs1_value),
-                        // VirtualMULI: index = rs1 * multiplier (u128)
+                        // VirtualMULI/Pow2/ShiftRightBitmask: dispatch on funct3
                         0x2B => blk128: {
-                            const shamt_raw3: u32 = instr >> 20;
-                            const shamt3: u6 = @truncate(shamt_raw3 & 0x3F);
-                            const multiplier3: u64 = @as(u64, 1) << shamt3;
-                            break :blk128 @as(u128, step.rs1_value) * @as(u128, multiplier3);
+                            if (funct3 == 0) {
+                                // VirtualMULI: index = rs1 * multiplier (u128)
+                                const shamt_raw3: u32 = instr >> 20;
+                                const shamt3: u6 = @truncate(shamt_raw3 & 0x3F);
+                                const multiplier3: u64 = @as(u64, 1) << shamt3;
+                                break :blk128 @as(u128, step.rs1_value) * @as(u128, multiplier3);
+                            } else {
+                                // VirtualPow2/VirtualShiftRightBitmask: AddOperands, index = rs1 + 0 = rs1
+                                break :blk128 @as(u128, step.rs1_value);
+                            }
                         },
                         // VirtualAdvice: index = advice_value (rd_value) — Jolt's to_lookup_index returns second operand
                         0x02 => @as(u128, step.rd_value),
                         // VirtualZeroExtendWord: index = rs1 + 0 = rs1 — Jolt's to_lookup_operands returns (0, x+y) where y=0
                         0x42 => @as(u128, step.rs1_value),
+                        // VirtualAssertHalfwordAlignment/WordAlignment (funct3=2,3): AddOperands, index = rs1 + imm (u128)
+                        0x22 => blk128: {
+                            const imm_u64_22 = computeUnsignedImmediate(instr);
+                            break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64_22);
+                        },
                         else => 0,
                     };
                     // right_op_raw is the lower 64 bits of the lookup index (for R1CS witness compatibility)
@@ -1349,11 +1390,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             break :blk @as(u64, @bitCast(imm_signed));
                         },
                         0x5B => blk5b: {
-                            // VirtualSRLI: right operand is bitmask computed from total shift
-                            const ts_raw: u32 = instr >> 20;
-                            const ts: u7 = @truncate(ts_raw & 0x3F);
-                            const ones_5b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts))) - 1;
-                            break :blk5b @truncate(ones_5b << ts);
+                            if (step.rs2_read) {
+                                // VirtualSRL/VirtualSRA R-type: right operand is rs2
+                                break :blk5b step.rs2_value;
+                            } else {
+                                // VirtualSRLI/VirtualSRAI I-type: right operand is bitmask computed from total shift
+                                const ts_raw: u32 = instr >> 20;
+                                const ts: u7 = @truncate(ts_raw & 0x3F);
+                                const ones_5b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts))) - 1;
+                                break :blk5b @truncate(ones_5b << ts);
+                            }
                         },
                         else => step.rs2_value,
                     };
@@ -1528,12 +1574,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     };
                     const right_is_rs2: bool = switch (opcode) {
                         0x33, 0x63, 0x3b => true,
-                        0x22 => true, // VirtualAssertEQ: right = rs2
+                        0x22 => (funct3 == 0 or funct3 == 1), // VirtualAssertEQ/ValidDiv0: rs2; alignment: imm
                         0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
+                        0x5B => step.rs2_read, // R-type VirtualSRL/SRA: rs2
                         else => false,
                     };
                     const right_is_imm: bool = switch (opcode) {
-                        0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                        0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                        0x22 => (funct3 == 2 or funct3 == 3), // alignment assertions: imm
+                        0x5B => !step.rs2_read, // I-type: imm; R-type: not imm
                         else => false,
                     };
 
@@ -1547,19 +1596,25 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         else => false,
                     };
                     const imm_val = if (opcode == 0x2B) blk: {
-                        // VirtualMULI: IMM = multiplier = 1 << shamt
-                        const shamt_raw4: u32 = instr >> 20;
-                        const shamt4: u6 = @truncate(shamt_raw4 & 0x3F);
-                        const multiplier4: u64 = @as(u64, 1) << shamt4;
-                        break :blk F.fromU64(multiplier4);
+                        if (funct3 == 0) {
+                            const shamt_raw4: u32 = instr >> 20;
+                            const shamt4: u6 = @truncate(shamt_raw4 & 0x3F);
+                            const multiplier4: u64 = @as(u64, 1) << shamt4;
+                            break :blk F.fromU64(multiplier4);
+                        } else {
+                            break :blk F.zero(); // VirtualPow2/VirtualShiftRightBitmask: IMM = 0
+                        }
                     } else if (opcode == 0x5B) blk: {
-                        // VirtualSRLI/SRAI: IMM = bitmask computed from total shift amount
-                        const total_shift_raw4: u32 = instr >> 20;
-                        const total_shift4: u7 = @truncate(total_shift_raw4 & 0x3F);
-                        const ones4: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift4))) - 1;
-                        const bitmask4: u64 = @truncate(ones4 << total_shift4);
-                        break :blk F.fromU64(bitmask4);
-                    } else if (is_identity_add_imm2) F.fromU64(computeUnsignedImmediate(instr)) else computeImmediate(instr);
+                        if (step.rs2_read) {
+                            break :blk F.zero(); // R-type: no immediate
+                        } else {
+                            const total_shift_raw4: u32 = instr >> 20;
+                            const total_shift4: u7 = @truncate(total_shift_raw4 & 0x3F);
+                            const ones4: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift4))) - 1;
+                            const bitmask4: u64 = @truncate(ones4 << total_shift4);
+                            break :blk F.fromU64(bitmask4);
+                        }
+                    } else if (opcode == 0x22 and (funct3 == 2 or funct3 == 3)) F.fromU64(computeUnsignedImmediate(instr)) else if (is_identity_add_imm2) F.fromU64(computeUnsignedImmediate(instr)) else computeImmediate(instr);
 
                     // Compute left_input and right_input
                     var left_input: F = F.zero();
@@ -1668,9 +1723,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             left_op = F.zero();
                             right_op = left_input.add(right_input);
                         },
-                        0x2B => { // VirtualMULI: MultiplyOperands, left=0, right=rs1*imm
-                            left_op = F.zero();
-                            right_op = left_input.mul(right_input);
+                        0x2B => { // Virtual I-type: dispatch on funct3
+                            if (funct3 == 0) {
+                                // VirtualMULI: MultiplyOperands, left=0, right=rs1*imm
+                                left_op = F.zero();
+                                right_op = left_input.mul(right_input);
+                            } else {
+                                // VirtualPow2 (funct3=1), VirtualShiftRightBitmask (funct3=2): AddOperands
+                                left_op = F.zero();
+                                right_op = left_input.add(right_input);
+                            }
                         },
                         0x1b => { // I-type word ALU (ADDIW, SLLIW, SRLIW, SRAIW)
                             // Only ADDIW (funct3=0) uses AddOperands; others use interleaved
@@ -1710,9 +1772,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             left_op = F.zero();
                             right_op = F.fromU128(@as(u128, step.rd_value));
                         },
-                        0x22 => { // VirtualAssertEQ: Assert flag (interleaved)
-                            left_op = left_input;
-                            right_op = right_input;
+                        0x22 => { // Virtual assert: dispatch on funct3
+                            if (funct3 == 2 or funct3 == 3) {
+                                // Alignment assertions: AddOperands
+                                left_op = F.zero();
+                                right_op = left_input.add(right_input);
+                            } else {
+                                // VirtualAssertEQ/ValidDiv0: interleaved
+                                left_op = left_input;
+                                right_op = right_input;
+                            }
                         },
                         0x42 => { // VirtualZeroExtendWord: AddOperands flag (identity path)
                             left_op = F.zero();
@@ -1827,6 +1896,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const step_v = trace.steps.items[jj];
                 const instr_v = step_v.instruction;
                 const opcode_v = instr_v & 0x7f;
+                const funct3_v: u3 = @truncate((instr_v >> 12) & 0x7);
+                const funct7_v: u7 = @truncate(instr_v >> 25);
                 // Recompute left_op, right_op, output using same logic as above
                 const left_is_rs1_v: bool = switch (opcode_v) {
                     0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
@@ -1841,24 +1912,35 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 };
                 const right_is_rs2_v: bool = switch (opcode_v) {
                     0x33, 0x63, 0x3b => true,
-                    0x22 => true, // VirtualAssertEQ: right = rs2
+                    0x22 => (funct3_v == 0 or funct3_v == 1), // VirtualAssertEQ/ValidDiv0: rs2; alignment: imm
                     0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
+                    0x5B => step_v.rs2_read, // VirtualSRL/SRA R-type: rs2
                     else => false,
                 };
                 const right_is_imm_v: bool = switch (opcode_v) {
-                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                    0x22 => (funct3_v == 2 or funct3_v == 3), // alignment assertions: imm
+                    0x5B => !step_v.rs2_read, // I-type: imm; R-type: not imm
                     else => false,
                 };
                 const imm_v = if (opcode_v == 0x2B) blk: {
-                    const shamt_rv: u32 = instr_v >> 20;
-                    const shamt_v: u6 = @truncate(shamt_rv & 0x3F);
-                    break :blk F.fromU64(@as(u64, 1) << shamt_v);
+                    if (funct3_v == 0) {
+                        const shamt_rv: u32 = instr_v >> 20;
+                        const shamt_v: u6 = @truncate(shamt_rv & 0x3F);
+                        break :blk F.fromU64(@as(u64, 1) << shamt_v);
+                    } else {
+                        break :blk F.zero(); // VirtualPow2/VirtualShiftRightBitmask: IMM = 0
+                    }
                 } else if (opcode_v == 0x5B) blk5bv: {
-                    const ts_rv: u32 = instr_v >> 20;
-                    const ts_v: u7 = @truncate(ts_rv & 0x3F);
-                    const ones_v: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts_v))) - 1;
-                    break :blk5bv F.fromU64(@truncate(ones_v << ts_v));
-                } else computeImmediate(instr_v);
+                    if (step_v.rs2_read) {
+                        break :blk5bv F.zero(); // R-type: no immediate
+                    } else {
+                        const ts_rv: u32 = instr_v >> 20;
+                        const ts_v: u7 = @truncate(ts_rv & 0x3F);
+                        const ones_v: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts_v))) - 1;
+                        break :blk5bv F.fromU64(@truncate(ones_v << ts_v));
+                    }
+                } else if (opcode_v == 0x22 and (funct3_v == 2 or funct3_v == 3)) F.fromU64(computeUnsignedImmediate(instr_v)) else computeImmediate(instr_v);
                 var left_input_v: F = F.zero();
                 if (left_is_rs1_v) left_input_v = F.fromU64(step_v.rs1_value);
                 if (left_is_pc_v) left_input_v = F.fromU64(step_v.unexpanded_pc);
@@ -1866,20 +1948,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 if (right_is_rs2_v) right_input_v = F.fromU64(step_v.rs2_value);
                 if (right_is_imm_v) right_input_v = imm_v;
                 // Compute lookup operands
-                const funct3_v: u3 = @truncate((instr_v >> 12) & 0x7);
-                const funct7_v: u7 = @truncate(instr_v >> 25);
                 const is_add_type = switch (opcode_v) {
                     0x13, 0x37, 0x17, 0x6f, 0x67, 0x0B => true, // 0x0B = VirtualSignExtendWord
                     0x1b => (funct3_v == 0), // ADDIW (funct3=0) uses AddOperands
                     0x33 => !(funct7_v == 0x01 and funct3_v != 0x0) and !(funct7_v == 0x20),
                     0x3b => (funct3_v == 0 and funct7_v == 0) or (funct3_v == 0 and funct7_v == 0x20), // ADDW/SUBW
+                    0x2B => (funct3_v != 0), // VirtualPow2/VirtualShiftRightBitmask: AddOperands
+                    0x22 => (funct3_v == 2 or funct3_v == 3), // Alignment assertions: AddOperands
                     0x42 => true, // VirtualZeroExtendWord: AddOperands
                     else => false,
                 };
                 const is_sub_type = (opcode_v == 0x33 and funct3_v == 0 and funct7_v == 0x20) or
                     (opcode_v == 0x3b and funct3_v == 0 and funct7_v == 0x20); // SUB or SUBW
                 const is_mul_type = (opcode_v == 0x33 and funct7_v == 0x01 and funct3_v == 0) or
-                    (opcode_v == 0x2B); // MUL or VirtualMULI
+                    (opcode_v == 0x2B and funct3_v == 0); // MUL or VirtualMULI (funct3=0 only)
                 var left_op_v: F = undefined;
                 var right_op_v: F = undefined;
                 if (opcode_v == 0x02) {
@@ -2593,12 +2675,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         };
                         const r1cs_right_is_rs2: bool = switch (opcode_d) {
                             0x33, 0x63, 0x3b => true,
-                            0x22 => true, // VirtualAssertEQ
+                            0x22 => (funct3_d == 0 or funct3_d == 1), // VirtualAssertEQ/ValidDiv0: rs2; alignment: imm
                             0x62 => true, // VirtualAssertValidUnsignedRemainder
+                            0x5B => step_d.rs2_read, // VirtualSRL/SRA R-type: rs2
                             else => false,
                         };
                         const r1cs_right_is_imm: bool = switch (opcode_d) {
-                            0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                            0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                            0x22 => (funct3_d == 2 or funct3_d == 3), // alignment assertions: imm
+                            0x5B => !step_d.rs2_read, // I-type: imm; R-type: not imm
                             else => false,
                         };
                         var r1cs_left_input = F.zero();
@@ -2608,14 +2693,24 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         if (r1cs_right_is_rs2) r1cs_right_input = F.fromU64(step_d.rs2_value);
                         if (r1cs_right_is_imm) {
                             if (opcode_d == 0x2B) {
-                                const shamt_rd: u32 = instr_d >> 20;
-                                const shamt_d: u6 = @truncate(shamt_rd & 0x3F);
-                                r1cs_right_input = F.fromU64(@as(u64, 1) << shamt_d);
+                                if (funct3_d == 0) {
+                                    const shamt_rd: u32 = instr_d >> 20;
+                                    const shamt_d: u6 = @truncate(shamt_rd & 0x3F);
+                                    r1cs_right_input = F.fromU64(@as(u64, 1) << shamt_d);
+                                } else {
+                                    r1cs_right_input = F.zero(); // VirtualPow2/VirtualShiftRightBitmask: IMM = 0
+                                }
                             } else if (opcode_d == 0x5B) {
-                                const ts_rd: u32 = instr_d >> 20;
-                                const ts_d: u7 = @truncate(ts_rd & 0x3F);
-                                const ones_d: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts_d))) - 1;
-                                r1cs_right_input = F.fromU64(@truncate(ones_d << ts_d));
+                                if (step_d.rs2_read) {
+                                    r1cs_right_input = F.zero(); // R-type: no immediate
+                                } else {
+                                    const ts_rd: u32 = instr_d >> 20;
+                                    const ts_d: u7 = @truncate(ts_rd & 0x3F);
+                                    const ones_d: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts_d))) - 1;
+                                    r1cs_right_input = F.fromU64(@truncate(ones_d << ts_d));
+                                }
+                            } else if (opcode_d == 0x22 and (funct3_d == 2 or funct3_d == 3)) {
+                                r1cs_right_input = F.fromU64(computeUnsignedImmediate(instr_d));
                             } else {
                                 r1cs_right_input = computeImmediate(instr_d);
                             }
@@ -2631,6 +2726,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             0x37, 0x17, 0x6f, 0x67 => true, // LUI, AUIPC, JAL, JALR
                             0x1b => (funct3_d == 0), // ADDIW
                             0x3b => (funct3_d == 0 and funct7_d == 0), // ADDW
+                            0x2B => (funct3_d != 0), // VirtualPow2/VirtualShiftRightBitmask: AddOperands
+                            0x22 => (funct3_d == 2 or funct3_d == 3), // Alignment assertions: AddOperands
                             0x42 => true, // VirtualZeroExtendWord (AddOperands)
                             else => false,
                         };
@@ -2641,7 +2738,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         };
                         const r1cs_is_mul = switch (opcode_d) {
                             0x33 => (funct7_d == 0x01 and (funct3_d == 0 or funct3_d == 3)), // MUL, MULHU
-                            0x2B => true, // VirtualMULI
+                            0x2B => (funct3_d == 0), // VirtualMULI (funct3=0 only)
                             else => false,
                         };
                         if (opcode_d == 0x02) {
@@ -7921,7 +8018,11 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
             break :blk -1;
         },
         0x0B => 21, // VirtualSignExtendWord -> SignExtendHalfWordTable
-        0x2B => 0, // VirtualMULI -> RangeCheckTable
+        0x2B => blk2b: { // Virtual I-type
+            if (funct3 == 1) break :blk2b 22; // VirtualPow2 -> Pow2Table
+            if (funct3 == 2) break :blk2b 24; // VirtualShiftRightBitmask -> ShiftRightBitmaskTable
+            break :blk2b 0; // VirtualMULI (funct3=0) -> RangeCheckTable
+        },
         0x5B => blk5b: { // Virtual shift right
             if (funct3 == 5) break :blk5b 27; // VirtualSRAI -> VirtualSRATable
             break :blk5b 26; // VirtualSRLI -> VirtualSRLTable (funct3=0)
@@ -7929,6 +8030,8 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
         0x02 => 0, // VirtualAdvice -> RangeCheckTable
         0x22 => blk22: { // Virtual assert
             if (funct3 == 1) break :blk22 17; // VirtualAssertValidDiv0 -> ValidDiv0Table
+            if (funct3 == 2) break :blk22 18; // VirtualAssertHalfwordAlignment -> HalfwordAlignmentTable
+            if (funct3 == 3) break :blk22 19; // VirtualAssertWordAlignment -> WordAlignmentTable
             break :blk22 6; // VirtualAssertEQ -> EqualTable (funct3=0)
         },
         0x42 => 20, // VirtualZeroExtendWord -> LowerHalfWordTable

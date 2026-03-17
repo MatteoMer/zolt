@@ -202,6 +202,13 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         VirtualSRA,
         // Virtual change-divisor for signed W-division overflow handling
         VirtualChangeDivisorW,
+        // Virtual power-of-2 (computes 1 << (rs1 % 64))
+        VirtualPow2,
+        // Virtual shift-right bitmask (computes bitmask for right shift amount)
+        VirtualShiftRightBitmask,
+        // Virtual alignment assertions
+        VirtualAssertHalfwordAlignment,
+        VirtualAssertWordAlignment,
 
         const Self = @This();
         const Table = lookup_table.LookupTable(@import("../../field/mod.zig").BN254Scalar, XLEN);
@@ -297,6 +304,29 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
                     } else {
                         break :blk @bitCast(@as(i64, ds_i32));
                     }
+                },
+                .VirtualPow2 => blk: {
+                    // VirtualPow2: AddOperands table, index = rs1 + 0 = rs1 (not interleaved)
+                    const rs1_val: u64 = @truncate(index);
+                    const shift: u6 = @truncate(rs1_val & 0x3F);
+                    break :blk @as(u64, 1) << shift;
+                },
+                .VirtualShiftRightBitmask => blk: {
+                    // VirtualShiftRightBitmask: AddOperands table, index = rs1 + 0 = rs1 (not interleaved)
+                    const rs1_val: u64 = @truncate(index);
+                    const shift: u6 = @truncate(rs1_val & 0x3F);
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift))) - 1;
+                    break :blk @truncate(ones << shift);
+                },
+                .VirtualAssertHalfwordAlignment => blk: {
+                    // VirtualAssertHalfwordAlignment: AddOperands table, index = rs1 + imm (not interleaved)
+                    const addr: u64 = @truncate(index);
+                    break :blk if (addr & 1 == 0) @as(u64, 1) else @as(u64, 0);
+                },
+                .VirtualAssertWordAlignment => blk: {
+                    // VirtualAssertWordAlignment: AddOperands table, index = rs1 + imm (not interleaved)
+                    const addr: u64 = @truncate(index);
+                    break :blk if (addr & 3 == 0) @as(u64, 1) else @as(u64, 0);
                 },
             };
         }

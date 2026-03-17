@@ -123,8 +123,14 @@ pub const JoltInstruction = struct {
         VirtualSignExtendWord,
         VirtualZeroExtendWord,
         VirtualMULI,
+        VirtualPow2,
         VirtualSRAI,
         VirtualSRLI,
+        VirtualShiftRightBitmask,
+        VirtualAssertHalfwordAlignment,
+        VirtualAssertWordAlignment,
+        VirtualSRL,
+        VirtualSRA,
     };
 
     /// Instruction operands - different formats store different fields
@@ -140,6 +146,8 @@ pub const JoltInstruction = struct {
         FormatR: struct { rd: u8, rs1: u8, rs2: u8 },
         /// I-type: rd, rs1, imm (Jolt uses u64)
         FormatI: struct { rd: u8, rs1: u8, imm: u64 },
+        /// Load-type: rd, rs1, imm (Jolt uses i64 — distinct from FormatI)
+        FormatLoad: struct { rd: u8, rs1: u8, imm: i64 },
         /// S-type: rs1, rs2, imm (Jolt uses i64)
         FormatS: struct { rs1: u8, rs2: u8, imm: i64 },
         /// B-type: rs1, rs2, imm (Jolt uses i128)
@@ -148,6 +156,8 @@ pub const JoltInstruction = struct {
         FormatU: struct { rd: u8, imm: u64 },
         /// J-type: rd, imm (Jolt uses u64)
         FormatJ: struct { rd: u8, imm: u64 },
+        /// Assert format: rs1, imm (no rd — used by alignment assertions)
+        FormatAssert: struct { rs1: u8, imm: i64 },
         /// No operands (NoOp, FENCE, ECALL)
         None: void,
     };
@@ -186,6 +196,9 @@ pub const JoltInstruction = struct {
             .FormatI => |i| {
                 try std.fmt.format(writer, "{{\"rd\":{},\"rs1\":{},\"imm\":{}}}", .{ i.rd, i.rs1, i.imm });
             },
+            .FormatLoad => |l| {
+                try std.fmt.format(writer, "{{\"rd\":{},\"rs1\":{},\"imm\":{}}}", .{ l.rd, l.rs1, l.imm });
+            },
             .FormatS => |s| {
                 try std.fmt.format(writer, "{{\"rs1\":{},\"rs2\":{},\"imm\":{}}}", .{ s.rs1, s.rs2, s.imm });
             },
@@ -197,6 +210,9 @@ pub const JoltInstruction = struct {
             },
             .FormatJ => |j| {
                 try std.fmt.format(writer, "{{\"rd\":{},\"imm\":{}}}", .{ j.rd, j.imm });
+            },
+            .FormatAssert => |a| {
+                try std.fmt.format(writer, "{{\"rs1\":{},\"imm\":{}}}", .{ a.rs1, a.imm });
             },
             .None => {
                 try writer.writeAll("{}");
@@ -1038,8 +1054,998 @@ pub const BytecodePreprocessing = struct {
                         .is_compressed = is_compressed,
                     });
                 },
+                .SLL => {
+                    // SLL rd, rs1, rs2 → 2-step: VirtualPow2(v0, rs2, 0) + MUL(rd, rs1, v0)
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rd,
+                        else => 0,
+                    };
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs1,
+                        else => 0,
+                    };
+                    const rs2 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs2,
+                        else => 0,
+                    };
+                    const v0: u8 = 40; // first virtual alloc register
+                    // Step 1: VirtualPow2(v0, rs2, 0) — compute 2^(rs2 % 64)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs2, .imm = 0 } },
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: MUL(rd, rs1, v0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = rd, .rs1 = rs1, .rs2 = v0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SRL => {
+                    // SRL rd, rs1, rs2 → 2-step: VirtualShiftRightBitmask(v0, rs2, 0) + VirtualSRL(rd, rs1, v0)
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rd,
+                        else => 0,
+                    };
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs1,
+                        else => 0,
+                    };
+                    const rs2 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs2,
+                        else => 0,
+                    };
+                    const v0: u8 = 40;
+                    // Step 1: VirtualShiftRightBitmask(v0, rs2, 0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualShiftRightBitmask,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs2, .imm = 0 } },
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: VirtualSRL(rd, rs1, v0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = rd, .rs1 = rs1, .rs2 = v0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SRA => {
+                    // SRA rd, rs1, rs2 → 2-step: VirtualShiftRightBitmask(v0, rs2, 0) + VirtualSRA(rd, rs1, v0)
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rd,
+                        else => 0,
+                    };
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs1,
+                        else => 0,
+                    };
+                    const rs2 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs2,
+                        else => 0,
+                    };
+                    const v0: u8 = 40;
+                    // Step 1: VirtualShiftRightBitmask(v0, rs2, 0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualShiftRightBitmask,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs2, .imm = 0 } },
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: VirtualSRA(rd, rs1, v0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRA,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = rd, .rs1 = rs1, .rs2 = v0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SRAI => {
+                    // SRAI rd, rs1, shamt → VirtualSRAI(rd, rs1, bitmask)
+                    // Single virtual instruction (same pattern as SRLI → VirtualSRLI)
+                    const raw_imm = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.imm,
+                        else => 0,
+                    };
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    const rs1_val = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rs1,
+                        else => 0,
+                    };
+                    const shift: u7 = @intCast(raw_imm & 0x3f);
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift))) - 1;
+                    const bitmask: u64 = @truncate(ones << shift);
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRAI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1_val, .imm = bitmask } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .LB, .LBU => {
+                    // LB/LBU rd, rs1, imm → 8 flat steps
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.rd,
+                        else => 0,
+                    };
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.rs1,
+                        else => 0,
+                    };
+                    const imm = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.imm,
+                        else => 0,
+                    };
+                    const v0: u8 = 40;
+                    const v1: u8 = 41;
+                    const v2: u8 = 42; // allocated by inner SLL
+                    const total_steps: u16 = 7; // vsr counts from 7 down to 0
+                    // Step 1: ADDI(v0, rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
+                        .virtual_sequence_remaining = total_steps,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: ANDI(v1, v0, -8)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ANDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
+                        .virtual_sequence_remaining = total_steps - 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: LD(v1, v1, 0) — MEMORY READ
+                    try self.bytecode.append(allocator, .{
+                        .variant = .LD,
+                        .address = addr,
+                        .operands = .{ .FormatLoad = .{ .rd = v1, .rs1 = v1, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 2,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 4: XORI(v0, v0, 7)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XORI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 7 } },
+                        .virtual_sequence_remaining = total_steps - 3,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 5: VirtualMULI(v0, v0, 8) — from SLLI v0, v0, 3
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
+                        .virtual_sequence_remaining = total_steps - 4,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 6: VirtualPow2(v2, v0, 0) — from SLL expansion step 1
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v2, .rs1 = v0, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 5,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 7: MUL(v1, v1, v2) — from SLL expansion step 2
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v1, .rs1 = v1, .rs2 = v2 } },
+                        .virtual_sequence_remaining = total_steps - 6,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 8: VirtualSRAI/VirtualSRLI(rd, v1, bitmask_56)
+                    const shift_56: u7 = 56;
+                    const ones_56: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_56))) - 1;
+                    const bitmask_56: u64 = @truncate(ones_56 << shift_56);
+                    if (jolt_instr.variant == .LB) {
+                        try self.bytecode.append(allocator, .{
+                            .variant = .VirtualSRAI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = rd, .rs1 = v1, .imm = bitmask_56 } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = false,
+                            .is_compressed = is_compressed,
+                        });
+                    } else {
+                        // LBU: logical right shift (zero-extend)
+                        try self.bytecode.append(allocator, .{
+                            .variant = .VirtualSRLI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = rd, .rs1 = v1, .imm = bitmask_56 } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = false,
+                            .is_compressed = is_compressed,
+                        });
+                    }
+                },
+                .LH, .LHU => {
+                    // LH/LHU rd, rs1, imm → 9 flat steps (includes alignment assertion)
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.rd,
+                        else => 0,
+                    };
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.rs1,
+                        else => 0,
+                    };
+                    const imm = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.imm,
+                        else => 0,
+                    };
+                    const v0: u8 = 40;
+                    const v1: u8 = 41;
+                    const v2: u8 = 42;
+                    const total_steps: u16 = 8; // vsr counts from 8 down to 0
+                    // Step 1: VirtualAssertHalfwordAlignment(rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertHalfwordAlignment,
+                        .address = addr,
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .virtual_sequence_remaining = total_steps,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: ADDI(v0, rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
+                        .virtual_sequence_remaining = total_steps - 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: ANDI(v1, v0, -8)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ANDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
+                        .virtual_sequence_remaining = total_steps - 2,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 4: LD(v1, v1, 0) — MEMORY READ
+                    try self.bytecode.append(allocator, .{
+                        .variant = .LD,
+                        .address = addr,
+                        .operands = .{ .FormatLoad = .{ .rd = v1, .rs1 = v1, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 3,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 5: XORI(v0, v0, 6)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XORI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 6 } },
+                        .virtual_sequence_remaining = total_steps - 4,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 6: VirtualMULI(v0, v0, 8) — from SLLI v0, v0, 3
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
+                        .virtual_sequence_remaining = total_steps - 5,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 7: VirtualPow2(v2, v0, 0) — from SLL step 1
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v2, .rs1 = v0, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 6,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 8: MUL(v1, v1, v2) — from SLL step 2
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v1, .rs1 = v1, .rs2 = v2 } },
+                        .virtual_sequence_remaining = total_steps - 7,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 9: VirtualSRAI/VirtualSRLI(rd, v1, bitmask_48)
+                    const shift_48: u7 = 48;
+                    const ones_48: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_48))) - 1;
+                    const bitmask_48: u64 = @truncate(ones_48 << shift_48);
+                    if (jolt_instr.variant == .LH) {
+                        try self.bytecode.append(allocator, .{
+                            .variant = .VirtualSRAI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = rd, .rs1 = v1, .imm = bitmask_48 } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = false,
+                            .is_compressed = is_compressed,
+                        });
+                    } else {
+                        try self.bytecode.append(allocator, .{
+                            .variant = .VirtualSRLI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = rd, .rs1 = v1, .imm = bitmask_48 } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = false,
+                            .is_compressed = is_compressed,
+                        });
+                    }
+                },
+                .LW => {
+                    // LW rd, rs1, imm → 8 flat steps (RV64: with alignment assert, SRL, sign-extend)
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.rd,
+                        else => 0,
+                    };
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.rs1,
+                        else => 0,
+                    };
+                    const imm = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.imm,
+                        else => 0,
+                    };
+                    const v0: u8 = 40;
+                    const v1: u8 = 41;
+                    const v2: u8 = 42; // allocated by inner SRL
+                    const total_steps: u16 = 7;
+                    // Step 1: VirtualAssertWordAlignment(rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertWordAlignment,
+                        .address = addr,
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .virtual_sequence_remaining = total_steps,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: ADDI(v0, rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
+                        .virtual_sequence_remaining = total_steps - 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: ANDI(v1, v0, -8)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ANDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
+                        .virtual_sequence_remaining = total_steps - 2,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 4: LD(v1, v1, 0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .LD,
+                        .address = addr,
+                        .operands = .{ .FormatLoad = .{ .rd = v1, .rs1 = v1, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 3,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 5: VirtualMULI(v0, v0, 8) — from SLLI v0, v0, 3 (NO XORI for LW)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
+                        .virtual_sequence_remaining = total_steps - 4,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 6: VirtualShiftRightBitmask(v2, v0, 0) — from SRL step 1
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualShiftRightBitmask,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v2, .rs1 = v0, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 5,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 7: VirtualSRL(v1, v1, v2) — from SRL step 2
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v1, .rs1 = v1, .rs2 = v2 } },
+                        .virtual_sequence_remaining = total_steps - 6,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 8: VirtualSignExtendWord(rd, v1, 0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = v1, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .LWU => {
+                    // LWU rd, rs1, imm → 9 flat steps (with XORI, SLL, SRLI)
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.rd,
+                        else => 0,
+                    };
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.rs1,
+                        else => 0,
+                    };
+                    const imm = switch (jolt_instr.operands) {
+                        .FormatLoad => |l| l.imm,
+                        else => 0,
+                    };
+                    const v0: u8 = 40;
+                    const v1: u8 = 41;
+                    const v2: u8 = 42; // from inner SLL
+                    const total_steps: u16 = 8;
+                    // Step 1: VirtualAssertWordAlignment(rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertWordAlignment,
+                        .address = addr,
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .virtual_sequence_remaining = total_steps,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: ADDI(v0, rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
+                        .virtual_sequence_remaining = total_steps - 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: ANDI(v1, v0, -8)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ANDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
+                        .virtual_sequence_remaining = total_steps - 2,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 4: LD(v1, v1, 0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .LD,
+                        .address = addr,
+                        .operands = .{ .FormatLoad = .{ .rd = v1, .rs1 = v1, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 3,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 5: XORI(v0, v0, 4)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XORI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 4 } },
+                        .virtual_sequence_remaining = total_steps - 4,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 6: VirtualMULI(v0, v0, 8) — from SLLI
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
+                        .virtual_sequence_remaining = total_steps - 5,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 7: VirtualPow2(v2, v0, 0) — from SLL step 1
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v2, .rs1 = v0, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 6,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 8: MUL(v1, v1, v2) — from SLL step 2
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v1, .rs1 = v1, .rs2 = v2 } },
+                        .virtual_sequence_remaining = total_steps - 7,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 9: VirtualSRLI(rd, v1, bitmask_32)
+                    const shift_32: u7 = 32;
+                    const ones_32: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_32))) - 1;
+                    const bitmask_32: u64 = @truncate(ones_32 << shift_32);
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRLI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = v1, .imm = bitmask_32 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SB => {
+                    // SB rs2, rs1, imm → 13 flat steps
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatS => |s| s.rs1,
+                        else => 0,
+                    };
+                    const rs2 = switch (jolt_instr.operands) {
+                        .FormatS => |s| s.rs2,
+                        else => 0,
+                    };
+                    const imm = switch (jolt_instr.operands) {
+                        .FormatS => |s| s.imm,
+                        else => 0,
+                    };
+                    const v0: u8 = 40;
+                    const v1: u8 = 41;
+                    const v2: u8 = 42;
+                    const v3: u8 = 43;
+                    const v4: u8 = 44; // from inner SLL #1
+                    const v5: u8 = 45; // from inner SLL #2
+                    const total_steps: u16 = 12;
+                    // Step 1: ADDI(v0, rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
+                        .virtual_sequence_remaining = total_steps,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: ANDI(v1, v0, -8)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ANDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
+                        .virtual_sequence_remaining = total_steps - 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: LD(v2, v1, 0) — MEMORY READ
+                    try self.bytecode.append(allocator, .{
+                        .variant = .LD,
+                        .address = addr,
+                        .operands = .{ .FormatLoad = .{ .rd = v2, .rs1 = v1, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 2,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 4: VirtualMULI(v3, v0, 8) — from SLLI v3, v0, 3
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v3, .rs1 = v0, .imm = 8 } },
+                        .virtual_sequence_remaining = total_steps - 3,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 5: LUI(v0, 0xff)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .LUI,
+                        .address = addr,
+                        .operands = .{ .FormatU = .{ .rd = v0, .imm = 0xff << 12 } },
+                        .virtual_sequence_remaining = total_steps - 4,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 6: VirtualPow2(v4, v3, 0) — from SLL(v0, v0, v3) step 1
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v4, .rs1 = v3, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 5,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 7: MUL(v0, v0, v4) — from SLL step 2
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v0, .rs1 = v0, .rs2 = v4 } },
+                        .virtual_sequence_remaining = total_steps - 6,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 8: VirtualPow2(v5, v3, 0) — from SLL(v3, rs2, v3) step 1
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v5, .rs1 = v3, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 7,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 9: MUL(v3, rs2, v5) — from SLL step 2
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v3, .rs1 = rs2, .rs2 = v5 } },
+                        .virtual_sequence_remaining = total_steps - 8,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 10: XOR(v3, v2, v3)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XOR,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v2, .rs2 = v3 } },
+                        .virtual_sequence_remaining = total_steps - 9,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 11: AND(v3, v3, v0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .AND,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v3, .rs2 = v0 } },
+                        .virtual_sequence_remaining = total_steps - 10,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 12: XOR(v2, v2, v3)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XOR,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v2, .rs1 = v2, .rs2 = v3 } },
+                        .virtual_sequence_remaining = total_steps - 11,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 13: SD(v1, v2, 0) — MEMORY WRITE
+                    try self.bytecode.append(allocator, .{
+                        .variant = .SD,
+                        .address = addr,
+                        .operands = .{ .FormatS = .{ .rs1 = v1, .rs2 = v2, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SH => {
+                    // SH rs2, rs1, imm → 14 flat steps (SB + alignment assertion + 0xffff mask)
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatS => |s| s.rs1,
+                        else => 0,
+                    };
+                    const rs2 = switch (jolt_instr.operands) {
+                        .FormatS => |s| s.rs2,
+                        else => 0,
+                    };
+                    const imm = switch (jolt_instr.operands) {
+                        .FormatS => |s| s.imm,
+                        else => 0,
+                    };
+                    const v0: u8 = 40;
+                    const v1: u8 = 41;
+                    const v2: u8 = 42;
+                    const v3: u8 = 43;
+                    const v4: u8 = 44;
+                    const v5: u8 = 45;
+                    const total_steps: u16 = 13;
+                    // Step 1: VirtualAssertHalfwordAlignment(rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertHalfwordAlignment,
+                        .address = addr,
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .virtual_sequence_remaining = total_steps,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: ADDI(v0, rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
+                        .virtual_sequence_remaining = total_steps - 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: ANDI(v1, v0, -8)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ANDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
+                        .virtual_sequence_remaining = total_steps - 2,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 4: LD(v2, v1, 0) — MEMORY READ
+                    try self.bytecode.append(allocator, .{
+                        .variant = .LD,
+                        .address = addr,
+                        .operands = .{ .FormatLoad = .{ .rd = v2, .rs1 = v1, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 3,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 5: VirtualMULI(v3, v0, 8) — from SLLI
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v3, .rs1 = v0, .imm = 8 } },
+                        .virtual_sequence_remaining = total_steps - 4,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 6: LUI(v0, 0xffff)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .LUI,
+                        .address = addr,
+                        .operands = .{ .FormatU = .{ .rd = v0, .imm = 0xffff << 12 } },
+                        .virtual_sequence_remaining = total_steps - 5,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 7: VirtualPow2(v4, v3, 0) — from SLL(v0, v0, v3)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v4, .rs1 = v3, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 6,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 8: MUL(v0, v0, v4)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v0, .rs1 = v0, .rs2 = v4 } },
+                        .virtual_sequence_remaining = total_steps - 7,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 9: VirtualPow2(v5, v3, 0) — from SLL(v3, rs2, v3)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v5, .rs1 = v3, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 8,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 10: MUL(v3, rs2, v5)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v3, .rs1 = rs2, .rs2 = v5 } },
+                        .virtual_sequence_remaining = total_steps - 9,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 11: XOR(v3, v2, v3)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XOR,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v2, .rs2 = v3 } },
+                        .virtual_sequence_remaining = total_steps - 10,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 12: AND(v3, v3, v0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .AND,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v3, .rs2 = v0 } },
+                        .virtual_sequence_remaining = total_steps - 11,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 13: XOR(v2, v2, v3)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XOR,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v2, .rs1 = v2, .rs2 = v3 } },
+                        .virtual_sequence_remaining = total_steps - 12,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 14: SD(v1, v2, 0) — MEMORY WRITE
+                    try self.bytecode.append(allocator, .{
+                        .variant = .SD,
+                        .address = addr,
+                        .operands = .{ .FormatS = .{ .rs1 = v1, .rs2 = v2, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SW => {
+                    // SW rs2, rs1, imm → 15 flat steps (RV64)
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatS => |s| s.rs1,
+                        else => 0,
+                    };
+                    const rs2 = switch (jolt_instr.operands) {
+                        .FormatS => |s| s.rs2,
+                        else => 0,
+                    };
+                    const imm = switch (jolt_instr.operands) {
+                        .FormatS => |s| s.imm,
+                        else => 0,
+                    };
+                    const v0: u8 = 40;
+                    const v1: u8 = 41;
+                    const v2: u8 = 42;
+                    const v3: u8 = 43;
+                    const v4: u8 = 44; // from inner SLL #1
+                    const v5: u8 = 45; // from inner SLL #2
+                    const total_steps: u16 = 14;
+                    // Step 1: VirtualAssertWordAlignment(rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertWordAlignment,
+                        .address = addr,
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .virtual_sequence_remaining = total_steps,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: ADDI(v0, rs1, imm)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
+                        .virtual_sequence_remaining = total_steps - 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: ANDI(v1, v0, -8)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ANDI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
+                        .virtual_sequence_remaining = total_steps - 2,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 4: LD(v2, v1, 0) — MEMORY READ
+                    try self.bytecode.append(allocator, .{
+                        .variant = .LD,
+                        .address = addr,
+                        .operands = .{ .FormatLoad = .{ .rd = v2, .rs1 = v1, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 3,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 5: VirtualMULI(v0, v0, 8) — from SLLI v0, v0, 3
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
+                        .virtual_sequence_remaining = total_steps - 4,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 6: ORI(v3, x0, -1) — all 1s
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ORI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v3, .rs1 = 0, .imm = @bitCast(@as(i64, -1)) } },
+                        .virtual_sequence_remaining = total_steps - 5,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 7: VirtualSRLI(v3, v3, bitmask_32) — 32-bit mask
+                    const shift_32: u7 = 32;
+                    const ones_32: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_32))) - 1;
+                    const bitmask_32: u64 = @truncate(ones_32 << shift_32);
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRLI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v3, .rs1 = v3, .imm = bitmask_32 } },
+                        .virtual_sequence_remaining = total_steps - 6,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 8: VirtualPow2(v4, v0, 0) — from SLL(v3, v3, v0) step 1
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v4, .rs1 = v0, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 7,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 9: MUL(v3, v3, v4) — shifted 32-bit mask
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v3, .rs2 = v4 } },
+                        .virtual_sequence_remaining = total_steps - 8,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 10: VirtualPow2(v5, v0, 0) — from SLL(v0, rs2, v0) step 1
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualPow2,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v5, .rs1 = v0, .imm = 0 } },
+                        .virtual_sequence_remaining = total_steps - 9,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 11: MUL(v0, rs2, v5) — shifted value
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v0, .rs1 = rs2, .rs2 = v5 } },
+                        .virtual_sequence_remaining = total_steps - 10,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 12: XOR(v0, v2, v0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XOR,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v0, .rs1 = v2, .rs2 = v0 } },
+                        .virtual_sequence_remaining = total_steps - 11,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 13: AND(v0, v0, v3)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .AND,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v0, .rs1 = v0, .rs2 = v3 } },
+                        .virtual_sequence_remaining = total_steps - 12,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 14: XOR(v2, v2, v0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XOR,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = v2, .rs1 = v2, .rs2 = v0 } },
+                        .virtual_sequence_remaining = total_steps - 13,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 15: SD(v1, v2, 0) — MEMORY WRITE
+                    try self.bytecode.append(allocator, .{
+                        .variant = .SD,
+                        .address = addr,
+                        .operands = .{ .FormatS = .{ .rs1 = v1, .rs2 = v2, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
                 else => {
-                    // Non-W-extension instructions: append as-is
+                    // Non-decomposed instructions: append as-is
                     try self.bytecode.append(allocator, jolt_instr);
                 },
             }
@@ -1362,8 +2368,8 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
             };
         },
         0b0000011 => { // Load
-            const imm = decodeIImmediate(instruction);
-            operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
+            const imm = decodeLoadImmediate(instruction);
+            operands = .{ .FormatLoad = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
             variant = switch (funct3) {
                 0b000 => .LB,
                 0b001 => .LH,
@@ -1502,6 +2508,17 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
         .is_first_in_sequence = false,
         .is_compressed = is_compressed,
     };
+}
+
+/// Decode Load-format immediate to i64 (sign-extended from 12-bit signed)
+/// Jolt uses i64 for FormatLoad.imm (distinct from FormatI which uses u64)
+fn decodeLoadImmediate(instruction: u32) i64 {
+    const imm: u32 = instruction >> 20;
+    const signed: i32 = if (imm & 0x800 != 0)
+        @bitCast(imm | 0xFFFFF000)
+    else
+        @bitCast(imm);
+    return @as(i64, signed);
 }
 
 /// Decode I-format immediate to u64 (sign-extended from 12-bit signed)

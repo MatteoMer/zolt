@@ -895,32 +895,73 @@ fn computeInstructionInputs(comptime F: type, step: tracer.TraceStep) Instructio
                 .right_i128 = @as(i128, step.rs2_value),
             };
         },
-        // VirtualMULI (SLLI decomposition): left = rs1, right = multiplier (1 << shamt)
+        // Virtual instructions on opcode 0x2B, dispatched by funct3:
+        //   funct3=0: VirtualMULI (SLLI decomposition): left=rs1, right=multiplier (1 << shamt)
+        //   funct3=1: VirtualPow2: left=rs1, right=0, imm=0
+        //   funct3=2: VirtualShiftRightBitmask: left=rs1, right=0, imm=0
         0x2B => {
-            // The instruction encoding stores the shift amount in the I-type imm field.
-            // We compute the multiplier (1 << shamt) from it.
-            const shamt_raw: u32 = step.instruction >> 20;
-            const shamt: u6 = @truncate(shamt_raw & 0x3F);
-            const multiplier: u64 = @as(u64, 1) << shamt;
-            return .{
-                .left = F.fromU64(step.rs1_value),
-                .right = F.fromU64(multiplier),
-                .right_is_signed = false,
-                .right_i128 = @as(i128, multiplier),
-            };
+            const funct3_2b: u3 = @truncate((step.instruction >> 12) & 0x7);
+            switch (funct3_2b) {
+                0 => {
+                    // VirtualMULI: The instruction encoding stores the shift amount in the I-type imm field.
+                    // We compute the multiplier (1 << shamt) from it.
+                    const shamt_raw: u32 = step.instruction >> 20;
+                    const shamt: u6 = @truncate(shamt_raw & 0x3F);
+                    const multiplier: u64 = @as(u64, 1) << shamt;
+                    return .{
+                        .left = F.fromU64(step.rs1_value),
+                        .right = F.fromU64(multiplier),
+                        .right_is_signed = false,
+                        .right_i128 = @as(i128, multiplier),
+                    };
+                },
+                1, 2 => {
+                    // VirtualPow2 / VirtualShiftRightBitmask: AddOperands with imm=0
+                    // to_instruction_inputs = (rs1, 0)
+                    return .{
+                        .left = F.fromU64(step.rs1_value),
+                        .right = F.zero(),
+                        .right_is_signed = false,
+                        .right_i128 = 0,
+                    };
+                },
+                else => {
+                    return .{
+                        .left = F.zero(),
+                        .right = F.zero(),
+                        .right_is_signed = false,
+                        .right_i128 = 0,
+                    };
+                },
+            }
         },
-        // VirtualSRLI: left = rs1, right = bitmask (computed from total shift)
+        // Virtual instructions on opcode 0x5B, dispatched by funct3 and rs2_read:
+        //   I-type (rs2_read=false): VirtualSRLI (funct3=0) or VirtualSRAI (funct3=5)
+        //     left=rs1, right=bitmask (computed from total shift in imm field)
+        //   R-type (rs2_read=true): VirtualSRL (funct3=0) or VirtualSRA (funct3=5)
+        //     left=rs1, right=rs2 (bitmask from virtual register)
         0x5B => {
-            const total_shift_raw: u32 = step.instruction >> 20;
-            const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
-            const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
-            const bitmask: u64 = @truncate(ones << total_shift);
-            return .{
-                .left = F.fromU64(step.rs1_value),
-                .right = F.fromU64(bitmask),
-                .right_is_signed = false,
-                .right_i128 = @as(i128, bitmask),
-            };
+            if (step.rs2_read) {
+                // R-type VirtualSRL/VirtualSRA: left=rs1, right=rs2
+                return .{
+                    .left = F.fromU64(step.rs1_value),
+                    .right = F.fromU64(step.rs2_value),
+                    .right_is_signed = false,
+                    .right_i128 = @as(i128, step.rs2_value),
+                };
+            } else {
+                // I-type VirtualSRLI/VirtualSRAI: left=rs1, right=bitmask from shift amount
+                const total_shift_raw: u32 = step.instruction >> 20;
+                const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
+                const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
+                const bitmask: u64 = @truncate(ones << total_shift);
+                return .{
+                    .left = F.fromU64(step.rs1_value),
+                    .right = F.fromU64(bitmask),
+                    .right_is_signed = false,
+                    .right_i128 = @as(i128, bitmask),
+                };
+            }
         },
         // SYSTEM: ECALL, EBREAK (opcode 0x73)
         0x73 => {
@@ -1086,21 +1127,53 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // This is safe because constraints 0 and 15 (which use Imm) only fire
             // for Load/Store and Branch respectively, never for ADDI/ADDIW/JAL/JALR.
             const imm = blk_imm: {
-                // VirtualMULI (0x2B): IMM = multiplier = 1 << shamt
-                // The instruction encoding stores the shift amount in the I-type imm field.
+                // Virtual instructions on opcode 0x2B, dispatched by funct3:
+                //   funct3=0: VirtualMULI: IMM = multiplier = 1 << shamt
+                //   funct3=1: VirtualPow2: IMM = 0 (instruction_inputs right = 0)
+                //   funct3=2: VirtualShiftRightBitmask: IMM = 0 (instruction_inputs right = 0)
                 if (opcode == 0x2B) {
-                    const shamt_raw: u32 = step.instruction >> 20;
-                    const shamt: u6 = @truncate(shamt_raw & 0x3F);
-                    const multiplier: u64 = @as(u64, 1) << shamt;
-                    break :blk_imm F.fromU64(multiplier);
+                    const funct3_2b: u3 = @truncate((step.instruction >> 12) & 0x7);
+                    if (funct3_2b == 0) {
+                        // VirtualMULI: The instruction encoding stores the shift amount in the I-type imm field.
+                        const shamt_raw: u32 = step.instruction >> 20;
+                        const shamt: u6 = @truncate(shamt_raw & 0x3F);
+                        const multiplier: u64 = @as(u64, 1) << shamt;
+                        break :blk_imm F.fromU64(multiplier);
+                    } else {
+                        // VirtualPow2 / VirtualShiftRightBitmask: imm = 0
+                        break :blk_imm F.zero();
+                    }
                 }
-                // VirtualSRLI (0x5B): IMM = bitmask computed from total shift
+                // Virtual instructions on opcode 0x5B:
+                //   I-type (rs2_read=false): VirtualSRLI/VirtualSRAI: IMM = bitmask from shift
+                //   R-type (rs2_read=true): VirtualSRL/VirtualSRA: IMM = 0 (uses rs2 not imm)
                 if (opcode == 0x5B) {
-                    const total_shift_raw: u32 = step.instruction >> 20;
-                    const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
-                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
-                    const bitmask: u64 = @truncate(ones << total_shift);
-                    break :blk_imm F.fromU64(bitmask);
+                    if (step.rs2_read) {
+                        // R-type: right operand is rs2, not imm
+                        break :blk_imm F.zero();
+                    } else {
+                        // I-type: bitmask computed from total shift amount in imm field
+                        const total_shift_raw: u32 = step.instruction >> 20;
+                        const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
+                        const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
+                        const bitmask: u64 = @truncate(ones << total_shift);
+                        break :blk_imm F.fromU64(bitmask);
+                    }
+                }
+                // VirtualAssertHalfwordAlignment (0x22, funct3=2) and
+                // VirtualAssertWordAlignment (0x22, funct3=3):
+                // These are AddOperands identity-path instructions with I-type encoding.
+                // IMM = unsigned u64 representation of sign-extended immediate.
+                if (opcode == 0x22) {
+                    const funct3_22: u3 = @truncate((step.instruction >> 12) & 0x7);
+                    if (funct3_22 == 2 or funct3_22 == 3) {
+                        // I-type immediate: imm[11:0] in bits [31:20]
+                        const imm12_raw: u32 = @truncate(step.instruction >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        break :blk_imm F.fromU64(@bitCast(imm_signed));
+                    }
+                    // funct3=0,1 (VirtualAssertEQ, VirtualAssertValidDiv0): no imm used
+                    break :blk_imm F.zero();
                 }
                 const is_identity_add = switch (opcode) {
                     0x13 => (step.instruction >> 12) & 0x7 == 0, // ADDI
@@ -1152,7 +1225,13 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             //   All I-type, U-type, J-type
             const reads_rs2 = switch (opcode) {
                 0x33, 0x3b, 0x23, 0x63 => true,
-                0x22 => true, // VirtualAssertEQ: right = rs2 (RightOperandIsRs2Value)
+                0x22 => blk_22_rs2: {
+                    // funct3=0,1 (VirtualAssertEQ, VirtualAssertValidDiv0): right = rs2
+                    // funct3=2,3 (alignment assertions): right = imm, NOT rs2
+                    const f3_22: u3 = @truncate((step.instruction >> 12) & 0x7);
+                    break :blk_22_rs2 (f3_22 == 0 or f3_22 == 1);
+                },
+                0x5B => step.rs2_read, // R-type VirtualSRL/VirtualSRA read rs2
                 0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2 (RightOperandIsRs2Value)
                 else => false,
             };
@@ -1281,7 +1360,13 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x33 => F.one(), // R-type: right = rs2
                 0x63 => F.one(), // B-type: right = rs2 (for comparison)
                 0x3B => F.one(), // OP-32: right = rs2 (ADDW, SUBW, etc.)
-                0x22 => F.one(), // VirtualAssertEQ: right = rs2 (RightOperandIsRs2Value)
+                0x22 => blk_22_ris2: {
+                    // funct3=0,1 (VirtualAssertEQ, VirtualAssertValidDiv0): right = rs2
+                    // funct3=2,3 (alignment assertions): right = imm, NOT rs2
+                    const f3_22r: u3 = @truncate((step.instruction >> 12) & 0x7);
+                    break :blk_22_ris2 if (f3_22r == 0 or f3_22r == 1) F.one() else F.zero();
+                },
+                0x5B => if (step.rs2_read) F.one() else F.zero(), // R-type VirtualSRL/VirtualSRA: right = rs2
                 0x62 => F.one(), // VirtualAssertValidUnsignedRemainder: right = rs2 (RightOperandIsRs2Value)
                 else => F.zero(),
             };
@@ -1291,8 +1376,14 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x17 => F.one(), // AUIPC: right = imm
                 0x6F => F.one(), // JAL: right = imm (offset)
                 0x1B => F.one(), // OP-IMM-32: right = imm (ADDIW, etc.)
-                0x2B => F.one(), // VirtualMULI: right = imm (multiplier, RightOperandIsImm)
-                0x5B => F.one(), // VirtualSRLI: right = imm (bitmask, RightOperandIsImm)
+                0x2B => F.one(), // VirtualMULI/VirtualPow2/VirtualShiftRightBitmask: all use RightOperandIsImm
+                0x5B => if (step.rs2_read) F.zero() else F.one(), // I-type uses imm, R-type uses rs2
+                0x22 => blk_22_rim: {
+                    // funct3=2,3 (alignment assertions): right = imm (RightOperandIsImm)
+                    // funct3=0,1 (VirtualAssertEQ, VirtualAssertValidDiv0): right = rs2
+                    const f3_22i: u3 = @truncate((step.instruction >> 12) & 0x7);
+                    break :blk_22_rim if (f3_22i == 2 or f3_22i == 3) F.one() else F.zero();
+                },
                 else => F.zero(),
             };
 
@@ -1416,9 +1507,13 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // =================================================================
             if (step.virtual_sequence_remaining > 0 and !step.is_termination_store) {
                 // This instruction is part of a virtual sequence with vsr>0
-                // In Jolt: vsr=Some(N), so VirtualInstruction=true, DoNotUpdateUnexpandedPC=true
+                // In Jolt: vsr=Some(N>0), so VirtualInstruction=true, DoNotUpdateUnexpandedPC=true
                 inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
                 inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+            } else if (step.is_last_in_sequence and !step.is_termination_store) {
+                // Last step of a virtual sequence (vsr=0, but is_last_in_sequence=true)
+                // In Jolt: vsr=Some(0), so VirtualInstruction=true, DoNotUpdateUnexpandedPC=false
+                inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
             }
             if (step.is_first_in_sequence) {
                 inputs.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
@@ -1650,12 +1745,18 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     // to_lookup_operands returns (0, rs1 + 0) = (0, rs1)
                     return F.fromU128(@as(u128, step.rs1_value));
                 },
-                0x2B => { // VirtualMULI: lookup index = rs1 * multiplier
-                    // to_lookup_operands returns (0, rs1 * imm)
-                    const shamt_raw: u32 = instr >> 20;
-                    const shamt: u6 = @truncate(shamt_raw & 0x3F);
-                    const multiplier: u64 = @as(u64, 1) << shamt;
-                    return F.fromU128(@as(u128, step.rs1_value) * @as(u128, multiplier));
+                0x2B => { // Virtual instructions on opcode 0x2B, dispatched by funct3
+                    if (funct3 == 0) {
+                        // VirtualMULI: to_lookup_operands returns (0, rs1 * imm)
+                        const shamt_raw: u32 = instr >> 20;
+                        const shamt: u6 = @truncate(shamt_raw & 0x3F);
+                        const multiplier: u64 = @as(u64, 1) << shamt;
+                        return F.fromU128(@as(u128, step.rs1_value) * @as(u128, multiplier));
+                    } else {
+                        // funct3=1 (VirtualPow2), funct3=2 (VirtualShiftRightBitmask):
+                        // AddOperands: to_lookup_operands returns (0, rs1 + 0) = (0, rs1)
+                        return F.fromU128(@as(u128, step.rs1_value));
+                    }
                 },
                 0x3b => { // ADDW/SUBW - should no longer appear in traces after W-ext decomposition
                     if (funct3 == 0 and funct7 == 0) {
@@ -1673,6 +1774,18 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     // to_lookup_operands returns (0, self.instruction.advice as u128)
                     // The advice value is stored in step.rd_value (written to rd register)
                     return F.fromU128(@as(u128, step.rd_value));
+                },
+                0x22 => { // VirtualAssert* instructions on opcode 0x22
+                    if (funct3 == 2 or funct3 == 3) {
+                        // VirtualAssertHalfwordAlignment / VirtualAssertWordAlignment:
+                        // AddOperands: to_lookup_operands returns (0, (rs1 as i128 + imm) as u128)
+                        const imm12_raw: u32 = @truncate(instr >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        return F.fromU128(@as(u128, step.rs1_value) + @as(u128, imm_u64));
+                    }
+                    // funct3=0,1 (VirtualAssertEQ, VirtualAssertValidDiv0): interleaved, not identity
+                    return F.zero();
                 },
                 0x42 => { // VirtualZeroExtendWord: lookup operands = (0, rs1 + 0) = (0, rs1)
                     // AddOperands: RightLookup = u128(left + right) = u128(rs1 + 0) = rs1
@@ -1806,48 +1919,80 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     // DoNotUpdateUnexpandedPC: false for VirtualSignExtendWord (vsr=0, 0!=0 is false)
                     // IsFirstInSequence: false for VirtualSignExtendWord (it's the second in sequence)
                 },
-                0x2B => { // VirtualMULI: MultiplyOperands, WriteLookupOutputToRD
-                    // VirtualMULI uses MultiplyOperands with u128 lookup
-                    // Lookup operands: (0, rs1 * imm)
-                    self.values[R1CSInputIndex.FlagMultiplyOperands.toIndex()] = F.one();
-                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
-                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
-                    // VirtualInstruction: ALWAYS true for VirtualMULI.
+                0x2B => { // Virtual instructions on opcode 0x2B, dispatched by funct3
+                    const funct3_2b: u3 = @truncate(funct3);
+                    switch (funct3_2b) {
+                        0 => {
+                            // VirtualMULI: MultiplyOperands, WriteLookupOutputToRD
+                            // Lookup operands: (0, rs1 * imm)
+                            self.values[R1CSInputIndex.FlagMultiplyOperands.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                        },
+                        1 => {
+                            // VirtualPow2: AddOperands, WriteLookupOutputToRD
+                            // Lookup operands: (0, rs1 + 0) = (0, rs1)
+                            self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                        },
+                        2 => {
+                            // VirtualShiftRightBitmask: AddOperands, WriteLookupOutputToRD
+                            // Lookup operands: (0, rs1 + 0) = (0, rs1)
+                            self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                        },
+                        else => {
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                        },
+                    }
+                    // VirtualInstruction: ALWAYS true for all 0x2B instructions.
                     // In Jolt, opcode 0x2B always has virtual_sequence_remaining=Some(...),
                     // so VirtualInstruction = is_some() = true unconditionally.
                     // Cases:
                     //   Standalone SLLI: vsr=Some(0), VirtInstr=true, IsFirst=true, DoNotUpdateUPC=false
                     //   SLLIW first step: vsr=Some(1), VirtInstr=true, IsFirst=true, DoNotUpdateUPC=true
-                    // The SLLIW case is already handled by the vsr>0 block at line 1342.
-                    // Here we handle the standalone SLLI case (vsr=0):
+                    //   SLL step 1 (VirtualPow2): vsr>0, VirtInstr=true, IsFirst=true, DoNotUpdateUPC=true
+                    //   SRL/SRA step 1 (VirtualShiftRightBitmask): vsr>0, VirtInstr=true, IsFirst=true, DoNotUpdateUPC=true
                     self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
                     if (step.virtual_sequence_remaining == 0) {
-                        // Standalone VirtualMULI (from SLLI): first and only step in sequence.
+                        // Standalone virtual instruction (from SLLI): first and only step in sequence.
                         // IsFirstInSequence = true, DoNotUpdateUnexpandedPC = false (default).
                         self.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
                     } else {
-                        // SLLIW first step (vsr>0): DoNotUpdateUnexpandedPC = true.
+                        // Multi-step sequence first step (vsr>0): DoNotUpdateUnexpandedPC = true.
                         // VirtualInstruction and IsFirstInSequence already set by vsr>0 block above.
                         self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
                     }
                 },
-                0x5B => { // VirtualSRLI: WriteLookupOutputToRD (NO Add/Sub/Mul operands)
-                    // VirtualSRLI uses interleaved operands with VirtualSRL table
-                    // Lookup operands: (rs1, bitmask) interleaved
+                0x5B => { // Virtual instructions on opcode 0x5B (I-type and R-type)
+                    // Both I-type (VirtualSRLI/VirtualSRAI) and R-type (VirtualSRL/VirtualSRA)
+                    // use WriteLookupOutputToRD with interleaved operands (NO Add/Sub/Mul)
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
                     self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
-                    // VirtualInstruction: ALWAYS true for VirtualSRLI.
+                    // VirtualInstruction: ALWAYS true for all 0x5B instructions.
                     // Cases:
-                    //   Standalone SRLI: vsr=Some(0), VirtInstr=true, IsFirst=true, DoNotUpdateUPC=false
-                    //   SRLIW middle step: vsr=Some(1), VirtInstr=true, IsFirst=false, DoNotUpdateUPC=true
+                    //   Standalone SRLI/SRAI: vsr=Some(0), VirtInstr=true, IsFirst=true, DoNotUpdateUPC=false
+                    //   SRLIW/SRAIW middle step: vsr=Some(1), VirtInstr=true, IsFirst=false, DoNotUpdateUPC=true
+                    //   R-type VirtualSRL/VirtualSRA (SRL/SRA step 2): vsr=Some(0), VirtInstr=true, IsLast=true
                     self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
                     if (step.virtual_sequence_remaining == 0) {
-                        // Standalone VirtualSRLI (from SRLI): first and only step in sequence.
-                        self.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
+                        // Standalone I-type or last step R-type.
+                        // For standalone SRLI/SRAI: first and only step in sequence.
+                        // For R-type VirtualSRL/VirtualSRA: last step (IsLastInSequence handled elsewhere).
+                        if (!step.rs2_read) {
+                            // Standalone I-type: IsFirstInSequence = true
+                            self.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
+                        }
+                        // R-type with vsr=0: IsFirstInSequence stays false (it's step 2 of SRL/SRA)
                     } else {
-                        // SRLIW middle step (vsr>0): DoNotUpdateUnexpandedPC = true.
+                        // Middle step (vsr>0): DoNotUpdateUnexpandedPC = true.
                         self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
                     }
                 },
@@ -1864,12 +2009,32 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                         self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
                     }
                 },
-                0x22 => { // VirtualAssertEQ: Assert (interleaved operands)
-                    // VirtualAssertEQ checks rs1 == rs2; uses Equal table
-                    // Lookup operands: (rs1, rs2) interleaved
-                    self.values[R1CSInputIndex.FlagAssert.toIndex()] = F.one();
-                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                0x22 => { // VirtualAssert* instructions on opcode 0x22, dispatched by funct3
+                    const funct3_22: u3 = @truncate(funct3);
+                    switch (funct3_22) {
+                        0, 1 => {
+                            // funct3=0: VirtualAssertEQ: Assert (interleaved operands)
+                            // funct3=1: VirtualAssertValidDiv0: Assert (interleaved operands)
+                            // Lookup operands: (rs1, rs2) interleaved
+                            self.values[R1CSInputIndex.FlagAssert.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                        },
+                        2, 3 => {
+                            // funct3=2: VirtualAssertHalfwordAlignment: Assert + AddOperands
+                            // funct3=3: VirtualAssertWordAlignment: Assert + AddOperands
+                            // Lookup operands: (0, rs1 + imm) via AddOperands identity path
+                            // NOTE: no WriteLookupOutputToRD (alignment assertions have no rd)
+                            self.values[R1CSInputIndex.FlagAssert.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                        },
+                        else => {
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                        },
+                    }
                     // Always part of a virtual sequence
                     self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
                     if (step.virtual_sequence_remaining > 0) {

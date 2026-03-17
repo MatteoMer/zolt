@@ -164,6 +164,32 @@ pub fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
             } else if (opcode == 0x1b and funct3 == 5 and (instr_word >> 30) & 1 == 0) {
                 // SRLIW: 3 entries (VirtualMULI + VirtualSRLI + VirtualSignExtendWord)
                 num_entries += 3;
+            } else if (opcode == 0x33 and funct3 == 1 and funct7 == 0) {
+                // SLL: 2 entries (VirtualPow2 + MUL)
+                num_entries += 2;
+            } else if (opcode == 0x33 and funct3 == 5 and (funct7 == 0 or funct7 == 0x20)) {
+                // SRL/SRA: 2 entries (VirtualShiftRightBitmask + VirtualSRL/VirtualSRA)
+                num_entries += 2;
+            } else if (opcode == 0x13 and funct3 == 5 and (instr_word >> 30) & 1 == 1) {
+                // SRAI: 1 entry (VirtualSRAI)
+                num_entries += 1;
+            } else if (opcode == 0x03 and funct3 != 3) {
+                // Sub-word loads: LB(f3=0)→8, LH(f3=1)→9, LW(f3=2)→8, LBU(f3=4)→8, LHU(f3=5)→9, LWU(f3=6)→9
+                num_entries += switch (funct3) {
+                    0, 4 => @as(usize, 8), // LB, LBU
+                    1, 5 => @as(usize, 9), // LH, LHU
+                    2 => @as(usize, 8), // LW
+                    6 => @as(usize, 9), // LWU
+                    else => @as(usize, 1), // shouldn't happen
+                };
+            } else if (opcode == 0x23 and funct3 != 3) {
+                // Sub-word stores: SB(f3=0)→13, SH(f3=1)→14, SW(f3=2)→15
+                num_entries += switch (funct3) {
+                    0 => @as(usize, 13), // SB
+                    1 => @as(usize, 14), // SH
+                    2 => @as(usize, 15), // SW
+                    else => @as(usize, 1), // shouldn't happen
+                };
             } else {
                 const is_w_ext_2 = switch (opcode) {
                     0x1b => switch (funct3) {

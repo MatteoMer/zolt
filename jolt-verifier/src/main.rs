@@ -76,6 +76,13 @@ fn main() {
     let verifier = RV64IMACVerifier::new(&preprocessing, proof, program_io, None, None)
         .unwrap_or_else(|e| fatal(&format!("create verifier: {e}")));
 
+    // Enable tracing subscriber for stage error messages
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .with_writer(std::io::stderr)
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
+
     match verifier.verify() {
         Ok(()) => {
             eprintln!("VERIFIED: proof is valid");

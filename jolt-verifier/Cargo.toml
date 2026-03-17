@@ -12,6 +12,8 @@ ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", branch = "de
 ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
 mimalloc = "0.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [patch.crates-io]
 ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }

@@ -1215,6 +1215,124 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
         };
 
+        /// HalfwordAlignment: output = 1 if (input % 2 == 0), else 0
+        /// Single-operand table: AddOperands combines rs1+imm before lookup.
+        /// MLE: f(r) = 1 - r[0] (bit 0 determines halfword alignment)
+        pub const HalfwordAlignment = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return if (index & 1 == 0) 1 else 0;
+            }
+
+            pub fn evaluateMLE(r: []const F) F {
+                // Alignment check: output 1 if lowest bit is 0
+                // MLE = 1 - r[0]
+                return F.one().sub(r[0]);
+            }
+        };
+
+        /// WordAlignment: output = 1 if (input % 4 == 0), else 0
+        /// MLE: f(r) = (1-r[0]) * (1-r[1])
+        pub const WordAlignment = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return if (index & 3 == 0) 1 else 0;
+            }
+
+            pub fn evaluateMLE(r: []const F) F {
+                // Word-aligned: bits 0 and 1 must both be 0
+                return (F.one().sub(r[0])).mul(F.one().sub(r[1]));
+            }
+        };
+
+        /// ShiftRightBitmask: output = bitmask with 1s from bit `shift` to bit `XLEN-1`
+        /// Input: shift amount (0..XLEN-1). Uses AddOperands (rs1+0=rs1).
+        /// output = ((1 << (XLEN - shift)) - 1) << shift
+        /// For shift=0: all 1s. For shift=63: only MSB.
+        pub const ShiftRightBitmask = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                const shift: u7 = @truncate(index & (XLEN - 1));
+                if (shift == 0) return @as(u64, 0) -% 1; // all 1s
+                const ones: u128 = (@as(u128, 1) << @intCast(XLEN - @as(u8, shift))) - 1;
+                return @truncate(ones << shift);
+            }
+
+            pub fn evaluateMLE(r: []const F) F {
+                // Single-operand table: iterate over all XLEN possible shift amounts
+                // For XLEN=64 this is only 64 entries (the shift amount is only log2(XLEN) bits)
+                std.debug.assert(r.len >= XLEN);
+                // The input is the shift amount, which only uses log2(XLEN) bits.
+                // But the table is indexed by the full XLEN-bit operand.
+                // We need to sum over all 2^XLEN entries, but only the lower log2(XLEN) bits matter.
+                // For bits >= log2(XLEN), they don't affect the result. The result is the same
+                // regardless of those higher bits since we mask with (XLEN-1).
+                // So MLE = (product of (1-r[i]) for i >= log2(XLEN)) * sum_over_shift_amounts
+                const log_xlen = if (XLEN == 64) 6 else 5;
+                // Factor out high bits: they must all be 0 for a valid shift amount
+                var high_factor = F.one();
+                for (log_xlen..XLEN) |i| {
+                    high_factor = high_factor.mul(F.one().sub(r[i]));
+                }
+                // Sum over valid shift amounts (0..XLEN-1)
+                var sum = F.zero();
+                for (0..XLEN) |shift| {
+                    const val = materializeEntry(@intCast(shift));
+                    var basis = F.one();
+                    for (0..log_xlen) |b| {
+                        const bit: u1 = @truncate(shift >> @truncate(b));
+                        if (bit == 1) {
+                            basis = basis.mul(r[b]);
+                        } else {
+                            basis = basis.mul(F.one().sub(r[b]));
+                        }
+                    }
+                    sum = sum.add(F.fromU64(val).mul(basis));
+                }
+                return high_factor.mul(sum);
+            }
+        };
+
+        /// VirtualSRA: shift-right-arithmetic using bitmask encoding
+        /// Same as VirtualSRL but with sign extension.
+        /// Reference: jolt-core/src/zkvm/lookup_table/virtual_sra.rs
+        pub const VirtualSRA = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                var x: u64 = 0;
+                var y: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    x |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
+                    y |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
+                }
+                const sign_bit: u64 = (x >> (XLEN - 1)) & 1;
+                var entry: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    const bit_pos = XLEN - 1 - i;
+                    const x_i: u64 = (x >> bit_pos) & 1;
+                    const y_i: u64 = (y >> bit_pos) & 1;
+                    entry = entry *% (1 + y_i) +% (x_i *% y_i) +% (sign_bit *% (1 - y_i));
+                }
+                return entry;
+            }
+
+            /// MLE follows the same interleave convention as VirtualSRL.
+            /// r[2*i] corresponds to even bit positions (first arg in interleaveBits),
+            /// r[2*i+1] corresponds to odd bit positions (second arg in interleaveBits).
+            /// The sign bit is the MSB of the value operand.
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                // Follow VirtualSRL's convention: r[2*i] and r[2*i+1] map to the
+                // interleaved bit positions. The formula is the same recurrence but
+                // with sign_bit * (1 - y_i) added.
+                // Sign bit (MSB of value) is at the same relative position as VirtualSRL's MSB
+                const sign_bit = r[2 * (XLEN - 1)];
+                var result = F.zero();
+                inline for (0..XLEN) |i| {
+                    const x_i = r[2 * i]; // same convention as VirtualSRL
+                    const y_i = r[2 * i + 1]; // same convention as VirtualSRL
+                    result = result.mul(F.one().add(y_i)).add(x_i.mul(y_i)).add(sign_bit.mul(F.one().sub(y_i)));
+                }
+                return result;
+            }
+        };
+
         /// VirtualSRL: shift-right-logical using bitmask encoding
         /// The index interleaves value bits (x) and bitmask bits (y).
         /// result = Π_{i=0}^{XLEN-1} (1 + y_i) * ... computed iteratively:
@@ -1286,16 +1404,16 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 15 => ValidSignedRemainder.evaluateMLE(r),
                 16 => ValidUnsignedRemainder.evaluateMLE(r),
                 17 => ValidDiv0.evaluateMLE(r),
-                18 => F.zero(), // HalfwordAlignment - TODO
-                19 => F.zero(), // WordAlignment - TODO
+                18 => HalfwordAlignment.evaluateMLE(r),
+                19 => WordAlignment.evaluateMLE(r),
                 20 => LowerHalfWord.evaluateMLE(r),
                 21 => SignExtendHalfWord.evaluateMLE(r),
                 22 => Pow2.evaluateMLE(r),
                 23 => F.zero(), // Pow2W - TODO
-                24 => F.zero(), // ShiftRightBitmask - TODO
+                24 => ShiftRightBitmask.evaluateMLE(r),
                 25 => F.zero(), // VirtualRev8W - TODO
                 26 => VirtualSRL.evaluateMLE(r),
-                27 => F.zero(), // VirtualSRA - TODO
+                27 => VirtualSRA.evaluateMLE(r),
                 28 => F.zero(), // VirtualROTR - TODO
                 29 => F.zero(), // VirtualROTRW - TODO
                 30 => F.zero(), // VirtualChangeDivisor - TODO

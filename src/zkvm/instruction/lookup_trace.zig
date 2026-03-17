@@ -1775,6 +1775,291 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
             try self.entries.append(self.allocator, entry);
         }
 
+        /// Record lookup for a VirtualPow2 instruction within a virtual sequence.
+        /// VirtualPow2 computes 1 << (rs1_val % 64). Stub — full implementation pending.
+        pub fn recordVirtualPow2(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+            const shift: u6 = @truncate(rs1_val & 0x3F);
+            const result: u64 = @as(u64, 1) << shift;
+            // AddOperands: lookup index = rs1 + imm = rs1 + 0 = rs1
+            const index: u128 = @as(u128, rs1_val);
+
+            var cf = CircuitFlagSet.init();
+            cf.set(.AddOperands);
+            cf.set(.WriteLookupOutputToRD);
+            if (is_virtual) cf.set(.VirtualInstruction);
+            if (do_not_update_pc) cf.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) cf.set(.IsFirstInSequence);
+            if (is_compressed) cf.set(.IsCompressed);
+
+            var inf = InstructionFlagSet.init();
+            inf.set(.LeftOperandIsRs1Value);
+            inf.set(.RightOperandIsImm);
+            if (rd != 0) inf.set(.IsRdNotZero);
+
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = .VirtualPow2,
+                .index = index,
+                .result = result,
+                .left_operand = rs1_val,
+                .right_operand = 0,
+                .circuit_flags = cf,
+                .instruction_flags = inf,
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualShiftRightBitmask instruction within a virtual sequence.
+        /// VirtualShiftRightBitmask computes the bitmask for a right shift. Stub — full implementation pending.
+        pub fn recordVirtualShiftRightBitmask(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+            const shift: u6 = @truncate(rs1_val & 0x3F);
+            const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift))) - 1;
+            const bitmask: u64 = @truncate(ones << shift);
+            // AddOperands: lookup index = rs1 + imm = rs1 + 0 = rs1
+            const index: u128 = @as(u128, rs1_val);
+
+            var cf = CircuitFlagSet.init();
+            cf.set(.AddOperands);
+            cf.set(.WriteLookupOutputToRD);
+            if (is_virtual) cf.set(.VirtualInstruction);
+            if (do_not_update_pc) cf.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) cf.set(.IsFirstInSequence);
+            if (is_compressed) cf.set(.IsCompressed);
+
+            var inf = InstructionFlagSet.init();
+            inf.set(.LeftOperandIsRs1Value);
+            inf.set(.RightOperandIsImm);
+            if (rd != 0) inf.set(.IsRdNotZero);
+
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = .VirtualShiftRightBitmask,
+                .index = index,
+                .result = bitmask,
+                .left_operand = rs1_val,
+                .right_operand = 0,
+                .circuit_flags = cf,
+                .instruction_flags = inf,
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualSRL R-type instruction within a virtual sequence.
+        /// VirtualSRL(rd, rs1, rs2) performs logical right shift using bitmask in rs2.
+        pub fn recordVirtualSRL_R(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+            const index = lookup_table.interleaveBits(rs1_val, rs2_val);
+            // Result: logical right shift by trailing zeros of bitmask
+            const shift: u6 = @truncate(@ctz(rs2_val));
+            const result: u64 = rs1_val >> shift;
+
+            var cf = CircuitFlagSet.init();
+            cf.set(.WriteLookupOutputToRD);
+            if (is_virtual) cf.set(.VirtualInstruction);
+            if (do_not_update_pc) cf.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) cf.set(.IsFirstInSequence);
+            if (is_compressed) cf.set(.IsCompressed);
+
+            var inf = InstructionFlagSet.init();
+            inf.set(.LeftOperandIsRs1Value);
+            inf.set(.RightOperandIsRs2Value);
+            if (rd != 0) inf.set(.IsRdNotZero);
+
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = .VirtualSRL,
+                .index = index,
+                .result = result,
+                .left_operand = rs1_val,
+                .right_operand = rs2_val,
+                .circuit_flags = cf,
+                .instruction_flags = inf,
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualSRA R-type instruction within a virtual sequence.
+        /// VirtualSRA(rd, rs1, rs2) performs arithmetic right shift using bitmask in rs2.
+        pub fn recordVirtualSRA_R(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+            const index = lookup_table.interleaveBits(rs1_val, rs2_val);
+            // Result: arithmetic right shift by trailing zeros of bitmask
+            const shift: u6 = @truncate(@ctz(rs2_val));
+            const result: u64 = @bitCast(@as(i64, @bitCast(rs1_val)) >> shift);
+
+            var cf = CircuitFlagSet.init();
+            cf.set(.WriteLookupOutputToRD);
+            if (is_virtual) cf.set(.VirtualInstruction);
+            if (do_not_update_pc) cf.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) cf.set(.IsFirstInSequence);
+            if (is_compressed) cf.set(.IsCompressed);
+
+            var inf = InstructionFlagSet.init();
+            inf.set(.LeftOperandIsRs1Value);
+            inf.set(.RightOperandIsRs2Value);
+            if (rd != 0) inf.set(.IsRdNotZero);
+
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = .VirtualSRA,
+                .index = index,
+                .result = result,
+                .left_operand = rs1_val,
+                .right_operand = rs2_val,
+                .circuit_flags = cf,
+                .instruction_flags = inf,
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualAssertHalfwordAlignment instruction.
+        /// Asserts that (rs1 + imm) is halfword-aligned.
+        pub fn recordVirtualAssertHalfwordAlignment(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            imm_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const addr: u64 = rs1_val +% imm_val;
+            // AddOperands: lookup index = rs1 + imm
+            const index: u128 = @as(u128, addr);
+
+            var cf = CircuitFlagSet.init();
+            cf.set(.Assert);
+            cf.set(.AddOperands);
+            if (is_virtual) cf.set(.VirtualInstruction);
+            if (do_not_update_pc) cf.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) cf.set(.IsFirstInSequence);
+            if (is_compressed) cf.set(.IsCompressed);
+
+            var inf = InstructionFlagSet.init();
+            inf.set(.LeftOperandIsRs1Value);
+            inf.set(.RightOperandIsImm);
+
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = .VirtualAssertHalfwordAlignment,
+                .index = index,
+                .result = if (addr & 1 == 0) 1 else 0, // 1 if aligned (assertion passed)
+                .left_operand = rs1_val,
+                .right_operand = imm_val,
+                .circuit_flags = cf,
+                .instruction_flags = inf,
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualAssertWordAlignment instruction.
+        /// Asserts that (rs1 + imm) is word-aligned.
+        pub fn recordVirtualAssertWordAlignment(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            imm_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const addr: u64 = rs1_val +% imm_val;
+            // AddOperands: lookup index = rs1 + imm
+            const index: u128 = @as(u128, addr);
+
+            var cf = CircuitFlagSet.init();
+            cf.set(.Assert);
+            cf.set(.AddOperands);
+            if (is_virtual) cf.set(.VirtualInstruction);
+            if (do_not_update_pc) cf.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) cf.set(.IsFirstInSequence);
+            if (is_compressed) cf.set(.IsCompressed);
+
+            var inf = InstructionFlagSet.init();
+            inf.set(.LeftOperandIsRs1Value);
+            inf.set(.RightOperandIsImm);
+
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = .VirtualAssertWordAlignment,
+                .index = index,
+                .result = if (addr & 3 == 0) 1 else 0, // 1 if aligned (assertion passed)
+                .left_operand = rs1_val,
+                .right_operand = imm_val,
+                .circuit_flags = cf,
+                .instruction_flags = inf,
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
         /// Get the number of lookup entries
         pub fn len(self: *const Self) usize {
             return self.entries.items.len;

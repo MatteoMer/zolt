@@ -1319,6 +1319,45 @@ pub fn JoltProver(comptime F: type) type {
 
             // Create UniSkip proof for Stage 1 with actual constraint evaluations
             // Use padded witnesses so that NoOp cycles are included in the polynomial evaluation
+            // DEBUG: Validate compact vs field for second group
+            {
+                var sg_mismatch: usize = 0;
+                for (0..@min(padded_witnesses.len, compact_witnesses.len)) |ci| {
+                    const cw = &compact_witnesses[ci];
+                    const ws = padded_witnesses[ci].asSlice();
+                    const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+                    const bz_field_sg = r1cs_evaluators.computeBzSecondGroupDirect(F, ws, two_pow_64);
+                    for (0..9) |t| {
+                        const field_bz = bz_field_sg[t];
+                        const s192_bz = cw.bz_second[t];
+                        // Convert S192 to field for comparison
+                        // Convert S192 magnitude to field element
+                        const lo: u128 = @as(u128, s192_bz.magnitude[0]) | (@as(u128, s192_bz.magnitude[1]) << 64);
+                        const hi: u64 = s192_bz.magnitude[2];
+                        const lo_f = F.fromU128(lo);
+                        const hi_f = F.fromU64(hi).mul(F.fromU128(@as(u128, 1) << 64).mul(F.fromU128(@as(u128, 1) << 64)));
+                        const mag_f = lo_f.add(hi_f);
+                        const s192_as_field = if (s192_bz.is_positive) mag_f else F.zero().sub(mag_f);
+                        if (!field_bz.eql(s192_as_field)) {
+                            if (sg_mismatch < 3) {
+                                const rl_f = ws[r1cs.R1CSInputIndex.RightLookupOperand.toIndex()];
+                                const rl_std = rl_f.fromMontgomery();
+                                const upc = ws[r1cs.R1CSInputIndex.UnexpandedPC.toIndex()].toU64();
+                                std.debug.print("SG BZ MISMATCH: cycle={d} SG[{d}] UPC=0x{x} RL_limbs=[{x},{x},{x},{x}]\n", .{
+                                    ci, t, upc, rl_std.limbs[0], rl_std.limbs[1], rl_std.limbs[2], rl_std.limbs[3],
+                                });
+                            }
+                            sg_mismatch += 1;
+                        }
+                    }
+                }
+                if (sg_mismatch > 0) {
+                    std.debug.print("SG BZ: {d} mismatches\n", .{sg_mismatch});
+                } else {
+                    std.debug.print("SG BZ: All match!\n", .{});
+                }
+            }
+
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
                 padded_witnesses,
                 tau,
@@ -3819,7 +3858,7 @@ pub fn JoltProver(comptime F: type) type {
                 }
             }
 
-            // Debug: Verify batched_claim equals sum of (coeff * prover_claim)
+            // Print prover's per-instance final claims for comparison with verifier
             var expected_batched = F.zero();
             // Instance 0: RWC
             if (rwc_prover) |rp| {

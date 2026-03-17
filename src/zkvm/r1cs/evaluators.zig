@@ -576,7 +576,20 @@ fn compactFromFieldWitness(comptime F: type, witness: []const F) CompactWitness 
     const rd_write = witness[comptime I.RdWriteValue.toIndex()].toU64();
     const left_lookup = witness[comptime I.LeftLookupOperand.toIndex()].toU64();
     const left_input = witness[comptime I.LeftInstructionInput.toIndex()].toU64();
-    const right_input = witness[comptime I.RightInstructionInput.toIndex()].toU64();
+    // Extract right_input as i128 to handle field-negative values (e.g., ANDI with -8)
+    const right_input_f = witness[comptime I.RightInstructionInput.toIndex()];
+    const right_input_std = right_input_f.fromMontgomery();
+    const right_input_i128: i128 = blk_ri: {
+        if (right_input_std.limbs[1] == 0 and right_input_std.limbs[2] == 0 and right_input_std.limbs[3] == 0) {
+            break :blk_ri @as(i128, right_input_std.limbs[0]);
+        }
+        const neg_ri = F.zero().sub(right_input_f);
+        const neg_ri_std = neg_ri.fromMontgomery();
+        if (neg_ri_std.limbs[1] == 0 and neg_ri_std.limbs[2] == 0 and neg_ri_std.limbs[3] == 0) {
+            break :blk_ri -@as(i128, neg_ri_std.limbs[0]);
+        }
+        break :blk_ri @as(i128, right_input_std.limbs[0]) | (@as(i128, right_input_std.limbs[1]) << 64);
+    };
     const lookup_out = witness[comptime I.LookupOutput.toIndex()].toU64();
     const next_upc = witness[comptime I.NextUnexpandedPC.toIndex()].toU64();
     const pc = witness[comptime I.PC.toIndex()].toU64();
@@ -587,15 +600,47 @@ fn compactFromFieldWitness(comptime F: type, witness: []const F) CompactWitness 
 
     // For second group: values that may be > u64
     // RightLookupOperand and Product can be u128/i128
-    // We need to extract them properly. toU64() only gets limb[0].
-    // For values > u64, use toBytes and reconstruct.
+    // Extract RightLookupOperand as S192, handling field-negative values.
+    // Field-negative values (p-k) arise when the operand is a negative immediate (e.g., ANDI -8).
+    // We detect sign by checking if the standard form fits in 128 bits.
     const right_lookup_f = witness[comptime I.RightLookupOperand.toIndex()];
     const right_lookup_std = right_lookup_f.fromMontgomery();
-    const right_lookup_u128: u128 = @as(u128, right_lookup_std.limbs[0]) | (@as(u128, right_lookup_std.limbs[1]) << 64);
+    const S192 = field_mod.S192;
+    const right_lookup_s192: S192 = blk_rl: {
+        if (right_lookup_std.limbs[2] == 0 and right_lookup_std.limbs[3] == 0) {
+            // Positive value fits in 128 bits
+            const val = @as(u128, right_lookup_std.limbs[0]) | (@as(u128, right_lookup_std.limbs[1]) << 64);
+            break :blk_rl S192.fromU128(val);
+        }
+        // Field-negative: negate to get magnitude, then represent as negative S192
+        const neg = F.zero().sub(right_lookup_f);
+        const neg_std = neg.fromMontgomery();
+        if (neg_std.limbs[2] == 0 and neg_std.limbs[3] == 0) {
+            const neg_val = @as(u128, neg_std.limbs[0]) | (@as(u128, neg_std.limbs[1]) << 64);
+            break :blk_rl S192.fromU128(neg_val).neg();
+        }
+        // Fallback: use lower 128 bits (shouldn't happen for valid R1CS values)
+        const val = @as(u128, right_lookup_std.limbs[0]) | (@as(u128, right_lookup_std.limbs[1]) << 64);
+        break :blk_rl S192.fromU128(val);
+    };
 
+    // Extract Product as S192 with same sign-detection
     const product_f = witness[comptime I.Product.toIndex()];
     const product_std = product_f.fromMontgomery();
-    const product_u128: u128 = @as(u128, product_std.limbs[0]) | (@as(u128, product_std.limbs[1]) << 64);
+    const product_s192: S192 = blk_pr: {
+        if (product_std.limbs[2] == 0 and product_std.limbs[3] == 0) {
+            const val = @as(u128, product_std.limbs[0]) | (@as(u128, product_std.limbs[1]) << 64);
+            break :blk_pr S192.fromU128(val);
+        }
+        const neg = F.zero().sub(product_f);
+        const neg_std = neg.fromMontgomery();
+        if (neg_std.limbs[2] == 0 and neg_std.limbs[3] == 0) {
+            const neg_val = @as(u128, neg_std.limbs[0]) | (@as(u128, neg_std.limbs[1]) << 64);
+            break :blk_pr S192.fromU128(neg_val).neg();
+        }
+        const val = @as(u128, product_std.limbs[0]) | (@as(u128, product_std.limbs[1]) << 64);
+        break :blk_pr S192.fromU128(val);
+    };
 
     // Imm has two possible representations depending on instruction type:
     // 1. F.fromU64(sign_extended_u64) for ADDI/JALR: limbs = [large_u64, 0, 0, 0]
@@ -635,19 +680,18 @@ fn compactFromFieldWitness(comptime F: type, witness: []const F) CompactWitness 
     // Second group Bz as S192 (signed 192-bit integers).
     // Uses exact S192 arithmetic instead of wrapping i128 to avoid sign truncation
     // for values where u128 > 2^127 (e.g., RightLookupOperand, Product).
-    const S192 = field_mod.S192;
-    const rl = S192.fromU128(right_lookup_u128);
+    const rl = right_lookup_s192;
     cw.bz_second = .{
         // SG0: RamAddress - Rs1 - Imm
         S192.fromU64(ram_addr).sub(S192.fromU64(rs1)).sub(S192.fromI128(imm)),
         // SG1: RightLookup - LeftInput - RightInput
-        rl.sub(S192.fromU64(left_input)).sub(S192.fromU64(right_input)),
+        rl.sub(S192.fromU64(left_input)).sub(S192.fromI128(right_input_i128)),
         // SG2: RightLookup - LeftInput + RightInput - 2^64
-        rl.sub(S192.fromU64(left_input)).add(S192.fromU64(right_input)).sub(S192.fromU128(@as(u128, 1) << 64)),
+        rl.sub(S192.fromU64(left_input)).add(S192.fromI128(right_input_i128)).sub(S192.fromU128(@as(u128, 1) << 64)),
         // SG3: RightLookup - Product
-        rl.sub(S192.fromU128(product_u128)),
+        rl.sub(product_s192),
         // SG4: RightLookup - RightInput
-        rl.sub(S192.fromU64(right_input)),
+        rl.sub(S192.fromI128(right_input_i128)),
         // SG5: RdWrite - LookupOutput
         S192.fromU64(rd_write).sub(S192.fromU64(lookup_out)),
         // SG6: RdWrite - UPC - 4 + 2*IsCompressed

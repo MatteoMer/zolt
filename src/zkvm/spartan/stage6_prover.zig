@@ -649,6 +649,232 @@ fn populateVirtualSRAIEntry(
     entry.is_first_in_sequence = is_first_in_sequence;
 }
 
+/// Populate a BytecodeEntry for a VirtualPow2 instruction.
+/// VirtualPow2 computes 2^(rs1 % 64). It uses AddOperands + WriteLookupOutputToRD,
+/// lookup table = Pow2 (22), NOT interleaved (AddOperands set).
+fn populateVirtualPow2Entry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+    entry.rd = rd;
+    entry.rs1 = rs1;
+    entry.rs2 = 255;
+    entry.opcode = 0x2B; // Virtual instruction opcode (same space as VirtualMULI)
+    entry.funct3 = 1; // funct3=1 distinguishes VirtualPow2 from VirtualMULI (funct3=0)
+    entry.circuit_flags = [_]bool{false} ** 14;
+    entry.instruction_flags = [_]bool{false} ** 7;
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining != 0)
+        cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    if (is_first_in_sequence)
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+    if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    entry.lookup_table_index = 22; // Pow2
+    entry.is_interleaved = false; // AddOperands set → NOT interleaved
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for a VirtualShiftRightBitmask instruction.
+/// Computes bitmask for right shift from register value.
+/// Uses AddOperands + WriteLookupOutputToRD, lookup table = ShiftRightBitmask (24).
+fn populateVirtualShiftRightBitmaskEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+    entry.rd = rd;
+    entry.rs1 = rs1;
+    entry.rs2 = 255;
+    entry.opcode = 0x2B;
+    entry.funct3 = 2; // funct3=2 for VirtualShiftRightBitmask
+    entry.circuit_flags = [_]bool{false} ** 14;
+    entry.instruction_flags = [_]bool{false} ** 7;
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining != 0)
+        cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    if (is_first_in_sequence)
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+    if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    entry.lookup_table_index = 24; // ShiftRightBitmask
+    entry.is_interleaved = false; // AddOperands set
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for VirtualAssertHalfwordAlignment.
+/// Assert that (rs1 + imm) is halfword-aligned (divisible by 2).
+/// Uses Assert + AddOperands, lookup table = HalfwordAlignment (18).
+fn populateVirtualAssertHalfwordAlignmentEntry(
+    entry: *BytecodeEntry,
+    rs1: u8,
+    imm: i64,
+    elf_address: u64,
+    virtual_sequence_remaining: u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = imm;
+    entry.rd = 255; // Assert: no destination register
+    entry.rs1 = rs1;
+    entry.rs2 = 255;
+    entry.opcode = 0x22; // Virtual assert opcode space
+    entry.funct3 = 2; // funct3=2 for HalfwordAlignment
+    entry.circuit_flags = [_]bool{false} ** 14;
+    entry.instruction_flags = [_]bool{false} ** 7;
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.Assert)] = true;
+    cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+    cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining != 0)
+        cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    if (is_first_in_sequence)
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+    // Assert: no rd, so IsRdNotZero = false
+    entry.lookup_table_index = 18; // HalfwordAlignment
+    entry.is_interleaved = false; // AddOperands set
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for VirtualAssertWordAlignment.
+/// Assert that (rs1 + imm) is word-aligned (divisible by 4).
+/// Uses Assert + AddOperands, lookup table = WordAlignment (19).
+fn populateVirtualAssertWordAlignmentEntry(
+    entry: *BytecodeEntry,
+    rs1: u8,
+    imm: i64,
+    elf_address: u64,
+    virtual_sequence_remaining: u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = imm;
+    entry.rd = 255;
+    entry.rs1 = rs1;
+    entry.rs2 = 255;
+    entry.opcode = 0x22;
+    entry.funct3 = 3; // funct3=3 for WordAlignment
+    entry.circuit_flags = [_]bool{false} ** 14;
+    entry.instruction_flags = [_]bool{false} ** 7;
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.Assert)] = true;
+    cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+    cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining != 0)
+        cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    if (is_first_in_sequence)
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+    entry.lookup_table_index = 19; // WordAlignment
+    entry.is_interleaved = false; // AddOperands set
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for VirtualSRL (R-type, register-based logical right shift).
+/// Uses WriteLookupOutputToRD ONLY (NO AddOperands), lookup table = VirtualSRL (26).
+/// Interleaved (no arithmetic combination of operands).
+fn populateVirtualSRLEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    rs2: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+    entry.rd = rd;
+    entry.rs1 = rs1;
+    entry.rs2 = rs2;
+    entry.opcode = 0x5B;
+    entry.funct3 = 0; // Same as VirtualSRLI
+    entry.circuit_flags = [_]bool{false} ** 14;
+    entry.instruction_flags = [_]bool{false} ** 7;
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining != 0)
+        cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    if (is_first_in_sequence)
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+    if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    entry.lookup_table_index = 26; // VirtualSRL
+    entry.is_interleaved = true; // No Add/Sub/Mul flags
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for VirtualSRA (R-type, register-based arithmetic right shift).
+/// Uses WriteLookupOutputToRD ONLY (NO AddOperands), lookup table = VirtualSRA (27).
+fn populateVirtualSRAEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    rs2: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+    entry.rd = rd;
+    entry.rs1 = rs1;
+    entry.rs2 = rs2;
+    entry.opcode = 0x5B;
+    entry.funct3 = 5; // Same as VirtualSRAI
+    entry.circuit_flags = [_]bool{false} ** 14;
+    entry.instruction_flags = [_]bool{false} ** 7;
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining != 0)
+        cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    if (is_first_in_sequence)
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+    if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    entry.lookup_table_index = 27; // VirtualSRA
+    entry.is_interleaved = true;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
 /// Populate a BytecodeEntry from a raw 32-bit instruction word and ELF address.
 /// This sets all static properties (flags, registers, immediates, lookup table)
 /// from the instruction encoding alone, without any trace-specific data.
@@ -1117,6 +1343,554 @@ pub fn buildBytecodeEntries(
                     const output_reg = if (raw_funct3 == 6) t3 else a2;
                     populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
                     entries[k].rs1 = output_reg;
+                } else if (raw_opcode == 0x13 and raw_funct3 == 5 and (instr_word >> 30) & 1 == 1) {
+                    // SRAI → VirtualSRAI (single entry, standalone virtual sequence)
+                    const shamt: u7 = @truncate((instr_word >> 20) & 0x3F);
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shamt))) - 1;
+                    const bitmask: u64 = @truncate(ones << shamt);
+                    populateVirtualSRAIEntry(&entries[k], raw_rd, raw_rs1, addr, bitmask, 0, true);
+                    if (is_compressed) {
+                        entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                    }
+                } else if (raw_opcode == 0x33 and raw_funct3 == 1 and (instr_word >> 25) == 0) {
+                    // SLL → VirtualPow2 + MUL (2 entries)
+                    // k = base_pc + 1: MUL at k (last, vsr=0), VirtualPow2 at k-1 (first, vsr=1)
+                    const raw_rs2: u8 = @truncate((instr_word >> 20) & 0x1F);
+                    const v0: u8 = 40;
+                    // k: MUL(rd, rs1, v0) — last step (vsr=0)
+                    populateVirtualRTypeEntry(&entries[k], raw_rd, raw_rs1, v0, addr, 0, false, 0x33, 0, 0x01);
+                    entries[k].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                    if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                    // k-1: VirtualPow2(v0, rs2, 0) — first step (vsr=1)
+                    if (k >= 1) {
+                        populateVirtualPow2Entry(&entries[k - 1], v0, raw_rs2, addr, 1, true);
+                    }
+                } else if (raw_opcode == 0x33 and raw_funct3 == 5 and (instr_word >> 25) == 0) {
+                    // SRL → VirtualShiftRightBitmask + VirtualSRL (2 entries)
+                    const raw_rs2: u8 = @truncate((instr_word >> 20) & 0x1F);
+                    const v0: u8 = 40;
+                    // k: VirtualSRL(rd, rs1, v0) — last (vsr=0)
+                    populateVirtualSRLEntry(&entries[k], raw_rd, raw_rs1, v0, addr, 0, false);
+                    entries[k].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                    if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                    // k-1: VirtualShiftRightBitmask(v0, rs2, 0) — first (vsr=1)
+                    if (k >= 1) {
+                        populateVirtualShiftRightBitmaskEntry(&entries[k - 1], v0, raw_rs2, addr, 1, true);
+                    }
+                } else if (raw_opcode == 0x33 and raw_funct3 == 5 and (instr_word >> 25) == 0x20) {
+                    // SRA → VirtualShiftRightBitmask + VirtualSRA (2 entries)
+                    const raw_rs2: u8 = @truncate((instr_word >> 20) & 0x1F);
+                    const v0: u8 = 40;
+                    // k: VirtualSRA(rd, rs1, v0) — last (vsr=0)
+                    populateVirtualSRAEntry(&entries[k], raw_rd, raw_rs1, v0, addr, 0, false);
+                    entries[k].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                    if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                    // k-1: VirtualShiftRightBitmask(v0, rs2, 0) — first (vsr=1)
+                    if (k >= 1) {
+                        populateVirtualShiftRightBitmaskEntry(&entries[k - 1], v0, raw_rs2, addr, 1, true);
+                    }
+                } else if (raw_opcode == 0x03 and raw_funct3 != 3) {
+                    // Sub-word loads: LB(f3=0), LH(f3=1), LW(f3=2), LBU(f3=4), LHU(f3=5), LWU(f3=6)
+                    // LD (f3=3) is NOT expanded
+                    const raw_rs2_unused: u8 = @truncate((instr_word >> 20) & 0x1F);
+                    _ = raw_rs2_unused;
+                    const raw_imm: i64 = @as(i64, @as(i32, @bitCast(instr_word)) >> 20);
+                    const v0: u8 = 40;
+                    const v1: u8 = 41;
+                    const v2: u8 = 42;
+                    switch (raw_funct3) {
+                        0, 4 => {
+                            // LB (f3=0) / LBU (f3=4) → 8 entries
+                            // k = base_pc + 7
+                            const shift_56: u7 = 56;
+                            const ones_56: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_56))) - 1;
+                            const bitmask_56: u64 = @truncate(ones_56 << shift_56);
+                            // k: VirtualSRAI/VirtualSRLI (last, vsr=0)
+                            if (raw_funct3 == 0) {
+                                populateVirtualSRAIEntry(&entries[k], raw_rd, v1, addr, bitmask_56, 0, false);
+                            } else {
+                                populateVirtualSRLIEntry(&entries[k], raw_rd, v1, addr, bitmask_56, 0, false);
+                            }
+                            if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                            // k-1: MUL(v1, v1, v2) (vsr=1)
+                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v1, v1, v2, addr, 1, false, 0x33, 0, 0x01);
+                            // k-2: VirtualPow2(v2, v0, 0) (vsr=2)
+                            if (k >= 2) populateVirtualPow2Entry(&entries[k - 2], v2, v0, addr, 2, false);
+                            // k-3: VirtualMULI(v0, v0, 8) (vsr=3)
+                            if (k >= 3) populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            // k-4: XORI(v0, v0, 7) (vsr=4)
+                            if (k >= 4) {
+                                const xori_instr: u32 = (7 << 20) | (@as(u32, v0 & 0x1F) << 15) | (4 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 4], xori_instr, addr);
+                                entries[k - 4].rd = v0;
+                                entries[k - 4].rs1 = v0;
+                                entries[k - 4].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 4].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 4].virtual_sequence_remaining = 4;
+                                entries[k - 4].is_first_in_sequence = false;
+                            }
+                            // k-5: LD(v1, v1, 0) (vsr=5)
+                            if (k >= 5) {
+                                const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v1 & 0x1F) << 7) | 0x03;
+                                populateEntryFromInstruction(&entries[k - 5], ld_instr, addr);
+                                entries[k - 5].rd = v1;
+                                entries[k - 5].rs1 = v1;
+                                entries[k - 5].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 5].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 5].virtual_sequence_remaining = 5;
+                                entries[k - 5].is_first_in_sequence = false;
+                            }
+                            // k-6: ANDI(v1, v0, -8) (vsr=6)
+                            if (k >= 6) {
+                                const andi_instr: u32 = (@as(u32, @bitCast(@as(i32, -8))) & 0xFFF) << 20 | (@as(u32, v0 & 0x1F) << 15) | (7 << 12) | (@as(u32, v1 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 6], andi_instr, addr);
+                                entries[k - 6].rd = v1;
+                                entries[k - 6].rs1 = v0;
+                                entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 6].virtual_sequence_remaining = 6;
+                                entries[k - 6].is_first_in_sequence = false;
+                            }
+                            // k-7: ADDI(v0, rs1, imm) (vsr=7, first)
+                            if (k >= 7) {
+                                const imm_bits: u32 = @bitCast(@as(i32, @truncate(raw_imm)));
+                                const addi_instr: u32 = (imm_bits & 0xFFF) << 20 | (@as(u32, raw_rs1 & 0x1F) << 15) | (0 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 7], addi_instr, addr);
+                                entries[k - 7].rd = v0;
+                                entries[k - 7].rs1 = raw_rs1;
+                                entries[k - 7].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 7].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 7].circuit_flags[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+                                entries[k - 7].virtual_sequence_remaining = 7;
+                                entries[k - 7].is_first_in_sequence = true;
+                            }
+                        },
+                        1, 5 => {
+                            // LH (f3=1) / LHU (f3=5) → 9 entries
+                            // k = base_pc + 8
+                            const shift_48: u7 = 48;
+                            const ones_48: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_48))) - 1;
+                            const bitmask_48: u64 = @truncate(ones_48 << shift_48);
+                            // k: VirtualSRAI/VirtualSRLI (last, vsr=0)
+                            if (raw_funct3 == 1) {
+                                populateVirtualSRAIEntry(&entries[k], raw_rd, v1, addr, bitmask_48, 0, false);
+                            } else {
+                                populateVirtualSRLIEntry(&entries[k], raw_rd, v1, addr, bitmask_48, 0, false);
+                            }
+                            if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                            // k-1: MUL(v1, v1, v2) (vsr=1)
+                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v1, v1, v2, addr, 1, false, 0x33, 0, 0x01);
+                            // k-2: VirtualPow2(v2, v0, 0) (vsr=2)
+                            if (k >= 2) populateVirtualPow2Entry(&entries[k - 2], v2, v0, addr, 2, false);
+                            // k-3: VirtualMULI(v0, v0, 8) (vsr=3)
+                            if (k >= 3) populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            // k-4: XORI(v0, v0, 6) (vsr=4)
+                            if (k >= 4) {
+                                const xori_instr: u32 = (6 << 20) | (@as(u32, v0 & 0x1F) << 15) | (4 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 4], xori_instr, addr);
+                                entries[k - 4].rd = v0;
+                                entries[k - 4].rs1 = v0;
+                                entries[k - 4].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 4].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 4].virtual_sequence_remaining = 4;
+                                entries[k - 4].is_first_in_sequence = false;
+                            }
+                            // k-5: LD(v1, v1, 0) (vsr=5)
+                            if (k >= 5) {
+                                const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v1 & 0x1F) << 7) | 0x03;
+                                populateEntryFromInstruction(&entries[k - 5], ld_instr, addr);
+                                entries[k - 5].rd = v1;
+                                entries[k - 5].rs1 = v1;
+                                entries[k - 5].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 5].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 5].virtual_sequence_remaining = 5;
+                                entries[k - 5].is_first_in_sequence = false;
+                            }
+                            // k-6: ANDI(v1, v0, -8) (vsr=6)
+                            if (k >= 6) {
+                                const andi_instr: u32 = (@as(u32, @bitCast(@as(i32, -8))) & 0xFFF) << 20 | (@as(u32, v0 & 0x1F) << 15) | (7 << 12) | (@as(u32, v1 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 6], andi_instr, addr);
+                                entries[k - 6].rd = v1;
+                                entries[k - 6].rs1 = v0;
+                                entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 6].virtual_sequence_remaining = 6;
+                                entries[k - 6].is_first_in_sequence = false;
+                            }
+                            // k-7: ADDI(v0, rs1, imm) (vsr=7)
+                            if (k >= 7) {
+                                const imm_bits: u32 = @bitCast(@as(i32, @truncate(raw_imm)));
+                                const addi_instr: u32 = (imm_bits & 0xFFF) << 20 | (@as(u32, raw_rs1 & 0x1F) << 15) | (0 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 7], addi_instr, addr);
+                                entries[k - 7].rd = v0;
+                                entries[k - 7].rs1 = raw_rs1;
+                                entries[k - 7].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 7].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 7].virtual_sequence_remaining = 7;
+                                entries[k - 7].is_first_in_sequence = false;
+                            }
+                            // k-8: VirtualAssertHalfwordAlignment(rs1, imm) (vsr=8, first)
+                            if (k >= 8) {
+                                populateVirtualAssertHalfwordAlignmentEntry(&entries[k - 8], raw_rs1, raw_imm, addr, 8, true);
+                            }
+                        },
+                        2 => {
+                            // LW → 8 entries (with SRL, not SLL)
+                            // k = base_pc + 7
+                            // k: VirtualSignExtendWord(rd, v1, 0) (vsr=0)
+                            populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
+                            entries[k].rs1 = v1;
+                            // k-1: VirtualSRL(v1, v1, v2) (vsr=1)
+                            if (k >= 1) populateVirtualSRLEntry(&entries[k - 1], v1, v1, v2, addr, 1, false);
+                            // k-2: VirtualShiftRightBitmask(v2, v0, 0) (vsr=2)
+                            if (k >= 2) populateVirtualShiftRightBitmaskEntry(&entries[k - 2], v2, v0, addr, 2, false);
+                            // k-3: VirtualMULI(v0, v0, 8) (vsr=3)
+                            if (k >= 3) populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            // k-4: LD(v1, v1, 0) (vsr=4)
+                            if (k >= 4) {
+                                const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v1 & 0x1F) << 7) | 0x03;
+                                populateEntryFromInstruction(&entries[k - 4], ld_instr, addr);
+                                entries[k - 4].rd = v1;
+                                entries[k - 4].rs1 = v1;
+                                entries[k - 4].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 4].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 4].virtual_sequence_remaining = 4;
+                                entries[k - 4].is_first_in_sequence = false;
+                            }
+                            // k-5: ANDI(v1, v0, -8) (vsr=5)
+                            if (k >= 5) {
+                                const andi_instr: u32 = (@as(u32, @bitCast(@as(i32, -8))) & 0xFFF) << 20 | (@as(u32, v0 & 0x1F) << 15) | (7 << 12) | (@as(u32, v1 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 5], andi_instr, addr);
+                                entries[k - 5].rd = v1;
+                                entries[k - 5].rs1 = v0;
+                                entries[k - 5].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 5].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 5].virtual_sequence_remaining = 5;
+                                entries[k - 5].is_first_in_sequence = false;
+                            }
+                            // k-6: ADDI(v0, rs1, imm) (vsr=6)
+                            if (k >= 6) {
+                                const imm_bits: u32 = @bitCast(@as(i32, @truncate(raw_imm)));
+                                const addi_instr: u32 = (imm_bits & 0xFFF) << 20 | (@as(u32, raw_rs1 & 0x1F) << 15) | (0 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 6], addi_instr, addr);
+                                entries[k - 6].rd = v0;
+                                entries[k - 6].rs1 = raw_rs1;
+                                entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 6].virtual_sequence_remaining = 6;
+                                entries[k - 6].is_first_in_sequence = false;
+                            }
+                            // k-7: VirtualAssertWordAlignment(rs1, imm) (vsr=7, first)
+                            if (k >= 7) {
+                                populateVirtualAssertWordAlignmentEntry(&entries[k - 7], raw_rs1, raw_imm, addr, 7, true);
+                            }
+                        },
+                        6 => {
+                            // LWU → 9 entries (with SLL then SRLI)
+                            // k = base_pc + 8
+                            const shift_32: u7 = 32;
+                            const ones_32: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_32))) - 1;
+                            const bitmask_32: u64 = @truncate(ones_32 << shift_32);
+                            // k: VirtualSRLI(rd, v1, bitmask_32) (vsr=0)
+                            populateVirtualSRLIEntry(&entries[k], raw_rd, v1, addr, bitmask_32, 0, false);
+                            if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                            // k-1: MUL(v1, v1, v2) (vsr=1)
+                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v1, v1, v2, addr, 1, false, 0x33, 0, 0x01);
+                            // k-2: VirtualPow2(v2, v0, 0) (vsr=2)
+                            if (k >= 2) populateVirtualPow2Entry(&entries[k - 2], v2, v0, addr, 2, false);
+                            // k-3: VirtualMULI(v0, v0, 8) (vsr=3)
+                            if (k >= 3) populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            // k-4: XORI(v0, v0, 4) (vsr=4)
+                            if (k >= 4) {
+                                const xori_instr: u32 = (4 << 20) | (@as(u32, v0 & 0x1F) << 15) | (4 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 4], xori_instr, addr);
+                                entries[k - 4].rd = v0;
+                                entries[k - 4].rs1 = v0;
+                                entries[k - 4].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 4].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 4].virtual_sequence_remaining = 4;
+                                entries[k - 4].is_first_in_sequence = false;
+                            }
+                            // k-5: LD(v1, v1, 0) (vsr=5)
+                            if (k >= 5) {
+                                const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v1 & 0x1F) << 7) | 0x03;
+                                populateEntryFromInstruction(&entries[k - 5], ld_instr, addr);
+                                entries[k - 5].rd = v1;
+                                entries[k - 5].rs1 = v1;
+                                entries[k - 5].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 5].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 5].virtual_sequence_remaining = 5;
+                                entries[k - 5].is_first_in_sequence = false;
+                            }
+                            // k-6: ANDI(v1, v0, -8) (vsr=6)
+                            if (k >= 6) {
+                                const andi_instr: u32 = (@as(u32, @bitCast(@as(i32, -8))) & 0xFFF) << 20 | (@as(u32, v0 & 0x1F) << 15) | (7 << 12) | (@as(u32, v1 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 6], andi_instr, addr);
+                                entries[k - 6].rd = v1;
+                                entries[k - 6].rs1 = v0;
+                                entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 6].virtual_sequence_remaining = 6;
+                                entries[k - 6].is_first_in_sequence = false;
+                            }
+                            // k-7: ADDI(v0, rs1, imm) (vsr=7)
+                            if (k >= 7) {
+                                const imm_bits: u32 = @bitCast(@as(i32, @truncate(raw_imm)));
+                                const addi_instr: u32 = (imm_bits & 0xFFF) << 20 | (@as(u32, raw_rs1 & 0x1F) << 15) | (0 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 7], addi_instr, addr);
+                                entries[k - 7].rd = v0;
+                                entries[k - 7].rs1 = raw_rs1;
+                                entries[k - 7].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 7].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 7].virtual_sequence_remaining = 7;
+                                entries[k - 7].is_first_in_sequence = false;
+                            }
+                            // k-8: VirtualAssertWordAlignment(rs1, imm) (vsr=8, first)
+                            if (k >= 8) {
+                                populateVirtualAssertWordAlignmentEntry(&entries[k - 8], raw_rs1, raw_imm, addr, 8, true);
+                            }
+                        },
+                        else => {
+                            // LD or unknown — pass through
+                            populateEntryFromInstruction(&entries[k], instr_word, addr);
+                            if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                        },
+                    }
+                } else if (raw_opcode == 0x23 and raw_funct3 != 3) {
+                    // Sub-word stores: SB(f3=0), SH(f3=1), SW(f3=2)
+                    // SD (f3=3) is NOT expanded
+                    const raw_rs2: u8 = @truncate((instr_word >> 20) & 0x1F);
+                    // S-type immediate: imm[11:5] = instr[31:25], imm[4:0] = instr[11:7]
+                    const raw_imm: i64 = @as(i64, @as(i32, @bitCast(instr_word)) >> 20) & ~@as(i64, 0x1F) | @as(i64, (instr_word >> 7) & 0x1F);
+                    const v0: u8 = 40;
+                    const v1: u8 = 41;
+                    const v2: u8 = 42;
+                    const v3: u8 = 43;
+                    const v4: u8 = 44;
+                    const v5: u8 = 45;
+                    switch (raw_funct3) {
+                        0 => {
+                            // SB → 13 entries. k = base_pc + 12
+                            // k: SD(v1, v2, 0) (vsr=0)
+                            {
+                                const sd_instr: u32 = (@as(u32, v2 & 0x1F) << 20) | (@as(u32, v1 & 0x1F) << 15) | (3 << 12) | 0x23;
+                                populateEntryFromInstruction(&entries[k], sd_instr, addr);
+                                entries[k].rs1 = v1;
+                                entries[k].rs2 = v2;
+                                entries[k].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k].virtual_sequence_remaining = 0;
+                                if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                            }
+                            // k-1: XOR(v2, v2, v3) (vsr=1)
+                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v2, v2, v3, addr, 1, false, 0x33, 4, 0);
+                            // k-2: AND(v3, v3, v0) (vsr=2)
+                            if (k >= 2) populateVirtualRTypeEntry(&entries[k - 2], v3, v3, v0, addr, 2, false, 0x33, 7, 0);
+                            // k-3: XOR(v3, v2, v3) (vsr=3)
+                            if (k >= 3) populateVirtualRTypeEntry(&entries[k - 3], v3, v2, v3, addr, 3, false, 0x33, 4, 0);
+                            // k-4: MUL(v3, rs2, v5) (vsr=4) — from SLL(v3, rs2, v3) step 2
+                            if (k >= 4) populateVirtualRTypeEntry(&entries[k - 4], v3, raw_rs2, v5, addr, 4, false, 0x33, 0, 0x01);
+                            // k-5: VirtualPow2(v5, v3, 0) (vsr=5) — from SLL step 1
+                            if (k >= 5) populateVirtualPow2Entry(&entries[k - 5], v5, v3, addr, 5, false);
+                            // k-6: MUL(v0, v0, v4) (vsr=6) — from SLL(v0, v0, v3) step 2
+                            if (k >= 6) populateVirtualRTypeEntry(&entries[k - 6], v0, v0, v4, addr, 6, false, 0x33, 0, 0x01);
+                            // k-7: VirtualPow2(v4, v3, 0) (vsr=7) — from SLL step 1
+                            if (k >= 7) populateVirtualPow2Entry(&entries[k - 7], v4, v3, addr, 7, false);
+                            // k-8: LUI(v0, 0xff) (vsr=8)
+                            if (k >= 8) {
+                                const lui_instr: u32 = (0xff << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x37;
+                                populateEntryFromInstruction(&entries[k - 8], lui_instr, addr);
+                                entries[k - 8].rd = v0;
+                                entries[k - 8].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 8].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 8].virtual_sequence_remaining = 8;
+                                entries[k - 8].is_first_in_sequence = false;
+                            }
+                            // k-9: VirtualMULI(v3, v0, 8) (vsr=9)
+                            if (k >= 9) populateVirtualMULIEntry(&entries[k - 9], v3, v0, addr, 3, 9, false);
+                            // k-10: LD(v2, v1, 0) (vsr=10)
+                            if (k >= 10) {
+                                const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v2 & 0x1F) << 7) | 0x03;
+                                populateEntryFromInstruction(&entries[k - 10], ld_instr, addr);
+                                entries[k - 10].rd = v2;
+                                entries[k - 10].rs1 = v1;
+                                entries[k - 10].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 10].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 10].virtual_sequence_remaining = 10;
+                                entries[k - 10].is_first_in_sequence = false;
+                            }
+                            // k-11: ANDI(v1, v0, -8) (vsr=11)
+                            if (k >= 11) {
+                                const andi_instr: u32 = (@as(u32, @bitCast(@as(i32, -8))) & 0xFFF) << 20 | (@as(u32, v0 & 0x1F) << 15) | (7 << 12) | (@as(u32, v1 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 11], andi_instr, addr);
+                                entries[k - 11].rd = v1;
+                                entries[k - 11].rs1 = v0;
+                                entries[k - 11].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 11].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 11].virtual_sequence_remaining = 11;
+                                entries[k - 11].is_first_in_sequence = false;
+                            }
+                            // k-12: ADDI(v0, rs1, imm) (vsr=12, first)
+                            if (k >= 12) {
+                                const imm_bits: u32 = @bitCast(@as(i32, @truncate(raw_imm)));
+                                const addi_instr: u32 = (imm_bits & 0xFFF) << 20 | (@as(u32, raw_rs1 & 0x1F) << 15) | (0 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 12], addi_instr, addr);
+                                entries[k - 12].rd = v0;
+                                entries[k - 12].rs1 = raw_rs1;
+                                entries[k - 12].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 12].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 12].circuit_flags[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+                                entries[k - 12].virtual_sequence_remaining = 12;
+                                entries[k - 12].is_first_in_sequence = true;
+                            }
+                        },
+                        1 => {
+                            // SH → 14 entries. k = base_pc + 13
+                            // Same as SB but with alignment assert + 0xffff mask
+                            // k: SD(v1, v2, 0) (vsr=0)
+                            {
+                                const sd_instr: u32 = (@as(u32, v2 & 0x1F) << 20) | (@as(u32, v1 & 0x1F) << 15) | (3 << 12) | 0x23;
+                                populateEntryFromInstruction(&entries[k], sd_instr, addr);
+                                entries[k].rs1 = v1;
+                                entries[k].rs2 = v2;
+                                entries[k].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k].virtual_sequence_remaining = 0;
+                                if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                            }
+                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v2, v2, v3, addr, 1, false, 0x33, 4, 0);
+                            if (k >= 2) populateVirtualRTypeEntry(&entries[k - 2], v3, v3, v0, addr, 2, false, 0x33, 7, 0);
+                            if (k >= 3) populateVirtualRTypeEntry(&entries[k - 3], v3, v2, v3, addr, 3, false, 0x33, 4, 0);
+                            if (k >= 4) populateVirtualRTypeEntry(&entries[k - 4], v3, raw_rs2, v5, addr, 4, false, 0x33, 0, 0x01);
+                            if (k >= 5) populateVirtualPow2Entry(&entries[k - 5], v5, v3, addr, 5, false);
+                            if (k >= 6) populateVirtualRTypeEntry(&entries[k - 6], v0, v0, v4, addr, 6, false, 0x33, 0, 0x01);
+                            if (k >= 7) populateVirtualPow2Entry(&entries[k - 7], v4, v3, addr, 7, false);
+                            // k-8: LUI(v0, 0xffff) (vsr=8)
+                            if (k >= 8) {
+                                const lui_instr: u32 = (0xffff << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x37;
+                                populateEntryFromInstruction(&entries[k - 8], lui_instr, addr);
+                                entries[k - 8].rd = v0;
+                                entries[k - 8].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 8].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 8].virtual_sequence_remaining = 8;
+                                entries[k - 8].is_first_in_sequence = false;
+                            }
+                            if (k >= 9) populateVirtualMULIEntry(&entries[k - 9], v3, v0, addr, 3, 9, false);
+                            // k-10: LD(v2, v1, 0) (vsr=10)
+                            if (k >= 10) {
+                                const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v2 & 0x1F) << 7) | 0x03;
+                                populateEntryFromInstruction(&entries[k - 10], ld_instr, addr);
+                                entries[k - 10].rd = v2;
+                                entries[k - 10].rs1 = v1;
+                                entries[k - 10].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 10].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 10].virtual_sequence_remaining = 10;
+                                entries[k - 10].is_first_in_sequence = false;
+                            }
+                            if (k >= 11) {
+                                const andi_instr: u32 = (@as(u32, @bitCast(@as(i32, -8))) & 0xFFF) << 20 | (@as(u32, v0 & 0x1F) << 15) | (7 << 12) | (@as(u32, v1 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 11], andi_instr, addr);
+                                entries[k - 11].rd = v1;
+                                entries[k - 11].rs1 = v0;
+                                entries[k - 11].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 11].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 11].virtual_sequence_remaining = 11;
+                                entries[k - 11].is_first_in_sequence = false;
+                            }
+                            if (k >= 12) {
+                                const imm_bits: u32 = @bitCast(@as(i32, @truncate(raw_imm)));
+                                const addi_instr: u32 = (imm_bits & 0xFFF) << 20 | (@as(u32, raw_rs1 & 0x1F) << 15) | (0 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 12], addi_instr, addr);
+                                entries[k - 12].rd = v0;
+                                entries[k - 12].rs1 = raw_rs1;
+                                entries[k - 12].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 12].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 12].virtual_sequence_remaining = 12;
+                                entries[k - 12].is_first_in_sequence = false;
+                            }
+                            // k-13: VirtualAssertHalfwordAlignment(rs1, imm) (vsr=13, first)
+                            if (k >= 13) {
+                                populateVirtualAssertHalfwordAlignmentEntry(&entries[k - 13], raw_rs1, raw_imm, addr, 13, true);
+                            }
+                        },
+                        2 => {
+                            // SW → 15 entries. k = base_pc + 14
+                            const shift_32: u7 = 32;
+                            const ones_32: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_32))) - 1;
+                            const bitmask_32: u64 = @truncate(ones_32 << shift_32);
+                            // k: SD(v1, v2, 0) (vsr=0)
+                            {
+                                const sd_instr: u32 = (@as(u32, v2 & 0x1F) << 20) | (@as(u32, v1 & 0x1F) << 15) | (3 << 12) | 0x23;
+                                populateEntryFromInstruction(&entries[k], sd_instr, addr);
+                                entries[k].rs1 = v1;
+                                entries[k].rs2 = v2;
+                                entries[k].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k].virtual_sequence_remaining = 0;
+                                if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                            }
+                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v2, v2, v0, addr, 1, false, 0x33, 4, 0);
+                            if (k >= 2) populateVirtualRTypeEntry(&entries[k - 2], v0, v0, v3, addr, 2, false, 0x33, 7, 0);
+                            if (k >= 3) populateVirtualRTypeEntry(&entries[k - 3], v0, v2, v0, addr, 3, false, 0x33, 4, 0);
+                            if (k >= 4) populateVirtualRTypeEntry(&entries[k - 4], v0, raw_rs2, v5, addr, 4, false, 0x33, 0, 0x01);
+                            if (k >= 5) populateVirtualPow2Entry(&entries[k - 5], v5, v0, addr, 5, false);
+                            if (k >= 6) populateVirtualRTypeEntry(&entries[k - 6], v3, v3, v4, addr, 6, false, 0x33, 0, 0x01);
+                            if (k >= 7) populateVirtualPow2Entry(&entries[k - 7], v4, v0, addr, 7, false);
+                            // k-8: VirtualSRLI(v3, v3, bitmask_32) (vsr=8)
+                            if (k >= 8) populateVirtualSRLIEntry(&entries[k - 8], v3, v3, addr, bitmask_32, 8, false);
+                            // k-9: ORI(v3, x0, -1) (vsr=9)
+                            if (k >= 9) {
+                                const ori_instr: u32 = (@as(u32, @bitCast(@as(i32, -1))) & 0xFFF) << 20 | (0 << 15) | (6 << 12) | (@as(u32, v3 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 9], ori_instr, addr);
+                                entries[k - 9].rd = v3;
+                                entries[k - 9].rs1 = 0;
+                                entries[k - 9].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 9].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 9].virtual_sequence_remaining = 9;
+                                entries[k - 9].is_first_in_sequence = false;
+                            }
+                            // k-10: VirtualMULI(v0, v0, 8) (vsr=10)
+                            if (k >= 10) populateVirtualMULIEntry(&entries[k - 10], v0, v0, addr, 3, 10, false);
+                            // k-11: LD(v2, v1, 0) (vsr=11)
+                            if (k >= 11) {
+                                const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v2 & 0x1F) << 7) | 0x03;
+                                populateEntryFromInstruction(&entries[k - 11], ld_instr, addr);
+                                entries[k - 11].rd = v2;
+                                entries[k - 11].rs1 = v1;
+                                entries[k - 11].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 11].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 11].virtual_sequence_remaining = 11;
+                                entries[k - 11].is_first_in_sequence = false;
+                            }
+                            if (k >= 12) {
+                                const andi_instr: u32 = (@as(u32, @bitCast(@as(i32, -8))) & 0xFFF) << 20 | (@as(u32, v0 & 0x1F) << 15) | (7 << 12) | (@as(u32, v1 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 12], andi_instr, addr);
+                                entries[k - 12].rd = v1;
+                                entries[k - 12].rs1 = v0;
+                                entries[k - 12].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 12].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 12].virtual_sequence_remaining = 12;
+                                entries[k - 12].is_first_in_sequence = false;
+                            }
+                            if (k >= 13) {
+                                const imm_bits: u32 = @bitCast(@as(i32, @truncate(raw_imm)));
+                                const addi_instr: u32 = (imm_bits & 0xFFF) << 20 | (@as(u32, raw_rs1 & 0x1F) << 15) | (0 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
+                                populateEntryFromInstruction(&entries[k - 13], addi_instr, addr);
+                                entries[k - 13].rd = v0;
+                                entries[k - 13].rs1 = raw_rs1;
+                                entries[k - 13].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                                entries[k - 13].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                                entries[k - 13].virtual_sequence_remaining = 13;
+                                entries[k - 13].is_first_in_sequence = false;
+                            }
+                            // k-14: VirtualAssertWordAlignment(rs1, imm) (vsr=14, first)
+                            if (k >= 14) {
+                                populateVirtualAssertWordAlignmentEntry(&entries[k - 14], raw_rs1, raw_imm, addr, 14, true);
+                            }
+                        },
+                        else => {
+                            // SD or unknown — pass through
+                            populateEntryFromInstruction(&entries[k], instr_word, addr);
+                            if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                        },
+                    }
                 } else if (isWExtensionWith2EntryDecomposition(raw_opcode, raw_funct3, @truncate(instr_word >> 25))) {
                     // W-extension instructions that decompose to base + VirtualSignExtendWord:
                     // ADDIW (0x1b/f3=0), ADDW (0x3b/f3=0/f7=0), SUBW (0x3b/f3=0/f7=0x20),
@@ -1351,10 +2125,19 @@ fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
             else => 255,
         },
         0x0B => 21, // VirtualSignExtendWord → SignExtendHalfWord
-        0x2B => 0, // VirtualMULI → RangeCheck
-        0x5B => if (funct3 == 5) @as(u8, 27) else 26, // VirtualSRAI → VirtualSRA, VirtualSRLI → VirtualSRL
+        0x2B => switch (funct3) { // Virtual I-type
+            1 => 22, // VirtualPow2 → Pow2
+            2 => 24, // VirtualShiftRightBitmask → ShiftRightBitmask
+            else => 0, // VirtualMULI (funct3=0) → RangeCheck
+        },
+        0x5B => if (funct3 == 5) @as(u8, 27) else 26, // VirtualSRAI/VirtualSRA → VirtualSRA, VirtualSRLI/VirtualSRL → VirtualSRL
         0x02 => 0, // VirtualAdvice → RangeCheck
-        0x22 => if (funct3 == 1) @as(u8, 17) else 6, // VirtualAssertValidDiv0 → ValidDiv0, VirtualAssertEQ → Equal
+        0x22 => switch (funct3) { // Virtual assert
+            1 => 17, // VirtualAssertValidDiv0 → ValidDiv0
+            2 => 18, // VirtualAssertHalfwordAlignment → HalfwordAlignment
+            3 => 19, // VirtualAssertWordAlignment → WordAlignment
+            else => 6, // VirtualAssertEQ → Equal
+        },
         0x42 => 20, // VirtualZeroExtendWord → LowerHalfWord
         0x62 => 16, // VirtualAssertValidUnsignedRemainder → ValidUnsignedRemainder
         else => 255, // Load, Store, ECALL, FENCE - no lookup table
@@ -8083,23 +8866,29 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
         return @as(u128, step.rs1_value);
     }
     if (opcode == 0x2B) {
-        // VirtualMULI: MultiplyOperands → rs1 * (1 << shamt)
-        // The instruction encodes shamt in I-type imm field (bits [31:20])
-        // Jolt's to_lookup_index() returns rs1 * imm where imm = 1 << shamt
-        const shamt_raw: u32 = instr >> 20;
-        const shamt: u6 = @truncate(shamt_raw & 0x3F);
-        const multiplier: u128 = @as(u128, 1) << shamt;
-        return @as(u128, step.rs1_value) * multiplier;
+        if (funct3 == 0) {
+            // VirtualMULI: MultiplyOperands → rs1 * (1 << shamt)
+            const shamt_raw: u32 = instr >> 20;
+            const shamt: u6 = @truncate(shamt_raw & 0x3F);
+            const multiplier: u128 = @as(u128, 1) << shamt;
+            return @as(u128, step.rs1_value) * multiplier;
+        } else {
+            // VirtualPow2 (funct3=1), VirtualShiftRightBitmask (funct3=2): AddOperands → rs1 + 0 = rs1
+            return @as(u128, step.rs1_value);
+        }
     }
     if (opcode == 0x5B) {
-        // VirtualSRLI: interleaved(rs1_value, bitmask)
-        // The instruction encodes total_shift in I-type imm field (bits [31:20])
-        // The 64-bit bitmask is reconstructed: ones = (1 << (64-shift)) - 1; bitmask = ones << shift
-        const total_shift_raw: u32 = instr >> 20;
-        const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
-        const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
-        const bitmask: u64 = @truncate(ones << total_shift);
-        return interleaveBits(step.rs1_value, bitmask);
+        if (step.rs2_read) {
+            // VirtualSRL/VirtualSRA R-type: interleaved(rs1_value, rs2_value)
+            return interleaveBits(step.rs1_value, step.rs2_value);
+        } else {
+            // VirtualSRLI/VirtualSRAI I-type: interleaved(rs1_value, bitmask)
+            const total_shift_raw: u32 = instr >> 20;
+            const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
+            const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
+            const bitmask: u64 = @truncate(ones << total_shift);
+            return interleaveBits(step.rs1_value, bitmask);
+        }
     }
     if (opcode == 0x02) {
         // VirtualAdvice: the lookup index is the advice value (rd_value)
@@ -8107,9 +8896,15 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
         return @as(u128, step.rd_value);
     }
     if (opcode == 0x22) {
-        // VirtualAssertEQ: interleaved(rs1_value, rs2_value)
-        // LeftOperandIsRs1Value, RightOperandIsRs2Value → interleave
-        return interleaveBits(step.rs1_value, step.rs2_value);
+        if (funct3 == 2 or funct3 == 3) {
+            // VirtualAssertHalfwordAlignment/WordAlignment: AddOperands → rs1 + imm
+            const imm_raw: u32 = instr >> 20;
+            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm_raw << 20)) >> 20);
+            return @as(u128, step.rs1_value) +% @as(u128, @as(u64, @bitCast(imm_signed)));
+        } else {
+            // VirtualAssertEQ (funct3=0) / VirtualAssertValidDiv0 (funct3=1): interleaved
+            return interleaveBits(step.rs1_value, step.rs2_value);
+        }
     }
     if (opcode == 0x42) {
         // VirtualZeroExtendWord: AddOperands → rs1 + 0 = rs1

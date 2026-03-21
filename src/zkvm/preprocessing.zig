@@ -157,6 +157,9 @@ pub const JoltInstruction = struct {
         /// J-type: rd, imm (Jolt uses u64)
         FormatJ: struct { rd: u8, imm: u64 },
         /// Assert format: rs1, imm (no rd — used by alignment assertions)
+        /// imm is u64 (unsigned), matching FormatI encoding so that the Jolt verifier's
+        /// NormalizedOperands.imm = u64 as i128 (zero-extension) produces the same
+        /// field element as the R1CS witness's F.fromU64(@bitCast(imm_signed)).
         FormatAssert: struct { rs1: u8, imm: i64 },
         /// No operands (NoOp, FENCE, ECALL)
         None: void,
@@ -422,6 +425,12 @@ pub const BytecodePreprocessing = struct {
     /// termination sequence that matches the prover's bytecode table.
     /// If null, uses the default MemoryLayout termination address (0x7FFFC008).
     pub fn preprocess(allocator: Allocator, code_bytes: []const u8, base_address: u64, termination_address_opt: ?u64) !BytecodePreprocessing {
+        return preprocessWithTextSize(allocator, code_bytes, base_address, termination_address_opt, code_bytes.len);
+    }
+
+    /// Preprocess bytecode, only decoding instructions within the first `text_size` bytes.
+    /// Bytes beyond text_size are treated as data (.rodata) and skipped.
+    pub fn preprocessWithTextSize(allocator: Allocator, code_bytes: []const u8, base_address: u64, termination_address_opt: ?u64, text_size: usize) !BytecodePreprocessing {
         const termination_address = termination_address_opt orelse 0x7FFFC008; // Default from MemoryLayout with standard 4KB sizes
         var self = BytecodePreprocessing.init(allocator);
         errdefer self.deinit();
@@ -437,9 +446,10 @@ pub const BytecodePreprocessing = struct {
         });
         try self.raw_words.append(allocator, 0); // NoOp = raw word 0
 
-        // Decode all instructions
+        // Decode instructions within the .text section only
+        const decode_limit = @min(text_size, code_bytes.len);
         var offset: usize = 0;
-        while (offset < code_bytes.len) {
+        while (offset < decode_limit) {
             const addr = base_address + offset;
 
             // Check if compressed (RVC)
@@ -449,7 +459,11 @@ pub const BytecodePreprocessing = struct {
             var instruction: u32 = undefined;
             var instr_size: usize = undefined;
 
-            if (is_compressed) {
+            if (first_halfword == 0) {
+                // Zero halfword in a code gap — skip 2 bytes, leave as NoOp padding
+                offset += 2;
+                continue;
+            } else if (is_compressed) {
                 // 16-bit compressed instruction - expand it
                 const zkvm_instruction = @import("instruction/mod.zig");
                 instruction = zkvm_instruction.uncompressInstruction(first_halfword, .Bit64);
@@ -476,7 +490,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = jolt_instr.operands, // Same FormatI operands
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: VirtualSignExtendWord(rd, rd, 0) with virtual_sequence_remaining=0
                     const rd = switch (jolt_instr.operands) {
@@ -501,7 +515,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = jolt_instr.operands, // Same FormatR operands
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: VirtualSignExtendWord(rd, rd, 0)
                     const rd = switch (jolt_instr.operands) {
@@ -525,7 +539,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = jolt_instr.operands,
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     const rd = switch (jolt_instr.operands) {
                         .FormatR => |r| r.rd,
@@ -548,7 +562,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = jolt_instr.operands,
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     const rd = switch (jolt_instr.operands) {
                         .FormatR => |r| r.rd,
@@ -608,7 +622,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, 1) << @intCast(shift_amount) } },
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     try self.bytecode.append(allocator, .{
                         .variant = .VirtualSignExtendWord,
@@ -678,7 +692,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v_rs1, .rs1 = rs1_val, .imm = @as(u64, 1) << 32 } },
                         .virtual_sequence_remaining = 2,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: VirtualSRLI(rd, v_rs1, bitmask)
                     try self.bytecode.append(allocator, .{
@@ -687,7 +701,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = rd, .rs1 = v_rs1, .imm = bitmask } },
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: VirtualSignExtendWord(rd, rd, 0)
                     try self.bytecode.append(allocator, .{
@@ -729,7 +743,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatJ = .{ .rd = a2, .imm = 0 } },
                         .virtual_sequence_remaining = 11,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: VirtualAdvice(a3) → remainder (vsr=10)
                     try self.bytecode.append(allocator, .{
@@ -738,7 +752,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatJ = .{ .rd = a3, .imm = 0 } },
                         .virtual_sequence_remaining = 10,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: VirtualZeroExtendWord(t3, a2) → zero-extend quotient (vsr=9)
                     try self.bytecode.append(allocator, .{
@@ -747,7 +761,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t3, .rs1 = a2, .imm = 0 } },
                         .virtual_sequence_remaining = 9,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 4: VirtualZeroExtendWord(t1, rs1) → zero-extend dividend (vsr=8)
                     try self.bytecode.append(allocator, .{
@@ -756,7 +770,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t1, .rs1 = rs1, .imm = 0 } },
                         .virtual_sequence_remaining = 8,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 5: VirtualZeroExtendWord(t2, rs2) → zero-extend divisor (vsr=7)
                     try self.bytecode.append(allocator, .{
@@ -765,7 +779,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t2, .rs1 = rs2, .imm = 0 } },
                         .virtual_sequence_remaining = 7,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 6: MUL(t0, t3, t2) → quotient * divisor (vsr=6)
                     try self.bytecode.append(allocator, .{
@@ -774,7 +788,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = t0, .rs1 = t3, .rs2 = t2 } },
                         .virtual_sequence_remaining = 6,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 7: VirtualZeroExtendWord(t4, t0) → mask to 32 bits (vsr=5)
                     try self.bytecode.append(allocator, .{
@@ -783,7 +797,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t4, .rs1 = t0, .imm = 0 } },
                         .virtual_sequence_remaining = 5,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 8: VirtualAssertEQ(t4, t0) → assert no overflow (vsr=4)
                     try self.bytecode.append(allocator, .{
@@ -792,7 +806,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatB = .{ .rs1 = t4, .rs2 = t0, .imm = 0 } },
                         .virtual_sequence_remaining = 4,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 9: ADD(t0, t0, a3) → add remainder (vsr=3)
                     try self.bytecode.append(allocator, .{
@@ -801,7 +815,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = t0, .rs1 = t0, .rs2 = a3 } },
                         .virtual_sequence_remaining = 3,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 10: VirtualAssertEQ(t0, t1) → assert dividend = q*d + r (vsr=2)
                     try self.bytecode.append(allocator, .{
@@ -810,7 +824,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatB = .{ .rs1 = t0, .rs2 = t1, .imm = 0 } },
                         .virtual_sequence_remaining = 2,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 11: VirtualAssertValidUnsignedRemainder(a3, t2) → r < d (vsr=1)
                     try self.bytecode.append(allocator, .{
@@ -819,7 +833,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatB = .{ .rs1 = a3, .rs2 = t2, .imm = 0 } },
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 12: VirtualSignExtendWord(rd, a3) → sign-extend result (vsr=0, last)
                     try self.bytecode.append(allocator, .{
@@ -862,7 +876,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatJ = .{ .rd = a2, .imm = 0 } },
                         .virtual_sequence_remaining = 20,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: VirtualAdvice(a3) → |remainder| (vsr=19)
                     try self.bytecode.append(allocator, .{
@@ -871,7 +885,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatJ = .{ .rd = a3, .imm = 0 } },
                         .virtual_sequence_remaining = 19,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: VirtualSignExtendWord(t4, rs1) → sign-extend dividend (vsr=18)
                     try self.bytecode.append(allocator, .{
@@ -880,7 +894,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t4, .rs1 = rs1, .imm = 0 } },
                         .virtual_sequence_remaining = 18,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 4: VirtualSignExtendWord(t3, rs2) → sign-extend divisor (vsr=17)
                     try self.bytecode.append(allocator, .{
@@ -889,7 +903,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t3, .rs1 = rs2, .imm = 0 } },
                         .virtual_sequence_remaining = 17,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 5: VirtualAssertValidDiv0(t3, a2) → handle div-by-zero (vsr=16)
                     try self.bytecode.append(allocator, .{
@@ -898,7 +912,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatB = .{ .rs1 = t3, .rs2 = a2, .imm = 0 } },
                         .virtual_sequence_remaining = 16,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 6: VirtualChangeDivisorW(t0, t4, t3) → handle overflow (vsr=15)
                     try self.bytecode.append(allocator, .{
@@ -907,7 +921,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = t0, .rs1 = t4, .rs2 = t3 } },
                         .virtual_sequence_remaining = 15,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 7: VirtualSignExtendWord(t1, a2) → sign-extend quotient (vsr=14)
                     try self.bytecode.append(allocator, .{
@@ -916,7 +930,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t1, .rs1 = a2, .imm = 0 } },
                         .virtual_sequence_remaining = 14,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 8: VirtualAssertEQ(t1, a2) → assert quotient fits 32 bits (vsr=13)
                     try self.bytecode.append(allocator, .{
@@ -925,7 +939,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatB = .{ .rs1 = t1, .rs2 = a2, .imm = 0 } },
                         .virtual_sequence_remaining = 13,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 9: VirtualSRAI(t2, a3, bitmask_31) → sign bit of |remainder| (vsr=12)
                     // SRAI is expanded to VirtualSRAI with bitmask: shift=31, bitmask = ((1<<33)-1) << 31
@@ -940,7 +954,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t2, .rs1 = a3, .imm = srai_bitmask } },
                         .virtual_sequence_remaining = 12,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 10: VirtualAssertEQ(t2, 0) → assert |remainder| is non-negative (vsr=11)
                     // Note: rs2=0 means comparing against register x0 (always 0)
@@ -950,7 +964,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatB = .{ .rs1 = t2, .rs2 = 0, .imm = 0 } },
                         .virtual_sequence_remaining = 11,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 11: VirtualSRAI(t2, t4, bitmask_31) → sign bit of dividend (vsr=10)
                     try self.bytecode.append(allocator, .{
@@ -959,7 +973,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t2, .rs1 = t4, .imm = srai_bitmask } },
                         .virtual_sequence_remaining = 10,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 12: XOR(t3, a3, t2) → XOR |remainder| with sign mask (vsr=9)
                     try self.bytecode.append(allocator, .{
@@ -968,7 +982,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = t3, .rs1 = a3, .rs2 = t2 } },
                         .virtual_sequence_remaining = 9,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 13: SUB(t3, t3, t2) → t3 = sign-corrected remainder (vsr=8)
                     try self.bytecode.append(allocator, .{
@@ -977,7 +991,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = t3, .rs1 = t3, .rs2 = t2 } },
                         .virtual_sequence_remaining = 8,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 14: MUL(t1, a2, t0) → quotient × adjusted_divisor (vsr=7)
                     try self.bytecode.append(allocator, .{
@@ -986,7 +1000,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = t1, .rs1 = a2, .rs2 = t0 } },
                         .virtual_sequence_remaining = 7,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 15: ADD(t1, t1, t3) → + remainder (vsr=6)
                     try self.bytecode.append(allocator, .{
@@ -995,7 +1009,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = t1, .rs1 = t1, .rs2 = t3 } },
                         .virtual_sequence_remaining = 6,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 16: VirtualAssertEQ(t1, t4) → assert dividend = q*d + r (vsr=5)
                     try self.bytecode.append(allocator, .{
@@ -1004,7 +1018,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatB = .{ .rs1 = t1, .rs2 = t4, .imm = 0 } },
                         .virtual_sequence_remaining = 5,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 17: VirtualSRAI(t2, t0, bitmask_31) → sign bit of adjusted divisor (vsr=4)
                     try self.bytecode.append(allocator, .{
@@ -1013,7 +1027,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = t2, .rs1 = t0, .imm = srai_bitmask } },
                         .virtual_sequence_remaining = 4,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 18: XOR(t1, t0, t2) → (vsr=3)
                     try self.bytecode.append(allocator, .{
@@ -1022,7 +1036,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = t1, .rs1 = t0, .rs2 = t2 } },
                         .virtual_sequence_remaining = 3,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 19: SUB(t1, t1, t2) → t1 = abs(divisor) (vsr=2)
                     try self.bytecode.append(allocator, .{
@@ -1031,7 +1045,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = t1, .rs1 = t1, .rs2 = t2 } },
                         .virtual_sequence_remaining = 2,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 20: VirtualAssertValidUnsignedRemainder(a3, t1) → |r| < |d| (vsr=1)
                     try self.bytecode.append(allocator, .{
@@ -1040,7 +1054,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatB = .{ .rs1 = a3, .rs2 = t1, .imm = 0 } },
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 21: VirtualSignExtendWord(rd, output) → sign-extend result (vsr=0, last)
                     // REMW: output = t3 (signed remainder), DIVW: output = a2 (quotient)
@@ -1076,7 +1090,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs2, .imm = 0 } },
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: MUL(rd, rs1, v0)
                     try self.bytecode.append(allocator, .{
@@ -1110,7 +1124,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs2, .imm = 0 } },
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: VirtualSRL(rd, rs1, v0)
                     try self.bytecode.append(allocator, .{
@@ -1144,7 +1158,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs2, .imm = 0 } },
                         .virtual_sequence_remaining = 1,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: VirtualSRA(rd, rs1, v0)
                     try self.bytecode.append(allocator, .{
@@ -1208,7 +1222,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
                         .virtual_sequence_remaining = total_steps,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: ANDI(v1, v0, -8)
                     try self.bytecode.append(allocator, .{
@@ -1217,7 +1231,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
                         .virtual_sequence_remaining = total_steps - 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: LD(v1, v1, 0) — MEMORY READ
                     try self.bytecode.append(allocator, .{
@@ -1226,7 +1240,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatLoad = .{ .rd = v1, .rs1 = v1, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 2,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 4: XORI(v0, v0, 7)
                     try self.bytecode.append(allocator, .{
@@ -1235,7 +1249,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 7 } },
                         .virtual_sequence_remaining = total_steps - 3,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 5: VirtualMULI(v0, v0, 8) — from SLLI v0, v0, 3
                     try self.bytecode.append(allocator, .{
@@ -1244,7 +1258,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
                         .virtual_sequence_remaining = total_steps - 4,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 6: VirtualPow2(v2, v0, 0) — from SLL expansion step 1
                     try self.bytecode.append(allocator, .{
@@ -1253,7 +1267,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v2, .rs1 = v0, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 5,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 7: MUL(v1, v1, v2) — from SLL expansion step 2
                     try self.bytecode.append(allocator, .{
@@ -1262,7 +1276,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v1, .rs1 = v1, .rs2 = v2 } },
                         .virtual_sequence_remaining = total_steps - 6,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 8: VirtualSRAI/VirtualSRLI(rd, v1, bitmask_56)
                     const shift_56: u7 = 56;
@@ -1311,10 +1325,10 @@ pub const BytecodePreprocessing = struct {
                     try self.bytecode.append(allocator, .{
                         .variant = .VirtualAssertHalfwordAlignment,
                         .address = addr,
-                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = @as(i64, imm) } },
                         .virtual_sequence_remaining = total_steps,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: ADDI(v0, rs1, imm)
                     try self.bytecode.append(allocator, .{
@@ -1323,7 +1337,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
                         .virtual_sequence_remaining = total_steps - 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: ANDI(v1, v0, -8)
                     try self.bytecode.append(allocator, .{
@@ -1332,7 +1346,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
                         .virtual_sequence_remaining = total_steps - 2,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 4: LD(v1, v1, 0) — MEMORY READ
                     try self.bytecode.append(allocator, .{
@@ -1341,7 +1355,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatLoad = .{ .rd = v1, .rs1 = v1, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 3,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 5: XORI(v0, v0, 6)
                     try self.bytecode.append(allocator, .{
@@ -1350,7 +1364,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 6 } },
                         .virtual_sequence_remaining = total_steps - 4,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 6: VirtualMULI(v0, v0, 8) — from SLLI v0, v0, 3
                     try self.bytecode.append(allocator, .{
@@ -1359,7 +1373,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
                         .virtual_sequence_remaining = total_steps - 5,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 7: VirtualPow2(v2, v0, 0) — from SLL step 1
                     try self.bytecode.append(allocator, .{
@@ -1368,7 +1382,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v2, .rs1 = v0, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 6,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 8: MUL(v1, v1, v2) — from SLL step 2
                     try self.bytecode.append(allocator, .{
@@ -1377,7 +1391,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v1, .rs1 = v1, .rs2 = v2 } },
                         .virtual_sequence_remaining = total_steps - 7,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 9: VirtualSRAI/VirtualSRLI(rd, v1, bitmask_48)
                     const shift_48: u7 = 48;
@@ -1425,10 +1439,10 @@ pub const BytecodePreprocessing = struct {
                     try self.bytecode.append(allocator, .{
                         .variant = .VirtualAssertWordAlignment,
                         .address = addr,
-                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = @as(i64, imm) } },
                         .virtual_sequence_remaining = total_steps,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: ADDI(v0, rs1, imm)
                     try self.bytecode.append(allocator, .{
@@ -1437,7 +1451,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
                         .virtual_sequence_remaining = total_steps - 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: ANDI(v1, v0, -8)
                     try self.bytecode.append(allocator, .{
@@ -1446,7 +1460,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
                         .virtual_sequence_remaining = total_steps - 2,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 4: LD(v1, v1, 0)
                     try self.bytecode.append(allocator, .{
@@ -1455,7 +1469,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatLoad = .{ .rd = v1, .rs1 = v1, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 3,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 5: VirtualMULI(v0, v0, 8) — from SLLI v0, v0, 3 (NO XORI for LW)
                     try self.bytecode.append(allocator, .{
@@ -1464,7 +1478,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
                         .virtual_sequence_remaining = total_steps - 4,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 6: VirtualShiftRightBitmask(v2, v0, 0) — from SRL step 1
                     try self.bytecode.append(allocator, .{
@@ -1473,7 +1487,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v2, .rs1 = v0, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 5,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 7: VirtualSRL(v1, v1, v2) — from SRL step 2
                     try self.bytecode.append(allocator, .{
@@ -1482,7 +1496,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v1, .rs1 = v1, .rs2 = v2 } },
                         .virtual_sequence_remaining = total_steps - 6,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 8: VirtualSignExtendWord(rd, v1, 0)
                     try self.bytecode.append(allocator, .{
@@ -1516,10 +1530,10 @@ pub const BytecodePreprocessing = struct {
                     try self.bytecode.append(allocator, .{
                         .variant = .VirtualAssertWordAlignment,
                         .address = addr,
-                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = @as(i64, imm) } },
                         .virtual_sequence_remaining = total_steps,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: ADDI(v0, rs1, imm)
                     try self.bytecode.append(allocator, .{
@@ -1528,7 +1542,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
                         .virtual_sequence_remaining = total_steps - 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: ANDI(v1, v0, -8)
                     try self.bytecode.append(allocator, .{
@@ -1537,7 +1551,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
                         .virtual_sequence_remaining = total_steps - 2,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 4: LD(v1, v1, 0)
                     try self.bytecode.append(allocator, .{
@@ -1546,7 +1560,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatLoad = .{ .rd = v1, .rs1 = v1, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 3,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 5: XORI(v0, v0, 4)
                     try self.bytecode.append(allocator, .{
@@ -1555,7 +1569,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 4 } },
                         .virtual_sequence_remaining = total_steps - 4,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 6: VirtualMULI(v0, v0, 8) — from SLLI
                     try self.bytecode.append(allocator, .{
@@ -1564,7 +1578,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
                         .virtual_sequence_remaining = total_steps - 5,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 7: VirtualPow2(v2, v0, 0) — from SLL step 1
                     try self.bytecode.append(allocator, .{
@@ -1573,7 +1587,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v2, .rs1 = v0, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 6,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 8: MUL(v1, v1, v2) — from SLL step 2
                     try self.bytecode.append(allocator, .{
@@ -1582,7 +1596,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v1, .rs1 = v1, .rs2 = v2 } },
                         .virtual_sequence_remaining = total_steps - 7,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 9: VirtualSRLI(rd, v1, bitmask_32)
                     const shift_32: u7 = 32;
@@ -1625,7 +1639,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
                         .virtual_sequence_remaining = total_steps,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: ANDI(v1, v0, -8)
                     try self.bytecode.append(allocator, .{
@@ -1634,7 +1648,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
                         .virtual_sequence_remaining = total_steps - 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: LD(v2, v1, 0) — MEMORY READ
                     try self.bytecode.append(allocator, .{
@@ -1643,7 +1657,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatLoad = .{ .rd = v2, .rs1 = v1, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 2,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 4: VirtualMULI(v3, v0, 8) — from SLLI v3, v0, 3
                     try self.bytecode.append(allocator, .{
@@ -1652,7 +1666,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v3, .rs1 = v0, .imm = 8 } },
                         .virtual_sequence_remaining = total_steps - 3,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 5: LUI(v0, 0xff)
                     try self.bytecode.append(allocator, .{
@@ -1661,7 +1675,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatU = .{ .rd = v0, .imm = 0xff << 12 } },
                         .virtual_sequence_remaining = total_steps - 4,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 6: VirtualPow2(v4, v3, 0) — from SLL(v0, v0, v3) step 1
                     try self.bytecode.append(allocator, .{
@@ -1670,7 +1684,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v4, .rs1 = v3, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 5,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 7: MUL(v0, v0, v4) — from SLL step 2
                     try self.bytecode.append(allocator, .{
@@ -1679,7 +1693,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v0, .rs1 = v0, .rs2 = v4 } },
                         .virtual_sequence_remaining = total_steps - 6,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 8: VirtualPow2(v5, v3, 0) — from SLL(v3, rs2, v3) step 1
                     try self.bytecode.append(allocator, .{
@@ -1688,7 +1702,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v5, .rs1 = v3, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 7,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 9: MUL(v3, rs2, v5) — from SLL step 2
                     try self.bytecode.append(allocator, .{
@@ -1697,7 +1711,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v3, .rs1 = rs2, .rs2 = v5 } },
                         .virtual_sequence_remaining = total_steps - 8,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 10: XOR(v3, v2, v3)
                     try self.bytecode.append(allocator, .{
@@ -1706,7 +1720,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v2, .rs2 = v3 } },
                         .virtual_sequence_remaining = total_steps - 9,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 11: AND(v3, v3, v0)
                     try self.bytecode.append(allocator, .{
@@ -1715,7 +1729,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v3, .rs2 = v0 } },
                         .virtual_sequence_remaining = total_steps - 10,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 12: XOR(v2, v2, v3)
                     try self.bytecode.append(allocator, .{
@@ -1724,7 +1738,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v2, .rs1 = v2, .rs2 = v3 } },
                         .virtual_sequence_remaining = total_steps - 11,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 13: SD(v1, v2, 0) — MEMORY WRITE
                     try self.bytecode.append(allocator, .{
@@ -1761,10 +1775,10 @@ pub const BytecodePreprocessing = struct {
                     try self.bytecode.append(allocator, .{
                         .variant = .VirtualAssertHalfwordAlignment,
                         .address = addr,
-                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = @as(i64, imm) } },
                         .virtual_sequence_remaining = total_steps,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: ADDI(v0, rs1, imm)
                     try self.bytecode.append(allocator, .{
@@ -1773,7 +1787,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
                         .virtual_sequence_remaining = total_steps - 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: ANDI(v1, v0, -8)
                     try self.bytecode.append(allocator, .{
@@ -1782,7 +1796,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
                         .virtual_sequence_remaining = total_steps - 2,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 4: LD(v2, v1, 0) — MEMORY READ
                     try self.bytecode.append(allocator, .{
@@ -1791,7 +1805,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatLoad = .{ .rd = v2, .rs1 = v1, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 3,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 5: VirtualMULI(v3, v0, 8) — from SLLI
                     try self.bytecode.append(allocator, .{
@@ -1800,7 +1814,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v3, .rs1 = v0, .imm = 8 } },
                         .virtual_sequence_remaining = total_steps - 4,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 6: LUI(v0, 0xffff)
                     try self.bytecode.append(allocator, .{
@@ -1809,7 +1823,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatU = .{ .rd = v0, .imm = 0xffff << 12 } },
                         .virtual_sequence_remaining = total_steps - 5,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 7: VirtualPow2(v4, v3, 0) — from SLL(v0, v0, v3)
                     try self.bytecode.append(allocator, .{
@@ -1818,7 +1832,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v4, .rs1 = v3, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 6,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 8: MUL(v0, v0, v4)
                     try self.bytecode.append(allocator, .{
@@ -1827,7 +1841,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v0, .rs1 = v0, .rs2 = v4 } },
                         .virtual_sequence_remaining = total_steps - 7,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 9: VirtualPow2(v5, v3, 0) — from SLL(v3, rs2, v3)
                     try self.bytecode.append(allocator, .{
@@ -1836,7 +1850,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v5, .rs1 = v3, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 8,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 10: MUL(v3, rs2, v5)
                     try self.bytecode.append(allocator, .{
@@ -1845,7 +1859,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v3, .rs1 = rs2, .rs2 = v5 } },
                         .virtual_sequence_remaining = total_steps - 9,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 11: XOR(v3, v2, v3)
                     try self.bytecode.append(allocator, .{
@@ -1854,7 +1868,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v2, .rs2 = v3 } },
                         .virtual_sequence_remaining = total_steps - 10,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 12: AND(v3, v3, v0)
                     try self.bytecode.append(allocator, .{
@@ -1863,7 +1877,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v3, .rs2 = v0 } },
                         .virtual_sequence_remaining = total_steps - 11,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 13: XOR(v2, v2, v3)
                     try self.bytecode.append(allocator, .{
@@ -1872,7 +1886,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v2, .rs1 = v2, .rs2 = v3 } },
                         .virtual_sequence_remaining = total_steps - 12,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 14: SD(v1, v2, 0) — MEMORY WRITE
                     try self.bytecode.append(allocator, .{
@@ -1909,10 +1923,10 @@ pub const BytecodePreprocessing = struct {
                     try self.bytecode.append(allocator, .{
                         .variant = .VirtualAssertWordAlignment,
                         .address = addr,
-                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = imm } },
+                        .operands = .{ .FormatAssert = .{ .rs1 = rs1, .imm = @as(i64, imm) } },
                         .virtual_sequence_remaining = total_steps,
                         .is_first_in_sequence = true,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 2: ADDI(v0, rs1, imm)
                     try self.bytecode.append(allocator, .{
@@ -1921,7 +1935,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = rs1, .imm = @bitCast(@as(i64, imm)) } },
                         .virtual_sequence_remaining = total_steps - 1,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 3: ANDI(v1, v0, -8)
                     try self.bytecode.append(allocator, .{
@@ -1930,7 +1944,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v1, .rs1 = v0, .imm = @bitCast(@as(i64, -8)) } },
                         .virtual_sequence_remaining = total_steps - 2,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 4: LD(v2, v1, 0) — MEMORY READ
                     try self.bytecode.append(allocator, .{
@@ -1939,7 +1953,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatLoad = .{ .rd = v2, .rs1 = v1, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 3,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 5: VirtualMULI(v0, v0, 8) — from SLLI v0, v0, 3
                     try self.bytecode.append(allocator, .{
@@ -1948,7 +1962,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v0, .rs1 = v0, .imm = 8 } },
                         .virtual_sequence_remaining = total_steps - 4,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 6: ORI(v3, x0, -1) — all 1s
                     try self.bytecode.append(allocator, .{
@@ -1957,7 +1971,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v3, .rs1 = 0, .imm = @bitCast(@as(i64, -1)) } },
                         .virtual_sequence_remaining = total_steps - 5,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 7: VirtualSRLI(v3, v3, bitmask_32) — 32-bit mask
                     const shift_32: u7 = 32;
@@ -1969,7 +1983,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v3, .rs1 = v3, .imm = bitmask_32 } },
                         .virtual_sequence_remaining = total_steps - 6,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 8: VirtualPow2(v4, v0, 0) — from SLL(v3, v3, v0) step 1
                     try self.bytecode.append(allocator, .{
@@ -1978,7 +1992,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v4, .rs1 = v0, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 7,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 9: MUL(v3, v3, v4) — shifted 32-bit mask
                     try self.bytecode.append(allocator, .{
@@ -1987,7 +2001,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v3, .rs1 = v3, .rs2 = v4 } },
                         .virtual_sequence_remaining = total_steps - 8,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 10: VirtualPow2(v5, v0, 0) — from SLL(v0, rs2, v0) step 1
                     try self.bytecode.append(allocator, .{
@@ -1996,7 +2010,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatI = .{ .rd = v5, .rs1 = v0, .imm = 0 } },
                         .virtual_sequence_remaining = total_steps - 9,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 11: MUL(v0, rs2, v5) — shifted value
                     try self.bytecode.append(allocator, .{
@@ -2005,7 +2019,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v0, .rs1 = rs2, .rs2 = v5 } },
                         .virtual_sequence_remaining = total_steps - 10,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 12: XOR(v0, v2, v0)
                     try self.bytecode.append(allocator, .{
@@ -2014,7 +2028,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v0, .rs1 = v2, .rs2 = v0 } },
                         .virtual_sequence_remaining = total_steps - 11,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 13: AND(v0, v0, v3)
                     try self.bytecode.append(allocator, .{
@@ -2023,7 +2037,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v0, .rs1 = v0, .rs2 = v3 } },
                         .virtual_sequence_remaining = total_steps - 12,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 14: XOR(v2, v2, v0)
                     try self.bytecode.append(allocator, .{
@@ -2032,7 +2046,7 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatR = .{ .rd = v2, .rs1 = v2, .rs2 = v0 } },
                         .virtual_sequence_remaining = total_steps - 13,
                         .is_first_in_sequence = false,
-                        .is_compressed = is_compressed,
+                        .is_compressed = false, // Only last entry in sequence gets is_compressed
                     });
                     // Step 15: SD(v1, v2, 0) — MEMORY WRITE
                     try self.bytecode.append(allocator, .{
@@ -2404,8 +2418,8 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
                 0b111 => variant = .ANDI,
                 0b001 => {
                     variant = .SLLI;
-                    // Shift amount is in lower 6 bits of imm for RV64
-                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, rs2) } };
+                    // RV64: shift amount is 6 bits (bits 25:20), not just 5 (rs2 field is only 24:20)
+                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, (rs2 & 0x1f) | (@as(u8, @intCast(@as(u8, funct7) & 1)) << 5)) } };
                 },
                 0b101 => {
                     if (funct7 & 0x20 != 0) {
@@ -2413,7 +2427,8 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
                     } else {
                         variant = .SRLI;
                     }
-                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, rs2) } };
+                    // RV64: shift amount is 6 bits (bits 25:20), not just 5 (rs2 field)
+                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, (rs2 & 0x1f) | (@as(u8, @intCast(@as(u8, funct7) & 1)) << 5)) } };
                 },
             }
         },

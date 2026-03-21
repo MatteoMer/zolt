@@ -879,12 +879,29 @@ fn populateVirtualSRAEntry(
 /// This sets all static properties (flags, registers, immediates, lookup table)
 /// from the instruction encoding alone, without any trace-specific data.
 fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: u64) void {
-    const decoded = instruction_mod.DecodedInstruction.decode(instr);
+    const opcode: u8 = @truncate(instr & 0x7F);
+
+    // Normalize funct7 for R-type (0x33) and OP-32 (0x3b) instructions.
+    // ELF binaries may have non-canonical funct7 values (e.g. from assembler bugs
+    // or future extensions). Jolt only recognizes canonical funct7 values, so
+    // unknown funct7 → 0 makes the instruction decode as the base variant (ADD/ADDW).
+    const funct3_raw: u3 = @truncate((instr >> 12) & 0x7);
+    const funct7_raw: u7 = @truncate(instr >> 25);
+    var norm_instr = instr;
+    if (opcode == 0x33 or opcode == 0x3b) {
+        const canonical_funct7: u7 = switch (funct3_raw) {
+            0 => if (funct7_raw == 0x20) @as(u7, 0x20) else if (funct7_raw == 0x01) @as(u7, 0x01) else 0,
+            5 => if (funct7_raw == 0x20) @as(u7, 0x20) else 0,
+            1, 2, 3, 4, 6, 7 => if (funct7_raw == 0x01) @as(u7, 0x01) else 0,
+        };
+        norm_instr = (instr & ~(@as(u32, 0x7F) << 25)) | (@as(u32, canonical_funct7) << 25);
+    }
+
+    const decoded = instruction_mod.DecodedInstruction.decode(norm_instr);
 
     entry.address = elf_address;
-    entry.imm = @intCast(decoded.imm);
-
-    const opcode: u8 = @truncate(instr & 0x7F);
+    // FENCE: imm=0 (Jolt's FENCE uses None operands, no imm contribution)
+    entry.imm = if (opcode == 0x0F) 0 else @intCast(decoded.imm);
 
     // Set rd, rs1, rs2 matching Jolt's NormalizedOperands behavior.
     // We use 255 as sentinel for "not present" so that `entry.X < REGISTER_COUNT`
@@ -896,17 +913,46 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     //      (non-zero) to Stages 4 and 5 val polynomials. We must NOT sentinel rd=0.
     // rs1: sentinel for U-type (LUI 0x37, AUIPC 0x17) and J-type (JAL 0x6f)
     // rs2: sentinel for I-type (0x13, 0x03, 0x67, 0x1b), U-type (0x37, 0x17), J-type (0x6f)
-    entry.rd = if (opcode == 0x23 or opcode == 0x63) 255 else decoded.rd;
-    entry.rs1 = switch (opcode) {
-        0x37, 0x17, 0x6f => 255, // U-type, J-type: no rs1
-        else => decoded.rs1,
-    };
-    entry.rs2 = switch (opcode) {
-        0x13, 0x03, 0x67, 0x1b, 0x37, 0x17, 0x6f, 0x0B, 0x2B, 0x5B => 255, // I-type, U-type, J-type, Virtual: no rs2
-        else => decoded.rs2,
-    };
-    const funct3: u3 = @truncate((instr >> 12) & 0x7);
-    const funct7: u7 = @truncate(instr >> 25);
+    // FENCE (0x0F): no operands in Jolt (None format), so sentinel all registers
+    if (opcode == 0x0F) {
+        entry.rd = 255;
+        entry.rs1 = 255;
+        entry.rs2 = 255;
+    } else {
+        entry.rd = if (opcode == 0x23 or opcode == 0x63) 255 else decoded.rd;
+        entry.rs1 = switch (opcode) {
+            0x37, 0x17, 0x6f => 255, // U-type, J-type: no rs1
+            else => decoded.rs1,
+        };
+        entry.rs2 = switch (opcode) {
+            0x13, 0x03, 0x67, 0x1b, 0x37, 0x17, 0x6f, 0x0B, 0x2B, 0x5B => 255, // I-type, U-type, J-type, Virtual: no rs2
+            else => decoded.rs2,
+        };
+    }
+    const funct3: u3 = @truncate((norm_instr >> 12) & 0x7);
+    const funct7: u7 = @truncate(norm_instr >> 25);
+
+    // UNIMPL detection: if the opcode/funct3/funct7 combination is not a known
+    // RISC-V instruction recognized by Jolt, treat it as UNIMPL (Jolt's Default).
+    // Return early with address=0, all flags false, matching Jolt's UNIMPL behavior.
+    if (!isKnownInstruction(opcode, funct3, funct7)) {
+        // UNIMPL: address = 0 (Jolt's UNIMPL normalizes to Default which has address=0).
+        // All flags false, no registers, no lookup table.
+        entry.address = 0;
+        entry.imm = 0;
+        entry.rd = 255;
+        entry.rs1 = 255;
+        entry.rs2 = 255;
+        entry.circuit_flags = [_]bool{false} ** 14;
+        entry.instruction_flags = [_]bool{false} ** 7;
+        entry.lookup_table_index = 255;
+        entry.is_interleaved = true;
+        entry.virtual_sequence_remaining = null;
+        entry.is_first_in_sequence = false;
+        entry.opcode = 0;
+        entry.funct3 = 0;
+        return;
+    }
 
     // Store opcode and funct3 for Imm encoding discrimination in val poly computation
     entry.opcode = opcode;
@@ -981,12 +1027,20 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
             0x2B => { // VirtualMULI
                 cf[@intFromEnum(CircuitFlags.MultiplyOperands)] = true;
             },
+            0x73, 0x0F => {
+                // ECALL and FENCE: no additional circuit flags beyond defaults
+                // (Jolt's ECALL only sets IsFirstInSequence and IsCompressed,
+                //  Jolt's FENCE only sets IsCompressed — both from instance fields)
+            },
             else => {},
         }
     }
 
     // Instruction flags
     var inf = &entry.instruction_flags;
+
+    // ECALL/FENCE: instruction_flags are all false in Jolt
+    // (NOT IsNoop — that's only for the NoOp instruction variant)
 
     // LeftOperandIsPC
     if (has_lookup and (opcode == 0x17 or opcode == 0x6F)) {
@@ -1041,6 +1095,862 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
         !cf[@intFromEnum(CircuitFlags.Advice)];
 }
 
+/// Populate a BytecodeEntry from a JoltInstruction (from preprocessing.zig).
+/// This is the preferred path when preprocessing bytecode is available,
+/// as it ensures the prover's bytecode entries match exactly what the
+/// verifier computes from the serialized preprocessing.
+///
+/// Maps each InstructionVariant to the correct circuit_flags, instruction_flags,
+/// lookup_table_index, registers, immediate, opcode, and funct3 fields.
+fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.JoltInstruction) void {
+    // Extract registers and immediate from the operand format
+    var rd: u8 = 255;
+    var rs1: u8 = 255;
+    var rs2: u8 = 255;
+    var imm: i64 = 0;
+
+    switch (instr.operands) {
+        .FormatR => |r| {
+            rd = r.rd;
+            rs1 = r.rs1;
+            rs2 = r.rs2;
+        },
+        .FormatI => |i_op| {
+            rd = i_op.rd;
+            rs1 = i_op.rs1;
+            imm = @bitCast(i_op.imm);
+        },
+        .FormatLoad => |l| {
+            rd = l.rd;
+            rs1 = l.rs1;
+            imm = l.imm;
+        },
+        .FormatS => |s| {
+            rs1 = s.rs1;
+            rs2 = s.rs2;
+            imm = s.imm;
+        },
+        .FormatB => |b| {
+            rs1 = b.rs1;
+            rs2 = b.rs2;
+            imm = @intCast(b.imm);
+        },
+        .FormatU => |u_op| {
+            rd = u_op.rd;
+            imm = @bitCast(u_op.imm);
+        },
+        .FormatJ => |j| {
+            rd = j.rd;
+            imm = @bitCast(j.imm);
+        },
+        .FormatAssert => |a| {
+            rs1 = a.rs1;
+            imm = a.imm;
+        },
+        .None => {},
+    }
+
+    const vsr = instr.virtual_sequence_remaining;
+    const is_first = instr.is_first_in_sequence;
+    const is_compressed = instr.is_compressed;
+
+    // Dispatch to existing populate helpers for virtual instructions
+    switch (instr.variant) {
+        // =====================================================================
+        // Virtual instructions — delegate to dedicated populate functions
+        // =====================================================================
+        .VirtualMULI => {
+            // VirtualMULI has FormatI operands with imm = multiplier (1 << shamt)
+            // We need to pass the shamt, but for populateVirtualMULIEntry the imm
+            // is set directly from the multiplier. Use the direct population path.
+            entry.address = instr.address;
+            entry.imm = imm;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x2B;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            cf[@intFromEnum(CircuitFlags.MultiplyOperands)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 0; // RangeCheck
+            entry.is_interleaved = false;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualSignExtendWord => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x0B;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            // VirtualSignExtendWord does NOT set RightOperandIsImm
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 21; // SignExtendHalfWord
+            entry.is_interleaved = false;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualZeroExtendWord => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x42;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 20; // LowerHalfWord
+            entry.is_interleaved = false;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualSRLI => {
+            entry.address = instr.address;
+            entry.imm = imm; // bitmask stored as i64
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x5B;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 26; // VirtualSRL
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualSRAI => {
+            entry.address = instr.address;
+            entry.imm = imm; // bitmask stored as i64
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x5B;
+            entry.funct3 = 5;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 27; // VirtualSRA
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualSRL => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = rs2;
+            entry.opcode = 0x5B;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 26; // VirtualSRL
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualSRA => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = rs2;
+            entry.opcode = 0x5B;
+            entry.funct3 = 5;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 27; // VirtualSRA
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualAdvice => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = 255;
+            entry.rs2 = 255;
+            entry.opcode = 0x02;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            cf[@intFromEnum(CircuitFlags.Advice)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 0; // RangeCheck
+            entry.is_interleaved = false;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualAssertEQ => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = 255;
+            entry.rs1 = rs1;
+            entry.rs2 = rs2;
+            entry.opcode = 0x22;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.Assert)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+            entry.lookup_table_index = 6; // Equal
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualAssertLTE => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = 255;
+            entry.rs1 = rs1;
+            entry.rs2 = rs2;
+            entry.opcode = 0x22;
+            entry.funct3 = 4; // funct3=4 for LTE
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.Assert)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+            entry.lookup_table_index = 14; // UnsignedLTE
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualAssertValidDiv0 => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = 255;
+            entry.rs1 = rs1;
+            entry.rs2 = rs2;
+            entry.opcode = 0x22;
+            entry.funct3 = 1;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.Assert)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+            entry.lookup_table_index = 17; // ValidDiv0
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualAssertValidUnsignedRemainder => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = 255;
+            entry.rs1 = rs1;
+            entry.rs2 = rs2;
+            entry.opcode = 0x62;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.Assert)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+            entry.lookup_table_index = 16; // ValidUnsignedRemainder
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualAssertHalfwordAlignment => {
+            entry.address = instr.address;
+            entry.imm = imm;
+            entry.rd = 255;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x22;
+            entry.funct3 = 2;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.Assert)] = true;
+            cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            entry.lookup_table_index = 18; // HalfwordAlignment
+            entry.is_interleaved = false;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualAssertWordAlignment => {
+            entry.address = instr.address;
+            entry.imm = imm;
+            entry.rd = 255;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x22;
+            entry.funct3 = 3;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.Assert)] = true;
+            cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            entry.lookup_table_index = 19; // WordAlignment
+            entry.is_interleaved = false;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualChangeDivisorW => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = rs2;
+            entry.opcode = 0x3b;
+            entry.funct3 = 6;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 31; // VirtualChangeDivisorW
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualPow2 => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x2B;
+            entry.funct3 = 1;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 22; // Pow2
+            entry.is_interleaved = false;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualShiftRightBitmask => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x2B;
+            entry.funct3 = 2;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 24; // ShiftRightBitmask
+            entry.is_interleaved = false;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+
+        // =====================================================================
+        // Standard RISC-V instructions — build a 32-bit word and delegate
+        // =====================================================================
+
+        // R-type (opcode 0x33): ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND,
+        //                       MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
+        .ADD, .SUB, .SLL, .SLT, .SLTU, .XOR, .SRL, .SRA, .OR, .AND, .MUL, .MULH, .MULHSU, .MULHU, .DIV, .DIVU, .REM, .REMU => {
+            const info = getRTypeEncoding(instr.variant);
+            const word = buildRType(info.funct7, rs2, rs1, info.funct3, rd, 0x33);
+            populateEntryFromInstruction(entry, word, instr.address);
+            applyVirtualAndCompressedFlags(entry, rd, rs1, rs2, vsr, is_first, is_compressed);
+        },
+
+        // OP-32 R-type (opcode 0x3b): ADDW, SUBW, SLLW, SRLW, SRAW, MULW, DIVW, DIVUW, REMW, REMUW
+        .ADDW, .SUBW, .SLLW, .SRLW, .SRAW, .MULW, .DIVW, .DIVUW, .REMW, .REMUW => {
+            const info = getOp32RTypeEncoding(instr.variant);
+            const word = buildRType(info.funct7, rs2, rs1, info.funct3, rd, 0x3b);
+            populateEntryFromInstruction(entry, word, instr.address);
+            applyVirtualAndCompressedFlags(entry, rd, rs1, rs2, vsr, is_first, is_compressed);
+        },
+
+        // I-type ALU (opcode 0x13): ADDI, SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI, SRAI
+        .ADDI, .SLTI, .SLTIU, .XORI, .ORI, .ANDI, .SLLI, .SRLI, .SRAI => {
+            const info = getITypeEncoding(instr.variant);
+            const imm_u64: u64 = @bitCast(imm);
+            const word = buildIType(imm_u64, rs1, info.funct3, rd, 0x13);
+            populateEntryFromInstruction(entry, word, instr.address);
+            applyVirtualAndCompressedFlags(entry, rd, rs1, 255, vsr, is_first, is_compressed);
+        },
+
+        // OP-IMM-32 (opcode 0x1b): ADDIW, SLLIW, SRLIW, SRAIW
+        .ADDIW, .SLLIW, .SRLIW, .SRAIW => {
+            const info = getOpImm32Encoding(instr.variant);
+            const imm_u64: u64 = @bitCast(imm);
+            const word = buildIType(imm_u64, rs1, info.funct3, rd, 0x1b);
+            populateEntryFromInstruction(entry, word, instr.address);
+            applyVirtualAndCompressedFlags(entry, rd, rs1, 255, vsr, is_first, is_compressed);
+        },
+
+        // Load (opcode 0x03): LB, LBU, LH, LHU, LW, LWU, LD
+        .LB, .LBU, .LH, .LHU, .LW, .LWU, .LD => {
+            const f3 = getLoadFunct3(instr.variant);
+            const imm_u64: u64 = @bitCast(imm);
+            const word = buildIType(imm_u64, rs1, f3, rd, 0x03);
+            populateEntryFromInstruction(entry, word, instr.address);
+            applyVirtualAndCompressedFlags(entry, rd, rs1, 255, vsr, is_first, is_compressed);
+        },
+
+        // Store (opcode 0x23): SB, SH, SW, SD
+        .SB, .SH, .SW, .SD => {
+            const f3 = getStoreFunct3(instr.variant);
+            const word = buildSType(imm, rs2, rs1, f3, 0x23);
+            populateEntryFromInstruction(entry, word, instr.address);
+            applyVirtualAndCompressedFlags(entry, 255, rs1, rs2, vsr, is_first, is_compressed);
+        },
+
+        // Branch (opcode 0x63): BEQ, BNE, BLT, BGE, BLTU, BGEU
+        .BEQ, .BNE, .BLT, .BGE, .BLTU, .BGEU => {
+            const f3 = getBranchFunct3(instr.variant);
+            const word = buildBType(imm, rs2, rs1, f3, 0x63);
+            populateEntryFromInstruction(entry, word, instr.address);
+            applyVirtualAndCompressedFlags(entry, 255, rs1, rs2, vsr, is_first, is_compressed);
+        },
+
+        // U-type: LUI (0x37), AUIPC (0x17)
+        .LUI => {
+            const imm_u64: u64 = @bitCast(imm);
+            const word = buildUType(imm_u64, rd, 0x37);
+            populateEntryFromInstruction(entry, word, instr.address);
+            applyVirtualAndCompressedFlags(entry, rd, 255, 255, vsr, is_first, is_compressed);
+        },
+        .AUIPC => {
+            const imm_u64: u64 = @bitCast(imm);
+            const word = buildUType(imm_u64, rd, 0x17);
+            populateEntryFromInstruction(entry, word, instr.address);
+            applyVirtualAndCompressedFlags(entry, rd, 255, 255, vsr, is_first, is_compressed);
+        },
+
+        // J-type: JAL (0x6F)
+        .JAL => {
+            const imm_u64: u64 = @bitCast(imm);
+            const word = buildJType(imm_u64, rd, 0x6F);
+            populateEntryFromInstruction(entry, word, instr.address);
+            // JAL x0 → vr40 remapping
+            if (rd == 0) {
+                entry.rd = 40;
+                entry.instruction_flags[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            }
+            applyVirtualAndCompressedFlags(entry, entry.rd, 255, 255, vsr, is_first, is_compressed);
+        },
+
+        // JALR (opcode 0x67)
+        .JALR => {
+            const imm_u64: u64 = @bitCast(imm);
+            const word = buildIType(imm_u64, rs1, 0, rd, 0x67);
+            populateEntryFromInstruction(entry, word, instr.address);
+            // JALR x0 → vr40 remapping
+            if (rd == 0) {
+                entry.rd = 40;
+                entry.instruction_flags[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            }
+            applyVirtualAndCompressedFlags(entry, entry.rd, rs1, 255, vsr, is_first, is_compressed);
+        },
+
+        // System: FENCE, ECALL → NoOp-like (no lookup, IsNoop flag)
+        .FENCE => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = 255;
+            entry.rs1 = 255;
+            entry.rs2 = 255;
+            entry.opcode = 0x0F;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            entry.instruction_flags[@intFromEnum(InstructionFlags.IsNoop)] = true;
+            entry.circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+            entry.lookup_table_index = 255;
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+            if (is_compressed) entry.circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+        },
+        .ECALL => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = 255;
+            entry.rs1 = 255;
+            entry.rs2 = 255;
+            entry.opcode = 0x73;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            entry.instruction_flags[@intFromEnum(InstructionFlags.IsNoop)] = true;
+            entry.circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+            entry.lookup_table_index = 255;
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+            if (is_compressed) entry.circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+        },
+
+        // NoOp — should not reach here (filtered at call site), but handle defensively
+        .NoOp => {
+            entry.address = 0;
+            entry.imm = 0;
+            entry.rd = 255;
+            entry.rs1 = 255;
+            entry.rs2 = 255;
+            entry.opcode = 0;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            entry.circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+            entry.instruction_flags[@intFromEnum(InstructionFlags.IsNoop)] = true;
+            entry.lookup_table_index = 255;
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = null;
+            entry.is_first_in_sequence = false;
+        },
+
+        // UNIMPL — all flags false, no lookup
+        .UNIMPL => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = 255;
+            entry.rs1 = 255;
+            entry.rs2 = 255;
+            entry.opcode = 0;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            entry.lookup_table_index = 255;
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = null;
+            entry.is_first_in_sequence = false;
+        },
+    }
+}
+
+/// Helper: set VirtualInstruction, DoNotUpdateUnexpandedPC, IsFirstInSequence, IsCompressed flags.
+fn setVirtualSequenceFlags(cf: *[14]bool, vsr: ?u16, is_first: bool, is_compressed: bool) void {
+    if (vsr != null) {
+        cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    }
+    if (vsr) |v| {
+        if (v != 0) {
+            cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+        }
+    }
+    if (is_first) {
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    }
+    if (is_compressed) {
+        cf[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+    }
+}
+
+/// Helper: apply virtual sequence flags and is_compressed on top of an entry
+/// already populated by populateEntryFromInstruction. Also fixes register
+/// indices for virtual register values > 31 (which can't be encoded in a 5-bit
+/// instruction word field).
+fn applyVirtualAndCompressedFlags(
+    entry: *BytecodeEntry,
+    rd_full: u8,
+    rs1_full: u8,
+    rs2_full: u8,
+    vsr: ?u16,
+    is_first: bool,
+    is_compressed: bool,
+) void {
+    // Fix register indices: populateEntryFromInstruction only sees the low 5 bits
+    // from the instruction word. Virtual registers (32+) need the full value.
+    if (rd_full != 255) entry.rd = rd_full;
+    if (rs1_full != 255) entry.rs1 = rs1_full;
+    if (rs2_full != 255) entry.rs2 = rs2_full;
+
+    // Set virtual sequence metadata
+    entry.virtual_sequence_remaining = vsr;
+    entry.is_first_in_sequence = is_first;
+    if (vsr != null) {
+        entry.circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    }
+    if (vsr) |v| {
+        if (v != 0) {
+            entry.circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+        }
+    }
+    if (is_first) {
+        entry.circuit_flags[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    }
+    if (is_compressed) {
+        entry.circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+    }
+}
+
+// =========================================================================
+// Instruction word builders — construct 32-bit RISC-V instruction words
+// from fields. Used by populateEntryFromJoltInstruction.
+// =========================================================================
+
+fn buildRType(funct7: u7, rs2_val: u8, rs1_val: u8, funct3: u3, rd_val: u8, opcode: u7) u32 {
+    return (@as(u32, funct7) << 25) |
+        (@as(u32, rs2_val & 0x1F) << 20) |
+        (@as(u32, rs1_val & 0x1F) << 15) |
+        (@as(u32, funct3) << 12) |
+        (@as(u32, rd_val & 0x1F) << 7) |
+        @as(u32, opcode);
+}
+
+fn buildIType(imm_u64: u64, rs1_val: u8, funct3: u3, rd_val: u8, opcode: u7) u32 {
+    const imm12: u32 = @truncate(imm_u64 & 0xFFF);
+    return (imm12 << 20) |
+        (@as(u32, rs1_val & 0x1F) << 15) |
+        (@as(u32, funct3) << 12) |
+        (@as(u32, rd_val & 0x1F) << 7) |
+        @as(u32, opcode);
+}
+
+fn buildSType(imm_val: i64, rs2_val: u8, rs1_val: u8, funct3: u3, opcode: u7) u32 {
+    const imm_bits: u32 = @bitCast(@as(i32, @truncate(imm_val)));
+    return ((imm_bits >> 5) & 0x7F) << 25 |
+        (@as(u32, rs2_val & 0x1F) << 20) |
+        (@as(u32, rs1_val & 0x1F) << 15) |
+        (@as(u32, funct3) << 12) |
+        ((imm_bits & 0x1F) << 7) |
+        @as(u32, opcode);
+}
+
+fn buildBType(imm_val: i64, rs2_val: u8, rs1_val: u8, funct3: u3, opcode: u7) u32 {
+    // B-type immediate encoding: imm[12|10:5] in bits[31:25], imm[4:1|11] in bits[11:7]
+    const imm_bits: u32 = @bitCast(@as(i32, @truncate(imm_val)));
+    const bit12 = (imm_bits >> 12) & 1;
+    const bits10_5 = (imm_bits >> 5) & 0x3F;
+    const bits4_1 = (imm_bits >> 1) & 0xF;
+    const bit11 = (imm_bits >> 11) & 1;
+    return (bit12 << 31) |
+        (bits10_5 << 25) |
+        (@as(u32, rs2_val & 0x1F) << 20) |
+        (@as(u32, rs1_val & 0x1F) << 15) |
+        (@as(u32, funct3) << 12) |
+        (bits4_1 << 8) |
+        (bit11 << 7) |
+        @as(u32, opcode);
+}
+
+fn buildUType(imm_u64: u64, rd_val: u8, opcode: u7) u32 {
+    // U-type: imm[31:12] in bits[31:12]
+    const imm_bits: u32 = @truncate(imm_u64);
+    return (imm_bits & 0xFFFFF000) |
+        (@as(u32, rd_val & 0x1F) << 7) |
+        @as(u32, opcode);
+}
+
+fn buildJType(imm_u64: u64, rd_val: u8, opcode: u7) u32 {
+    // J-type immediate encoding: imm[20|10:1|11|19:12]
+    const imm_bits: u32 = @truncate(imm_u64);
+    const bit20 = (imm_bits >> 20) & 1;
+    const bits10_1 = (imm_bits >> 1) & 0x3FF;
+    const bit11 = (imm_bits >> 11) & 1;
+    const bits19_12 = (imm_bits >> 12) & 0xFF;
+    return (bit20 << 31) |
+        (bits10_1 << 21) |
+        (bit11 << 20) |
+        (bits19_12 << 12) |
+        (@as(u32, rd_val & 0x1F) << 7) |
+        @as(u32, opcode);
+}
+
+// =========================================================================
+// Variant-to-encoding mapping tables
+// =========================================================================
+
+const RTypeInfo = struct { funct3: u3, funct7: u7 };
+
+fn getRTypeEncoding(variant: preprocessing.JoltInstruction.InstructionVariant) RTypeInfo {
+    return switch (variant) {
+        .ADD => .{ .funct3 = 0, .funct7 = 0x00 },
+        .SUB => .{ .funct3 = 0, .funct7 = 0x20 },
+        .SLL => .{ .funct3 = 1, .funct7 = 0x00 },
+        .SLT => .{ .funct3 = 2, .funct7 = 0x00 },
+        .SLTU => .{ .funct3 = 3, .funct7 = 0x00 },
+        .XOR => .{ .funct3 = 4, .funct7 = 0x00 },
+        .SRL => .{ .funct3 = 5, .funct7 = 0x00 },
+        .SRA => .{ .funct3 = 5, .funct7 = 0x20 },
+        .OR => .{ .funct3 = 6, .funct7 = 0x00 },
+        .AND => .{ .funct3 = 7, .funct7 = 0x00 },
+        .MUL => .{ .funct3 = 0, .funct7 = 0x01 },
+        .MULH => .{ .funct3 = 1, .funct7 = 0x01 },
+        .MULHSU => .{ .funct3 = 2, .funct7 = 0x01 },
+        .MULHU => .{ .funct3 = 3, .funct7 = 0x01 },
+        .DIV => .{ .funct3 = 4, .funct7 = 0x01 },
+        .DIVU => .{ .funct3 = 5, .funct7 = 0x01 },
+        .REM => .{ .funct3 = 6, .funct7 = 0x01 },
+        .REMU => .{ .funct3 = 7, .funct7 = 0x01 },
+        else => unreachable,
+    };
+}
+
+fn getOp32RTypeEncoding(variant: preprocessing.JoltInstruction.InstructionVariant) RTypeInfo {
+    return switch (variant) {
+        .ADDW => .{ .funct3 = 0, .funct7 = 0x00 },
+        .SUBW => .{ .funct3 = 0, .funct7 = 0x20 },
+        .SLLW => .{ .funct3 = 1, .funct7 = 0x00 },
+        .SRLW => .{ .funct3 = 5, .funct7 = 0x00 },
+        .SRAW => .{ .funct3 = 5, .funct7 = 0x20 },
+        .MULW => .{ .funct3 = 0, .funct7 = 0x01 },
+        .DIVW => .{ .funct3 = 4, .funct7 = 0x01 },
+        .DIVUW => .{ .funct3 = 5, .funct7 = 0x01 },
+        .REMW => .{ .funct3 = 6, .funct7 = 0x01 },
+        .REMUW => .{ .funct3 = 7, .funct7 = 0x01 },
+        else => unreachable,
+    };
+}
+
+fn getITypeEncoding(variant: preprocessing.JoltInstruction.InstructionVariant) struct { funct3: u3 } {
+    return .{ .funct3 = switch (variant) {
+        .ADDI => 0,
+        .SLTI => 2,
+        .SLTIU => 3,
+        .XORI => 4,
+        .ORI => 6,
+        .ANDI => 7,
+        .SLLI => 1,
+        .SRLI => 5, // funct7 encoded in imm[11:5]
+        .SRAI => 5, // funct7 encoded in imm[11:5] (bit 30 set)
+        else => unreachable,
+    } };
+}
+
+fn getOpImm32Encoding(variant: preprocessing.JoltInstruction.InstructionVariant) struct { funct3: u3 } {
+    return .{ .funct3 = switch (variant) {
+        .ADDIW => 0,
+        .SLLIW => 1,
+        .SRLIW => 5,
+        .SRAIW => 5,
+        else => unreachable,
+    } };
+}
+
+fn getLoadFunct3(variant: preprocessing.JoltInstruction.InstructionVariant) u3 {
+    return switch (variant) {
+        .LB => 0,
+        .LH => 1,
+        .LW => 2,
+        .LD => 3,
+        .LBU => 4,
+        .LHU => 5,
+        .LWU => 6,
+        else => unreachable,
+    };
+}
+
+fn getStoreFunct3(variant: preprocessing.JoltInstruction.InstructionVariant) u3 {
+    return switch (variant) {
+        .SB => 0,
+        .SH => 1,
+        .SW => 2,
+        .SD => 3,
+        else => unreachable,
+    };
+}
+
+fn getBranchFunct3(variant: preprocessing.JoltInstruction.InstructionVariant) u3 {
+    return switch (variant) {
+        .BEQ => 0,
+        .BNE => 1,
+        .BLT => 4,
+        .BGE => 5,
+        .BLTU => 6,
+        .BGEU => 7,
+        else => unreachable,
+    };
+}
+
 /// Build bytecode entry table from static ELF bytecode + execution trace overlay.
 ///
 /// Phase 1: Populate ALL entries from the static ELF code bytes. This ensures
@@ -1060,6 +1970,8 @@ pub fn buildBytecodeEntries(
     program_code_bytes: ?[]const u8,
     code_base_address: u64,
     termination_address: u64,
+    text_size: usize,
+    bytecode_preprocessing: ?*const @import("../preprocessing.zig").BytecodePreprocessing,
 ) ![]BytecodeEntry {
     _ = trace;
     const entries = try allocator.alloc(BytecodeEntry, bytecode_K);
@@ -1102,25 +2014,32 @@ pub fn buildBytecodeEntries(
     }
 
     // ================================================================
-    // Phase 1: Populate from static ELF code bytes
+    // Phase 1: Populate from preprocessing bytecode (preferred) or raw ELF bytes
     // ================================================================
-    // This fills in ALL instructions from the program, including those
-    // that are never executed in a particular trace. The bytecode array
-    // is: [NoOp at k=0] [instruction at addr0] [instruction at addr1] ...
-    // Index 0 is always the NoOp/padding entry.
+    // Using preprocessing bytecode ensures the prover's bytecode entries match
+    // exactly what the verifier will compute from the serialized preprocessing.
+    // This is critical for programs with .rodata sections (like SHA256) where
+    // data bytes in the code section would be decoded differently by two
+    // independent decoders.
     if (program_code_bytes) |code_bytes| {
+        const decode_limit = @min(text_size, code_bytes.len);
         var offset: usize = 0;
-        while (offset < code_bytes.len) {
+        while (offset < decode_limit) {
             const addr = code_base_address + offset;
 
             // Check if compressed (RVC)
-            if (offset + 2 > code_bytes.len) break;
+            if (offset + 2 > decode_limit) break;
             const first_halfword: u16 = std.mem.readInt(u16, code_bytes[offset..][0..2], .little);
             const is_compressed = (first_halfword & 0x3) != 0x3;
 
             var instr_word: u32 = undefined;
             var instr_size: usize = undefined;
 
+            if (first_halfword == 0) {
+                // Zero halfword in a code gap — skip 2 bytes, leave entry as NoOp
+                offset += 2;
+                continue;
+            }
             if (is_compressed) {
                 // 16-bit compressed instruction - expand it
                 instr_word = instruction_mod.uncompressInstruction(@as(u32, first_halfword), .Bit64);
@@ -1167,7 +2086,7 @@ pub fn buildBytecodeEntries(
                     // Populate VirtualMULI at k-1 (= base_pc, first in sequence)
                     // vsr=Some(1): 1 instruction remaining after this
                     // is_first_in_sequence=true: it's the first entry
-                    // is_compressed: NOT set on non-last instructions (Jolt only sets on last)
+                    // is_compressed: only on last entry (k), not propagated to k-1
                     if (k >= 1) {
                         populateVirtualMULIEntry(&entries[k - 1], raw_rd, raw_rs1, addr, shamt, 1, true);
                     }
@@ -1220,15 +2139,25 @@ pub fn buildBytecodeEntries(
                     const t4: u8 = 38;
 
                     // Step 1 (k-11): VirtualAdvice(a2) → quotient (vsr=11, first)
-                    if (k >= 11) populateVirtualAdviceEntry(&entries[k - 11], a2, addr, 11, true);
+                    if (k >= 11) {
+                        populateVirtualAdviceEntry(&entries[k - 11], a2, addr, 11, true);
+                    }
                     // Step 2 (k-10): VirtualAdvice(a3) → remainder (vsr=10)
-                    if (k >= 10) populateVirtualAdviceEntry(&entries[k - 10], a3, addr, 10, false);
+                    if (k >= 10) {
+                        populateVirtualAdviceEntry(&entries[k - 10], a3, addr, 10, false);
+                    }
                     // Step 3 (k-9): VirtualZeroExtendWord(t3, a2) → zero-extend quotient (vsr=9)
-                    if (k >= 9) populateVirtualZeroExtendWordEntry(&entries[k - 9], t3, a2, addr, 9, false);
+                    if (k >= 9) {
+                        populateVirtualZeroExtendWordEntry(&entries[k - 9], t3, a2, addr, 9, false);
+                    }
                     // Step 4 (k-8): VirtualZeroExtendWord(t1, rs1) → zero-extend dividend (vsr=8)
-                    if (k >= 8) populateVirtualZeroExtendWordEntry(&entries[k - 8], t1, raw_rs1, addr, 8, false);
+                    if (k >= 8) {
+                        populateVirtualZeroExtendWordEntry(&entries[k - 8], t1, raw_rs1, addr, 8, false);
+                    }
                     // Step 5 (k-7): VirtualZeroExtendWord(t2, rs2) → zero-extend divisor (vsr=7)
-                    if (k >= 7) populateVirtualZeroExtendWordEntry(&entries[k - 7], t2, raw_rs2, addr, 7, false);
+                    if (k >= 7) {
+                        populateVirtualZeroExtendWordEntry(&entries[k - 7], t2, raw_rs2, addr, 7, false);
+                    }
                     // Step 6 (k-6): MUL(t0, t3, t2) → quotient * divisor (vsr=6)
                     // MUL is a regular R-type with opcode=0x33, funct3=0, funct7=1
                     if (k >= 6) {
@@ -1245,9 +2174,13 @@ pub fn buildBytecodeEntries(
                         entries[k - 6].is_first_in_sequence = false;
                     }
                     // Step 7 (k-5): VirtualZeroExtendWord(t4, t0) → mask to 32 bits (vsr=5)
-                    if (k >= 5) populateVirtualZeroExtendWordEntry(&entries[k - 5], t4, t0, addr, 5, false);
+                    if (k >= 5) {
+                        populateVirtualZeroExtendWordEntry(&entries[k - 5], t4, t0, addr, 5, false);
+                    }
                     // Step 8 (k-4): VirtualAssertEQ(t4, t0) → assert no overflow (vsr=4)
-                    if (k >= 4) populateVirtualAssertEQEntry(&entries[k - 4], t4, t0, addr, 4, false);
+                    if (k >= 4) {
+                        populateVirtualAssertEQEntry(&entries[k - 4], t4, t0, addr, 4, false);
+                    }
                     // Step 9 (k-3): ADD(t0, t0, a3) → add remainder (vsr=3)
                     // ADD is a regular R-type with opcode=0x33, funct3=0, funct7=0
                     if (k >= 3) {
@@ -1264,9 +2197,13 @@ pub fn buildBytecodeEntries(
                         entries[k - 3].is_first_in_sequence = false;
                     }
                     // Step 10 (k-2): VirtualAssertEQ(t0, t1) → assert dividend = q*d + r (vsr=2)
-                    if (k >= 2) populateVirtualAssertEQEntry(&entries[k - 2], t0, t1, addr, 2, false);
+                    if (k >= 2) {
+                        populateVirtualAssertEQEntry(&entries[k - 2], t0, t1, addr, 2, false);
+                    }
                     // Step 11 (k-1): VirtualAssertValidUnsignedRemainder(a3, t2) → r < d (vsr=1)
-                    if (k >= 1) populateVirtualAssertValidUnsignedRemainderEntry(&entries[k - 1], a3, t2, addr, 1, false);
+                    if (k >= 1) {
+                        populateVirtualAssertValidUnsignedRemainderEntry(&entries[k - 1], a3, t2, addr, 1, false);
+                    }
                     // Step 12 (k): VirtualSignExtendWord(rd, a3) → sign-extend result (vsr=0, last)
                     populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
                     // Fix rs1: VirtualSignExtendWord reads from a3
@@ -1287,9 +2224,13 @@ pub fn buildBytecodeEntries(
                     const t4: u8 = 38; // sign-extended dividend
 
                     // Step 1 (k-20): VirtualAdvice(a2) → quotient (vsr=20, first)
-                    if (k >= 20) populateVirtualAdviceEntry(&entries[k - 20], a2, addr, 20, true);
+                    if (k >= 20) {
+                        populateVirtualAdviceEntry(&entries[k - 20], a2, addr, 20, true);
+                    }
                     // Step 2 (k-19): VirtualAdvice(a3) → |remainder| (vsr=19)
-                    if (k >= 19) populateVirtualAdviceEntry(&entries[k - 19], a3, addr, 19, false);
+                    if (k >= 19) {
+                        populateVirtualAdviceEntry(&entries[k - 19], a3, addr, 19, false);
+                    }
                     // Step 3 (k-18): VirtualSignExtendWord(t4, rs1) → sign-extend dividend (vsr=18)
                     if (k >= 18) {
                         populateVirtualSignExtendWordEntryWithParams(&entries[k - 18], t4, raw_rs1, addr, 18, false);
@@ -1299,15 +2240,21 @@ pub fn buildBytecodeEntries(
                         populateVirtualSignExtendWordEntryWithParams(&entries[k - 17], t3, raw_rs2, addr, 17, false);
                     }
                     // Step 5 (k-16): VirtualAssertValidDiv0(t3, a2) → handle div-by-zero (vsr=16)
-                    if (k >= 16) populateVirtualAssertValidDiv0Entry(&entries[k - 16], t3, a2, addr, 16, false);
+                    if (k >= 16) {
+                        populateVirtualAssertValidDiv0Entry(&entries[k - 16], t3, a2, addr, 16, false);
+                    }
                     // Step 6 (k-15): VirtualChangeDivisorW(t0, t4, t3) → handle overflow (vsr=15)
-                    if (k >= 15) populateVirtualChangeDivisorWEntry(&entries[k - 15], t0, t4, t3, addr, 15, false);
+                    if (k >= 15) {
+                        populateVirtualChangeDivisorWEntry(&entries[k - 15], t0, t4, t3, addr, 15, false);
+                    }
                     // Step 7 (k-14): VirtualSignExtendWord(t1, a2) → sign-extend quotient (vsr=14)
                     if (k >= 14) {
                         populateVirtualSignExtendWordEntryWithParams(&entries[k - 14], t1, a2, addr, 14, false);
                     }
                     // Step 8 (k-13): VirtualAssertEQ(t1, a2) → assert quotient fits 32 bits (vsr=13)
-                    if (k >= 13) populateVirtualAssertEQEntry(&entries[k - 13], t1, a2, addr, 13, false);
+                    if (k >= 13) {
+                        populateVirtualAssertEQEntry(&entries[k - 13], t1, a2, addr, 13, false);
+                    }
                     // VirtualSRAI bitmask for shift=31: ((1<<33)-1) << 31 = 0xFFFFFFFF80000000
                     const srai_bitmask: u64 = blk: {
                         const shift_amt: u7 = 31;
@@ -1315,29 +2262,53 @@ pub fn buildBytecodeEntries(
                         break :blk @truncate(ones << shift_amt);
                     };
                     // Step 9 (k-12): VirtualSRAI(t2, a3, bitmask) → sign bit of |remainder| (vsr=12)
-                    if (k >= 12) populateVirtualSRAIEntry(&entries[k - 12], t2, a3, addr, srai_bitmask, 12, false);
+                    if (k >= 12) {
+                        populateVirtualSRAIEntry(&entries[k - 12], t2, a3, addr, srai_bitmask, 12, false);
+                    }
                     // Step 10 (k-11): VirtualAssertEQ(t2, 0) → assert non-negative (vsr=11)
-                    if (k >= 11) populateVirtualAssertEQEntry(&entries[k - 11], t2, 0, addr, 11, false);
+                    if (k >= 11) {
+                        populateVirtualAssertEQEntry(&entries[k - 11], t2, 0, addr, 11, false);
+                    }
                     // Step 11 (k-10): VirtualSRAI(t2, t4, bitmask) → sign bit of dividend (vsr=10)
-                    if (k >= 10) populateVirtualSRAIEntry(&entries[k - 10], t2, t4, addr, srai_bitmask, 10, false);
+                    if (k >= 10) {
+                        populateVirtualSRAIEntry(&entries[k - 10], t2, t4, addr, srai_bitmask, 10, false);
+                    }
                     // Step 12 (k-9): XOR(t3, a3, t2) → XOR |remainder| with sign mask (vsr=9)
-                    if (k >= 9) populateVirtualRTypeEntry(&entries[k - 9], t3, a3, t2, addr, 9, false, 0x33, 4, 0);
+                    if (k >= 9) {
+                        populateVirtualRTypeEntry(&entries[k - 9], t3, a3, t2, addr, 9, false, 0x33, 4, 0);
+                    }
                     // Step 13 (k-8): SUB(t3, t3, t2) → sign-corrected remainder (vsr=8)
-                    if (k >= 8) populateVirtualRTypeEntry(&entries[k - 8], t3, t3, t2, addr, 8, false, 0x33, 0, 0x20);
+                    if (k >= 8) {
+                        populateVirtualRTypeEntry(&entries[k - 8], t3, t3, t2, addr, 8, false, 0x33, 0, 0x20);
+                    }
                     // Step 14 (k-7): MUL(t1, a2, t0) → quotient × adjusted_divisor (vsr=7)
-                    if (k >= 7) populateVirtualRTypeEntry(&entries[k - 7], t1, a2, t0, addr, 7, false, 0x33, 0, 0x01);
+                    if (k >= 7) {
+                        populateVirtualRTypeEntry(&entries[k - 7], t1, a2, t0, addr, 7, false, 0x33, 0, 0x01);
+                    }
                     // Step 15 (k-6): ADD(t1, t1, t3) → + remainder (vsr=6)
-                    if (k >= 6) populateVirtualRTypeEntry(&entries[k - 6], t1, t1, t3, addr, 6, false, 0x33, 0, 0);
+                    if (k >= 6) {
+                        populateVirtualRTypeEntry(&entries[k - 6], t1, t1, t3, addr, 6, false, 0x33, 0, 0);
+                    }
                     // Step 16 (k-5): VirtualAssertEQ(t1, t4) → assert dividend = q*d + r (vsr=5)
-                    if (k >= 5) populateVirtualAssertEQEntry(&entries[k - 5], t1, t4, addr, 5, false);
+                    if (k >= 5) {
+                        populateVirtualAssertEQEntry(&entries[k - 5], t1, t4, addr, 5, false);
+                    }
                     // Step 17 (k-4): VirtualSRAI(t2, t0, bitmask) → sign bit of adjusted divisor (vsr=4)
-                    if (k >= 4) populateVirtualSRAIEntry(&entries[k - 4], t2, t0, addr, srai_bitmask, 4, false);
+                    if (k >= 4) {
+                        populateVirtualSRAIEntry(&entries[k - 4], t2, t0, addr, srai_bitmask, 4, false);
+                    }
                     // Step 18 (k-3): XOR(t1, t0, t2) → (vsr=3)
-                    if (k >= 3) populateVirtualRTypeEntry(&entries[k - 3], t1, t0, t2, addr, 3, false, 0x33, 4, 0);
+                    if (k >= 3) {
+                        populateVirtualRTypeEntry(&entries[k - 3], t1, t0, t2, addr, 3, false, 0x33, 4, 0);
+                    }
                     // Step 19 (k-2): SUB(t1, t1, t2) → abs(divisor) (vsr=2)
-                    if (k >= 2) populateVirtualRTypeEntry(&entries[k - 2], t1, t1, t2, addr, 2, false, 0x33, 0, 0x20);
+                    if (k >= 2) {
+                        populateVirtualRTypeEntry(&entries[k - 2], t1, t1, t2, addr, 2, false, 0x33, 0, 0x20);
+                    }
                     // Step 20 (k-1): VirtualAssertValidUnsignedRemainder(a3, t1) → |r| < |d| (vsr=1)
-                    if (k >= 1) populateVirtualAssertValidUnsignedRemainderEntry(&entries[k - 1], a3, t1, addr, 1, false);
+                    if (k >= 1) {
+                        populateVirtualAssertValidUnsignedRemainderEntry(&entries[k - 1], a3, t1, addr, 1, false);
+                    }
                     // Step 21 (k): VirtualSignExtendWord(rd, output) → sign-extend result (vsr=0, last)
                     // REMW: output = t3 (signed remainder), DIVW: output = a2 (quotient)
                     const output_reg = if (raw_funct3 == 6) t3 else a2;
@@ -1413,11 +2384,17 @@ pub fn buildBytecodeEntries(
                             }
                             if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
                             // k-1: MUL(v1, v1, v2) (vsr=1)
-                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v1, v1, v2, addr, 1, false, 0x33, 0, 0x01);
+                            if (k >= 1) {
+                                populateVirtualRTypeEntry(&entries[k - 1], v1, v1, v2, addr, 1, false, 0x33, 0, 0x01);
+                            }
                             // k-2: VirtualPow2(v2, v0, 0) (vsr=2)
-                            if (k >= 2) populateVirtualPow2Entry(&entries[k - 2], v2, v0, addr, 2, false);
+                            if (k >= 2) {
+                                populateVirtualPow2Entry(&entries[k - 2], v2, v0, addr, 2, false);
+                            }
                             // k-3: VirtualMULI(v0, v0, 8) (vsr=3)
-                            if (k >= 3) populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            if (k >= 3) {
+                                populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            }
                             // k-4: XORI(v0, v0, 7) (vsr=4)
                             if (k >= 4) {
                                 const xori_instr: u32 = (7 << 20) | (@as(u32, v0 & 0x1F) << 15) | (4 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
@@ -1479,11 +2456,17 @@ pub fn buildBytecodeEntries(
                             }
                             if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
                             // k-1: MUL(v1, v1, v2) (vsr=1)
-                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v1, v1, v2, addr, 1, false, 0x33, 0, 0x01);
+                            if (k >= 1) {
+                                populateVirtualRTypeEntry(&entries[k - 1], v1, v1, v2, addr, 1, false, 0x33, 0, 0x01);
+                            }
                             // k-2: VirtualPow2(v2, v0, 0) (vsr=2)
-                            if (k >= 2) populateVirtualPow2Entry(&entries[k - 2], v2, v0, addr, 2, false);
+                            if (k >= 2) {
+                                populateVirtualPow2Entry(&entries[k - 2], v2, v0, addr, 2, false);
+                            }
                             // k-3: VirtualMULI(v0, v0, 8) (vsr=3)
-                            if (k >= 3) populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            if (k >= 3) {
+                                populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            }
                             // k-4: XORI(v0, v0, 6) (vsr=4)
                             if (k >= 4) {
                                 const xori_instr: u32 = (6 << 20) | (@as(u32, v0 & 0x1F) << 15) | (4 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
@@ -1541,11 +2524,17 @@ pub fn buildBytecodeEntries(
                             populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
                             entries[k].rs1 = v1;
                             // k-1: VirtualSRL(v1, v1, v2) (vsr=1)
-                            if (k >= 1) populateVirtualSRLEntry(&entries[k - 1], v1, v1, v2, addr, 1, false);
+                            if (k >= 1) {
+                                populateVirtualSRLEntry(&entries[k - 1], v1, v1, v2, addr, 1, false);
+                            }
                             // k-2: VirtualShiftRightBitmask(v2, v0, 0) (vsr=2)
-                            if (k >= 2) populateVirtualShiftRightBitmaskEntry(&entries[k - 2], v2, v0, addr, 2, false);
+                            if (k >= 2) {
+                                populateVirtualShiftRightBitmaskEntry(&entries[k - 2], v2, v0, addr, 2, false);
+                            }
                             // k-3: VirtualMULI(v0, v0, 8) (vsr=3)
-                            if (k >= 3) populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            if (k >= 3) {
+                                populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            }
                             // k-4: LD(v1, v1, 0) (vsr=4)
                             if (k >= 4) {
                                 const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v1 & 0x1F) << 7) | 0x03;
@@ -1595,11 +2584,17 @@ pub fn buildBytecodeEntries(
                             populateVirtualSRLIEntry(&entries[k], raw_rd, v1, addr, bitmask_32, 0, false);
                             if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
                             // k-1: MUL(v1, v1, v2) (vsr=1)
-                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v1, v1, v2, addr, 1, false, 0x33, 0, 0x01);
+                            if (k >= 1) {
+                                populateVirtualRTypeEntry(&entries[k - 1], v1, v1, v2, addr, 1, false, 0x33, 0, 0x01);
+                            }
                             // k-2: VirtualPow2(v2, v0, 0) (vsr=2)
-                            if (k >= 2) populateVirtualPow2Entry(&entries[k - 2], v2, v0, addr, 2, false);
+                            if (k >= 2) {
+                                populateVirtualPow2Entry(&entries[k - 2], v2, v0, addr, 2, false);
+                            }
                             // k-3: VirtualMULI(v0, v0, 8) (vsr=3)
-                            if (k >= 3) populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            if (k >= 3) {
+                                populateVirtualMULIEntry(&entries[k - 3], v0, v0, addr, 3, 3, false);
+                            }
                             // k-4: XORI(v0, v0, 4) (vsr=4)
                             if (k >= 4) {
                                 const xori_instr: u32 = (4 << 20) | (@as(u32, v0 & 0x1F) << 15) | (4 << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x13;
@@ -1682,19 +2677,33 @@ pub fn buildBytecodeEntries(
                                 if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
                             }
                             // k-1: XOR(v2, v2, v3) (vsr=1)
-                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v2, v2, v3, addr, 1, false, 0x33, 4, 0);
+                            if (k >= 1) {
+                                populateVirtualRTypeEntry(&entries[k - 1], v2, v2, v3, addr, 1, false, 0x33, 4, 0);
+                            }
                             // k-2: AND(v3, v3, v0) (vsr=2)
-                            if (k >= 2) populateVirtualRTypeEntry(&entries[k - 2], v3, v3, v0, addr, 2, false, 0x33, 7, 0);
+                            if (k >= 2) {
+                                populateVirtualRTypeEntry(&entries[k - 2], v3, v3, v0, addr, 2, false, 0x33, 7, 0);
+                            }
                             // k-3: XOR(v3, v2, v3) (vsr=3)
-                            if (k >= 3) populateVirtualRTypeEntry(&entries[k - 3], v3, v2, v3, addr, 3, false, 0x33, 4, 0);
+                            if (k >= 3) {
+                                populateVirtualRTypeEntry(&entries[k - 3], v3, v2, v3, addr, 3, false, 0x33, 4, 0);
+                            }
                             // k-4: MUL(v3, rs2, v5) (vsr=4) — from SLL(v3, rs2, v3) step 2
-                            if (k >= 4) populateVirtualRTypeEntry(&entries[k - 4], v3, raw_rs2, v5, addr, 4, false, 0x33, 0, 0x01);
+                            if (k >= 4) {
+                                populateVirtualRTypeEntry(&entries[k - 4], v3, raw_rs2, v5, addr, 4, false, 0x33, 0, 0x01);
+                            }
                             // k-5: VirtualPow2(v5, v3, 0) (vsr=5) — from SLL step 1
-                            if (k >= 5) populateVirtualPow2Entry(&entries[k - 5], v5, v3, addr, 5, false);
+                            if (k >= 5) {
+                                populateVirtualPow2Entry(&entries[k - 5], v5, v3, addr, 5, false);
+                            }
                             // k-6: MUL(v0, v0, v4) (vsr=6) — from SLL(v0, v0, v3) step 2
-                            if (k >= 6) populateVirtualRTypeEntry(&entries[k - 6], v0, v0, v4, addr, 6, false, 0x33, 0, 0x01);
+                            if (k >= 6) {
+                                populateVirtualRTypeEntry(&entries[k - 6], v0, v0, v4, addr, 6, false, 0x33, 0, 0x01);
+                            }
                             // k-7: VirtualPow2(v4, v3, 0) (vsr=7) — from SLL step 1
-                            if (k >= 7) populateVirtualPow2Entry(&entries[k - 7], v4, v3, addr, 7, false);
+                            if (k >= 7) {
+                                populateVirtualPow2Entry(&entries[k - 7], v4, v3, addr, 7, false);
+                            }
                             // k-8: LUI(v0, 0xff) (vsr=8)
                             if (k >= 8) {
                                 const lui_instr: u32 = (0xff << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x37;
@@ -1706,7 +2715,9 @@ pub fn buildBytecodeEntries(
                                 entries[k - 8].is_first_in_sequence = false;
                             }
                             // k-9: VirtualMULI(v3, v0, 8) (vsr=9)
-                            if (k >= 9) populateVirtualMULIEntry(&entries[k - 9], v3, v0, addr, 3, 9, false);
+                            if (k >= 9) {
+                                populateVirtualMULIEntry(&entries[k - 9], v3, v0, addr, 3, 9, false);
+                            }
                             // k-10: LD(v2, v1, 0) (vsr=10)
                             if (k >= 10) {
                                 const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v2 & 0x1F) << 7) | 0x03;
@@ -1756,13 +2767,27 @@ pub fn buildBytecodeEntries(
                                 entries[k].virtual_sequence_remaining = 0;
                                 if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
                             }
-                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v2, v2, v3, addr, 1, false, 0x33, 4, 0);
-                            if (k >= 2) populateVirtualRTypeEntry(&entries[k - 2], v3, v3, v0, addr, 2, false, 0x33, 7, 0);
-                            if (k >= 3) populateVirtualRTypeEntry(&entries[k - 3], v3, v2, v3, addr, 3, false, 0x33, 4, 0);
-                            if (k >= 4) populateVirtualRTypeEntry(&entries[k - 4], v3, raw_rs2, v5, addr, 4, false, 0x33, 0, 0x01);
-                            if (k >= 5) populateVirtualPow2Entry(&entries[k - 5], v5, v3, addr, 5, false);
-                            if (k >= 6) populateVirtualRTypeEntry(&entries[k - 6], v0, v0, v4, addr, 6, false, 0x33, 0, 0x01);
-                            if (k >= 7) populateVirtualPow2Entry(&entries[k - 7], v4, v3, addr, 7, false);
+                            if (k >= 1) {
+                                populateVirtualRTypeEntry(&entries[k - 1], v2, v2, v3, addr, 1, false, 0x33, 4, 0);
+                            }
+                            if (k >= 2) {
+                                populateVirtualRTypeEntry(&entries[k - 2], v3, v3, v0, addr, 2, false, 0x33, 7, 0);
+                            }
+                            if (k >= 3) {
+                                populateVirtualRTypeEntry(&entries[k - 3], v3, v2, v3, addr, 3, false, 0x33, 4, 0);
+                            }
+                            if (k >= 4) {
+                                populateVirtualRTypeEntry(&entries[k - 4], v3, raw_rs2, v5, addr, 4, false, 0x33, 0, 0x01);
+                            }
+                            if (k >= 5) {
+                                populateVirtualPow2Entry(&entries[k - 5], v5, v3, addr, 5, false);
+                            }
+                            if (k >= 6) {
+                                populateVirtualRTypeEntry(&entries[k - 6], v0, v0, v4, addr, 6, false, 0x33, 0, 0x01);
+                            }
+                            if (k >= 7) {
+                                populateVirtualPow2Entry(&entries[k - 7], v4, v3, addr, 7, false);
+                            }
                             // k-8: LUI(v0, 0xffff) (vsr=8)
                             if (k >= 8) {
                                 const lui_instr: u32 = (0xffff << 12) | (@as(u32, v0 & 0x1F) << 7) | 0x37;
@@ -1773,7 +2798,9 @@ pub fn buildBytecodeEntries(
                                 entries[k - 8].virtual_sequence_remaining = 8;
                                 entries[k - 8].is_first_in_sequence = false;
                             }
-                            if (k >= 9) populateVirtualMULIEntry(&entries[k - 9], v3, v0, addr, 3, 9, false);
+                            if (k >= 9) {
+                                populateVirtualMULIEntry(&entries[k - 9], v3, v0, addr, 3, 9, false);
+                            }
                             // k-10: LD(v2, v1, 0) (vsr=10)
                             if (k >= 10) {
                                 const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v2 & 0x1F) << 7) | 0x03;
@@ -1826,15 +2853,31 @@ pub fn buildBytecodeEntries(
                                 entries[k].virtual_sequence_remaining = 0;
                                 if (is_compressed) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
                             }
-                            if (k >= 1) populateVirtualRTypeEntry(&entries[k - 1], v2, v2, v0, addr, 1, false, 0x33, 4, 0);
-                            if (k >= 2) populateVirtualRTypeEntry(&entries[k - 2], v0, v0, v3, addr, 2, false, 0x33, 7, 0);
-                            if (k >= 3) populateVirtualRTypeEntry(&entries[k - 3], v0, v2, v0, addr, 3, false, 0x33, 4, 0);
-                            if (k >= 4) populateVirtualRTypeEntry(&entries[k - 4], v0, raw_rs2, v5, addr, 4, false, 0x33, 0, 0x01);
-                            if (k >= 5) populateVirtualPow2Entry(&entries[k - 5], v5, v0, addr, 5, false);
-                            if (k >= 6) populateVirtualRTypeEntry(&entries[k - 6], v3, v3, v4, addr, 6, false, 0x33, 0, 0x01);
-                            if (k >= 7) populateVirtualPow2Entry(&entries[k - 7], v4, v0, addr, 7, false);
+                            if (k >= 1) {
+                                populateVirtualRTypeEntry(&entries[k - 1], v2, v2, v0, addr, 1, false, 0x33, 4, 0);
+                            }
+                            if (k >= 2) {
+                                populateVirtualRTypeEntry(&entries[k - 2], v0, v0, v3, addr, 2, false, 0x33, 7, 0);
+                            }
+                            if (k >= 3) {
+                                populateVirtualRTypeEntry(&entries[k - 3], v0, v2, v0, addr, 3, false, 0x33, 4, 0);
+                            }
+                            if (k >= 4) {
+                                populateVirtualRTypeEntry(&entries[k - 4], v0, raw_rs2, v5, addr, 4, false, 0x33, 0, 0x01);
+                            }
+                            if (k >= 5) {
+                                populateVirtualPow2Entry(&entries[k - 5], v5, v0, addr, 5, false);
+                            }
+                            if (k >= 6) {
+                                populateVirtualRTypeEntry(&entries[k - 6], v3, v3, v4, addr, 6, false, 0x33, 0, 0x01);
+                            }
+                            if (k >= 7) {
+                                populateVirtualPow2Entry(&entries[k - 7], v4, v0, addr, 7, false);
+                            }
                             // k-8: VirtualSRLI(v3, v3, bitmask_32) (vsr=8)
-                            if (k >= 8) populateVirtualSRLIEntry(&entries[k - 8], v3, v3, addr, bitmask_32, 8, false);
+                            if (k >= 8) {
+                                populateVirtualSRLIEntry(&entries[k - 8], v3, v3, addr, bitmask_32, 8, false);
+                            }
                             // k-9: ORI(v3, x0, -1) (vsr=9)
                             if (k >= 9) {
                                 const ori_instr: u32 = (@as(u32, @bitCast(@as(i32, -1))) & 0xFFF) << 20 | (0 << 15) | (6 << 12) | (@as(u32, v3 & 0x1F) << 7) | 0x13;
@@ -1847,7 +2890,9 @@ pub fn buildBytecodeEntries(
                                 entries[k - 9].is_first_in_sequence = false;
                             }
                             // k-10: VirtualMULI(v0, v0, 8) (vsr=10)
-                            if (k >= 10) populateVirtualMULIEntry(&entries[k - 10], v0, v0, addr, 3, 10, false);
+                            if (k >= 10) {
+                                populateVirtualMULIEntry(&entries[k - 10], v0, v0, addr, 3, 10, false);
+                            }
                             // k-11: LD(v2, v1, 0) (vsr=11)
                             if (k >= 11) {
                                 const ld_instr: u32 = (3 << 12) | (@as(u32, v1 & 0x1F) << 15) | (@as(u32, v2 & 0x1F) << 7) | 0x03;
@@ -1908,7 +2953,17 @@ pub fn buildBytecodeEntries(
                         // Build the base instruction word by mapping the opcode:
                         // 0x1b (OP-IMM-32) → 0x13 (OP-IMM), 0x3b (OP-32) → 0x33 (OP)
                         const base_opcode: u8 = if (raw_opcode == 0x1b) 0x13 else 0x33;
-                        const base_instr = (instr_word & ~@as(u32, 0x7F)) | @as(u32, base_opcode);
+                        var base_instr = (instr_word & ~@as(u32, 0x7F)) | @as(u32, base_opcode);
+                        // Normalize funct7 for OP-32 → OP mapping (same logic as populateEntryFromInstruction)
+                        if (raw_opcode == 0x3b) {
+                            const raw_f7: u7 = @truncate(instr_word >> 25);
+                            const canon_f7: u7 = switch (raw_funct3) {
+                                0 => if (raw_f7 == 0x20) @as(u7, 0x20) else if (raw_f7 == 0x01) @as(u7, 0x01) else 0,
+                                5 => if (raw_f7 == 0x20) @as(u7, 0x20) else 0,
+                                1, 2, 3, 4, 6, 7 => if (raw_f7 == 0x01) @as(u7, 0x01) else 0,
+                            };
+                            base_instr = (base_instr & ~(@as(u32, 0x7F) << 25)) | (@as(u32, canon_f7) << 25);
+                        }
                         populateEntryFromInstruction(&entries[k - 1], base_instr, addr);
                         // Set virtual sequence flags for the base (first) instruction:
                         // vsr=Some(1): 1 instruction remaining
@@ -1920,7 +2975,6 @@ pub fn buildBytecodeEntries(
                         entries[k - 1].circuit_flags[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
                         entries[k - 1].virtual_sequence_remaining = 1;
                         entries[k - 1].is_first_in_sequence = true;
-                        // is_compressed: NOT set on non-last instructions (Jolt only sets on last)
                     }
                 } else {
                     populateEntryFromInstruction(&entries[k], instr_word, addr);
@@ -2026,6 +3080,89 @@ pub fn buildBytecodeEntries(
         }
     }
 
+    // ================================================================
+    // Phase 3: Sync with preprocessing to ensure bytecode entries match
+    // ================================================================
+    // The preprocessing (serialized to the verifier) may have different entries
+    // at indices corresponding to data bytes (.rodata) that both decoders interpret
+    // as UNIMPL but with different instruction alignment. Sync all entries where
+    // the preprocessing and raw-byte path disagree on address or variant.
+    if (bytecode_preprocessing) |prep| {
+        var sync_count: usize = 0;
+        std.debug.print("[SYNC] prep.bytecode.items.len={}, bytecode_K={}\n", .{prep.bytecode.items.len, bytecode_K});
+        for (0..@min(bytecode_K, prep.bytecode.items.len)) |k| {
+            const prep_instr = prep.bytecode.items[k];
+            const prep_addr = prep_instr.address;
+            const is_prep_noop = (prep_instr.variant == .NoOp);
+            const is_prep_unimpl = (prep_instr.variant == .UNIMPL);
+            const entry_addr = entries[k].address;
+
+            // If addresses match and preprocessing is not UNIMPL, entries are consistent
+            if (prep_addr == entry_addr and !is_prep_unimpl and !is_prep_noop) continue;
+            // If both are NoOp/UNIMPL with same address, skip
+            if (prep_addr == entry_addr and entry_addr == 0) continue;
+
+            sync_count += 1;
+            if (sync_count <= 50) {
+                std.debug.print("[SYNC] k={} prep_addr=0x{x} entry_addr=0x{x} prep_variant={} is_noop={} is_unimpl={}\n", .{
+                    k, prep_addr, entry_addr, @intFromEnum(prep_instr.variant), is_prep_noop, is_prep_unimpl,
+                });
+            }
+
+            // Addresses differ — sync to match preprocessing
+            if (is_prep_noop) {
+                // Preprocessing has NoOp but we have something else → make it NoOp
+                var cf = [_]bool{false} ** 14;
+                cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                var inf = [_]bool{false} ** 7;
+                inf[@intFromEnum(InstructionFlags.IsNoop)] = true;
+                entries[k] = BytecodeEntry{
+                    .address = 0, .imm = 0, .rd = 255, .rs1 = 255, .rs2 = 255,
+                    .circuit_flags = cf, .instruction_flags = inf,
+                    .lookup_table_index = 255, .is_interleaved = true,
+                    .virtual_sequence_remaining = null, .is_first_in_sequence = false,
+                    .opcode = 0, .funct3 = 0,
+                };
+            } else if (is_prep_unimpl) {
+                // Preprocessing has UNIMPL — set entry to UNIMPL (address=0, matching Jolt's Default)
+                entries[k].address = 0;
+                entries[k].imm = 0;
+                entries[k].rd = 255;
+                entries[k].rs1 = 255;
+                entries[k].rs2 = 255;
+                entries[k].circuit_flags = [_]bool{false} ** 14;
+                entries[k].instruction_flags = [_]bool{false} ** 7;
+                entries[k].lookup_table_index = 255;
+                entries[k].is_interleaved = true;
+                entries[k].virtual_sequence_remaining = null;
+                entries[k].is_first_in_sequence = false;
+                entries[k].opcode = 0;
+                entries[k].funct3 = 0;
+            }
+            else {
+                // Real instruction in preprocessing but prover has different/UNIMPL.
+                // Re-decode from raw bytes at the preprocessing's address.
+                if (program_code_bytes) |code_bytes| {
+                    const byte_offset = prep_addr - code_base_address;
+                    if (byte_offset + 2 <= code_bytes.len) {
+                        const hw: u16 = std.mem.readInt(u16, code_bytes[byte_offset..][0..2], .little);
+                        const is_comp = (hw & 0x3) != 0x3;
+                        var instr_word: u32 = undefined;
+                        if (is_comp) {
+                            instr_word = instruction_mod.uncompressInstruction(@as(u32, hw), .Bit64);
+                        } else if (byte_offset + 4 <= code_bytes.len) {
+                            instr_word = std.mem.readInt(u32, code_bytes[byte_offset..][0..4], .little);
+                        } else {
+                            instr_word = 0;
+                        }
+                        populateEntryFromInstruction(&entries[k], instr_word, prep_addr);
+                        if (is_comp) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                    }
+                }
+            }
+        }
+    }
+
     // Debug: dump first entries
     dbg("\n[ZOLT BYTECODE ENTRIES] bytecode_K={}\n", .{bytecode_K});
     for (0..@min(bytecode_K, 32)) |k| {
@@ -2052,14 +3189,47 @@ pub fn buildBytecodeEntries(
 /// base_instruction + VirtualSignExtendWord. This includes ADDIW, ADDW, SUBW, MULW.
 /// Excludes SLLIW (handled separately with VirtualMULI decomposition).
 fn isWExtensionWith2EntryDecomposition(opcode: u8, funct3: u3, funct7: u7) bool {
+    _ = funct7;
     return switch (opcode) {
         0x1b => funct3 == 0, // ADDIW (funct3=0); SLLIW (funct3=1) excluded
-        0x3b => switch (funct3) {
-            0 => (funct7 == 0 or funct7 == 0x20 or funct7 == 0x01), // ADDW, SUBW, MULW
-            else => false,
-        },
+        0x3b => funct3 == 0,
         else => false,
     };
+}
+
+/// Check if an opcode/funct3/funct7 combination is a known RISC-V instruction
+/// recognized by Jolt. Unknown combinations are treated as UNIMPL (Default).
+fn isKnownInstruction(opcode: u8, funct3: u3, funct7: u7) bool {
+    switch (opcode) {
+        0x33 => return switch (funct3) { // R-type
+            0 => (funct7 == 0 or funct7 == 0x20 or funct7 == 0x01), // ADD, SUB, MUL
+            1, 2, 3, 4, 6 => (funct7 == 0 or funct7 == 0x01), // SLL, SLT, SLTU, XOR, OR + M-ext
+            5 => (funct7 == 0 or funct7 == 0x20 or funct7 == 0x01), // SRL, SRA, DIVU
+            7 => (funct7 == 0 or funct7 == 0x01), // AND, REMU
+        },
+        0x3b => return switch (funct3) { // OP-32
+            0 => (funct7 == 0 or funct7 == 0x20 or funct7 == 0x01), // ADDW, SUBW, MULW
+            1 => (funct7 == 0), // SLLW
+            4, 5, 6, 7 => (funct7 == 0x01), // DIVW, DIVUW, REMW, REMUW
+            2, 3 => false,
+        },
+        0x13 => return switch (funct3) { // OP-IMM
+            0, 1, 2, 3, 4, 5, 6, 7 => true, // ADDI, SLLI, SLTI, SLTIU, XORI, SRLI/SRAI, ORI, ANDI
+        },
+        0x1b => return switch (funct3) { // OP-IMM-32
+            0 => true, // ADDIW
+            1 => true, // SLLIW
+            5 => true, // SRLIW/SRAIW
+            else => false,
+        },
+        0x03, 0x23, 0x63, 0x37, 0x17, 0x6F, 0x67, // Standard opcodes
+        0x73, 0x0F, // ECALL, FENCE (treated as NoOp in Jolt)
+        => return true,
+        // Virtual opcodes (0x0B, 0x2B, 0x5B, 0x02, 0x22) are NOT recognized here
+        // since they only appear in virtual sequence entries created by populate functions,
+        // never in raw ELF bytes.
+        else => return false,
+    }
 }
 
 /// Map a RISC-V instruction to its lookup table index (0..40).
@@ -4682,6 +5852,8 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 // If we use external claims that differ from the actual polynomial sum,
                 // the sumcheck will be inconsistent.
                 stage_claims_init[s] = recomputed_claim;
+                // Always print stage match
+                std.debug.print("[S6_INIT] stage {}: match={}\n", .{s, recomputed_claim.eql(external_stage_claims[s])});
 
                 // Debug: Check if recomputed matches external
                 if (comptime debug_verbose) {
@@ -6172,9 +7344,11 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     //   FormatS (i64): i64 as i128 → sign-extended (can be negative)
                     //   FormatLoad (i64): i64 as i128 → sign-extended (can be negative)
                     // We must match: signed formats use fieldFromI128, unsigned use fromU64.
-                    const is_signed_format = (opcode_for_imm == 0x63) or // B-type (branches)
-                        (opcode_for_imm == 0x23) or // S-type (stores)
-                        (opcode_for_imm == 0x03); // Load (FormatLoad uses i64, sign-extends to i128)
+                    // Signed encoding: must match R1CS witness and Jolt verifier.
+                    const is_signed_format = (opcode_for_imm == 0x63) or // B-type (branches: FormatB i128)
+                        (opcode_for_imm == 0x23) or // S-type (stores: FormatS i64)
+                        (opcode_for_imm == 0x03) or // Load (FormatLoad: i64 sign-extended to i128)
+                        (opcode_for_imm == 0x22); // VirtualAssert (FormatAssert: signed i64)
                     if (is_signed_format) {
                         break :blk fieldFromI128(F, @as(i128, entry.imm));
                     } else {
@@ -6278,6 +7452,39 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     val5 = val5.add(stage5_gammas[2 + @as(usize, entry.lookup_table_index)]);
                 }
                 bytecode_val_polys[4][k] = val5;
+            }
+
+            // Always print val[0] for comparison with Jolt verifier [JV0] output
+            {
+                for (0..bytecode_K) |k| {
+                    if (k >= bytecode_entries.len) break;
+                    const entry = bytecode_entries[k];
+                    if (entry.address == 0) continue;
+                    const be = bytecode_val_polys[0][k].toBytesBE();
+                    std.debug.print("[ZV0] k={} v=0x", .{k});
+                    for (be) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                }
+                // Print detail for first few mismatched entries and stage1_gammas
+                std.debug.print("[DIAG_GAMMA] stage1_gammas:\n", .{});
+                for (0..16) |gi| {
+                    const gbe = stage1_gammas[gi].toBytesBE();
+                    std.debug.print("  g1[{}]=0x", .{gi});
+                    for (gbe) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                }
+                // Print bytecode entry details for problem indices
+                for ([_]usize{ 1405, 1406, 1407, 1408, 1409, 1410, 1440, 1441, 1442, 1443, 1483, 1484, 1488, 1489, 1490, 1491, 1596, 1597, 1598, 1599, 1600, 1601 }) |dk| {
+                    if (dk >= bytecode_entries.len) continue;
+                    const de = bytecode_entries[dk];
+                    std.debug.print("[DIAG_ENTRY] k={} addr=0x{x} op=0x{x:0>2} f3={} imm={} vsr={?} first={} cf=[", .{
+                        dk, de.address, de.opcode, de.funct3, de.imm, de.virtual_sequence_remaining, de.is_first_in_sequence,
+                    });
+                    for (0..14) |fi| {
+                        if (de.circuit_flags[fi]) std.debug.print("1", .{}) else std.debug.print("0", .{});
+                    }
+                    std.debug.print("] lt={}\n", .{de.lookup_table_index});
+                }
             }
 
             // Debug: Print Stage 3 Val poly for comparison with Jolt verifier
@@ -7779,6 +8986,23 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 }
                             }
                             try bytecode_prover.transitionToPhase2(bytecode_addr_challenges);
+                            // ALWAYS check Phase 2 consistency
+                            {
+                                const bc_c = bytecode_prover.combined.?;
+                                const bc_r = bytecode_prover.ra_chunks.?;
+                                const bc_T = bytecode_prover.current_len;
+                                var p2sum = F.zero();
+                                for (0..bc_T) |cc| {
+                                    var rp = F.one();
+                                    for (0..bytecode_prover.bytecode_d) |di| rp = rp.mul(bc_r[di][cc]);
+                                    p2sum = p2sum.add(bc_c[cc].mul(rp));
+                                }
+                                std.debug.print("[P2_CHECK] inst0={} phase2_sum={} match={}\n", .{
+                                    @as(u8, if (instance_claims[0].eql(F.zero())) 0 else 1),
+                                    @as(u8, if (p2sum.eql(F.zero())) 0 else 1),
+                                    instance_claims[0].eql(p2sum),
+                                });
+                            }
                             if (comptime debug_verbose) {
                                 // After transition, check Phase 2 polynomial sum
                                 const bc_combined = bytecode_prover.combined.?;
@@ -7807,6 +9031,22 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         self.allocator.free(cached_bc_phase2.?);
                         cached_bc_phase2 = null;
                         bytecode_prover.bindChallengePhase2(challenge);
+
+                        // Verify polynomial sum after binding
+                        {
+                            const bc_c2 = bytecode_prover.combined.?;
+                            const bc_r2 = bytecode_prover.ra_chunks.?;
+                            const bc_T2 = bytecode_prover.current_len;
+                            var p2sum2 = F.zero();
+                            for (0..bc_T2) |cc2| {
+                                var rp2 = F.one();
+                                for (0..bytecode_prover.bytecode_d) |di2| rp2 = rp2.mul(bc_r2[di2][cc2]);
+                                p2sum2 = p2sum2.add(bc_c2[cc2].mul(rp2));
+                            }
+                            if (!instance_claims[0].eql(p2sum2)) {
+                                std.debug.print("[P2_ROUND_ERR] round={} inst0 != poly_sum\n", .{round});
+                            }
+                        }
                     }
                 }
 
@@ -7866,25 +9106,25 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // instance_claims[i] = input_claims[i] = the correct unscaled claim.
             }
 
-            // Debug: print final instance claims after sumcheck (ALWAYS ON)
+            // Always print final instance claims for comparison with verifier
             {
-                dbg("\n[S6P] Final instance claims after sumcheck:\n", .{});
+                std.debug.print("\n[S6P_FINAL] Instance claims (hex LE) after sumcheck:\n", .{});
                 for (0..6) |i| {
                     const be = instance_claims[i].toBytesBE();
-                    dbg("  instance[{d}] final_claim_LE=[", .{i});
-                    for (0..32) |bi| dbg("{x:0>2}", .{be[31 - bi]});
-                    dbg("]\n", .{});
+                    std.debug.print("  inst[{}] = 0x", .{i});
+                    for (be) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
                 }
                 const bb = current_batched_claim.toBytesBE();
-                dbg("  batched_output_claim_LE=[", .{});
-                for (0..32) |bi| dbg("{x:0>2}", .{bb[31 - bi]});
-                dbg("]\n", .{});
-                dbg("[S6P] All challenges (LE first 8 bytes):\n", .{});
-                for (0..max_num_rounds) |i| {
-                    const be = challenges[i].toBytesBE();
-                    dbg("  ch[{d}] = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                        i, be[31], be[30], be[29], be[28], be[27], be[26], be[25], be[24],
-                    });
+                std.debug.print("  output  = 0x", .{});
+                for (bb) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n", .{});
+                // Also print batch coefficients
+                for (0..6) |i| {
+                    const batchb = batch[i].toBytesBE();
+                    std.debug.print("  batch[{}] = 0x", .{i});
+                    for (batchb) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
                 }
             }
 
@@ -8231,6 +9471,15 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var bc_ra_prod = F.one();
                 for (bytecode_ra_claims) |c| bc_ra_prod = bc_ra_prod.mul(c);
                 const bc_recomputed = bc_combined_val.mul(bc_ra_prod);
+                // Always print for comparison with verifier
+                std.debug.print("[ZV_BCRAF] val={any}\n", .{bc_combined_val.toBytesBE()});
+                std.debug.print("[ZV_BCRAF] d={}\n", .{bytecode_d});
+                for (0..bytecode_d) |ra_idx| {
+                    std.debug.print("[ZV_BCRAF] ra_claim[{}]={any}\n", .{ra_idx, bytecode_ra_claims[ra_idx].toBytesBE()});
+                }
+                std.debug.print("[ZV_BCRAF] result={any}\n", .{bc_recomputed.toBytesBE()});
+                std.debug.print("[ZV_BCRAF] inst0={any}\n", .{instance_claims[0].toBytesBE()});
+                std.debug.print("[ZV_BCRAF] match={}\n", .{bc_recomputed.eql(instance_claims[0])});
                 dbg("[STAGE6] Consistency check Instance 0:\n", .{});
                 // Print combined[0] as LE hex for comparison with Jolt's "val (sum)"
                 const cval_be = bc_combined_val.toBytesBE();
@@ -8390,6 +9639,33 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             transcript.appendScalar("opening_claim", ram_inc_claim);
             transcript.appendScalar("opening_claim", rd_inc_claim);
             dbg("[STAGE6] After ALL cache_openings: round={}\n", .{transcript.n_rounds});
+
+            // Print BCRAF components for comparison with verifier
+            {
+                const bc_val = bytecode_prover.combined.?[0];
+                // Decompose combined[0] per stage
+                for (0..5) |si| {
+                    const bv = bytecode_prover.bound_vals_stored[si];
+                    std.debug.print("[ZV_BCRAF] bound_vals[{}]=0x", .{si});
+                    for (bv.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                }
+                std.debug.print("[ZV_BCRAF] val=0x", .{});
+                for (bc_val.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n[ZV_BCRAF] d={}\n", .{bytecode_d});
+                for (0..bytecode_d) |ri| {
+                    std.debug.print("[ZV_BCRAF] ra[{}]=0x", .{ri});
+                    for (bytecode_ra_claims[ri].toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                }
+                var prod = bc_val;
+                for (bytecode_ra_claims[0..bytecode_d]) |c| prod = prod.mul(c);
+                std.debug.print("[ZV_BCRAF] result=0x", .{});
+                for (prod.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n[ZV_BCRAF] inst0=0x", .{});
+                for (instance_claims[0].toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n", .{});
+            }
 
             return Stage6Result(F){
                 .challenges = challenges,

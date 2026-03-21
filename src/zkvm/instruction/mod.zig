@@ -578,7 +578,7 @@ pub const DecodedInstruction = struct {
                 const raw_imm = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
                 imm = @bitCast(signExtend(u21, raw_imm));
             },
-            .JALR, .LOAD, .OP_IMM, .OP_IMM_32 => {
+            .JALR, .LOAD, .OP_IMM, .OP_IMM_32, .SYSTEM, .FENCE => {
                 format = .I;
                 imm = @bitCast(signExtend(u12, @truncate(instruction >> 20)));
             },

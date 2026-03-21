@@ -2595,8 +2595,59 @@ pub fn JoltProver(comptime F: type) type {
             const stage6_mod = @import("spartan/stage6_prover.zig");
             // Get pc_map for converting ELF addresses to bytecode array indices
             const pc_map_ptr = config.bytecode_pc_map orelse return error.MissingBytecodepcMap;
-            const bytecode_entries = try stage6_mod.buildBytecodeEntries(self.allocator, the_trace, bytecode_K_val, pc_map_ptr, config.program_code_bytes, config.code_base_address, the_memory_layout.termination);
+            const bytecode_entries = try stage6_mod.buildBytecodeEntries(self.allocator, the_trace, bytecode_K_val, pc_map_ptr, config.program_code_bytes, config.code_base_address, the_memory_layout.termination, config.text_size, config.bytecode_preprocessing);
             defer self.allocator.free(bytecode_entries);
+
+            // Diagnostic: compare val_poly stage 0 with R1CS witness for first 5 differing cycles
+            {
+                const r1cs_mod = @import("r1cs/constraints.zig");
+                var diff_count: usize = 0;
+                for (0..the_trace.steps.items.len) |c| {
+                    if (c >= cycle_witnesses.len) break;
+                    const step = the_trace.steps.items[c];
+                    const pc_idx = pc_map_ptr.getPCForStep(step);
+                    if (pc_idx >= bytecode_entries.len) continue;
+                    const entry = bytecode_entries[pc_idx];
+                    // Compute val_poly stage 0 from bytecode entry
+                    const opcode_for_imm = entry.opcode;
+                    _ = opcode_for_imm;
+                    // Compare UnexpandedPC
+                    const witness = cycle_witnesses[c];
+                    const witness_upc = witness.values[r1cs_mod.R1CSInputIndex.UnexpandedPC.toIndex()];
+                    const entry_upc = F.fromU64(entry.address);
+                    if (!witness_upc.eql(entry_upc) and diff_count < 3) {
+                        std.debug.print("[DIAG] c={} pc_idx={}: UPC mismatch!\n", .{c, pc_idx});
+                        diff_count += 1;
+                    }
+                    // Check Imm
+                    const witness_imm = witness.values[r1cs_mod.R1CSInputIndex.Imm.toIndex()];
+                    const is_signed = (entry.opcode == 0x63) or (entry.opcode == 0x23) or (entry.opcode == 0x03) or (entry.opcode == 0x22);
+                    const entry_imm = if (is_signed)
+                        (if (entry.imm < 0) F.fromU64(@intCast(-entry.imm)).neg() else F.fromU64(@intCast(entry.imm)))
+                    else
+                        F.fromU64(@as(u64, @bitCast(entry.imm)));
+                    if (!witness_imm.eql(entry_imm) and diff_count < 3) {
+                        std.debug.print("[DIAG] c={} pc={} op=0x{x:0>2}: IMM mismatch\n", .{c, pc_idx, entry.opcode});
+                        diff_count += 1;
+                    }
+                    // Check OpFlags (circuit flags)
+                    for (0..14) |fi| {
+                        const witness_flag = witness.values[r1cs_mod.R1CSInputIndex.FlagAddOperands.toIndex() + fi];
+                        const entry_flag = if (entry.circuit_flags[fi]) F.one() else F.zero();
+                        if (!witness_flag.eql(entry_flag) and diff_count < 5) {
+                            std.debug.print("[DIAG] c={} pc={} addr=0x{x} op=0x{x:0>2} vsr={?} first={}: FLAG[{}] w={} e={}\n", .{
+                                c, pc_idx, entry.address, entry.opcode,
+                                entry.virtual_sequence_remaining, entry.is_first_in_sequence,
+                                fi,
+                                if (witness_flag.eql(F.one())) @as(u8, 1) else 0,
+                                if (entry_flag.eql(F.one())) @as(u8, 1) else 0,
+                            });
+                            diff_count += 1;
+                        }
+                    }
+                }
+                if (diff_count > 0) std.debug.print("[DIAG] Total mismatches: {}\n", .{diff_count});
+            }
 
             // Get register address opening points for Stages 4 and 5
             // Stage 4: from RegistersReadWriteChecking (address portion)
@@ -4629,6 +4680,10 @@ pub const JoltProverConfig = struct {
     program_code_bytes: ?[]const u8 = null,
     /// Base address of the code section (typically 0x80000000)
     code_base_address: u64 = 0x80000000,
+    /// Size of the .text section in bytes (instructions only, excluding .rodata)
+    text_size: usize = 0,
+    /// Preprocessing bytecode (source of truth for verifier; used to build val_polys)
+    bytecode_preprocessing: ?*const @import("preprocessing.zig").BytecodePreprocessing = null,
 };
 
 // =============================================================================

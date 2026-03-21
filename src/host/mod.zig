@@ -69,10 +69,24 @@ pub const ELFLoader = struct {
             .program_size = bytecode_size,
         };
 
+        // Find the size of the executable segment (.text section).
+        // Instructions should only be decoded within this range; bytes beyond
+        // this point may be .rodata (constants, lookup tables).
+        // ELF segment flags: PF_X = 1 (executable), PF_W = 2 (writable), PF_R = 4 (readable)
+        var text_size: usize = bytecode_size;
+        for (parsed.segments) |segment| {
+            if ((segment.flags & 1) != 0 and segment.data.len > 0) {
+                // Executable segment — use its data length as text boundary
+                text_size = segment.data.len;
+                break;
+            }
+        }
+
         return Program{
             .bytecode = bytecode,
             .entry_point = parsed.header.entry,
             .base_address = base_addr,
+            .text_size = text_size,
             .memory_layout = common.MemoryLayout.init(&config),
             .allocator = self.allocator,
         };
@@ -95,12 +109,16 @@ pub const ELFLoader = struct {
 
 /// A loaded RISC-V program
 pub const Program = struct {
-    /// Program bytecode
+    /// Program bytecode (all loadable segments concatenated)
     bytecode: []const u8,
     /// Entry point address
     entry_point: u64,
     /// Base address for the program in memory
     base_address: u64,
+    /// Size of the executable code (.text) section in bytes.
+    /// Only this portion should be decoded as instructions; bytes
+    /// beyond this may be .rodata (constants) or other data.
+    text_size: usize,
     /// Memory layout
     memory_layout: common.MemoryLayout,
     allocator: Allocator,

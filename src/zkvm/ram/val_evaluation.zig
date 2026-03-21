@@ -275,7 +275,9 @@ pub fn WaPolynomial(comptime F: type) type {
             }
 
             for (trace.accesses.items) |access| {
-                if (access.op != .Write) continue;
+                // Include ALL accesses (reads AND writes) - the RA polynomial
+                // has entries for every RAM operation, not just writes.
+                // In Jolt's model, every timestamp is an access.
                 if (access.address < start_address) continue;
                 const remapped = (access.address - start_address) / 8;
                 if (remapped >= k) continue;

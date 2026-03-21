@@ -312,6 +312,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
         srs_path,
         program.base_address,
         program.entry_point,
+        program.text_size,
     ) catch |err| {
         std.debug.print("  Error generating Jolt-compatible proof: {s}\n", .{@errorName(err)});
         return err;
@@ -366,7 +367,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
         defer device_mut.deinit();
 
         std.debug.print("  Termination address: 0x{x:0>16}\n", .{device.memory_layout.termination});
-        var bytecode_prep = preprocessing.BytecodePreprocessing.preprocess(allocator, program.bytecode, program.entry_point, device.memory_layout.termination) catch |err| {
+        var bytecode_prep = preprocessing.BytecodePreprocessing.preprocessWithTextSize(allocator, program.bytecode, program.entry_point, device.memory_layout.termination, program.text_size) catch |err| {
             std.debug.print("  Error generating bytecode preprocessing: {s}\n", .{@errorName(err)});
             return err;
         };

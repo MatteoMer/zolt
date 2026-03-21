@@ -365,6 +365,7 @@ pub fn JoltProver(comptime F: type) type {
             srs_path: ?[]const u8,
             base_address: u64,
             entry_point: u64,
+            text_size_opt: ?usize,
         ) !jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof) {
             const JoltProofWithDory = jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof);
             const DoryScheme = Dory.DoryCommitmentScheme(F);
@@ -995,7 +996,8 @@ pub fn JoltProver(comptime F: type) type {
 
             // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
             const preproc = @import("preprocessing.zig");
-            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address, null);
+            const text_sz = text_size_opt orelse program_bytecode.len;
+            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, null, text_sz);
             defer bytecode_prep_dory.deinit();
 
             // Convert to Jolt-compatible format with transcript integration
@@ -1026,9 +1028,12 @@ pub fn JoltProver(comptime F: type) type {
                     .min_bytecode_address = bytecode_info_dory.min_bytecode_address,
                     // PC mapper for Stage 6 BytecodeReadRaf
                     .bytecode_pc_map = &bytecode_prep_dory.pc_map,
+                    // Preprocessing bytecode for Stage 6 val_poly computation
+                    .bytecode_preprocessing = &bytecode_prep_dory,
                     // Static ELF code bytes for Stage 6 bytecode entry population
                     .program_code_bytes = program_bytecode,
                     .code_base_address = common.constants.RAM_START_ADDRESS,
+                    .text_size = text_sz,
                 },
                 cycle_witnesses,
                 tau,

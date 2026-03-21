@@ -393,8 +393,11 @@ pub fn EqPolynomial(comptime F: type) type {
             const n = r.len;
             const size = out.len;
             std.debug.assert(size == @as(usize, 1) << @intCast(n));
-            // Build eq table in-place, then shift right by 1.
-            // Shift must go backwards to avoid overwriting unread entries.
+            // eq_plus_one[j] = eq(r, j-1) for j > 0, eq_plus_one[0] = 0.
+            // This implements: Σ_j eq_plus_one[j] * f(j) = Σ_j eq(r, j-1) * f(j)
+            //                = Σ_{j'} eq(r, j') * f(j'+1)
+            // Which is the "shift forward" used in the shift sumcheck.
+            // Build eq table in-place, then shift RIGHT by 1.
             buildEqTableInPlace(r, out, null);
             var k: usize = size - 1;
             while (k > 0) : (k -= 1) {

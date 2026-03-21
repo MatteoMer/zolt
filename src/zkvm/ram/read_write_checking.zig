@@ -13,7 +13,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const debug_verbose = true;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -107,10 +107,10 @@ pub fn CycleMajorEntry(comptime F: type) type {
         ra_coeff: F,
         /// Value coefficient (memory value before access)
         val_coeff: F,
-        /// Previous value (for tracking)
-        prev_val: u64,
-        /// Next value (for tracking write increments)
-        next_val: u64,
+        /// Previous value (for tracking) - field element, bound during Phase 2
+        prev_val: F,
+        /// Next value (for tracking write increments) - field element, bound during Phase 2
+        next_val: F,
 
         /// Bind entries at even and odd rows to create a new entry at row/2
         /// Matches Jolt's CycleMajorMatrixEntry::bind_entries
@@ -135,9 +135,9 @@ pub fn CycleMajorEntry(comptime F: type) type {
             } else if (even != null) {
                 // Only even entry exists - odd is implicit
                 const e = even.?.*;
-                const odd_val_coeff = F.fromU64(e.next_val);
+                const odd_val_coeff = e.next_val;
                 const new_val = e.val_coeff.add(r.mul(odd_val_coeff.sub(e.val_coeff)));
-                dbg("[BIND CYCLE] EVEN_ONLY: even_cycle={}, even_val={any}, odd_implicit_val=F({})={any}, r={any}, result_val={any}\n", .{ e.cycle, e.val_coeff.toBytesBE()[0..8], e.next_val, odd_val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
+                dbg("[BIND CYCLE] EVEN_ONLY: even_cycle={}, even_val={any}, odd_implicit_val={any}, r={any}, result_val={any}\n", .{ e.cycle, e.val_coeff.toBytesBE()[0..8], odd_val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
                 return Self{
                     .cycle = e.cycle / 2,
                     .address = e.address,
@@ -149,9 +149,9 @@ pub fn CycleMajorEntry(comptime F: type) type {
             } else if (odd != null) {
                 // Only odd entry exists - even is implicit
                 const o = odd.?.*;
-                const even_val_coeff = F.fromU64(o.prev_val);
+                const even_val_coeff = o.prev_val;
                 const new_val = even_val_coeff.add(r.mul(o.val_coeff.sub(even_val_coeff)));
-                dbg("[BIND CYCLE] ODD_ONLY: odd_cycle={}, even_implicit_val=F({})={any}, odd_val={any}, r={any}, result_val={any}\n", .{ o.cycle, o.prev_val, even_val_coeff.toBytesBE()[0..8], o.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
+                dbg("[BIND CYCLE] ODD_ONLY: odd_cycle={}, even_implicit_val={any}, odd_val={any}, r={any}, result_val={any}\n", .{ o.cycle, even_val_coeff.toBytesBE()[0..8], o.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
                 return Self{
                     .cycle = o.cycle / 2,
                     .address = o.address,
@@ -196,6 +196,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         eq_size: usize,
         /// Gruen split eq polynomial for optimized round polynomial computation
         gruen_eq: ?GruenSplitEq,
+        /// Memory trace (kept for dense val_claim computation)
+        trace: *const MemoryTrace,
         /// Allocator
         allocator: Allocator,
 
@@ -328,8 +330,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     .address = addr_idx,
                     .ra_coeff = F.one(),
                     .val_coeff = val_coeff,
-                    .prev_val = prev_val,
-                    .next_val = access.value,
+                    .prev_val = F.fromU64(prev_val),
+                    .next_val = F.fromU64(access.value),
                 });
 
                 dbg("[RWC INIT] entry: cycle={}, addr={}, op={}, prev_val={}, next_val={}, inc[{}]={any}\n", .{
@@ -419,6 +421,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 .eq_evals = eq_evals,
                 .eq_size = T,
                 .gruen_eq = gruen_eq,
+                .trace = trace,
                 .allocator = allocator,
             };
         }
@@ -482,16 +485,21 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             var q_quadratic: F = F.zero();
 
             // Group entries by row pair (rows 2j and 2j+1 for each j)
-            // Entries are bound after each round, so entry.cycle is the current row
+            // Entries are sorted by (cycle, address).
+            // Within each row pair, we split into even-row and odd-row sub-lists
+            // and merge by column (address), matching Jolt's seq_prover_message_contribution.
             var entry_idx: usize = 0;
             while (entry_idx < self.entries.items.len) {
-                const entry = self.entries.items[entry_idx];
-                // Since entries are bound, entry.cycle is the current effective cycle
-                const effective_cycle = entry.cycle;
-                const row_pair_idx = effective_cycle / 2; // j = cycle / 2
+                const first_entry = self.entries.items[entry_idx];
+                const row_pair_idx = first_entry.cycle / 2;
 
-                // Find even and odd entries for this column at this row pair
-                const is_even_row = effective_cycle % 2 == 0;
+                // Find the extent of all entries in this row pair
+                var pair_end = entry_idx;
+                while (pair_end < self.entries.items.len and
+                    self.entries.items[pair_end].cycle / 2 == row_pair_idx)
+                {
+                    pair_end += 1;
+                }
 
                 // Compute E_prefix = E_out[x_out] * E_in[x_in]
                 const x_out = row_pair_idx >> @intCast(head_in_bits);
@@ -508,69 +516,90 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 const inc_infty = inc_1.sub(inc_0);
                 const inc_evals = [2]F{ inc_0, inc_infty };
 
-                // Compute ra_evals and val_evals based on which entries exist
-                // Case 1: Only even entry exists (common case for sparse matrix)
-                // Case 2: Only odd entry exists
-                // Case 3: Both entries exist (check if next entry is in same row pair)
+                // Split entries in this row pair into even-row and odd-row sub-lists.
+                // Since entries are sorted by (cycle, address), all even-row entries
+                // come before all odd-row entries within this pair.
+                const pair_entries = self.entries.items[entry_idx..pair_end];
+                var odd_row_start: usize = 0;
+                while (odd_row_start < pair_entries.len and pair_entries[odd_row_start].cycle % 2 == 0) {
+                    odd_row_start += 1;
+                }
+                const even_row = pair_entries[0..odd_row_start];
+                const odd_row = pair_entries[odd_row_start..];
 
-                var ra_0: F = undefined;
-                var ra_infty: F = undefined;
-                var val_0: F = undefined;
-                var val_infty: F = undefined;
+                // Merge even and odd rows by column (address),
+                // matching Jolt's seq_prover_message_contribution for cycle-major.
+                var ei: usize = 0;
+                var oi: usize = 0;
+                while (ei < even_row.len and oi < odd_row.len) {
+                    var ra_0: F = undefined;
+                    var ra_infty: F = undefined;
+                    var val_0: F = undefined;
+                    var val_infty: F = undefined;
 
-                if (is_even_row) {
-                    // Entry is at even row - check if there's a matching odd entry
-                    const has_odd = blk: {
-                        if (entry_idx + 1 < self.entries.items.len) {
-                            const next = self.entries.items[entry_idx + 1];
-                            // Entries are bound, so next.cycle is the current row
-                            const next_effective = next.cycle;
-                            const next_pair = next_effective / 2;
-                            break :blk (next_pair == row_pair_idx and next.address == entry.address and next_effective % 2 == 1);
-                        }
-                        break :blk false;
-                    };
-
-                    if (has_odd) {
-                        // Both even and odd entries exist
-                        const odd_entry = self.entries.items[entry_idx + 1];
-                        ra_0 = entry.ra_coeff;
-                        ra_infty = odd_entry.ra_coeff.sub(entry.ra_coeff);
-                        val_0 = entry.val_coeff;
-                        val_infty = odd_entry.val_coeff.sub(entry.val_coeff);
-                        entry_idx += 2; // Skip both entries
+                    if (even_row[ei].address == odd_row[oi].address) {
+                        // Both even and odd entries exist at same column
+                        ra_0 = even_row[ei].ra_coeff;
+                        ra_infty = odd_row[oi].ra_coeff.sub(even_row[ei].ra_coeff);
+                        val_0 = even_row[ei].val_coeff;
+                        val_infty = odd_row[oi].val_coeff.sub(even_row[ei].val_coeff);
+                        ei += 1;
+                        oi += 1;
+                    } else if (even_row[ei].address < odd_row[oi].address) {
+                        // Only even entry - implicit odd has ra=0, val=next_val
+                        const odd_val_coeff = even_row[ei].next_val;
+                        ra_0 = even_row[ei].ra_coeff;
+                        ra_infty = F.zero().sub(even_row[ei].ra_coeff);
+                        val_0 = even_row[ei].val_coeff;
+                        val_infty = odd_val_coeff.sub(even_row[ei].val_coeff);
+                        ei += 1;
                     } else {
-                        // Only even entry exists - odd entry is implicit
-                        // odd_val_coeff = entry.next_val (value after this access)
-                        const odd_val_coeff = F.fromU64(entry.next_val);
-                        ra_0 = entry.ra_coeff;
-                        ra_infty = F.zero().sub(entry.ra_coeff); // -ra_even
-                        val_0 = entry.val_coeff;
-                        val_infty = odd_val_coeff.sub(entry.val_coeff);
-                        entry_idx += 1;
+                        // Only odd entry - implicit even has ra=0, val=prev_val
+                        const even_val_coeff = odd_row[oi].prev_val;
+                        ra_0 = F.zero();
+                        ra_infty = odd_row[oi].ra_coeff;
+                        val_0 = even_val_coeff;
+                        val_infty = odd_row[oi].val_coeff.sub(even_val_coeff);
+                        oi += 1;
                     }
-                } else {
-                    // Entry is at odd row - even entry is implicit
-                    // even_val_coeff = entry.prev_val (value before this access)
-                    const even_val_coeff = F.fromU64(entry.prev_val);
-                    ra_0 = F.zero(); // No access at even row
-                    ra_infty = entry.ra_coeff;
-                    val_0 = even_val_coeff;
-                    val_infty = entry.val_coeff.sub(even_val_coeff);
-                    entry_idx += 1;
+
+                    const inner_0 = val_0.add(gamma.mul(inc_evals[0].add(val_0)));
+                    const inner_infty = val_infty.add(gamma.mul(inc_evals[1].add(val_infty)));
+                    q_constant = q_constant.add(E_prefix.mul(ra_0).mul(inner_0));
+                    q_quadratic = q_quadratic.add(E_prefix.mul(ra_infty).mul(inner_infty));
                 }
 
-                // Apply Jolt's formula:
-                // q_constant += E_prefix * ra_0 * (val_0 + gamma * (inc_0 + val_0))
-                // q_quadratic += E_prefix * ra_infty * (val_infty + gamma * (inc_infty + val_infty))
-                const inner_0 = val_0.add(gamma.mul(inc_evals[0].add(val_0)));
-                const inner_infty = val_infty.add(gamma.mul(inc_evals[1].add(val_infty)));
+                // Remaining even entries (no odd counterpart)
+                while (ei < even_row.len) {
+                    const odd_val_coeff = even_row[ei].next_val;
+                    const ra_0 = even_row[ei].ra_coeff;
+                    const ra_infty = F.zero().sub(even_row[ei].ra_coeff);
+                    const val_0 = even_row[ei].val_coeff;
+                    const val_infty = odd_val_coeff.sub(even_row[ei].val_coeff);
 
-                const contrib_0 = E_prefix.mul(ra_0).mul(inner_0);
-                const contrib_infty = E_prefix.mul(ra_infty).mul(inner_infty);
+                    const inner_0 = val_0.add(gamma.mul(inc_evals[0].add(val_0)));
+                    const inner_infty = val_infty.add(gamma.mul(inc_evals[1].add(val_infty)));
+                    q_constant = q_constant.add(E_prefix.mul(ra_0).mul(inner_0));
+                    q_quadratic = q_quadratic.add(E_prefix.mul(ra_infty).mul(inner_infty));
+                    ei += 1;
+                }
 
-                q_constant = q_constant.add(contrib_0);
-                q_quadratic = q_quadratic.add(contrib_infty);
+                // Remaining odd entries (no even counterpart)
+                while (oi < odd_row.len) {
+                    const even_val_coeff = odd_row[oi].prev_val;
+                    const ra_0 = F.zero();
+                    const ra_infty = odd_row[oi].ra_coeff;
+                    const val_0 = even_val_coeff;
+                    const val_infty = odd_row[oi].val_coeff.sub(even_val_coeff);
+
+                    const inner_0 = val_0.add(gamma.mul(inc_evals[0].add(val_0)));
+                    const inner_infty = val_infty.add(gamma.mul(inc_evals[1].add(val_infty)));
+                    q_constant = q_constant.add(E_prefix.mul(ra_0).mul(inner_0));
+                    q_quadratic = q_quadratic.add(E_prefix.mul(ra_infty).mul(inner_infty));
+                    oi += 1;
+                }
+
+                entry_idx = pair_end;
             }
 
             // Use Gruen's formula to compute s(X) = l(X) * q(X)
@@ -731,8 +760,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         );
                         s0 = s0.add(evals[0]);
                         s2 = s2.add(evals[1]);
-                        even_checkpoint = F.fromU64(even_entry.next_val);
-                        odd_checkpoint = F.fromU64(odd_entry.next_val);
+                        even_checkpoint = even_entry.next_val;
+                        odd_checkpoint = odd_entry.next_val;
                         even_idx += 1;
                         odd_idx += 1;
                     } else if (even_entry.cycle < odd_entry.cycle) {
@@ -750,7 +779,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         );
                         s0 = s0.add(evals[0]);
                         s2 = s2.add(evals[1]);
-                        even_checkpoint = F.fromU64(even_entry.next_val);
+                        even_checkpoint = even_entry.next_val;
                         even_idx += 1;
                     } else {
                         // Only odd entry at this row
@@ -767,7 +796,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         );
                         s0 = s0.add(evals[0]);
                         s2 = s2.add(evals[1]);
-                        odd_checkpoint = F.fromU64(odd_entry.next_val);
+                        odd_checkpoint = odd_entry.next_val;
                         odd_idx += 1;
                     }
                 }
@@ -788,7 +817,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     );
                     s0 = s0.add(evals[0]);
                     s2 = s2.add(evals[1]);
-                    even_checkpoint = F.fromU64(even_entry.next_val);
+                    even_checkpoint = even_entry.next_val;
                     even_idx += 1;
                 }
 
@@ -808,7 +837,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     );
                     s0 = s0.add(evals[0]);
                     s2 = s2.add(evals[1]);
-                    odd_checkpoint = F.fromU64(odd_entry.next_val);
+                    odd_checkpoint = odd_entry.next_val;
                     odd_idx += 1;
                 }
 
@@ -1118,8 +1147,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         if (bindAddressMajorPair(even_entry, odd_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
                             try new_entries.append(self.allocator, bound);
                         }
-                        even_checkpoint = F.fromU64(even_entry.next_val);
-                        odd_checkpoint = F.fromU64(odd_entry.next_val);
+                        even_checkpoint = even_entry.next_val;
+                        odd_checkpoint = odd_entry.next_val;
                         even_idx += 1;
                         odd_idx += 1;
                     } else if (even_entry.cycle < odd_entry.cycle) {
@@ -1127,14 +1156,14 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         if (bindAddressMajorEvenOnly(even_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
                             try new_entries.append(self.allocator, bound);
                         }
-                        even_checkpoint = F.fromU64(even_entry.next_val);
+                        even_checkpoint = even_entry.next_val;
                         even_idx += 1;
                     } else {
                         // Only odd entry at this row
                         if (bindAddressMajorOddOnly(odd_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
                             try new_entries.append(self.allocator, bound);
                         }
-                        odd_checkpoint = F.fromU64(odd_entry.next_val);
+                        odd_checkpoint = odd_entry.next_val;
                         odd_idx += 1;
                     }
                 }
@@ -1145,7 +1174,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     if (bindAddressMajorEvenOnly(even_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
                         try new_entries.append(self.allocator, bound);
                     }
-                    even_checkpoint = F.fromU64(even_entry.next_val);
+                    even_checkpoint = even_entry.next_val;
                     even_idx += 1;
                 }
 
@@ -1155,7 +1184,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     if (bindAddressMajorOddOnly(odd_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
                         try new_entries.append(self.allocator, bound);
                     }
-                    odd_checkpoint = F.fromU64(odd_entry.next_val);
+                    odd_checkpoint = odd_entry.next_val;
                     odd_idx += 1;
                 }
 
@@ -1175,15 +1204,14 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             _ = odd_checkpoint;
 
             // Matching Jolt's RamAddressMajorEntry::bind_entries (Some, Some) case
-            // For prev_val and next_val, we keep as u64 (track the original trace values)
-            // The actual binding uses field arithmetic on val_coeff
+            // prev_val and next_val are field elements that get bound like val_coeff
             return Entry{
                 .cycle = even.cycle,
                 .address = even.address / 2,
                 .ra_coeff = even.ra_coeff.add(r.mul(odd.ra_coeff.sub(even.ra_coeff))),
                 .val_coeff = even.val_coeff.add(r.mul(odd.val_coeff.sub(even.val_coeff))),
-                .prev_val = even.prev_val, // Keep tracking (used for implicit entries)
-                .next_val = odd.next_val, // Use the final value after binding
+                .prev_val = even.prev_val.add(r.mul(odd.prev_val.sub(even.prev_val))),
+                .next_val = even.next_val.add(r.mul(odd.next_val.sub(even.next_val))),
             };
         }
 
@@ -1192,7 +1220,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             _ = even_checkpoint;
 
             // Matching Jolt's (Some(even), None) case
-            // Implicit odd has ra=0, val=odd_checkpoint
+            // Implicit odd has ra=0, val=odd_checkpoint, prev_val=odd_checkpoint, next_val=odd_checkpoint
             const one_minus_r = F.one().sub(r);
             const new_val = even.val_coeff.add(r.mul(odd_checkpoint.sub(even.val_coeff)));
             dbg("[BIND ADDR] EVEN_ONLY: addr={}, even_val={any}, odd_chkpt={any}, r={any}, result_val={any}\n", .{ even.address, even.val_coeff.toBytesBE()[0..8], odd_checkpoint.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
@@ -1201,8 +1229,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 .address = even.address / 2,
                 .ra_coeff = one_minus_r.mul(even.ra_coeff), // (1-r)*ra_even + r*0
                 .val_coeff = new_val,
-                .prev_val = even.prev_val, // Keep tracking
-                .next_val = even.next_val,
+                .prev_val = even.prev_val.add(r.mul(odd_checkpoint.sub(even.prev_val))),
+                .next_val = even.next_val.add(r.mul(odd_checkpoint.sub(even.next_val))),
             };
         }
 
@@ -1211,7 +1239,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             _ = odd_checkpoint;
 
             // Matching Jolt's (None, Some(odd)) case
-            // Implicit even has ra=0, val=even_checkpoint
+            // Implicit even has ra=0, val=even_checkpoint, prev_val=even_checkpoint, next_val=even_checkpoint
             const new_val = even_checkpoint.add(r.mul(odd.val_coeff.sub(even_checkpoint)));
             dbg("[BIND ADDR] ODD_ONLY: addr={}, even_chkpt={any}, odd_val={any}, r={any}, result_val={any}\n", .{ odd.address, even_checkpoint.toBytesBE()[0..8], odd.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
             return Entry{
@@ -1219,46 +1247,79 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 .address = odd.address / 2,
                 .ra_coeff = r.mul(odd.ra_coeff), // (1-r)*0 + r*ra_odd
                 .val_coeff = new_val,
-                .prev_val = odd.prev_val,
-                .next_val = odd.next_val,
+                .prev_val = even_checkpoint.add(r.mul(odd.prev_val.sub(even_checkpoint))),
+                .next_val = even_checkpoint.add(r.mul(odd.next_val.sub(even_checkpoint))),
             };
         }
 
-        /// Bind entries by grouping (row/2, col) and creating bound entries
+        /// Bind entries by grouping into row pairs, splitting into even/odd rows,
+        /// and merge-joining by column (address).
+        /// This matches Jolt's ReadWriteMatrixCycleMajor::bind which merges
+        /// even_row and odd_row slices sorted by column.
         fn bindEntries(self: *Self, r: F) !void {
             var new_entries = std.ArrayListUnmanaged(Entry){};
 
-            var i: usize = 0;
-            while (i < self.entries.items.len) {
-                const entry = &self.entries.items[i];
-                const pair_key = entry.cycle / 2;
-                const addr_key = entry.address;
-                const is_even = entry.cycle % 2 == 0;
+            // Entries are sorted by (cycle, address).
+            // Group by row pair (cycle/2), split even/odd, merge by address.
+            var idx: usize = 0;
+            while (idx < self.entries.items.len) {
+                const row_pair = self.entries.items[idx].cycle / 2;
 
-                // Look for matching odd entry at next position
-                var odd_entry: ?*const Entry = null;
-                var even_entry: ?*const Entry = null;
+                // Find extent of this row pair
+                var pair_end = idx;
+                while (pair_end < self.entries.items.len and
+                    self.entries.items[pair_end].cycle / 2 == row_pair)
+                {
+                    pair_end += 1;
+                }
 
-                if (is_even) {
-                    even_entry = entry;
-                    // Check if next entry is the odd counterpart
-                    if (i + 1 < self.entries.items.len) {
-                        const next = &self.entries.items[i + 1];
-                        if (next.cycle / 2 == pair_key and next.address == addr_key and next.cycle % 2 == 1) {
-                            odd_entry = next;
-                            i += 1; // Skip next entry
+                // Split into even-row and odd-row sub-lists
+                const pair_entries = self.entries.items[idx..pair_end];
+                var odd_start: usize = 0;
+                while (odd_start < pair_entries.len and pair_entries[odd_start].cycle % 2 == 0) {
+                    odd_start += 1;
+                }
+                const even_row = pair_entries[0..odd_start];
+                const odd_row = pair_entries[odd_start..];
+
+                // Merge by column (address) — matching Jolt's seq_bind_rows
+                var ei: usize = 0;
+                var oi: usize = 0;
+                while (ei < even_row.len and oi < odd_row.len) {
+                    if (even_row[ei].address == odd_row[oi].address) {
+                        if (Entry.bindEntries(&even_row[ei], &odd_row[oi], r)) |bound| {
+                            try new_entries.append(self.allocator, bound);
                         }
+                        ei += 1;
+                        oi += 1;
+                    } else if (even_row[ei].address < odd_row[oi].address) {
+                        if (Entry.bindEntries(&even_row[ei], null, r)) |bound| {
+                            try new_entries.append(self.allocator, bound);
+                        }
+                        ei += 1;
+                    } else {
+                        if (Entry.bindEntries(null, &odd_row[oi], r)) |bound| {
+                            try new_entries.append(self.allocator, bound);
+                        }
+                        oi += 1;
                     }
-                } else {
-                    odd_entry = entry;
+                }
+                // Remaining even entries
+                while (ei < even_row.len) {
+                    if (Entry.bindEntries(&even_row[ei], null, r)) |bound| {
+                        try new_entries.append(self.allocator, bound);
+                    }
+                    ei += 1;
+                }
+                // Remaining odd entries
+                while (oi < odd_row.len) {
+                    if (Entry.bindEntries(null, &odd_row[oi], r)) |bound| {
+                        try new_entries.append(self.allocator, bound);
+                    }
+                    oi += 1;
                 }
 
-                // Bind the entry pair
-                if (Entry.bindEntries(even_entry, odd_entry, r)) |bound| {
-                    try new_entries.append(self.allocator, bound);
-                }
-
-                i += 1;
+                idx = pair_end;
             }
 
             // Replace old entries with bound entries
@@ -1268,7 +1329,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             dbg("[RWC BIND] round={}, entries.len after bind={}\n", .{ self.round, self.entries.items.len });
             if (self.entries.items.len > 0) {
                 const e = self.entries.items[0];
-                dbg("[RWC BIND]   entry[0]: cycle={}, addr={}, ra_coeff={any}, val_coeff={any}, prev_val={}, next_val={}\n", .{ e.cycle, e.address, e.ra_coeff.toBytesBE()[0..8], e.val_coeff.toBytesBE()[0..8], e.prev_val, e.next_val });
+                dbg("[RWC BIND]   entry[0]: cycle={}, addr={}, ra_coeff={any}, val_coeff={any}, prev_val={any}, next_val={any}\n", .{ e.cycle, e.address, e.ra_coeff.toBytesBE()[0..8], e.val_coeff.toBytesBE()[0..8], e.prev_val.toBytesBE()[0..8], e.next_val.toBytesBE()[0..8] });
             }
         }
 
@@ -1380,11 +1441,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const eq_eval = self.eq_evals[0];
             const gamma = self.params.gamma;
 
-            // val_claim: Use entry.val_coeff (the direct polynomial evaluation)
-            // For entries with accesses, the checkpoint mechanism in Phase 2 binding
-            // ensures val_coeff absorbs val_init contributions.
-            // For addresses without accesses, val_init[0] is the evaluation.
-            var val_claim: F = self.val_init[0]; // Default: no entries → val = val_init(r_addr)
+            // val_claim from sparse binding (now correct with merge-join fix)
+            var val_claim: F = self.val_init[0];
             if (self.entries.items.len > 0) {
                 val_claim = F.zero();
                 for (self.entries.items) |entry| {
@@ -1407,63 +1465,110 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             dbg("[RWC GET_OPENING] expected = eq*ra*(v+g*(v+i)) = {any}\n", .{expected_claim.toBytesBE()});
             dbg("[RWC GET_OPENING] MATCH = {}\n", .{expected_claim.eql(self.current_claim)});
 
-            // DENSE VERIFICATION: Compute val(r_addr, r_cycle) independently
-            // The challenges stored are: [phase1_challenges..., phase2_challenges...]
-            // Phase 1 challenges bind cycle vars (low-to-high)
-            // Phase 2 challenges bind address vars (low-to-high)
-            {
-                const phase1_end_v = self.params.phase1_num_rounds;
-                const r_cycle_le = self.challenges.items[0..phase1_end_v]; // Phase 1 challenges = r_cycle (LE)
-                const r_addr_le = self.challenges.items[phase1_end_v..]; // Phase 2 challenges = r_addr (LE)
-                dbg("[RWC GET_OPENING] r_cycle_le len={}, r_addr_le len={}\n", .{ r_cycle_le.len, r_addr_le.len });
-
-                // Compute eq(r_addr_le, 2049) where 2049 = 0b100000000001 (16-bit)
-                // eq(r, k) = prod_i ( r[i]*k_i + (1-r[i])*(1-k_i) )
-                var eq_addr_2049 = F.one();
-                for (0..r_addr_le.len) |i| {
-                    const bit: u1 = @truncate(@as(usize, 2049) >> @intCast(i));
-                    if (bit == 1) {
-                        eq_addr_2049 = eq_addr_2049.mul(r_addr_le[i]);
-                    } else {
-                        eq_addr_2049 = eq_addr_2049.mul(F.one().sub(r_addr_le[i]));
-                    }
-                }
-
-                // Compute LT(54, r_cycle_le) = sum_{j=55}^{T-1} eq(r_cycle_le, j)
-                const T_v = @as(usize, 1) << @intCast(r_cycle_le.len);
-                var lt_54 = F.zero();
-                for (55..T_v) |j| {
-                    var eq_j = F.one();
-                    for (0..r_cycle_le.len) |i| {
-                        const bit: u1 = @truncate(j >> @intCast(i));
-                        if (bit == 1) {
-                            eq_j = eq_j.mul(r_cycle_le[i]);
-                        } else {
-                            eq_j = eq_j.mul(F.one().sub(r_cycle_le[i]));
-                        }
-                    }
-                    lt_54 = lt_54.add(eq_j);
-                }
-
-                const dense_val_claim = self.val_init[0].add(eq_addr_2049.mul(lt_54));
-                dbg("[RWC GET_OPENING] DENSE val(r_addr,r_cycle) = {any}\n", .{dense_val_claim.toBytesBE()});
-                dbg("[RWC GET_OPENING] sparse val_claim              = {any}\n", .{val_claim.toBytesBE()});
-                dbg("[RWC GET_OPENING] DENSE matches sparse? {}\n", .{dense_val_claim.eql(val_claim)});
-                dbg("[RWC GET_OPENING] eq(r_addr, 2049) = {any}\n", .{eq_addr_2049.toBytesBE()});
-                dbg("[RWC GET_OPENING] LT(54, r_cycle) = {any}\n", .{lt_54.toBytesBE()});
-                dbg("[RWC GET_OPENING] val_init[0] = {any}\n", .{self.val_init[0].toBytesBE()});
-                // Decompose: sparse = val_init_contrib + eq * LT ?
-                const sparse_delta = val_claim.sub(eq_addr_2049.mul(lt_54));
-                dbg("[RWC GET_OPENING] sparse - eq*LT = {any}\n", .{sparse_delta.toBytesBE()});
-                dbg("[RWC GET_OPENING] val_init[0]    = {any}\n", .{self.val_init[0].toBytesBE()});
-                dbg("[RWC GET_OPENING] sparse_delta == val_init[0]? {}\n", .{sparse_delta.eql(self.val_init[0])});
-            }
-
             return OpeningClaims(F){
                 .ra_claim = ra_claim,
                 .val_claim = val_claim,
                 .inc_claim = inc_claim,
             };
+        }
+
+        /// Compute val(r_addr, r_cycle) via dense evaluation using eq tables and suffix sums.
+        ///
+        /// The val polynomial is an MLE over (addr, cycle) dimensions where val[k][j] is the
+        /// memory value at address k just before cycle j. Between writes the value is constant,
+        /// so we decompose the evaluation as:
+        ///
+        ///   val(r_addr, r_cycle) = Σ_k eq_addr[k] * val_init[k]            (initial values)
+        ///                        + Σ_writes eq_addr[k] * (new-old) * suffix_eq_cycle[c]  (deltas)
+        ///
+        /// where suffix_eq_cycle[c] = Σ_{j>=c} eq_cycle[j] accounts for the write at cycle c
+        /// affecting all subsequent cycles.
+        fn computeDenseValClaim(self: *const Self) !F {
+            const poly_mod = @import("../../poly/mod.zig");
+            const EqPoly = poly_mod.EqPolynomial(F);
+
+            const phase1_end = self.params.phase1_num_rounds;
+            const r_cycle_le = self.challenges.items[0..phase1_end];
+            const r_addr_le = self.challenges.items[phase1_end..];
+            const K: usize = @as(usize, 1) << @intCast(self.params.log_k);
+            const T: usize = @as(usize, 1) << @intCast(r_cycle_le.len);
+
+            // buildEqTableInPlace: bit 0 of idx corresponds to r[n-1].
+            // Binding convention: bit 0 of cycle/addr corresponds to challenge[0].
+            // So we need r = [c_{n-1}, ..., c_0] (reversed from LE) to get eq[idx]
+            // with bit 0 of idx = c_0.
+            // But wait — for the val polynomial, the "bit 0" of the cycle timestamp is
+            // what was bound in round 0. The cycle timestamp IS the raw RISC-V cycle number.
+            // After binding round 0 with challenge c_0, entries at even cycles get weight (1-c_0)
+            // and entries at odd cycles get weight c_0. So bit 0 of the timestamp corresponds to c_0.
+            // Therefore eq_cycle[timestamp] should have: bit 0 = c_0.
+            // With buildEqTableInPlace: bit 0 = r[n-1]. So r = [c_{n-1}, ..., c_0] → r[n-1] = c_0.
+            // This means we need to REVERSE the LE challenges.
+            const r_addr_rev = try self.allocator.alloc(F, r_addr_le.len);
+            defer self.allocator.free(r_addr_rev);
+            for (0..r_addr_le.len) |i| r_addr_rev[i] = r_addr_le[r_addr_le.len - 1 - i];
+
+            const r_cycle_rev = try self.allocator.alloc(F, r_cycle_le.len);
+            defer self.allocator.free(r_cycle_rev);
+            for (0..r_cycle_le.len) |i| r_cycle_rev[i] = r_cycle_le[r_cycle_le.len - 1 - i];
+
+            const eq_addr_evals = try EqPoly.evalsSliceWithScaling(F, self.allocator, r_addr_rev, null);
+            defer self.allocator.free(eq_addr_evals);
+
+            const eq_cycle_evals = try EqPoly.evalsSliceWithScaling(F, self.allocator, r_cycle_rev, null);
+            defer self.allocator.free(eq_cycle_evals);
+
+            // val_init contribution: Σ_k eq_addr[k] * val_init[k]
+            // (Σ_j eq_cycle[j] = 1 by partition of unity, so val_init is weighted only by eq_addr)
+            var val_init_contrib = F.zero();
+            for (0..@min(K, self.val_init.len)) |k| {
+                if (!self.val_init[k].eql(F.zero())) {
+                    if (k < eq_addr_evals.len) {
+                        val_init_contrib = val_init_contrib.add(eq_addr_evals[k].mul(self.val_init[k]));
+                    }
+                }
+            }
+
+            // Build suffix sums of eq_cycle: suffix[c] = Σ_{j=c}^{T-1} eq_cycle[j]
+            const suffix_sums = try self.allocator.alloc(F, T + 1);
+            defer self.allocator.free(suffix_sums);
+            suffix_sums[T] = F.zero();
+            var si: usize = T;
+            while (si > 0) {
+                si -= 1;
+                suffix_sums[si] = suffix_sums[si + 1].add(
+                    if (si < eq_cycle_evals.len) eq_cycle_evals[si] else F.zero(),
+                );
+            }
+
+            // Write delta contribution: for each write at (addr k, cycle c) changing old→new,
+            // the val polynomial changes by (new - old) for all cycles >= c at address k.
+            // Contribution = eq_addr[k] * (new - old) * suffix_sums[c+1]
+            // (the write AT cycle c uses old_val; cycles > c use new_val)
+            var write_delta_contrib = F.zero();
+            const trace = self.trace;
+            for (trace.accesses.items) |access| {
+                if (access.op != .Write) continue;
+                if (access.address < self.params.start_address) continue;
+                const k = (access.address - self.params.start_address) / 8;
+                if (k >= K) continue;
+                const c = access.timestamp;
+                if (c >= T) continue;
+
+                const old_v = access.pre_value;
+                const new_v = access.value;
+                if (new_v == old_v) continue;
+
+                const delta = if (new_v >= old_v)
+                    F.fromU64(new_v - old_v)
+                else
+                    F.zero().sub(F.fromU64(old_v - new_v));
+
+                const eq_k = if (k < eq_addr_evals.len) eq_addr_evals[k] else F.zero();
+                write_delta_contrib = write_delta_contrib.add(eq_k.mul(delta).mul(suffix_sums[c + 1]));
+            }
+
+            return val_init_contrib.add(write_delta_contrib);
         }
     };
 }

@@ -960,8 +960,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         break :blk F.fromU64(bitmask2);
                     }
                 } else if (opcode == 0x22 and (funct3 == 2 or funct3 == 3)) blk: {
-                    // VirtualAssertHalfwordAlignment/WordAlignment: IMM from I-type encoding
-                    break :blk F.fromU64(computeUnsignedImmediate(instr));
+                    // VirtualAssertHalfwordAlignment/WordAlignment: SIGNED IMM encoding
+                    // Must match R1CS witness (now signed) and Jolt verifier val_poly
+                    const assert_imm_raw: u32 = @truncate(instr >> 20);
+                    const assert_imm_signed: i64 = @as(i64, @as(i32, @bitCast(assert_imm_raw << 20)) >> 20);
+                    if (assert_imm_signed < 0) {
+                        break :blk F.fromU64(@intCast(-assert_imm_signed)).neg();
+                    } else {
+                        break :blk F.fromU64(@intCast(assert_imm_signed));
+                    }
                 } else if (is_identity_add_imm) blk: {
                     // Use unsigned u64 representation (two's complement) for the immediate.
                     // E.g., imm=-1 → F(0xFFFFFFFFFFFFFFFF) instead of F(p-1).
@@ -1358,8 +1365,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         0x42 => @as(u128, step.rs1_value),
                         // VirtualAssertHalfwordAlignment/WordAlignment (funct3=2,3): AddOperands, index = rs1 + imm (u128)
                         0x22 => blk128: {
+                            // Wrapping u64 addition matching tracer's lookup index
                             const imm_u64_22 = computeUnsignedImmediate(instr);
-                            break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64_22);
+                            break :blk128 @as(u128, step.rs1_value +% imm_u64_22);
                         },
                         else => 0,
                     };
@@ -1614,7 +1622,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const bitmask4: u64 = @truncate(ones4 << total_shift4);
                             break :blk F.fromU64(bitmask4);
                         }
-                    } else if (opcode == 0x22 and (funct3 == 2 or funct3 == 3)) F.fromU64(computeUnsignedImmediate(instr)) else if (is_identity_add_imm2) F.fromU64(computeUnsignedImmediate(instr)) else computeImmediate(instr);
+                    } else if (opcode == 0x22 and (funct3 == 2 or funct3 == 3)) blk_assert: {
+                        // Signed encoding for alignment assertions
+                        const aim_raw: u32 = @truncate(instr >> 20);
+                        const aim_signed: i64 = @as(i64, @as(i32, @bitCast(aim_raw << 20)) >> 20);
+                        break :blk_assert if (aim_signed < 0) F.fromU64(@intCast(-aim_signed)).neg() else F.fromU64(@intCast(aim_signed));
+                    } else if (is_identity_add_imm2) F.fromU64(computeUnsignedImmediate(instr)) else computeImmediate(instr);
 
                     // Compute left_input and right_input
                     var left_input: F = F.zero();
@@ -1940,7 +1953,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const ones_v: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts_v))) - 1;
                         break :blk5bv F.fromU64(@truncate(ones_v << ts_v));
                     }
-                } else if (opcode_v == 0x22 and (funct3_v == 2 or funct3_v == 3)) F.fromU64(computeUnsignedImmediate(instr_v)) else computeImmediate(instr_v);
+                } else if (opcode_v == 0x22 and (funct3_v == 2 or funct3_v == 3)) blk_assert2: {
+                    const aim2_raw: u32 = @truncate(instr_v >> 20);
+                    const aim2_signed: i64 = @as(i64, @as(i32, @bitCast(aim2_raw << 20)) >> 20);
+                    break :blk_assert2 if (aim2_signed < 0) F.fromU64(@intCast(-aim2_signed)).neg() else F.fromU64(@intCast(aim2_signed));
+                } else computeImmediate(instr_v);
                 var left_input_v: F = F.zero();
                 if (left_is_rs1_v) left_input_v = F.fromU64(step_v.rs1_value);
                 if (left_is_pc_v) left_input_v = F.fromU64(step_v.unexpanded_pc);
@@ -7325,7 +7342,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         fn computeUnsignedImmediate(instr: u32) u64 {
             const opcode: u8 = @truncate(instr & 0x7f);
             switch (opcode) {
-                0x13, 0x03, 0x67, 0x1b => { // I-type
+                0x13, 0x03, 0x67, 0x1b, 0x22 => { // I-type (including VirtualAssert*)
                     const imm12: u32 = instr >> 20;
                     const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
                     return @bitCast(imm_signed);

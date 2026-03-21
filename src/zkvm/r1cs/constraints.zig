@@ -604,7 +604,7 @@ fn isNoopInstruction(step_opt: ?tracer.TraceStep) bool {
 /// For JAL: jump target = PC + imm
 /// For JALR: jump target = (rs1 + imm) & ~1
 /// For other instructions: rd_value (the result written to rd)
-fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldType {
+pub fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldType {
     const opcode: u8 = @truncate(step.instruction & 0x7F);
     const funct3: u3 = @truncate((step.instruction >> 12) & 0x7);
     const funct7: u7 = @truncate(step.instruction >> 25);
@@ -667,7 +667,7 @@ fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldTy
 /// Check if an instruction has a lookup table assignment.
 /// Returns false for Load, Store, SLL, SLLI, and other instructions
 /// that don't use lookup tables (matching Jolt's lookup_table() = None).
-fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
+pub fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
     return switch (opcode) {
         0x33 => blk: { // R-type
             if (funct3 == 0 and funct7 == 0) break :blk true; // ADD
@@ -1167,10 +1167,14 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 if (opcode == 0x22) {
                     const funct3_22: u3 = @truncate((step.instruction >> 12) & 0x7);
                     if (funct3_22 == 2 or funct3_22 == 3) {
-                        // I-type immediate: imm[11:0] in bits [31:20]
+                        // Signed encoding matching Jolt verifier's F::from_i128(i64 as i128)
                         const imm12_raw: u32 = @truncate(step.instruction >> 20);
                         const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        break :blk_imm F.fromU64(@bitCast(imm_signed));
+                        if (imm_signed < 0) {
+                            break :blk_imm F.fromU64(@intCast(-imm_signed)).neg();
+                        } else {
+                            break :blk_imm F.fromU64(@intCast(imm_signed));
+                        }
                     }
                     // funct3=0,1 (VirtualAssertEQ, VirtualAssertValidDiv0): no imm used
                     break :blk_imm F.zero();
@@ -1471,6 +1475,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 //   - It is a VirtualMULI instruction (opcode 0x2B, which has vsr=Some(0) for standalone SLLI)
                 const next_opcode: u8 = @truncate(ns.instruction & 0x7F);
                 const next_is_virtual = (!ns.is_noop and ns.virtual_sequence_remaining > 0) or
+                    (!ns.is_noop and ns.is_last_in_sequence) or // last step of virtual sequence (vsr=0 but still virtual)
                     (next_opcode == 0x0B) or // VirtualSignExtendWord is always virtual (vsr=Some(0))
                     (next_opcode == 0x2B) or // VirtualMULI is always virtual (standalone SLLI has vsr=Some(0))
                     (next_opcode == 0x5B) or // VirtualSRLI is always virtual (standalone SRLI has vsr=Some(0))
@@ -1480,8 +1485,11 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     (next_opcode == 0x62); // VirtualAssertValidUnsignedRemainder is always virtual
                 inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = if (next_is_virtual) F.one() else F.zero();
 
-                // NextIsFirstInSequence: 1 if the next step is the first in a virtual sequence.
-                // Now uses the explicit is_first_in_sequence field from the trace step.
+                // NextIsFirstInSequence must match FlagIsFirstInSequence of the NEXT cycle's witness.
+                // This includes both the trace step field AND setFlagsFromInstruction overrides.
+                // We compute it the same way FlagIsFirstInSequence is set for the next step:
+                // The trace step's is_first_in_sequence is authoritative for both
+                // standalone virtual instructions and decomposed-sequence steps.
                 const next_is_first = !ns.is_noop and ns.is_first_in_sequence;
                 inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = if (next_is_first) F.one() else F.zero();
             } else {
@@ -1507,12 +1515,10 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // =================================================================
             if (step.virtual_sequence_remaining > 0 and !step.is_termination_store) {
                 // This instruction is part of a virtual sequence with vsr>0
-                // In Jolt: vsr=Some(N>0), so VirtualInstruction=true, DoNotUpdateUnexpandedPC=true
                 inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
                 inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
             } else if (step.is_last_in_sequence and !step.is_termination_store) {
                 // Last step of a virtual sequence (vsr=0, but is_last_in_sequence=true)
-                // In Jolt: vsr=Some(0), so VirtualInstruction=true, DoNotUpdateUnexpandedPC=false
                 inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
             }
             if (step.is_first_in_sequence) {
@@ -1586,7 +1592,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         fn computeUnsignedImmediate(instr: u32) u64 {
             const opcode = instr & 0x7F;
             switch (opcode) {
-                0x13, 0x03, 0x67, 0x1b => { // I-type
+                0x13, 0x03, 0x67, 0x1b, 0x22 => { // I-type (including VirtualAssert alignment)
                     const imm12: u32 = instr >> 20;
                     const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
                     return @bitCast(imm_signed);
@@ -1605,17 +1611,26 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         }
 
         /// Derive immediate value from instruction (as signed field element)
-        fn deriveImmediate(self: *Self, instr: u32) F {
+        pub fn deriveImmediate(self: *Self, instr: u32) F {
             _ = self;
             const opcode = instr & 0x7F;
             switch (opcode) {
-                0x13, 0x03, 0x67, 0x1b => { // I-type: ADDI, LOAD, JALR, ADDIW
-                    const imm = instr >> 20;
-                    // Sign extend from 12 bits
-                    if (imm & 0x800 != 0) {
-                        return F.zero().sub(F.fromU64((~imm + 1) & 0xFFF));
+                0x13, 0x67, 0x1b => { // I-type (FormatI: u64 imm): ADDI, JALR, ADDIW
+                    // FormatI stores imm as u64. NormalizedOperands.imm = u64 as i128 (zero-ext → positive)
+                    // F::from_i128(positive) = F.fromU64(u64). Use unsigned encoding.
+                    const imm12: u32 = instr >> 20;
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
+                    return F.fromU64(@as(u64, @bitCast(imm_signed)));
+                },
+                0x03 => { // LOAD (FormatLoad: i64 imm)
+                    // FormatLoad stores imm as i64. NormalizedOperands.imm = i64 as i128 (sign-ext → can be negative)
+                    // F::from_i128(negative) = F(p - |imm|). Use signed encoding.
+                    const imm12: u32 = instr >> 20;
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
+                    if (imm_signed < 0) {
+                        return F.fromU64(@intCast(-imm_signed)).neg();
                     }
-                    return F.fromU64(imm);
+                    return F.fromU64(@intCast(imm_signed));
                 },
                 0x23 => { // S-type: STORE
                     const imm4_0 = (instr >> 7) & 0x1F;
@@ -1664,7 +1679,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         /// For AddOperands: x as u128 + y as u64 as u128 (where y is the signed imm reinterpreted as u64)
         /// For SubtractOperands: x as u128 + 2^64 - y as u128
         /// For MultiplyOperands: x as u128 * y as u128
-        fn computeU128LookupOperand(instr: u32, step: tracer.TraceStep) F {
+        pub fn computeU128LookupOperand(instr: u32, step: tracer.TraceStep) F {
             const opcode: u8 = @truncate(instr & 0x7F);
             const funct3 = (instr >> 12) & 0x7;
             const funct7 = (instr >> 25) & 0x7F;
@@ -1777,12 +1792,11 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 },
                 0x22 => { // VirtualAssert* instructions on opcode 0x22
                     if (funct3 == 2 or funct3 == 3) {
-                        // VirtualAssertHalfwordAlignment / VirtualAssertWordAlignment:
-                        // AddOperands: to_lookup_operands returns (0, (rs1 as i128 + imm) as u128)
+                        // Wrapping u64 addition matching tracer's lookup index
                         const imm12_raw: u32 = @truncate(instr >> 20);
                         const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-                        return F.fromU128(@as(u128, step.rs1_value) + @as(u128, imm_u64));
+                        const addr: u64 = step.rs1_value +% @as(u64, @bitCast(imm_signed));
+                        return F.fromU128(@as(u128, addr));
                     }
                     // funct3=0,1 (VirtualAssertEQ, VirtualAssertValidDiv0): interleaved, not identity
                     return F.zero();
@@ -1983,14 +1997,11 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     //   R-type VirtualSRL/VirtualSRA (SRL/SRA step 2): vsr=Some(0), VirtInstr=true, IsLast=true
                     self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
                     if (step.virtual_sequence_remaining == 0) {
-                        // Standalone I-type or last step R-type.
-                        // For standalone SRLI/SRAI: first and only step in sequence.
-                        // For R-type VirtualSRL/VirtualSRA: last step (IsLastInSequence handled elsewhere).
-                        if (!step.rs2_read) {
-                            // Standalone I-type: IsFirstInSequence = true
-                            self.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
-                        }
-                        // R-type with vsr=0: IsFirstInSequence stays false (it's step 2 of SRL/SRA)
+                        // vsr=0: standalone SRLI/SRAI or last step of decomposed load (LBU/LHU/LWU/LB/LH).
+                        // IsFirstInSequence is set from step.is_first_in_sequence (line 1535),
+                        // not from instruction type, because the same I-type 0x5B can appear
+                        // in both standalone (IsFirst=true) and decomposed-last-step (IsFirst=false) contexts.
+                        // R-type with vsr=0: IsFirstInSequence stays false (it's step 2 of SRL/SRA).
                     } else {
                         // Middle step (vsr>0): DoNotUpdateUnexpandedPC = true.
                         self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();

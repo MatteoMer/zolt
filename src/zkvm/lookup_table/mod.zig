@@ -1225,21 +1225,22 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
 
             pub fn evaluateMLE(r: []const F) F {
                 // Alignment check: output 1 if lowest bit is 0
-                // MLE = 1 - r[0]
-                return F.one().sub(r[0]);
+                // r is in HighToLow order: r[0]=MSB, r[len-1]=LSB
+                // MLE = 1 - r_lsb where r_lsb = r[len-1]
+                return F.one().sub(r[r.len - 1]);
             }
         };
 
         /// WordAlignment: output = 1 if (input % 4 == 0), else 0
-        /// MLE: f(r) = (1-r[0]) * (1-r[1])
+        /// MLE: f(r) = (1-r_bit0) * (1-r_bit1) where bit0=LSB, bit1=next
         pub const WordAlignment = struct {
             pub fn materializeEntry(index: u128) u64 {
                 return if (index & 3 == 0) 1 else 0;
             }
 
             pub fn evaluateMLE(r: []const F) F {
-                // Word-aligned: bits 0 and 1 must both be 0
-                return (F.one().sub(r[0])).mul(F.one().sub(r[1]));
+                // r is in HighToLow: r[len-1]=LSB (bit 0), r[len-2]=bit 1
+                return (F.one().sub(r[r.len - 1])).mul(F.one().sub(r[r.len - 2]));
             }
         };
 
@@ -1387,7 +1388,19 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         pub fn evaluateTableMLE(table_index: usize, r: []const F) F {
             return switch (table_index) {
                 0 => RangeCheck.evaluateMLE(r),
-                1 => F.zero(), // RangeCheckAligned - TODO
+                1 => blk_rca: {
+                    // RangeCheckAligned = RangeCheck with LSB cleared
+                    // MLE = Σ_{i=0}^{XLEN-2} 2^{XLEN-1-i} * r[XLEN+i]
+                    // Same as RangeCheck but without the LSB term
+                    var rca_result = F.zero();
+                    const rca_xlen = XLEN;
+                    for (0..rca_xlen - 1) |i| {
+                        const shift: u6 = @intCast(rca_xlen - 1 - i);
+                        const coeff = F.fromU64(@as(u64, 1) << shift);
+                        rca_result = rca_result.add(coeff.mul(r[rca_xlen + i]));
+                    }
+                    break :blk_rca rca_result;
+                },
                 2 => And.evaluateMLE(r),
                 3 => Andn.evaluateMLE(r),
                 4 => Or.evaluateMLE(r),
@@ -1497,6 +1510,10 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                     const divisor_i32: i32 = @bitCast(divisor_u32);
                     break :blk17 if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1) 0 else 1;
                 },
+                18 => HalfwordAlignment.materializeEntry(index), // identity path
+                19 => WordAlignment.materializeEntry(index), // identity path
+                22 => Pow2.materializeEntry(index), // identity path
+                24 => ShiftRightBitmask.materializeEntry(index), // identity path
                 26 => VirtualSRL.materializeEntry(index), // interleaved
                 27 => blk27: {
                     // VirtualSRA: interleaved(value, bitmask)

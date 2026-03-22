@@ -3252,7 +3252,7 @@ fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
             else if (funct7 == 0x01) 0 // MUL → RangeCheck
             else 255,
             7 => if (funct7 == 0) @as(u8, 2) // AND → And
-            else if (funct7 == 0x01) 13 // MULHU → UpperWord
+            else if (funct7 == 0x01) 13 // REMU → (was UpperWord, should be ValidUnsignedRemainder but decomposed)
             else 255,
             6 => if (funct7 == 0) @as(u8, 4) // OR → Or
             else 255,
@@ -5723,6 +5723,8 @@ fn BytecodeReadRafProver(comptime F: type) type {
 
         /// Stored from Phase 1→2 transition for diagnostics
         bound_vals_stored: [5]F,
+        /// F_s[0] values saved before freeing F_s_arrs (for Phase 2 consistency check)
+        f_s_bound_saved: [5]F,
 
         /// Data needed for phase transition
         trace: *const ExecutionTrace,
@@ -5912,6 +5914,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 .current_len = bytecode_K,
                 .addr_rounds_done = 0,
                 .bound_vals_stored = [_]F{F.zero()} ** 5,
+                .f_s_bound_saved = [_]F{F.zero()} ** 5,
                 .trace = trace,
                 .pc_map = pc_map,
                 .stage_r_cycles = stage_r_cycles,
@@ -6141,7 +6144,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
             // But val_poly coefficients are indexed with bit 0 = LSB.
             // Jolt's verifier reverses challenges (normalize_opening_point) before evaluate,
             // so r[0] = LSB challenge maps to bit 0 of coefficient index.
-            // We must do the same: use r_address_be (reversed) for the eq table.
+            // Use r_address_be (reversed) for the eq table, matching Jolt's normalize_opening_point.
             const eq_addr = try computeEqTableParallel(F, self.allocator, r_address_be, self.bytecode_log_k, self.pool);
             defer self.allocator.free(eq_addr);
 
@@ -6216,8 +6219,9 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 }
 
                 // bound_vals[s] = gamma^s * val_with_raf[s][0]
-                // Use the Phase 1 bound value directly (like Jolt's poly.final_sumcheck_claim()),
-                // NOT the recomputed val_eval from the eq table.
+                // After Phase 1 binding of all address variables, val_with_raf[s][0] is the
+                // MLE evaluation at the binding point. stage_claims[s] = F_s[0]*val_with_raf[s][0]
+                // since both are reduced to single elements.
                 bound_vals[s] = self.gamma_powers[s].mul(self.val_with_raf[s][0]);
                 self.bound_vals_stored[s] = bound_vals[s];
 
@@ -6320,7 +6324,59 @@ fn BytecodeReadRafProver(comptime F: type) type {
             // Debug: verify Π_i ra_chunk_i(c) = eq_addr[PC(c)] for each cycle
             // ALWAYS ON: check ALL cycles to find mismatches
             {
-                dbg("[BCRAF_RA] bytecode_d={} log_k_chunk={} bytecode_log_k={} T={}\n", .{
+                // Check RA product vs eq_binding (using LH challenges directly)
+                const eq_binding_check = try computeEqTableParallel(F, self.allocator, r_address_challenges, self.bytecode_log_k, self.pool);
+                defer self.allocator.free(eq_binding_check);
+                var binding_mismatch: usize = 0;
+                for (0..@min(10, T)) |cc| {
+                    var ra_prod_cc = F.one();
+                    for (0..self.bytecode_d) |di| ra_prod_cc = ra_prod_cc.mul(self.ra_chunks.?[di][cc]);
+                    const step_cc = self.trace.steps.items[cc];
+                    const pc_cc = self.pc_map.getPCForStep(step_cc);
+                    const eq_bind_val = if (pc_cc < bytecode_K) eq_binding_check[pc_cc] else F.zero();
+                    if (!ra_prod_cc.eql(eq_bind_val)) {
+                        binding_mismatch += 1;
+                        if (binding_mismatch <= 3) {
+                            std.debug.print("[RA_BIND_CHECK] c={} pc={} ra_prod≠eq_binding\n", .{cc, pc_cc});
+                        }
+                    }
+                }
+                // Full check
+                var full_bind_mm: usize = 0;
+                for (0..T) |cc2| {
+                    var ra_prod2 = F.one();
+                    for (0..self.bytecode_d) |di| ra_prod2 = ra_prod2.mul(self.ra_chunks.?[di][cc2]);
+                    const step2 = self.trace.steps.items[cc2];
+                    const pc2 = self.pc_map.getPCForStep(step2);
+                    const eb2 = if (pc2 < bytecode_K) eq_binding_check[pc2] else F.zero();
+                    if (!ra_prod2.eql(eb2)) full_bind_mm += 1;
+                }
+                std.debug.print("[RA_BIND_CHECK] total: {}/{} mismatches vs eq_binding(LH)\n", .{full_bind_mm, T});
+                // Verify per-stage and combined consistency
+                {
+                    // Method A: Σ_s bv[s]*Σeq_s*Πra
+                    var method_a = F.zero();
+                    for (0..5) |ss| {
+                        var ss_sum = F.zero();
+                        for (0..T) |cc3| {
+                            var rp3 = F.one();
+                            for (0..self.bytecode_d) |di3| rp3 = rp3.mul(self.ra_chunks.?[di3][cc3]);
+                            ss_sum = ss_sum.add(eq_per_stage[ss][cc3].mul(rp3));
+                        }
+                        method_a = method_a.add(bound_vals[ss].mul(ss_sum));
+                    }
+                    // Method B: Σ combined[c]*Πra
+                    var method_b = F.zero();
+                    for (0..T) |cc4| {
+                        var rp4 = F.one();
+                        for (0..self.bytecode_d) |di4| rp4 = rp4.mul(self.ra_chunks.?[di4][cc4]);
+                        method_b = method_b.add(self.combined.?[cc4].mul(rp4));
+                    }
+                    std.debug.print("[COMBINED_CHECK] methodA==methodB? {}\n", .{method_a.eql(method_b)});
+                    std.debug.print("[COMBINED_CHECK] methodA==inst0? {}\n", .{method_a.eql(self.gamma_powers[0].mul(self.stage_claims[0]).add(self.gamma_powers[1].mul(self.stage_claims[1])).add(self.gamma_powers[2].mul(self.stage_claims[2])).add(self.gamma_powers[3].mul(self.stage_claims[3])).add(self.gamma_powers[4].mul(self.stage_claims[4])))});
+                }
+
+                std.debug.print("[BCRAF_RA] bytecode_d={} log_k_chunk={} bytecode_log_k={} T={}\n", .{
                     self.bytecode_d, self.log_k_chunk, self.bytecode_log_k, T,
                 });
                 var mismatch_count: usize = 0;
@@ -6354,7 +6410,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                         }
                     }
                 }
-                dbg("[BCRAF_RA] total mismatches: {}/{}\n", .{ mismatch_count, T });
+                std.debug.print("[BCRAF_RA] total mismatches: {}/{}\n", .{ mismatch_count, T });
 
                 // Also check Σ_c eq_s(c) * eq_addr[PC(c)] vs F_s_bound for stage 0
                 var direct_sum = F.zero();
@@ -6426,6 +6482,41 @@ fn BytecodeReadRafProver(comptime F: type) type {
             // Free eq tables
             for (0..5) |s| {
                 self.allocator.free(eq_per_stage[s]);
+            }
+
+            // Save F_s[0] before freeing and verify product identity
+            for (0..5) |s| {
+                self.f_s_bound_saved[s] = if (self.F_s_arrs[s].len > 0) self.F_s_arrs[s][0] else F.zero();
+                {
+                    const fs = self.f_s_bound_saved[s];
+                    const vwr = self.val_with_raf[s][0];
+                    const product = fs.mul(vwr);
+                    const claim = self.stage_claims[s];
+                    std.debug.print("[TRANS_DBG] stage[{}]: F*V==claim? {} bv*Fs=0x", .{s, product.eql(claim)});
+                    const bv_fs = bound_vals[s].mul(fs);
+                    for (bv_fs.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                }
+            }
+
+            // Verify Σ bv*Fs = aggregate claim
+            {
+                var sum_bv_fs = F.zero();
+                for (0..5) |s| {
+                    sum_bv_fs = sum_bv_fs.add(bound_vals[s].mul(self.f_s_bound_saved[s]));
+                }
+                var agg_claim = F.zero();
+                for (0..5) |s| {
+                    agg_claim = agg_claim.add(self.gamma_powers[s].mul(self.stage_claims[s]));
+                }
+                std.debug.print("[TRANS_VERIFY] Σbv*Fs == Σgamma*claims? {}\n", .{sum_bv_fs.eql(agg_claim)});
+                if (!sum_bv_fs.eql(agg_claim)) {
+                    std.debug.print("[TRANS_VERIFY] Σbv*Fs=0x", .{});
+                    for (sum_bv_fs.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n[TRANS_VERIFY] aggclm=0x", .{});
+                    for (agg_claim.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                }
             }
 
             // Free Phase 1 arrays (no longer needed)
@@ -7454,7 +7545,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 bytecode_val_polys[4][k] = val5;
             }
 
-            // Always print val[0] for comparison with Jolt verifier [JV0] output
+            // Print val[0] and val[4] for comparison with Jolt verifier
             {
                 for (0..bytecode_K) |k| {
                     if (k >= bytecode_entries.len) break;
@@ -7463,6 +7554,11 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     const be = bytecode_val_polys[0][k].toBytesBE();
                     std.debug.print("[ZV0] k={} v=0x", .{k});
                     for (be) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                    // Also print stage 4 val
+                    const be4 = bytecode_val_polys[4][k].toBytesBE();
+                    std.debug.print("[ZV4] k={} v=0x", .{k});
+                    for (be4) |b| std.debug.print("{x:0>2}", .{b});
                     std.debug.print("\n", .{});
                 }
                 // Print detail for first few mismatched entries and stage1_gammas
@@ -7474,7 +7570,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     std.debug.print("\n", .{});
                 }
                 // Print bytecode entry details for problem indices
-                for ([_]usize{ 1405, 1406, 1407, 1408, 1409, 1410, 1440, 1441, 1442, 1443, 1483, 1484, 1488, 1489, 1490, 1491, 1596, 1597, 1598, 1599, 1600, 1601 }) |dk| {
+                for ([_]usize{ 1334, 1335, 1336, 1337, 1338 }) |dk| {
                     if (dk >= bytecode_entries.len) continue;
                     const de = bytecode_entries[dk];
                     std.debug.print("[DIAG_ENTRY] k={} addr=0x{x} op=0x{x:0>2} f3={} imm={} vsr={?} first={} cf=[", .{
@@ -8932,6 +9028,14 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         }
                         bytecode_addr_challenges[bytecode_prover.addr_rounds_done] = challenge;
                         bytecode_prover.bindChallengePhase1(challenge, cached_bc_phase1_per_stage);
+                        // Check: inst0 == Σgamma*claims after bind?
+                        {
+                            var ac2 = F.zero();
+                            for (0..5) |si3| ac2 = ac2.add(bytecode_prover.gamma_powers[si3].mul(bytecode_prover.stage_claims[si3]));
+                            if (!instance_claims[0].eql(ac2)) {
+                                std.debug.print("[AGG_DIVERGE] round={} inst0≠Σgamma*claims!\n", .{round});
+                            }
+                        }
                         if (comptime debug_verbose) {
                             // Check invariant: instance_claims[0] == Σ gamma^s * stage_claims[s]
                             var agg_check = F.zero();
@@ -8997,11 +9101,47 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                     for (0..bytecode_prover.bytecode_d) |di| rp = rp.mul(bc_r[di][cc]);
                                     p2sum = p2sum.add(bc_c[cc].mul(rp));
                                 }
-                                std.debug.print("[P2_CHECK] inst0={} phase2_sum={} match={}\n", .{
-                                    @as(u8, if (instance_claims[0].eql(F.zero())) 0 else 1),
-                                    @as(u8, if (p2sum.eql(F.zero())) 0 else 1),
-                                    instance_claims[0].eql(p2sum),
-                                });
+                                const p2_match = instance_claims[0].eql(p2sum);
+                                // Also check: inst0 == Σgamma*claims?
+                                var agg_chk = F.zero();
+                                for (0..5) |si2| agg_chk = agg_chk.add(bytecode_prover.gamma_powers[si2].mul(bytecode_prover.stage_claims[si2]));
+                                std.debug.print("[P2_CHECK] match={} inst0==Σgamma*claims? {} p2sum==agg? {}\n", .{p2_match, instance_claims[0].eql(agg_chk), p2sum.eql(agg_chk)});
+                                // Is combined the same as what we verified in transition?
+                                std.debug.print("[P2_CHECK] combined[0]=0x", .{});
+                                for (bc_c[0].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                                std.debug.print(" ra[0][0]=0x", .{});
+                                for (bc_r[0][0].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                                std.debug.print("\n", .{});
+                                if (!p2_match) {
+                                    // Per-stage: Σeq*Πra vs F_s_bound
+                                    for (0..5) |si| {
+                                        var stg_sum = F.zero();
+                                        for (0..bc_T) |cc2| {
+                                            var rp2 = F.one();
+                                            for (0..bytecode_prover.bytecode_d) |di2| rp2 = rp2.mul(bc_r[di2][cc2]);
+                                            stg_sum = stg_sum.add(bc_c[cc2].mul(rp2)); // Wrong — this is combined*ra not eq_s*ra
+                                        }
+                                        // Actually compute combined contribution per stage is complex.
+                                        // Let's just check bv[s] * Σeq * Πra instead
+                                        const fs_saved = bytecode_prover.f_s_bound_saved[si];
+                                        const bv_s = bytecode_prover.bound_vals_stored[si];
+                                        std.debug.print("[P2_CHECK] stage[{}]: F_s_bound=0x", .{si});
+                                        for (fs_saved.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                                        std.debug.print(" bv=0x", .{});
+                                        for (bv_s.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                                        std.debug.print("\n", .{});
+                                    }
+                                    // Recompute claim from bv*F_s
+                                    var recomp = F.zero();
+                                    for (0..5) |si| {
+                                        recomp = recomp.add(bytecode_prover.bound_vals_stored[si].mul(bytecode_prover.f_s_bound_saved[si]));
+                                    }
+                                    std.debug.print("[P2_CHECK] Σbv*Fs =0x", .{});
+                                    for (recomp.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                                    std.debug.print("\n[P2_CHECK] inst0   =0x", .{});
+                                    for (instance_claims[0].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                                    std.debug.print("\n[P2_CHECK] bv*Fs==inst0? {}\n", .{recomp.eql(instance_claims[0])});
+                                }
                             }
                             if (comptime debug_verbose) {
                                 // After transition, check Phase 2 polynomial sum

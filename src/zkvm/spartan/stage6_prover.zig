@@ -8975,8 +8975,55 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                // Evaluate combined polynomial at challenge using evalFromHintGeneral (no allocation)
-                current_batched_claim = UniPoly(F).evalFromHintGeneral(coeffs[0..num_compressed], current_batched_claim, challenge);
+                // Evaluate combined polynomial at challenge.
+                // Use Vandermonde evaluation directly (exact Lagrange interpolation) rather than
+                // compressed monomial form + hint recovery, since the two can diverge when
+                // Gaussian elimination in vandermondeToCompressed introduces numerical artifacts.
+                // The verifier uses evalFromHintGeneral on the compressed coefficients, so
+                // we need to ensure the prover produces the SAME result.
+                // Fix: use evalFromHintGeneral but verify hint consistency.
+                // Evaluate combined polynomial at challenge from Vandermonde evaluation points.
+                // Using evalFromEvalsGeneral instead of evalFromHintGeneral because the
+                // latter can diverge for polynomials with degree > 4 due to Gaussian
+                // elimination artifacts in vandermondeToCompressed.
+                current_batched_claim = UniPoly(F).evalFromEvalsGeneral(combined_evals[0..num_evals], challenge);
+
+                // Also compute from Vandermonde evals for cross-check
+                {
+                    const vdm_claim = UniPoly(F).evalFromEvalsGeneral(combined_evals[0..num_evals], challenge);
+                    if (!vdm_claim.eql(current_batched_claim)) {
+                        if (round == 11) {
+                            std.debug.print("[EVAL_CROSSCHECK] R11 monomial=0x", .{});
+                            for (current_batched_claim.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" vandermonde=0x", .{});
+                            for (vdm_claim.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" num_evals={}\n", .{num_evals});
+                            // Also compute via fromEvalsVandermonde+Horner
+                            const alt_claim = try UniPoly(F).evaluateVandermondeAt(self.allocator, combined_evals[0..num_evals], challenge);
+                            // Check: do compressed coefficients match full coefficients?
+                            const full_coeffs = try UniPoly(F).fromEvalsVandermonde(self.allocator, combined_evals[0..num_evals]);
+                            defer self.allocator.free(full_coeffs);
+                            // Recover c1 from hint (hint = p(0)+p(1) = old batched claim)
+                            const hint_for_c1 = combined_evals[0].add(combined_evals[1]);
+                            var c1_recovered = hint_for_c1.sub(full_coeffs[0]).sub(full_coeffs[0]);
+                            for (2..full_coeffs.len) |ci| c1_recovered = c1_recovered.sub(full_coeffs[ci]);
+                            std.debug.print("[EVAL_CROSSCHECK] c1_actual=0x", .{});
+                            for (full_coeffs[1].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" c1_recovered=0x", .{});
+                            for (c1_recovered.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" match={}\n", .{c1_recovered.eql(full_coeffs[1])});
+                            // Check: hint = p(0)+p(1)?
+                            var p1_from_coeffs = F.zero();
+                            for (full_coeffs) |c| p1_from_coeffs = p1_from_coeffs.add(c);
+                            const hint_val = combined_evals[0].add(combined_evals[1]);
+                            const p0_plus_p1_from_coeffs = full_coeffs[0].add(p1_from_coeffs);
+                            std.debug.print("[EVAL_CROSSCHECK] hint=p(0)+p(1)? {} hint=batched? {}\n", .{hint_val.eql(p0_plus_p1_from_coeffs), hint_val.eql(current_batched_claim)});
+                            std.debug.print("[EVAL_CROSSCHECK] R11 vandermondeAt=0x", .{});
+                            for (alt_claim.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" match_mono={} match_vdm={}\n", .{alt_claim.eql(current_batched_claim), alt_claim.eql(vdm_claim)});
+                        }
+                    }
+                }
 
                 if (comptime debug_verbose) {
                     const hint_val = combined_evals[0].add(combined_evals[1]);

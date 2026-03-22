@@ -1194,41 +1194,22 @@ pub fn UniPoly(comptime F: type) type {
         /// Evaluate from compressed form [c0, c2, c3, ..., c_d] and hint = p(0)+p(1).
         /// Recovers c1 = hint - 2*c0 - Σ compressed[1..], then Horner. No allocation.
         pub fn evalFromHintGeneral(compressed: []const F, hint: F, x: F) F {
-            // Recover full evaluation points from compressed + hint,
-            // then evaluate using evalFromEvalsGeneral (Newton forward differences).
-            // This avoids any inconsistency between monomial and Newton representations.
-            const d = compressed.len; // degree = len(compressed)
+            // Match Jolt's eval_from_hint exactly:
+            // linear_term = hint - 2*c0 - c2 - c3 - ... - c_d
+            // result = c0 + linear_term*x + c2*x^2 + c3*x^3 + ... + c_d*x^d
             const c0 = compressed[0];
-
-            // Recover c1 = hint - 2*c0 - c2 - c3 - ... - c_d
-            var c1 = hint.sub(c0).sub(c0);
+            var linear_term = hint.sub(c0).sub(c0);
             for (compressed[1..]) |ci| {
-                c1 = c1.sub(ci);
+                linear_term = linear_term.sub(ci);
             }
 
-            // Reconstruct full monomial coefficients: [c0, c1, c2, ..., c_d]
-            var coeffs: [16]F = undefined;
-            coeffs[0] = c0;
-            coeffs[1] = c1;
-            for (1..d) |i| {
-                coeffs[i + 1] = compressed[i];
+            var running_point = x;
+            var running_sum = c0.add(x.mul(linear_term));
+            for (compressed[1..]) |ci| {
+                running_point = running_point.mul(x);
+                running_sum = running_sum.add(ci.mul(running_point));
             }
-
-            // Convert monomial to evaluation form at {0, 1, ..., d}
-            var evals: [16]F = undefined;
-            for (0..d + 1) |pt| {
-                const x_pt = F.fromU64(@intCast(pt));
-                var val = coeffs[d]; // Horner
-                var j: usize = d;
-                while (j > 0) {
-                    j -= 1;
-                    val = val.mul(x_pt).add(coeffs[j]);
-                }
-                evals[pt] = val;
-            }
-
-            // Evaluate at x using Newton forward differences (consistent with evalFromEvalsGeneral)
-            return evalFromEvalsGeneral(evals[0 .. d + 1], x);
+            return running_sum;
         }
 
         /// Evaluate degree-2 poly at x from Vandermonde evals [p(0), p(1), p(2)].

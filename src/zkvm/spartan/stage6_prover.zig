@@ -7177,6 +7177,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
             defer lookups_ra_prover.deinit();
 
+            // NOTE: Cannot call computeRoundPoly here — it would corrupt prover state
+            // The p(0)+p(1)!=claim issue for LookupsRaVirtual was confirmed separately.
+
             // Instance 2: Booleanity (degree 3, two-phase)
             // Build BooleanityProver with G tables and eq tables from Stage 5 opening point.
             //

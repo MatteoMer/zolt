@@ -1039,7 +1039,7 @@ pub fn UniPoly(comptime F: type) type {
             if (n == 0) return try allocator.alloc(F, 0);
 
             // Build augmented Vandermonde matrix [V | evals]
-            // Row i: [1, i, i², ..., i^{n-1}, evals[i]]
+            // Matches Jolt's gaussian_elimination exactly
             var matrix = try allocator.alloc([]F, n);
             errdefer {
                 for (matrix) |row| allocator.free(row);
@@ -1056,48 +1056,48 @@ pub fn UniPoly(comptime F: type) type {
                 matrix[i][n] = evals[i]; // RHS
             }
 
-            // Gaussian elimination with partial pivoting
-            for (0..n) |col| {
-                // Find pivot
-                var max_row = col;
-                for ((col + 1)..n) |row| {
-                    if (!matrix[row][col].eql(F.zero()) and matrix[max_row][col].eql(F.zero())) {
-                        max_row = row;
-                    }
-                }
-
-                if (max_row != col) {
-                    const tmp = matrix[col];
-                    matrix[col] = matrix[max_row];
-                    matrix[max_row] = tmp;
-                }
-
-                if (matrix[col][col].eql(F.zero())) continue;
-
-                const pivot_inv = matrix[col][col].inverse().?;
-                for ((col + 1)..n) |row| {
-                    if (!matrix[row][col].eql(F.zero())) {
-                        const factor = matrix[row][col].mul(pivot_inv);
-                        for (col..n + 1) |j| {
-                            matrix[row][j] = matrix[row][j].sub(factor.mul(matrix[col][j]));
+            // Forward elimination (echelon) - matches Jolt's echelon function
+            for (0..n - 1) |i| {
+                for (i..n - 1) |j| {
+                    // echelon(matrix, i, j): eliminate matrix[j+1][i]
+                    if (!matrix[i][i].eql(F.zero())) {
+                        const factor = matrix[j + 1][i].mul(matrix[i][i].inverse().?);
+                        for (i..n + 1) |k| {
+                            const tmp = matrix[i][k];
+                            matrix[j + 1][k] = matrix[j + 1][k].sub(factor.mul(tmp));
                         }
                     }
                 }
             }
 
-            // Back substitution
-            const coeffs = try allocator.alloc(F, n);
-            var i_plus_1 = n;
-            while (i_plus_1 > 0) {
-                const i = i_plus_1 - 1;
-                i_plus_1 -= 1;
-
-                var sum = matrix[i][n]; // RHS
-                for ((i + 1)..n) |j| {
-                    sum = sum.sub(matrix[i][j].mul(coeffs[j]));
+            // Backward elimination - matches Jolt's eliminate function
+            {
+                var i_rev = n;
+                while (i_rev > 1) {
+                    i_rev -= 1;
+                    // eliminate(matrix, i_rev)
+                    if (!matrix[i_rev][i_rev].eql(F.zero())) {
+                        var j = i_rev;
+                        while (j > 0) {
+                            j -= 1;
+                            const factor = matrix[j][i_rev].mul(matrix[i_rev][i_rev].inverse().?);
+                            var k = n;
+                            while (k > 0) {
+                                const tmp = matrix[i_rev][k];
+                                matrix[j][k] = matrix[j][k].sub(factor.mul(tmp));
+                                if (k == 0) break;
+                                k -= 1;
+                            }
+                        }
+                    }
                 }
+            }
+
+            // Extract result: result[i] = matrix[i][n] / matrix[i][i]
+            const coeffs = try allocator.alloc(F, n);
+            for (0..n) |i| {
                 if (!matrix[i][i].eql(F.zero())) {
-                    coeffs[i] = sum.mul(matrix[i][i].inverse().?);
+                    coeffs[i] = matrix[i][n].mul(matrix[i][i].inverse().?);
                 } else {
                     coeffs[i] = F.zero();
                 }
@@ -1194,24 +1194,41 @@ pub fn UniPoly(comptime F: type) type {
         /// Evaluate from compressed form [c0, c2, c3, ..., c_d] and hint = p(0)+p(1).
         /// Recovers c1 = hint - 2*c0 - Σ compressed[1..], then Horner. No allocation.
         pub fn evalFromHintGeneral(compressed: []const F, hint: F, x: F) F {
+            // Recover full evaluation points from compressed + hint,
+            // then evaluate using evalFromEvalsGeneral (Newton forward differences).
+            // This avoids any inconsistency between monomial and Newton representations.
+            const d = compressed.len; // degree = len(compressed)
             const c0 = compressed[0];
-            // c1 = hint - 2*c0 - c2 - c3 - ... - c_d
+
+            // Recover c1 = hint - 2*c0 - c2 - c3 - ... - c_d
             var c1 = hint.sub(c0).sub(c0);
             for (compressed[1..]) |ci| {
                 c1 = c1.sub(ci);
             }
-            // Horner from degree d down: result = c_d
-            // then result = result * x + c_{d-1}, ..., result * x + c1, result * x + c0
-            var result = compressed[compressed.len - 1]; // c_d
-            var i = compressed.len - 1;
-            while (i > 1) {
-                i -= 1;
-                result = result.mul(x).add(compressed[i]); // c_{i+1} since compressed[i] = c_{i+1} for i>=1
+
+            // Reconstruct full monomial coefficients: [c0, c1, c2, ..., c_d]
+            var coeffs: [16]F = undefined;
+            coeffs[0] = c0;
+            coeffs[1] = c1;
+            for (1..d) |i| {
+                coeffs[i + 1] = compressed[i];
             }
-            // Now result holds accumulated from c_d down to c_2
-            result = result.mul(x).add(c1);
-            result = result.mul(x).add(c0);
-            return result;
+
+            // Convert monomial to evaluation form at {0, 1, ..., d}
+            var evals: [16]F = undefined;
+            for (0..d + 1) |pt| {
+                const x_pt = F.fromU64(@intCast(pt));
+                var val = coeffs[d]; // Horner
+                var j: usize = d;
+                while (j > 0) {
+                    j -= 1;
+                    val = val.mul(x_pt).add(coeffs[j]);
+                }
+                evals[pt] = val;
+            }
+
+            // Evaluate at x using Newton forward differences (consistent with evalFromEvalsGeneral)
+            return evalFromEvalsGeneral(evals[0 .. d + 1], x);
         }
 
         /// Evaluate degree-2 poly at x from Vandermonde evals [p(0), p(1), p(2)].

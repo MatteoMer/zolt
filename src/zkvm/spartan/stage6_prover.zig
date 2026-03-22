@@ -3261,7 +3261,8 @@ fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
             1 => 255, // SLL - decomposed to virtual instructions
             5 => 255, // SRL/SRA - decomposed to virtual instructions
             2 => 10, // SLT → SignedLessThan
-            3 => 11, // SLTU → UnsignedLessThan
+            3 => if (funct7 == 0x01) @as(u8, 13) // MULHU → UpperWord
+            else 11, // SLTU → UnsignedLessThan
         },
         0x13 => switch (funct3) { // I-type ALU
             0 => 0, // ADDI → RangeCheck
@@ -5855,7 +5856,15 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 // the sumcheck will be inconsistent.
                 stage_claims_init[s] = recomputed_claim;
                 // Always print stage match
-                std.debug.print("[S6_INIT] stage {}: match={}\n", .{s, recomputed_claim.eql(external_stage_claims[s])});
+                const s6_init_match = recomputed_claim.eql(external_stage_claims[s]);
+                std.debug.print("[S6_INIT] stage {}: match={}\n", .{s, s6_init_match});
+                if (!s6_init_match) {
+                    std.debug.print("[S6_INIT] recomp=0x", .{});
+                    for (recomputed_claim.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n[S6_INIT] extern=0x", .{});
+                    for (external_stage_claims[s].toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                }
 
                 // Debug: Check if recomputed matches external
                 if (comptime debug_verbose) {
@@ -8315,17 +8324,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
             defer bytecode_prover.deinit();
 
-            // Recompute BytecodeReadRaf aggregate claim from the prover's recomputed per-stage claims.
-            // The external aggregate (from opening claims) may differ if the committed polynomials
-            // (from R1CS witness) don't exactly match the bytecode val_polys (from preprocessing).
-            // The prover's polynomial is built from val_polys, so the claim must match val_polys.
-            {
-                var prover_agg = F.zero();
-                for (0..5) |si| {
-                    prover_agg = prover_agg.add(bytecode_prover.gamma_powers[si].mul(bytecode_prover.stage_claims[si]));
-                }
-                bytecodeReadRaf_input = prover_agg;
-            }
+            // pc_maps now consistent — no override needed
 
             // Debug: Compare prover's initial BytecodeReadRaf claim with opening-claims-derived claim
             if (comptime debug_verbose) {
@@ -9271,6 +9270,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 std.debug.print("  output  = 0x", .{});
                 for (bb) |b| std.debug.print("{x:0>2}", .{b});
                 std.debug.print("\n", .{});
+                // Verify output == Σ batch*inst
+                var expected_out = F.zero();
+                for (0..6) |bi| expected_out = expected_out.add(batch[bi].mul(instance_claims[bi]));
+                std.debug.print("  Σb*i   = 0x", .{});
+                for (expected_out.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n  match   = {}\n", .{expected_out.eql(current_batched_claim)});
                 // Also print batch coefficients
                 for (0..6) |i| {
                     const batchb = batch[i].toBytesBE();

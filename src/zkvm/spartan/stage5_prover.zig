@@ -7997,10 +7997,10 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
             if (funct3 == 1) break :blk -1; // SLL -> uses virtual decomposition
             if (funct3 == 5 and funct7 == 0) break :blk 26; // SRL -> VirtualSRLTable
             if (funct3 == 5 and funct7 == 0x20) break :blk 27; // SRA -> VirtualSRATable
-            if (funct3 == 2) break :blk 10; // SLT -> SignedLessThanTable
-            if (funct3 == 3) break :blk 11; // SLTU -> UnsignedLessThanTable
             if (funct7 == 0x01 and funct3 == 0) break :blk 0; // MUL -> RangeCheckTable
             if (funct7 == 0x01 and funct3 == 3) break :blk 13; // MULHU -> UpperWordTable
+            if (funct3 == 2) break :blk 10; // SLT -> SignedLessThanTable
+            if (funct3 == 3) break :blk 11; // SLTU -> UnsignedLessThanTable
             break :blk -1;
         },
         0x13 => blk: { // I-type

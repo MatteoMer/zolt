@@ -7177,8 +7177,14 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
             defer lookups_ra_prover.deinit();
 
-            // NOTE: Cannot call computeRoundPoly here — it would corrupt prover state
-            // The p(0)+p(1)!=claim issue for LookupsRaVirtual was confirmed separately.
+            // Verify: eq table partition of unity (Σ eq[j] = 1)
+            {
+                var eq_sum = F.zero();
+                for (0..lookups_ra_prover.current_len) |j| {
+                    eq_sum = eq_sum.add(lookups_ra_prover.e_out[j]);
+                }
+                std.debug.print("[LR_EQ] Σeq==1? {} T={}\n", .{eq_sum.eql(F.one()), lookups_ra_prover.current_len});
+            }
 
             // Instance 2: Booleanity (degree 3, two-phase)
             // Build BooleanityProver with G tables and eq tables from Stage 5 opening point.

@@ -6848,7 +6848,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 stage4_gammas,
                 stage5_gammas,
             );
-            const bytecodeReadRaf_input = bcraf_result.total;
+            var bytecodeReadRaf_input = bcraf_result.total;
             const bcraf_per_stage_claims = bcraf_result.per_stage;
 
             const hammingBooleanity_input = F.zero();
@@ -8314,6 +8314,18 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 self.thread_pool,
             );
             defer bytecode_prover.deinit();
+
+            // Recompute BytecodeReadRaf aggregate claim from the prover's recomputed per-stage claims.
+            // The external aggregate (from opening claims) may differ if the committed polynomials
+            // (from R1CS witness) don't exactly match the bytecode val_polys (from preprocessing).
+            // The prover's polynomial is built from val_polys, so the claim must match val_polys.
+            {
+                var prover_agg = F.zero();
+                for (0..5) |si| {
+                    prover_agg = prover_agg.add(bytecode_prover.gamma_powers[si].mul(bytecode_prover.stage_claims[si]));
+                }
+                bytecodeReadRaf_input = prover_agg;
+            }
 
             // Debug: Compare prover's initial BytecodeReadRaf claim with opening-claims-derived claim
             if (comptime debug_verbose) {

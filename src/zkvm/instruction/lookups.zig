@@ -1239,7 +1239,7 @@ pub fn MulhuLookup(comptime XLEN: comptime_int) type {
         }
 
         pub fn lookupTable() LookupTables(XLEN) {
-            return .RangeCheck;
+            return .RangeCheck; // MULHU uses the multiplication product, evaluated via RangeCheck table in Zolt's implementation
         }
 
         pub fn toLookupIndex(self: Self) u128 {

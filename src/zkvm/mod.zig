@@ -401,7 +401,8 @@ pub fn JoltProver(comptime F: type) type {
             // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
             // Needed for R1CS witness generation: PC must be bytecode index, not ELF address
             const preproc_for_witness = @import("preprocessing.zig");
-            var bytecode_prep_witness = try preproc_for_witness.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address, null);
+            const text_sz_for_witness = text_size_opt orelse program_bytecode.len;
+            var bytecode_prep_witness = try preproc_for_witness.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, null, text_sz_for_witness);
             defer bytecode_prep_witness.deinit();
 
             // Generate R1CS cycle witnesses from execution trace

@@ -8450,7 +8450,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             for (batched_claim.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
             std.debug.print("\n", .{});
 
-            const num_evals = max_degree + 1;
             const num_compressed = max_degree;
 
             // Track Phase 1 address challenges for BytecodeReadRaf
@@ -8460,9 +8459,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
 
-                var combined_evals = try self.allocator.alloc(F, num_evals);
-                defer self.allocator.free(combined_evals);
-                @memset(combined_evals, F.zero());
+                // Monomial-form batched polynomial: combined_coeffs[i] = coefficient of x^i
+                // This matches Jolt's approach: each instance returns a UniPoly in monomial form,
+                // and the batched poly is Σ batch[i] * poly_i in coefficient space.
+                var combined_coeffs = try self.allocator.alloc(F, max_degree + 1);
+                defer self.allocator.free(combined_coeffs);
+                @memset(combined_coeffs, F.zero());
 
                 // Per-instance cached round poly evals for claim tracking
                 // We cache each instance's round poly so we don't recompute after challenge
@@ -8479,7 +8481,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Track which instances are active this round
                 var inst_active: [6]bool = .{ false, false, false, false, false, false };
                 const debug_r5 = (round == 5 or round == 6);
-                // Debug: per-instance contribution to combined_evals[0] and [1]
+                // Debug: per-instance contribution to combined_coeffs[0] and [1]
                 var dbg_inst_p0: [6]F = .{F.zero()} ** 6;
                 var dbg_inst_p1: [6]F = .{F.zero()} ** 6;
 
@@ -8487,14 +8489,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 {
                     const inst = 0;
                     if (remaining_rounds > num_rounds_arr[inst]) {
-                        // Not started yet - constant polynomial
+                        // Not started yet - constant polynomial (degree 0)
+                        // Jolt: c0 = previous_claim / 2. In Zolt terms: c0 = input_claims[inst] * 2^scale
+                        // where scale = remaining_rounds - num_rounds - 1, which equals Jolt's individual_claims[inst] / 2.
                         const scale = remaining_rounds - num_rounds_arr[inst] - 1;
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
-                        const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
-                        }
+                        combined_coeffs[0] = combined_coeffs[0].add(batch[inst].mul(scaled));
                     } else {
                         inst_active[inst] = true;
                         if (bytecode_prover.phase == 0) {
@@ -8531,13 +8532,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             const a1 = p1.sub(p0).sub(a2);
                             cached_bc_phase1_coeffs = [3]F{ a0, a1, a2 };
 
-                            // Evaluate degree-2 poly at all finite points for combined_evals
-                            // combined_evals format (Vandermonde): [p(0), p(1), ..., p(max_degree)]
-                            for (0..num_evals) |k| {
-                                const x = F.fromU64(@intCast(k));
-                                const pk = a0.add(x.mul(a1.add(x.mul(a2))));
-                                combined_evals[k] = combined_evals[k].add(batch[inst].mul(pk));
-                            }
+                            // Add degree-2 monomial coefficients [a0, a1, a2] to combined_coeffs
+                            combined_coeffs[0] = combined_coeffs[0].add(batch[inst].mul(a0));
+                            combined_coeffs[1] = combined_coeffs[1].add(batch[inst].mul(a1));
+                            combined_coeffs[2] = combined_coeffs[2].add(batch[inst].mul(a2));
                         } else {
                             // Phase 2: cycle binding (degree bytecode_d+1)
                             const polys = try bytecode_prover.computeRoundPolyPhase2(self.allocator);
@@ -8547,18 +8545,36 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 const p01_ok: u8 = if (std.mem.eql(u8, &p01.toBytesBE(), &instance_claims[inst].toBytesBE())) 1 else 0;
                                 dbg("  [R5_DBG] inst0_phase2 polys_len={} p(0)+p(1)=claim? {}\n", .{ polys.len, p01_ok });
                             }
-                            addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
+                            // Convert evaluations to monomial coefficients and add to combined_coeffs
+                            const mono = try UniPoly(F).fromEvalsVandermonde(self.allocator, polys);
+                            defer self.allocator.free(mono);
+                            for (0..mono.len) |ci| {
+                                combined_coeffs[ci] = combined_coeffs[ci].add(batch[inst].mul(mono[ci]));
+                            }
+                            // Verify: mono represents the correct polynomial
+                            if (round == 11) {
+                                var mono_p01 = mono[0].add(mono[0]); // 2*c0
+                                for (1..mono.len) |ci| mono_p01 = mono_p01.add(mono[ci]); // + c1 + ... + cd
+                                std.debug.print("[R11_INST0] mono p(0)+p(1)==inst[0]? {} polys_len={} mono_len={}\n", .{
+                                    mono_p01.eql(instance_claims[0]), polys.len, mono.len,
+                                });
+                            }
                         }
                     }
                 }
 
-                dbg_inst_p0[0] = combined_evals[0];
-                dbg_inst_p1[0] = combined_evals[1];
+                dbg_inst_p0[0] = combined_coeffs[0];
+                if (round == 11) {
+                    var run_p01 = combined_coeffs[0].add(combined_coeffs[0]);
+                    for (1..max_degree + 1) |ci_v| run_p01 = run_p01.add(combined_coeffs[ci_v]);
+                    std.debug.print("[R11_RUN] after inst0: p01==batch[0]*inst[0]? {}\n", .{run_p01.eql(batch[0].mul(instance_claims[0]))});
+                }
+                dbg_inst_p1[0] = combined_coeffs[1];
 
                 if (debug_r5) {
-                    const e0 = combined_evals[0].toBytes();
-                    const e1 = combined_evals[1].toBytes();
-                    dbg("  [R5_DBG] after inst0: e[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] e[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    const e0 = combined_coeffs[0].toBytes();
+                    const e1 = combined_coeffs[1].toBytes();
+                    dbg("  [R5_DBG] after inst0: c[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] c[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                         e0[0], e0[1], e0[2], e0[3], e0[4], e0[5], e0[6], e0[7],
                         e1[0], e1[1], e1[2], e1[3], e1[4], e1[5], e1[6], e1[7],
                     });
@@ -8572,10 +8588,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         const scale = remaining_rounds - num_rounds_arr[inst] - 1;
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
-                        const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
-                        }
+                        combined_coeffs[0] = combined_coeffs[0].add(batch[inst].mul(scaled));
                     } else {
                         inst_active[inst] = true;
                         const polys = try booleanity_prover.computeRoundPoly(self.allocator, instance_claims[inst]);
@@ -8591,16 +8604,25 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 p1b[31], p1b[30], p1b[29], p1b[28],
                             });
                         }
-                        addFixedEvalsToCombibed(F, combined_evals, polys, 4, batch[inst], num_evals);
+                        // Convert degree-3 evals [p(0), p(1), p(2), p(3)] to monomial coefficients
+                        // using finite differences, then add batch[inst] * coeffs to combined_coeffs
+                        addEvalsAsMonomialToCoeffs(F, combined_coeffs, polys, 4, batch[inst]);
                     }
                 }
-                dbg_inst_p0[1] = combined_evals[0];
-                dbg_inst_p1[1] = combined_evals[1];
+                dbg_inst_p0[1] = combined_coeffs[0];
+                if (round == 11) {
+                    var run_p01 = combined_coeffs[0].add(combined_coeffs[0]);
+                    for (1..max_degree + 1) |ci_v| run_p01 = run_p01.add(combined_coeffs[ci_v]);
+                    var exp = F.zero();
+                    for (0..2) |bi| exp = exp.add(batch[bi].mul(instance_claims[bi]));
+                    std.debug.print("[R11_RUN] after inst1: match? {}\n", .{run_p01.eql(exp)});
+                }
+                dbg_inst_p1[1] = combined_coeffs[1];
 
                 if (debug_r5) {
-                    const e0 = combined_evals[0].toBytes();
-                    const e1 = combined_evals[1].toBytes();
-                    dbg("  [R5_DBG] after inst1: e[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] e[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    const e0 = combined_coeffs[0].toBytes();
+                    const e1 = combined_coeffs[1].toBytes();
+                    dbg("  [R5_DBG] after inst1: c[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] c[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                         e0[0], e0[1], e0[2], e0[3], e0[4], e0[5], e0[6], e0[7],
                         e1[0], e1[1], e1[2], e1[3], e1[4], e1[5], e1[6], e1[7],
                     });
@@ -8613,24 +8635,28 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         const scale = remaining_rounds - num_rounds_arr[inst] - 1;
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
-                        const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
-                        }
+                        combined_coeffs[0] = combined_coeffs[0].add(batch[inst].mul(scaled));
                     } else {
                         inst_active[inst] = true;
                         const polys = hamming_prover.computeRoundPoly();
                         cached_hamming = polys;
-                        addFixedEvalsToCombibed(F, combined_evals, &polys, 4, batch[inst], num_evals);
+                        addEvalsAsMonomialToCoeffs(F, combined_coeffs, &polys, 4, batch[inst]);
                     }
                 }
-                dbg_inst_p0[2] = combined_evals[0];
-                dbg_inst_p1[2] = combined_evals[1];
+                dbg_inst_p0[2] = combined_coeffs[0];
+                if (round == 11) {
+                    var rp = combined_coeffs[0].add(combined_coeffs[0]);
+                    for (1..max_degree + 1) |ci_v| rp = rp.add(combined_coeffs[ci_v]);
+                    var ep = F.zero();
+                    for (0..3) |bi| ep = ep.add(batch[bi].mul(instance_claims[bi]));
+                    std.debug.print("[R11_RUN] after inst2: match? {}\n", .{rp.eql(ep)});
+                }
+                dbg_inst_p1[2] = combined_coeffs[1];
 
                 if (debug_r5) {
-                    const e0 = combined_evals[0].toBytes();
-                    const e1 = combined_evals[1].toBytes();
-                    dbg("  [R5_DBG] after inst2: e[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] e[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    const e0 = combined_coeffs[0].toBytes();
+                    const e1 = combined_coeffs[1].toBytes();
+                    dbg("  [R5_DBG] after inst2: c[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] c[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                         e0[0], e0[1], e0[2], e0[3], e0[4], e0[5], e0[6], e0[7],
                         e1[0], e1[1], e1[2], e1[3], e1[4], e1[5], e1[6], e1[7],
                     });
@@ -8643,10 +8669,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         const scale = remaining_rounds - num_rounds_arr[inst] - 1;
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
-                        const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
-                        }
+                        combined_coeffs[0] = combined_coeffs[0].add(batch[inst].mul(scaled));
                     } else {
                         inst_active[inst] = true;
                         const polys = try ram_ra_prover.computeRoundPoly(self.allocator);
@@ -8669,16 +8692,28 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 claim_le[0], claim_le[1], claim_le[2], claim_le[3], claim_le[4], claim_le[5], claim_le[6], claim_le[7],
                             });
                         }
-                        addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
+                        // Convert evaluations to monomial coefficients and add to combined_coeffs
+                        const mono = try UniPoly(F).fromEvalsVandermonde(self.allocator, polys);
+                        defer self.allocator.free(mono);
+                        for (0..mono.len) |ci| {
+                            combined_coeffs[ci] = combined_coeffs[ci].add(batch[inst].mul(mono[ci]));
+                        }
                     }
                 }
-                dbg_inst_p0[3] = combined_evals[0];
-                dbg_inst_p1[3] = combined_evals[1];
+                dbg_inst_p0[3] = combined_coeffs[0];
+                if (round == 11) {
+                    var rp3 = combined_coeffs[0].add(combined_coeffs[0]);
+                    for (1..max_degree + 1) |ci_v| rp3 = rp3.add(combined_coeffs[ci_v]);
+                    var ep3 = F.zero();
+                    for (0..4) |bi| ep3 = ep3.add(batch[bi].mul(instance_claims[bi]));
+                    std.debug.print("[R11_RUN] after inst3: match? {}\n", .{rp3.eql(ep3)});
+                }
+                dbg_inst_p1[3] = combined_coeffs[1];
 
                 if (debug_r5) {
-                    const e0 = combined_evals[0].toBytes();
-                    const e1 = combined_evals[1].toBytes();
-                    dbg("  [R5_DBG] after inst3: e[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] e[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    const e0 = combined_coeffs[0].toBytes();
+                    const e1 = combined_coeffs[1].toBytes();
+                    dbg("  [R5_DBG] after inst3: c[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] c[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                         e0[0], e0[1], e0[2], e0[3], e0[4], e0[5], e0[6], e0[7],
                         e1[0], e1[1], e1[2], e1[3], e1[4], e1[5], e1[6], e1[7],
                     });
@@ -8691,10 +8726,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         const scale = remaining_rounds - num_rounds_arr[inst] - 1;
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
-                        const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
-                        }
+                        combined_coeffs[0] = combined_coeffs[0].add(batch[inst].mul(scaled));
                     } else {
                         inst_active[inst] = true;
                         const polys = try lookups_ra_prover.computeRoundPoly(self.allocator);
@@ -8716,16 +8748,37 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 cl_le[0], cl_le[1], cl_le[2], cl_le[3], cl_le[4], cl_le[5], cl_le[6], cl_le[7],
                             });
                         }
-                        addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
+                        // Convert evaluations to monomial coefficients and add to combined_coeffs
+                        const mono = try UniPoly(F).fromEvalsVandermonde(self.allocator, polys);
+                        defer self.allocator.free(mono);
+                        if (round == 11) {
+                            // Verify: mono p(0)+p(1) should = inst[4]
+                            var m_p01 = mono[0].add(mono[0]);
+                            for (1..mono.len) |ci| m_p01 = m_p01.add(mono[ci]);
+                            std.debug.print("[R11_INST4] polys.len={} mono.len={} p(0)+p(1)==inst[4]? {}\n", .{polys.len, mono.len, m_p01.eql(instance_claims[inst])});
+                            // Also check evals directly
+                            const direct_p01 = polys[0].add(polys[1]);
+                            std.debug.print("[R11_INST4] polys[0]+polys[1]==inst[4]? {}\n", .{direct_p01.eql(instance_claims[inst])});
+                        }
+                        for (0..mono.len) |ci| {
+                            combined_coeffs[ci] = combined_coeffs[ci].add(batch[inst].mul(mono[ci]));
+                        }
                     }
                 }
-                dbg_inst_p0[4] = combined_evals[0];
-                dbg_inst_p1[4] = combined_evals[1];
+                dbg_inst_p0[4] = combined_coeffs[0];
+                if (round == 11) {
+                    var rp4 = combined_coeffs[0].add(combined_coeffs[0]);
+                    for (1..max_degree + 1) |ci_v| rp4 = rp4.add(combined_coeffs[ci_v]);
+                    var ep4 = F.zero();
+                    for (0..5) |bi| ep4 = ep4.add(batch[bi].mul(instance_claims[bi]));
+                    std.debug.print("[R11_RUN] after inst4: match? {}\n", .{rp4.eql(ep4)});
+                }
+                dbg_inst_p1[4] = combined_coeffs[1];
 
                 if (debug_r5) {
-                    const e0 = combined_evals[0].toBytes();
-                    const e1 = combined_evals[1].toBytes();
-                    dbg("  [R5_DBG] after inst4: e[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] e[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    const e0 = combined_coeffs[0].toBytes();
+                    const e1 = combined_coeffs[1].toBytes();
+                    dbg("  [R5_DBG] after inst4: c[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] c[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                         e0[0], e0[1], e0[2], e0[3], e0[4], e0[5], e0[6], e0[7],
                         e1[0], e1[1], e1[2], e1[3], e1[4], e1[5], e1[6], e1[7],
                     });
@@ -8738,10 +8791,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         const scale = remaining_rounds - num_rounds_arr[inst] - 1;
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
-                        const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
-                        }
+                        combined_coeffs[0] = combined_coeffs[0].add(batch[inst].mul(scaled));
                     } else {
                         inst_active[inst] = true;
                         const polys = inc_prover.computeRoundPoly();
@@ -8760,33 +8810,39 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         }
 
                         // IncClaimReduction is degree 2 in Vandermonde format [p(0), p(1), p(2)].
-                        // Interpolate coefficients: a0 + a1*x + a2*x^2
+                        // Interpolate monomial coefficients: a0 + a1*x + a2*x^2
                         const a0 = p0;
                         const two = F.fromU64(2);
                         const two_inv = two.inverse().?;
                         const a2_coeff = polys[2].sub(p1.add(p1)).add(p0).mul(two_inv);
                         const a1 = p1.sub(a0).sub(a2_coeff);
 
-                        // Add evaluations at all finite points [0, 1, ..., num_evals-1]
-                        // p(k) = a0 + a1*k + a2*k^2
-                        for (0..num_evals) |k| {
-                            const x = F.fromU64(@intCast(k));
-                            const px = a0.add(x.mul(a1.add(x.mul(a2_coeff))));
-                            combined_evals[k] = combined_evals[k].add(batch[inst].mul(px));
-                        }
+                        // Add monomial coefficients to combined_coeffs
+                        combined_coeffs[0] = combined_coeffs[0].add(batch[inst].mul(a0));
+                        combined_coeffs[1] = combined_coeffs[1].add(batch[inst].mul(a1));
+                        combined_coeffs[2] = combined_coeffs[2].add(batch[inst].mul(a2_coeff));
                     }
                 }
-                dbg_inst_p0[5] = combined_evals[0];
-                dbg_inst_p1[5] = combined_evals[1];
+                dbg_inst_p0[5] = combined_coeffs[0];
+                if (round == 11) {
+                    var run_p01_final = combined_coeffs[0].add(combined_coeffs[0]);
+                    for (1..max_degree + 1) |ci_v| run_p01_final = run_p01_final.add(combined_coeffs[ci_v]);
+                    var exp_all = F.zero();
+                    for (0..6) |bi| exp_all = exp_all.add(batch[bi].mul(instance_claims[bi]));
+                    std.debug.print("[R11_RUN] after inst5 (ALL): match? {}\n", .{run_p01_final.eql(exp_all)});
+                }
+                dbg_inst_p1[5] = combined_coeffs[1];
 
                 if (debug_r5) {
-                    const e0 = combined_evals[0].toBytes();
-                    const e1 = combined_evals[1].toBytes();
-                    dbg("  [R5_DBG] after inst5: e[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] e[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    const e0 = combined_coeffs[0].toBytes();
+                    const e1 = combined_coeffs[1].toBytes();
+                    dbg("  [R5_DBG] after inst5: c[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] c[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                         e0[0], e0[1], e0[2], e0[3], e0[4], e0[5], e0[6], e0[7],
                         e1[0], e1[1], e1[2], e1[3], e1[4], e1[5], e1[6], e1[7],
                     });
-                    const sum = combined_evals[0].add(combined_evals[1]);
+                    // In monomial form, p(0)+p(1) = 2*c0 + c1 + c2 + ... + cd
+                    var sum = combined_coeffs[0].add(combined_coeffs[0]); // 2*c0
+                    for (1..max_degree + 1) |ci| sum = sum.add(combined_coeffs[ci]); // + c1 + c2 + ... + cd
                     const sum_le = sum.toBytes();
                     const claim_le = current_batched_claim.toBytes();
                     dbg("  [R5_DBG] sum=e[0]+e[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
@@ -8826,8 +8882,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
 
                 // Debug: check sumcheck invariant p(0)+p(1)=claim for ALL rounds
+                // In monomial form: p(0)+p(1) = 2*c0 + c1 + c2 + ... + cd
                 if (comptime debug_verbose) {
-                    const p01_sum = combined_evals[0].add(combined_evals[1]);
+                    var p01_sum = combined_coeffs[0].add(combined_coeffs[0]); // 2*c0
+                    for (1..max_degree + 1) |cii| p01_sum = p01_sum.add(combined_coeffs[cii]);
                     const p01_match = p01_sum.eql(current_batched_claim);
                     if (!p01_match) {
                         dbg("  [S6P] R{} *** SUMCHECK INVARIANT VIOLATED *** p(0)+p(1) != claim\n", .{round});
@@ -8886,17 +8944,19 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                // Debug: print Vandermonde evaluations for round 7
+                // Debug: print monomial coefficients for round 7
                 if (comptime debug_verbose) {
                     if (round == 7) {
-                        dbg("  [S6P] R7 Vandermonde evals:\n", .{});
-                        for (0..num_evals) |ev_idx| {
-                            const ev_le = combined_evals[ev_idx].toBytes();
-                            dbg("    p({})=[", .{ev_idx});
-                            for (0..32) |bi| dbg("{x:0>2}", .{ev_le[bi]});
+                        dbg("  [S6P] R7 monomial coeffs:\n", .{});
+                        for (0..max_degree + 1) |ci_idx| {
+                            const ci_le = combined_coeffs[ci_idx].toBytes();
+                            dbg("    c[{}]=[", .{ci_idx});
+                            for (0..32) |bi| dbg("{x:0>2}", .{ci_le[bi]});
                             dbg("]\n", .{});
                         }
-                        const sum01 = combined_evals[0].add(combined_evals[1]);
+                        // p(0)+p(1) = 2*c0 + c1 + c2 + ... + cd
+                        var sum01 = combined_coeffs[0].add(combined_coeffs[0]);
+                        for (1..max_degree + 1) |ci_idx| sum01 = sum01.add(combined_coeffs[ci_idx]);
                         const sum_le = sum01.toBytes();
                         const hint_le = current_batched_claim.toBytes();
                         dbg("    p(0)+p(1)=[", .{});
@@ -8907,9 +8967,80 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                // Compress and append to transcript (Vandermonde format)
-                const compressed = try UniPoly(F).vandermondeToCompressed(self.allocator, combined_evals);
+                // Compress: strip c1 (linear term) from monomial coefficients
+                // compressed = [c0, c2, c3, ..., c_d] (same as Jolt's UniPoly::compress)
+                const compressed = try self.allocator.alloc(F, max_degree);
                 defer self.allocator.free(compressed);
+                compressed[0] = combined_coeffs[0]; // c0
+                for (1..max_degree) |ci_idx| {
+                    compressed[ci_idx] = combined_coeffs[ci_idx + 1]; // c2, c3, ..., c_d
+                }
+
+                // Verify sumcheck invariant: p(0)+p(1) == batched_claim
+                if (round == 11) {
+                    var p01_from_coeffs = combined_coeffs[0].add(combined_coeffs[0]);
+                    for (1..max_degree + 1) |ci_v| p01_from_coeffs = p01_from_coeffs.add(combined_coeffs[ci_v]);
+                    // Print per-coefficient values
+                    for (0..max_degree + 1) |ci_v| {
+                        std.debug.print("[R11_COEFF] c[{}]=0x", .{ci_v});
+                        for (combined_coeffs[ci_v].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                        std.debug.print("\n", .{});
+                    }
+                    // Also compute Σ batch*instance_claims directly
+                    var bi_sum = F.zero();
+                    for (0..6) |bi| bi_sum = bi_sum.add(batch[bi].mul(instance_claims[bi]));
+                    // Check if any combined_coeffs entry is suspiciously large
+                    std.debug.print("[R11_DETAIL] p(0)+p(1)=0x", .{});
+                    for (p01_from_coeffs.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print(" Σbi=0x", .{});
+                    for (bi_sum.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print(" claim=0x", .{});
+                    for (current_batched_claim.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                    // Verify: recalculate
+                    // For each instance that contributed, the p(1) = sum of all monomial coeffs
+                    // and p(0) = c0. So p(0)+p(1) = 2*c0 + c1 + c2 + ... + cd.
+                    // If instance i contributes mono_i coefficients, the batch-weighted p(0)+p(1)
+                    // should be Σ batch[i]*instance_claims[i].
+
+                    // But combined_coeffs is the SUM of all batch*mono, so checking the total is enough.
+                    // Let's instead check if the INACTIVE handling is correct.
+                    // At round 11, all instances should be active. Let me verify:
+                    for (0..6) |ii| {
+                        const rem = max_num_rounds - round;
+                        const active = rem <= num_rounds_arr[ii];
+                        if (!active) {
+                            std.debug.print("[R11] inst[{}] INACTIVE! remaining={} num_rounds={}\n", .{ii, rem, num_rounds_arr[ii]});
+                        }
+                    }
+
+                    // Check per-instance contributions
+                    // combined_coeffs = Σ batch[i]*per_instance_coeffs[i]
+                    // For each instance: p_i(0)+p_i(1) should = instance_claims[i]
+                    // After batching: p(0)+p(1) should = Σ batch[i]*instance_claims[i]
+                    var poly_sum = combined_coeffs[0].add(combined_coeffs[0]);
+                    for (1..max_degree + 1) |ci_v| poly_sum = poly_sum.add(combined_coeffs[ci_v]);
+                    var batch_inst_sum = F.zero();
+                    for (0..6) |bi| batch_inst_sum = batch_inst_sum.add(batch[bi].mul(instance_claims[bi]));
+                    const diff = poly_sum.sub(batch_inst_sum);
+                    std.debug.print("[R11] diff=0x", .{});
+                    for (diff.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                    // Check: is diff a multiple of one specific batch[i]?
+                    for (0..6) |bi| {
+                        const bi_inv = batch[bi].inverse().?;
+                        const inst_diff = diff.mul(bi_inv);
+                        // If inst_diff is small (fits in 64 bits), it's a candidate
+                        const be = inst_diff.toBytesBE();
+                        var is_small = true;
+                        for (0..24) |j| { if (be[j] != 0) { is_small = false; break; } }
+                        if (is_small) {
+                            std.debug.print("[R11] diff/batch[{}] is small: 0x", .{bi});
+                            for (be[24..32]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print("\n", .{});
+                        }
+                    }
+                }
 
                 // Debug: print compressed coefficients LE for ALL rounds
                 if (comptime debug_verbose) {
@@ -8982,32 +9113,23 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 current_batched_claim = UniPoly(F).evalFromHintGeneral(coeffs[0..num_compressed], current_batched_claim, challenge);
 
                 if (comptime debug_verbose) {
-                    const hint_val = combined_evals[0].add(combined_evals[1]);
-                    var c1_efh = hint_val.sub(coeffs[0]).sub(coeffs[0]);
-                    for (1..num_compressed) |ci| {
-                        c1_efh = c1_efh.sub(coeffs[ci]);
+                    // Verify: directly evaluate combined_coeffs at challenge via Horner
+                    var direct_eval = combined_coeffs[max_degree];
+                    {
+                        var ci_rev = max_degree;
+                        while (ci_rev > 0) {
+                            ci_rev -= 1;
+                            direct_eval = direct_eval.mul(challenge).add(combined_coeffs[ci_rev]);
+                        }
                     }
-                    var running_point_efh = challenge;
-                    var running_sum_efh = coeffs[0].add(challenge.mul(c1_efh));
-                    for (1..num_compressed) |ci| {
-                        running_point_efh = running_point_efh.mul(challenge);
-                        running_sum_efh = running_sum_efh.add(coeffs[ci].mul(running_point_efh));
-                    }
-                    const efh_match = running_sum_efh.eql(current_batched_claim);
+                    const efh_match = direct_eval.eql(current_batched_claim);
                     if (!efh_match) {
-                        const efh_le = running_sum_efh.toBytes();
+                        const efh_le = direct_eval.toBytes();
                         const vdm_le = current_batched_claim.toBytes();
-                        dbg("  [S6P] R{} EVAL_MISMATCH! eval_from_hint=[", .{round});
+                        dbg("  [S6P] R{} EVAL_MISMATCH! direct_eval=[", .{round});
                         for (0..32) |bi| dbg("{x:0>2}", .{efh_le[bi]});
-                        dbg("]\n  [S6P] R{} EVAL_MISMATCH! vandermonde  =[", .{round});
+                        dbg("]\n  [S6P] R{} EVAL_MISMATCH! evalFromHint=[", .{round});
                         for (0..32) |bi| dbg("{x:0>2}", .{vdm_le[bi]});
-                        dbg("]\n", .{});
-                        const h_le = hint_val.toBytes();
-                        dbg("  [S6P] R{} hint=[", .{round});
-                        for (0..32) |bi| dbg("{x:0>2}", .{h_le[bi]});
-                        dbg("]\n  [S6P] R{} c1_recovered=[", .{round});
-                        const c1_le = c1_efh.toBytes();
-                        for (0..32) |bi| dbg("{x:0>2}", .{c1_le[bi]});
                         dbg("]\n", .{});
                         dbg("  [S6P] R{} num_compressed={}, compressed.len={}\n", .{ round, num_compressed, compressed.len });
                     }
@@ -10050,7 +10172,155 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 }
 
 // =============================================================================
-// Helper: Add variable-length instance evals to combined_evals with interpolation
+// Helper: Convert evaluations to monomial coefficients and add batch*coeffs to combined_coeffs
+// =============================================================================
+// Converts [p(0), p(1), ..., p(d)] (Vandermonde evals) to monomial [c0, c1, ..., cd]
+// using finite differences for small degrees (d <= 3), then adds batch * c_i to combined_coeffs[i].
+fn addEvalsAsMonomialToCoeffs(comptime F: type, combined_coeffs: []F, polys: []const F, n_evals: usize, batch_coeff: F) void {
+    if (n_evals == 1) {
+        // Degree 0: c0 = p(0)
+        combined_coeffs[0] = combined_coeffs[0].add(batch_coeff.mul(polys[0]));
+    } else if (n_evals == 2) {
+        // Degree 1: c0 = p(0), c1 = p(1) - p(0)
+        const c0 = polys[0];
+        const c1 = polys[1].sub(polys[0]);
+        combined_coeffs[0] = combined_coeffs[0].add(batch_coeff.mul(c0));
+        combined_coeffs[1] = combined_coeffs[1].add(batch_coeff.mul(c1));
+    } else if (n_evals == 3) {
+        // Degree 2: c0 = p(0), c2 = (p(2) - 2p(1) + p(0)) / 2, c1 = p(1) - p(0) - c2
+        const inv2 = F.fromU64(2).inverse().?;
+        const c0 = polys[0];
+        const c2 = polys[2].sub(polys[1]).sub(polys[1]).add(polys[0]).mul(inv2);
+        const c1 = polys[1].sub(polys[0]).sub(c2);
+        combined_coeffs[0] = combined_coeffs[0].add(batch_coeff.mul(c0));
+        combined_coeffs[1] = combined_coeffs[1].add(batch_coeff.mul(c1));
+        combined_coeffs[2] = combined_coeffs[2].add(batch_coeff.mul(c2));
+    } else if (n_evals == 4) {
+        // Degree 3: finite differences
+        const inv2 = F.fromU64(2).inverse().?;
+        const inv6 = F.fromU64(6).inverse().?;
+        const c0 = polys[0];
+        const d1 = polys[1].sub(polys[0]);
+        const d2 = polys[2].sub(polys[1]);
+        const d3 = polys[3].sub(polys[2]);
+        const dd1 = d2.sub(d1);
+        const dd2 = d3.sub(d2);
+        const c3 = dd2.sub(dd1).mul(inv6);
+        const c2 = dd1.mul(inv2).sub(c3.mul(F.fromU64(3)));
+        const c1 = d1.sub(c2).sub(c3);
+        // Verify: p(1) = c0+c1+c2+c3 should = polys[1]
+        const check_p1 = c0.add(c1).add(c2).add(c3);
+        if (!check_p1.eql(polys[1])) {
+            std.debug.print("[DEG3_BUG] p(1) mismatch!\n", .{});
+        }
+        combined_coeffs[0] = combined_coeffs[0].add(batch_coeff.mul(c0));
+        combined_coeffs[1] = combined_coeffs[1].add(batch_coeff.mul(c1));
+        combined_coeffs[2] = combined_coeffs[2].add(batch_coeff.mul(c2));
+        combined_coeffs[3] = combined_coeffs[3].add(batch_coeff.mul(c3));
+    } else {
+        // General case: use Newton forward differences with static buffer
+        // Supports up to degree 15 (16 eval points)
+        std.debug.assert(n_evals <= 16);
+        var dd: [16]F = undefined;
+        for (0..n_evals) |i| dd[i] = polys[i];
+
+        // Build forward difference table: dd[k] = k-th order forward difference at 0
+        // After processing, dd[k] = Δ^k p(0)
+        var coeffs_buf: [16]F = undefined;
+        coeffs_buf[0] = dd[0]; // Δ^0 = p(0)
+
+        var order: usize = 1;
+        while (order < n_evals) : (order += 1) {
+            // Compute order-th forward differences in-place
+            var i = n_evals - 1;
+            while (i >= order) : (i -= 1) {
+                dd[i] = dd[i].sub(dd[i - 1]);
+                if (i == order) break;
+            }
+            coeffs_buf[order] = dd[order]; // Δ^order p(0)
+        }
+
+        // Convert Newton forward differences to monomial coefficients
+        // Newton form: p(x) = Σ_k Δ^k p(0) * C(x, k)
+        // where C(x, k) = x(x-1)...(x-k+1) / k!
+        // We need to convert to monomial c0 + c1*x + c2*x^2 + ...
+        // Use the fact that Δ^k p(0) / k! is the leading coefficient contribution
+        // Actually, the simplest approach for general n: use the Vandermonde solver result
+        // which is already available via fromEvalsVandermonde. But since this is a non-allocating
+        // path, we use Sterling numbers of the first kind.
+        //
+        // Actually for the general case, let's just compute monomial coefficients directly
+        // from the forward differences using the Stirling number relationship.
+        // c_j = Σ_{k=j}^{d} S1(k, j) * Δ^k p(0) / k!
+        // This is complex. For now, fall back to evaluating the Newton form at integer points
+        // and using the same approach as vandermondeToCompressed for n > 4.
+        //
+        // Simpler: we have forward differences. Convert via the standard formula:
+        // The Newton forward difference interpolation gives:
+        // c_k = Σ_{j=0}^{k} (-1)^{k-j} C(k,j) * Δ^j p(0) / ... no, this is circular.
+        //
+        // Let's just directly use finite-difference-to-monomial conversion:
+        // Start with Newton basis coefficients dd[0..n] = [Δ^0 p(0)/0!, Δ^1 p(0)/1!, ...]
+        // and convert to monomial via the standard algorithm.
+
+        // Divide by factorials to get Newton basis coefficients
+        var fact = F.one();
+        for (1..n_evals) |k| {
+            fact = fact.mul(F.fromU64(@intCast(k)));
+            coeffs_buf[k] = coeffs_buf[k].mul(fact.inverse().?);
+        }
+
+        // Convert Newton basis to monomial: c(x) = Σ a_k * x*(x-1)*...*(x-k+1)
+        // Process from highest to lowest degree, expanding x*(x-1)*...*(x-k+1) into monomials.
+        // Use the recurrence: multiply running polynomial by (x - k) at each step.
+        var mono: [16]F = .{F.zero()} ** 16;
+        mono[0] = coeffs_buf[0];
+
+        for (1..n_evals) |k| {
+            // We need to add coeffs_buf[k] * x*(x-1)*...*(x-k+1) to mono
+            // Build the falling factorial x*(x-1)*...*(x-k+1) incrementally
+            // ff[k] = ff[k-1] * (x - (k-1))
+            // We maintain ff_mono[0..k] = monomial coefficients of x*(x-1)*...*(x-k+1)
+            // Start: ff_mono = [0, 1] for x
+            // Multiply by (x - j) for j = 1, 2, ..., k-1
+            var ff: [16]F = .{F.zero()} ** 16;
+            ff[1] = F.one(); // x
+            for (1..k) |j| {
+                // Multiply ff by (x - j): new[i] = ff[i-1] - j*ff[i]
+                const neg_j = F.zero().sub(F.fromU64(@intCast(j)));
+                var i_rev = j + 1;
+                while (i_rev > 0) {
+                    i_rev -= 1;
+                    const prev = if (i_rev > 0) ff[i_rev - 1] else F.zero();
+                    ff[i_rev] = prev.add(neg_j.mul(ff[i_rev]));
+                }
+            }
+            // Add coeffs_buf[k] * ff to mono
+            for (0..k + 1) |i| {
+                mono[i] = mono[i].add(coeffs_buf[k].mul(ff[i]));
+            }
+        }
+
+        // Verify: evaluate mono at original points should match polys
+        for (0..n_evals) |pt| {
+            const x_pt = F.fromU64(@intCast(pt));
+            var val = mono[n_evals - 1];
+            var j2: usize = n_evals - 1;
+            while (j2 > 0) { j2 -= 1; val = val.mul(x_pt).add(mono[j2]); }
+            if (!val.eql(polys[pt])) {
+                std.debug.print("[NEWTON_BUG] n_evals={} pt={} mismatch!\n", .{n_evals, pt});
+            }
+        }
+
+        // Add batch * mono to combined_coeffs
+        for (0..n_evals) |i| {
+            combined_coeffs[i] = combined_coeffs[i].add(batch_coeff.mul(mono[i]));
+        }
+    }
+}
+
+// =============================================================================
+// Helper: Add variable-length instance evals to combined_evals with interpolation (LEGACY)
 // =============================================================================
 // All evaluation arrays use Vandermonde format: [p(0), p(1), ..., p(d)]
 // (evaluations at consecutive integer points, no p_inf)

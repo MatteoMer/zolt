@@ -1321,6 +1321,7 @@ pub fn JoltProver(comptime F: type) type {
                         std.debug.print("]\n", .{});
                     }
                 }
+                std.debug.print("[STAGE8] total_poly_size={} num_claims={} point_len={}\n", .{ total_poly_size, num_claims, dory_point.len });
                 dbg("[STAGE8] Starting Dory opening proof (total_poly_size={}, num_claims={})...\n", .{ total_poly_size, num_claims });
                 if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] Stage 8 prep (hints+poly): {d:.1} ms\n", .{@as(f64, @floatFromInt(phase_timer.read())) / 1_000_000.0});
                 phase_timer.reset();
@@ -1334,6 +1335,11 @@ pub fn JoltProver(comptime F: type) type {
                     self.thread_pool,
                 );
                 dbg("[STAGE8] Dory opening proof generated.\n", .{});
+                std.debug.print("[STAGE8] Dory proof: nu={} sigma={} rounds={} first_msgs={} second_msgs={}\n", .{
+                    dory_proof.nu, dory_proof.sigma,
+                    @max(dory_proof.nu, dory_proof.sigma),
+                    dory_proof.first_messages.len, dory_proof.second_messages.len,
+                });
                 result.dory_opening_proof = dory_proof;
                 result.opening_point = opening_point;
                 const stage8_time = phase_timer.read();

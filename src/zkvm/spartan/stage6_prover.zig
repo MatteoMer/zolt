@@ -10615,7 +10615,7 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
             // VirtualAssertHalfwordAlignment/WordAlignment: AddOperands → rs1 + imm
             const imm_raw: u32 = instr >> 20;
             const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm_raw << 20)) >> 20);
-            return @as(u128, step.rs1_value) +% @as(u128, @as(u64, @bitCast(imm_signed)));
+            return @as(u128, step.rs1_value +% @as(u64, @bitCast(imm_signed)));
         } else {
             // VirtualAssertEQ (funct3=0) / VirtualAssertValidDiv0 (funct3=1): interleaved
             return interleaveBits(step.rs1_value, step.rs2_value);

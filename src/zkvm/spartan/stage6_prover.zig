@@ -8981,49 +8981,73 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Gaussian elimination in vandermondeToCompressed introduces numerical artifacts.
                 // The verifier uses evalFromHintGeneral on the compressed coefficients, so
                 // we need to ensure the prover produces the SAME result.
-                // Fix: use evalFromHintGeneral but verify hint consistency.
-                // Evaluate combined polynomial at challenge from Vandermonde evaluation points.
-                // Using evalFromEvalsGeneral instead of evalFromHintGeneral because the
-                // latter can diverge for polynomials with degree > 4 due to Gaussian
-                // elimination artifacts in vandermondeToCompressed.
-                current_batched_claim = UniPoly(F).evalFromEvalsGeneral(combined_evals[0..num_evals], challenge);
-
-                // Also compute from Vandermonde evals for cross-check
+                // Evaluate combined polynomial at challenge
                 {
-                    const vdm_claim = UniPoly(F).evalFromEvalsGeneral(combined_evals[0..num_evals], challenge);
-                    if (!vdm_claim.eql(current_batched_claim)) {
-                        if (round == 11) {
-                            std.debug.print("[EVAL_CROSSCHECK] R11 monomial=0x", .{});
-                            for (current_batched_claim.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                            std.debug.print(" vandermonde=0x", .{});
-                            for (vdm_claim.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                            std.debug.print(" num_evals={}\n", .{num_evals});
-                            // Also compute via fromEvalsVandermonde+Horner
-                            const alt_claim = try UniPoly(F).evaluateVandermondeAt(self.allocator, combined_evals[0..num_evals], challenge);
-                            // Check: do compressed coefficients match full coefficients?
-                            const full_coeffs = try UniPoly(F).fromEvalsVandermonde(self.allocator, combined_evals[0..num_evals]);
-                            defer self.allocator.free(full_coeffs);
-                            // Recover c1 from hint (hint = p(0)+p(1) = old batched claim)
-                            const hint_for_c1 = combined_evals[0].add(combined_evals[1]);
-                            var c1_recovered = hint_for_c1.sub(full_coeffs[0]).sub(full_coeffs[0]);
-                            for (2..full_coeffs.len) |ci| c1_recovered = c1_recovered.sub(full_coeffs[ci]);
-                            std.debug.print("[EVAL_CROSSCHECK] c1_actual=0x", .{});
-                            for (full_coeffs[1].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                            std.debug.print(" c1_recovered=0x", .{});
-                            for (c1_recovered.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                            std.debug.print(" match={}\n", .{c1_recovered.eql(full_coeffs[1])});
-                            // Check: hint = p(0)+p(1)?
-                            var p1_from_coeffs = F.zero();
-                            for (full_coeffs) |c| p1_from_coeffs = p1_from_coeffs.add(c);
-                            const hint_val = combined_evals[0].add(combined_evals[1]);
-                            const p0_plus_p1_from_coeffs = full_coeffs[0].add(p1_from_coeffs);
-                            std.debug.print("[EVAL_CROSSCHECK] hint=p(0)+p(1)? {} hint=batched? {}\n", .{hint_val.eql(p0_plus_p1_from_coeffs), hint_val.eql(current_batched_claim)});
-                            std.debug.print("[EVAL_CROSSCHECK] R11 vandermondeAt=0x", .{});
-                            for (alt_claim.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                            std.debug.print(" match_mono={} match_vdm={}\n", .{alt_claim.eql(current_batched_claim), alt_claim.eql(vdm_claim)});
+                    const from_hint = UniPoly(F).evalFromHintGeneral(coeffs[0..num_compressed], current_batched_claim, challenge);
+                    {
+                        const true_hint = combined_evals[0].add(combined_evals[1]);
+                        if (!true_hint.eql(current_batched_claim)) {
+                            std.debug.print("[HINT_DRIFT] round={}\n", .{round});
+                        }
+                        // Check: does evalFromHintGeneral match evalFromEvalsGeneral BEFORE updating?
+                        const efh_pre = UniPoly(F).evalFromHintGeneral(coeffs[0..num_compressed], current_batched_claim, challenge);
+                        const efe_pre = UniPoly(F).evalFromEvalsGeneral(combined_evals[0..num_evals], challenge);
+                        if (!efh_pre.eql(efe_pre) and round <= 11) {
+                            std.debug.print("[EVAL_DIV] round={} hint_correct={}\n", .{round, true_hint.eql(current_batched_claim)});
                         }
                     }
+                    if (round == 11) {
+                        const from_evals = UniPoly(F).evalFromEvalsGeneral(combined_evals[0..num_evals], challenge);
+                        if (!from_hint.eql(from_evals)) {
+                            // Verify fromEvalsVandermonde reproduces evals
+                            const full_c = try UniPoly(F).fromEvalsVandermonde(self.allocator, combined_evals[0..num_evals]);
+                            defer self.allocator.free(full_c);
+                            var eval_mm: usize = 0;
+                            for (0..num_evals) |pt| {
+                                const x_pt = F.fromU64(@intCast(pt));
+                                var val = full_c[full_c.len - 1];
+                                var ci2: usize = full_c.len - 1;
+                                while (ci2 > 0) { ci2 -= 1; val = val.mul(x_pt).add(full_c[ci2]); }
+                                if (!val.eql(combined_evals[pt])) eval_mm += 1;
+                            }
+                            std.debug.print("[BUG_R11] fromEvalsVandermonde eval mismatches: {}\n", .{eval_mm});
+                            // Direct Horner from full coefficients
+                            var direct_horner = full_c[full_c.len - 1];
+                            var dh_i: usize = full_c.len - 1;
+                            while (dh_i > 0) { dh_i -= 1; direct_horner = direct_horner.mul(challenge).add(full_c[dh_i]); }
+                            std.debug.print("[BUG_R11] from_hint=0x", .{});
+                            for (from_hint.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" from_evals=0x", .{});
+                            for (from_evals.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" direct_horner=0x", .{});
+                            for (direct_horner.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print("\n", .{});
+                            std.debug.print("[BUG_R11] hint==horner? {} evals==horner? {}\n", .{from_hint.eql(direct_horner), from_evals.eql(direct_horner)});
+                            // Check c1 recovery
+                            var c1_check = current_batched_claim.sub(coeffs[0]).sub(coeffs[0]);
+                            for (coeffs[1..num_compressed]) |ci3| c1_check = c1_check.sub(ci3);
+                            std.debug.print("[BUG_R11] c1_from_hint=0x", .{});
+                            for (c1_check.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" c1_actual=0x", .{});
+                            for (full_c[1].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" c1_match={}\n", .{c1_check.eql(full_c[1])});
+                            // Check c0
+                            std.debug.print("[BUG_R11] c0_comp=0x", .{});
+                            for (coeffs[0].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" c0_actual=0x", .{});
+                            for (full_c[0].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" match={}\n", .{coeffs[0].eql(full_c[0])});
+                            // Check c2
+                            std.debug.print("[BUG_R11] c2_comp=0x", .{});
+                            for (coeffs[1].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" c2_actual=0x", .{});
+                            for (full_c[2].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+                            std.debug.print(" match={}\n", .{coeffs[1].eql(full_c[2])});
+                        }
+                    }
+                    current_batched_claim = from_hint;
                 }
+
 
                 if (comptime debug_verbose) {
                     const hint_val = combined_evals[0].add(combined_evals[1]);

@@ -15,6 +15,9 @@ const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
+
+// Benchmark timing control - set to true to enable fine-grained timing
+const bench_timing = false;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -384,6 +387,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             r_cycle_rw: []const F, // r_cycle_rw from RamReadWriteChecking (n_cycle_vars elements)
             r_cycle_val: []const F, // r_cycle_val from RamValEvaluation (n_cycle_vars elements)
         ) !Stage5Result(F) {
+            // Start benchmark timer at the very beginning
+            var bench_overall_timer = if (comptime bench_timing) std.time.Timer.start() catch unreachable else {};
+            _ = &bench_overall_timer;
+
             const regs_val_num_rounds = n_cycle_vars;
             // Upstream RamRaClaimReduction: cycle-only binding, no address binding
             const ram_ra_num_rounds = n_cycle_vars; // was log_ram_k + n_cycle_vars
@@ -532,11 +539,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 }
             }
 
+            // Sub-timer for init breakdown
+            var init_sub_timer = if (comptime bench_timing) std.time.Timer.start() catch unreachable else {};
+            _ = &init_sub_timer;
+
             // Compute LT polynomial using efficient algorithm
             // lt_evals[j] = LT(j, r_cycle) for all j in [0, T)
             // r_cycle_regs is in BIG_ENDIAN order (MSB first) from Stage 4
-            const lt_evals = try computeAllLtEvals(self.allocator, r_cycle_regs);
+            const lt_evals = try computeAllLtEvals(self.allocator, r_cycle_regs, self.thread_pool);
             defer self.allocator.free(lt_evals);
+
+            if (comptime bench_timing) {
+                std.debug.print("    [STAGE5-INIT] LT + alloc:        {d:8.1} ms\n", .{@as(f64, @floatFromInt(init_sub_timer.read())) / 1_000_000.0});
+                init_sub_timer.reset();
+            }
 
             // Build LookupsReadRaf polynomial tables
             // For each cycle j, compute:
@@ -550,8 +566,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var lookups_eq_evals = try self.allocator.alloc(F, T);
             var lookups_combined_vals = try self.allocator.alloc(F, T);
             var lookups_ra_weights = try self.allocator.alloc(F, T); // Per-cycle total ra weight (product of chunks)
-            var lookups_indices_lo = try self.allocator.alloc(u64, T); // Lower 64 bits of lookup index
-            var lookups_indices_hi = try self.allocator.alloc(u64, T); // Upper 64 bits of lookup index
+            const lookups_indices_lo = try self.allocator.alloc(u64, T); // Lower 64 bits of lookup index
+            const lookups_indices_hi = try self.allocator.alloc(u64, T); // Upper 64 bits of lookup index
             defer self.allocator.free(lookups_eq_evals);
             defer self.allocator.free(lookups_combined_vals);
             defer self.allocator.free(lookups_ra_weights);
@@ -570,21 +586,21 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const ra_num_chunks = LOOKUPS_LOG_K / lookups_ra_virtual_log_k_chunk;
             std.debug.assert(ra_num_chunks <= MAX_RA_CHUNKS);
 
+            // ra_chunk_weights allocated lazily at rematerialization (round 128) to avoid 64MB memset at init
             var ra_chunk_weights: [MAX_RA_CHUNKS][]F = undefined;
-            for (0..ra_num_chunks) |chunk_idx| {
-                ra_chunk_weights[chunk_idx] = try self.allocator.alloc(F, T);
-                @memset(ra_chunk_weights[chunk_idx], F.one());
-            }
+            var ra_chunk_weights_allocated = false;
             defer {
-                for (0..ra_num_chunks) |chunk_idx| {
-                    self.allocator.free(ra_chunk_weights[chunk_idx]);
+                if (ra_chunk_weights_allocated) {
+                    for (0..ra_num_chunks) |chunk_idx| {
+                        self.allocator.free(ra_chunk_weights[chunk_idx]);
+                    }
                 }
             }
 
             // Track which cycles use which lookup table (for flag claims)
             // and which use identity path (for raf_flag claim)
-            var cycle_table_indices = try self.allocator.alloc(i8, T);
-            var cycle_is_identity_path = try self.allocator.alloc(bool, T);
+            const cycle_table_indices = try self.allocator.alloc(i8, T);
+            const cycle_is_identity_path = try self.allocator.alloc(bool, T);
             defer self.allocator.free(cycle_table_indices);
             defer self.allocator.free(cycle_is_identity_path);
             @memset(cycle_table_indices, -1); // -1 = no table
@@ -599,7 +615,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Build eq_reduction[j] = eq(j, r_reduction) for all cycles j
             // r_reduction is in BIG_ENDIAN order (MSB first)
             // Use O(2^n) doubling technique instead of O(n * 2^n) per-element computation
-            buildFullEqTable(r_reduction, lookups_eq_evals[0..T]);
+            buildFullEqTable(r_reduction, lookups_eq_evals[0..T], self.thread_pool);
+
+            if (comptime bench_timing) {
+                std.debug.print("    [STAGE5-INIT] EqTable + allocs:  {d:8.1} ms\n", .{@as(f64, @floatFromInt(init_sub_timer.read())) / 1_000_000.0});
+                init_sub_timer.reset();
+            }
 
             // Debug: print first few eq values and verify sum = 1
             if (comptime debug_verbose) {
@@ -620,45 +641,51 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 }
             }
 
-            // Populate inc and wa from trace
-            // Use trace's rd_pre_value and rd_value directly (just like Jolt does)
+            // Populate inc and wa from trace (parallel over cycles — each is independent)
             const trace_len = trace.steps.items.len;
-            for (trace.steps.items, 0..) |step, j| {
-                if (step.is_noop and !step.is_termination_store) {
-                    // NOP cycles in Jolt are Cycle::NoOp, NOT ADDI.
-                    // NoOp has: lookup_table()=None, is_interleaved_operands()=true,
-                    // to_lookup_index()=0, to_lookup_output()=0.
-                    // Defaults from @memset are already correct:
-                    //   cycle_table_indices[j] = -1 (no table)
-                    //   cycle_is_identity_path[j] = false (interleaved)
-                    //   lookup_indices_u128[j] = 0
-                    //   lookups_combined_vals[j] = 0
-                    continue;
-                }
-
-                // Use explicit register index from TraceStep (supports virtual registers 32+)
-                const rd: u8 = step.rd_index;
-
-                // Compute wa for ALL writes including rd=0 (x0), because the
-                // BytecodeReadRaf val5 polynomial includes eq(rd, r_register) for all
-                // bytecode entries with valid rd, and the verifier reconstructs val5
-                // from preprocessing. inc is 0 for rd=0 since x0 is hardwired to zero.
-                if (step.rd_written) {
-                    wa_evals[j] = computeEqAtIndex(r_address_regs, @as(usize, rd));
-
-                    if (rd != 0) {
-                        const pre_value: i128 = @intCast(step.rd_pre_value);
-                        const post_value: i128 = @intCast(step.rd_value);
-                        const increment = post_value - pre_value;
-
-                        if (increment >= 0) {
-                            inc_evals[j] = F.fromU64(@intCast(increment));
-                        } else {
-                            inc_evals[j] = F.zero().sub(F.fromU64(@intCast(-increment)));
+            {
+                const IncWaCtx = struct {
+                    steps: []const tracer.TraceStep,
+                    inc: []F,
+                    wa: []F,
+                    r_addr: []const F,
+                };
+                const ctx = IncWaCtx{
+                    .steps = trace.steps.items,
+                    .inc = inc_evals,
+                    .wa = wa_evals,
+                    .r_addr = r_address_regs,
+                };
+                const incWaFn = struct {
+                    fn f(c: IncWaCtx, j: usize) void {
+                        const step = c.steps[j];
+                        if (step.is_noop and !step.is_termination_store) return;
+                        const rd: u8 = step.rd_index;
+                        if (step.rd_written) {
+                            c.wa[j] = computeEqAtIndex(c.r_addr, @as(usize, rd));
+                            if (rd != 0) {
+                                const pre_value: i128 = @intCast(step.rd_pre_value);
+                                const post_value: i128 = @intCast(step.rd_value);
+                                const increment = post_value - pre_value;
+                                if (increment >= 0) {
+                                    c.inc[j] = F.fromU64(@intCast(increment));
+                                } else {
+                                    c.inc[j] = F.zero().sub(F.fromU64(@intCast(-increment)));
+                                }
+                            }
                         }
                     }
+                }.f;
+                if (self.thread_pool) |tp| {
+                    tp.parallelForForce(trace_len, ctx, incWaFn);
+                } else {
+                    for (0..trace_len) |j| incWaFn(ctx, j);
                 }
-                // Note: lt_evals[j] is already computed for all j via computeAllLtEvals
+            }
+
+            if (comptime bench_timing) {
+                std.debug.print("    [STAGE5-INIT] inc/wa from trace: {d:8.1} ms\n", .{@as(f64, @floatFromInt(init_sub_timer.read())) / 1_000_000.0});
+                init_sub_timer.reset();
             }
 
             // Debug: Print first 10 polynomial values
@@ -880,623 +907,89 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             //   right_operand = y (rs2 or imm)
             //   lookup_output = result of operation
             //
-            for (trace.steps.items, 0..) |step, j| {
-                // NOTE: Do NOT skip NOOPs here! In Jolt, NOOPs (ADDI x0,x0,0) are valid
-                // instructions with lookup_table = RangeCheck and is_identity_path = true.
-                // Skipping them causes cycle_table_indices and cycle_is_identity_path to be
-                // wrong, which corrupts Q arrays, rematerialization, and opening claims.
+            // Parallel dispatch: each thread processes a chunk of cycles
+            const combined_chunk_count = if (self.thread_pool) |tp| @as(usize, tp.thread_count + 1) else @as(usize, 1);
+            const combined_chunk_size = (trace_len + combined_chunk_count - 1) / combined_chunk_count;
 
-                const instr = step.instruction;
-                const opcode = instr & 0x7f;
-                const funct3: u3 = @truncate((instr >> 12) & 0x7);
-                const funct7: u7 = @truncate(instr >> 25);
-
-                // Determine left_op, right_op, and lookup_output based on instruction type.
-                // This MUST match the verification loop / R1CS witness exactly.
-                // Use field arithmetic with signedI64ToField for signed immediates.
-                var left_op: F = undefined;
-                var right_op: F = undefined;
-                var lookup_output: F = undefined;
-
-                // First compute left_input and right_input (same as R1CS)
-                const left_is_rs1: bool = switch (opcode) {
-                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
-                    0x22 => true, // VirtualAssertEQ: left = rs1
-                    0x42 => true, // VirtualZeroExtendWord: left = rs1
-                    0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1
-                    // 0x02 (VirtualAdvice): left_is_rs1 = false (instruction_inputs = (0,0))
-                    else => false,
-                };
-                const left_is_pc: bool = switch (opcode) {
-                    0x17, 0x6f => true,
-                    else => false,
-                };
-                const right_is_rs2: bool = switch (opcode) {
-                    0x33, 0x63, 0x3b => true,
-                    0x22 => (funct3 == 0 or funct3 == 1), // VirtualAssertEQ/ValidDiv0: right = rs2; alignment: right = imm
-                    0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
-                    0x5B => step.rs2_read, // VirtualSRL/VirtualSRA R-type: rs2; VirtualSRLI/VirtualSRAI I-type: imm
-                    else => false,
-                };
-                const right_is_imm: bool = switch (opcode) {
-                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
-                    0x22 => (funct3 == 2 or funct3 == 3), // alignment assertions: right = imm
-                    0x5B => !step.rs2_read, // I-type: imm; R-type: not imm
-                    else => false,
-                };
-
-                // For identity-path AddOperands instructions (ADDI, ADDIW, JAL, JALR, VirtualSignExtendWord),
-                // use UNSIGNED u64 immediate to match Jolt's to_lookup_operands() u128 arithmetic.
-                // This ensures RightInstructionInput matches between R1CS, Stage 3, and Stage 5.
-                const is_identity_add_imm: bool = switch (opcode) {
-                    0x13 => funct3 == 0, // ADDI
-                    0x1b => funct3 == 0, // ADDIW
-                    0x0B => true, // VirtualSignExtendWord
-                    0x6f => true, // JAL
-                    0x67 => true, // JALR
-                    else => false,
-                };
-                const imm_val = if (opcode == 0x2B) blk: {
-                    if (funct3 == 0) {
-                        // VirtualMULI: IMM = multiplier = 1 << shamt
-                        const shamt_raw2: u32 = instr >> 20;
-                        const shamt2: u6 = @truncate(shamt_raw2 & 0x3F);
-                        const multiplier2: u64 = @as(u64, 1) << shamt2;
-                        break :blk F.fromU64(multiplier2);
-                    } else {
-                        // VirtualPow2/VirtualShiftRightBitmask: IMM = 0
-                        break :blk F.zero();
-                    }
-                } else if (opcode == 0x5B) blk: {
-                    if (step.rs2_read) {
-                        // VirtualSRL/VirtualSRA R-type: no immediate (rs2 used instead)
-                        break :blk F.zero();
-                    } else {
-                        // VirtualSRLI/VirtualSRAI I-type: IMM = bitmask computed from total shift
-                        const total_shift_raw2: u32 = instr >> 20;
-                        const total_shift2: u7 = @truncate(total_shift_raw2 & 0x3F);
-                        const ones2: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift2))) - 1;
-                        const bitmask2: u64 = @truncate(ones2 << total_shift2);
-                        break :blk F.fromU64(bitmask2);
-                    }
-                } else if (opcode == 0x22 and (funct3 == 2 or funct3 == 3)) blk: {
-                    // VirtualAssertHalfwordAlignment/WordAlignment: SIGNED IMM encoding
-                    // Must match R1CS witness (now signed) and Jolt verifier val_poly
-                    const assert_imm_raw: u32 = @truncate(instr >> 20);
-                    const assert_imm_signed: i64 = @as(i64, @as(i32, @bitCast(assert_imm_raw << 20)) >> 20);
-                    if (assert_imm_signed < 0) {
-                        break :blk F.fromU64(@intCast(-assert_imm_signed)).neg();
-                    } else {
-                        break :blk F.fromU64(@intCast(assert_imm_signed));
-                    }
-                } else if (is_identity_add_imm) blk: {
-                    // Use unsigned u64 representation (two's complement) for the immediate.
-                    // E.g., imm=-1 → F(0xFFFFFFFFFFFFFFFF) instead of F(p-1).
-                    break :blk F.fromU64(computeUnsignedImmediate(instr));
-                } else computeImmediate(instr);
-
-                var left_input: F = F.zero();
-                if (left_is_rs1) left_input = F.fromU64(step.rs1_value);
-                // FIX: Use unexpanded_pc (raw RISC-V address) not pc (expanded bytecode index)
-                // This matches R1CS constraints.zig and Jolt's instruction_input.rs
-                if (left_is_pc) left_input = F.fromU64(step.unexpanded_pc);
-
-                var right_input: F = F.zero();
-                if (right_is_rs2) right_input = F.fromU64(step.rs2_value);
-                if (right_is_imm) right_input = imm_val;
-
-                // Compute LookupOutput = materialize_entry(lookup_index) for the instruction's table.
-                // For identity-path (AddOperands/SubtractOperands/MultiplyOperands):
-                //   lookup_output = materialize_entry(right_op_raw) = F.fromU64(right_op_raw) for RangeCheck.
-                // For interleaved path:
-                //   lookup_output = materialize_entry(interleave(left, right)) from the assigned table.
-                // Special cases: JAL, JALR, Branch have their own formulas.
-                //
-                // NOTE: This is computed AFTER the lookup index section below, but we set a
-                // preliminary value here and may override it.
-                switch (opcode) {
-                    0x6f => { // JAL: LookupOutput = PC + imm
-                        lookup_output = left_input.add(right_input);
-                    },
-                    0x67 => { // JALR: LookupOutput = (rs1 + imm) & ~1
-                        const target = left_input.add(right_input);
-                        const target_u64 = target.toU64() & ~@as(u64, 1);
-                        lookup_output = F.fromU64(target_u64);
-                    },
-                    0x63 => { // Branch: LookupOutput = condition result (0 or 1)
-                        const result: u64 = switch (funct3) {
-                            0x0 => if (step.rs1_value == step.rs2_value) 1 else 0,
-                            0x1 => if (step.rs1_value != step.rs2_value) 1 else 0,
-                            0x4 => if (@as(i64, @bitCast(step.rs1_value)) < @as(i64, @bitCast(step.rs2_value))) 1 else 0,
-                            0x5 => if (@as(i64, @bitCast(step.rs1_value)) >= @as(i64, @bitCast(step.rs2_value))) 1 else 0,
-                            0x6 => if (step.rs1_value < step.rs2_value) 1 else 0,
-                            0x7 => if (step.rs1_value >= step.rs2_value) 1 else 0,
-                            else => 0,
-                        };
-                        lookup_output = F.fromU64(result);
-                    },
-                    0x22, 0x62 => {
-                        // VirtualAssertEQ and VirtualAssertValidUnsignedRemainder: Assert instructions
-                        // LookupOutput = 1 (assertion passed). Matches R1CS computeLookupOutput.
-                        lookup_output = F.one();
-                    },
-                    else => {
-                        // Default: rd_value (will be overridden for ADDIW/ADDW/SUBW below)
-                        lookup_output = F.fromU64(step.rd_value);
-                    },
-                }
-
-                // Compute LeftLookupOperand and RightLookupOperand
-                switch (opcode) {
-                    0x33 => { // R-type
-                        if (funct7 == 0x01) {
-                            // M-extension
-                            if (funct3 == 0x0) { // MUL: MultiplyOperands
-                                left_op = F.zero();
-                                right_op = left_input.mul(right_input); // Product
-                            } else if (funct3 == 0x3) { // MULHU: MultiplyOperands
-                                left_op = F.zero();
-                                right_op = left_input.mul(right_input); // Product
-                            } else {
-                                // DIVU, REMU, MULHSU, etc.: interleaved
-                                left_op = left_input;
-                                right_op = right_input;
-                            }
-                        } else if (funct3 == 0x0 and funct7 == 0x20) {
-                            // SUB: SubtractOperands, left=0, right=rs1-rs2+2^64
-                            const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
-                            left_op = F.zero();
-                            right_op = left_input.sub(right_input).add(two_pow_64);
-                        } else if (funct3 == 0x0 and funct7 == 0x0) {
-                            // ADD: AddOperands, left=0, right=rs1+rs2
-                            left_op = F.zero();
-                            right_op = left_input.add(right_input);
-                        } else {
-                            // XOR, AND, OR, SLT, SLTU, SRL, SRA: interleaved operands
-                            left_op = left_input;
-                            right_op = right_input;
-                        }
-                    },
-                    0x13 => { // I-type ALU: only ADDI (funct3=0) uses AddOperands
-                        // Other I-type ALU instructions (SLLI, SLTI, etc.) use interleaved operands
-                        // Note: Jolt expands SLLI/etc to virtual instructions, but Zolt handles them directly
-                        if (funct3 == 0) {
-                            // ADDI: AddOperands
-                            left_op = F.zero();
-                            right_op = left_input.add(right_input);
-                        } else {
-                            // SLLI, SLTI, SLTIU, XORI, SRLI, SRAI, ORI, ANDI: interleaved
-                            left_op = left_input;
-                            right_op = right_input;
-                        }
-                    },
-                    0x37 => { // LUI: AddOperands, left_input=0, right_input=imm
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input);
-                    },
-                    0x17 => { // AUIPC: AddOperands, left_input=PC, right_input=imm
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input);
-                    },
-                    0x6f => { // JAL: AddOperands, left_input=PC, right_input=imm
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input);
-                    },
-                    0x67 => { // JALR: AddOperands, left_input=rs1, right_input=imm
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input);
-                    },
-                    0x1b => { // I-type word ALU (ADDIW, SLLIW, SRLIW, SRAIW)
-                        // Only ADDIW (funct3=0) uses AddOperands; others use interleaved
-                        if (funct3 == 0) {
-                            // ADDIW: AddOperands, left=0, right=rs1+imm
-                            left_op = F.zero();
-                            right_op = left_input.add(right_input);
-                        } else {
-                            // SLLIW, SRLIW, SRAIW: interleaved
-                            left_op = left_input;
-                            right_op = right_input;
-                        }
-                    },
-                    0x3b => { // ADDW/SUBW/VirtualChangeDivisorW
-                        // In Jolt, ADDW decomposes to ADD+VirtualSEW, SUBW to SUB+VirtualSEW.
-                        // For Zolt's single-cycle model, match the first step's format.
-                        if (funct3 == 0 and funct7 == 0) {
-                            // ADDW: AddOperands, left=0, right=rs1+rs2
-                            left_op = F.zero();
-                            right_op = left_input.add(right_input);
-                        } else if (funct3 == 0 and funct7 == 0x20) {
-                            // SUBW: SubtractOperands, left=0, right=rs1-rs2+2^64
-                            const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
-                            left_op = F.zero();
-                            right_op = left_input.sub(right_input).add(two_pow_64);
-                        } else if (funct3 == 6 and funct7 == 0x01) {
-                            // VirtualChangeDivisorW: interleaved, left=rs1 as u32 as u64 (truncated), right=rs2
-                            // Jolt's to_instruction_inputs: (rs1 as u32 as u64, rs2 as i128)
-                            // to_lookup_operands: (rs1 as u32 as u64, rs2 as u64)
-                            const rs1_lower32: u64 = step.rs1_value & 0xFFFFFFFF;
-                            left_op = F.fromU64(rs1_lower32);
-                            right_op = F.fromU64(step.rs2_value);
-                        } else {
-                            // Other 0x3b variants (not AddOperands/SubtractOperands)
-                            left_op = left_input;
-                            right_op = right_input;
-                        }
-                    },
-                    0x0B => { // VirtualSignExtendWord: AddOperands, left=0, right=rs1
-                        // Lookup operands: (0, rs1_val + 0) = (0, rs1_val)
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input); // rs1 + 0 = rs1
-                    },
-                    0x2B => { // Virtual I-type: dispatch on funct3
-                        if (funct3 == 0) {
-                            // VirtualMULI: MultiplyOperands, left=0, right=rs1*imm
-                            left_op = F.zero();
-                            right_op = left_input.mul(right_input);
-                        } else {
-                            // VirtualPow2 (funct3=1), VirtualShiftRightBitmask (funct3=2): AddOperands
-                            // Lookup operands: (0, rs1 + 0) = (0, rs1)
-                            left_op = F.zero();
-                            right_op = left_input.add(right_input); // rs1 + 0 = rs1
-                        }
-                    },
-                    0x03 => { // Load: NOT AddOperands, left=rs1, right=imm
-                        // R1CS witness sets: LeftLookupOperand=left_input, RightLookupOperand=right_input
-                        left_op = left_input;
-                        right_op = right_input;
-                    },
-                    0x23 => { // Store: NOT AddOperands, left=rs1, right=imm
-                        // R1CS witness sets: LeftLookupOperand=left_input, RightLookupOperand=right_input
-                        left_op = left_input;
-                        right_op = right_input;
-                    },
-                    0x02 => { // VirtualAdvice: Advice flag (identity path)
-                        // R1CS: LeftLookupOperand=0, RightLookupOperand=F.fromU128(rd_value)
-                        // left_input=0, right_input=0 (no instruction inputs)
-                        // The lookup operand is the advice oracle value (rd_value)
-                        left_op = F.zero();
-                        right_op = F.fromU128(@as(u128, step.rd_value));
-                    },
-                    0x22 => { // Virtual assert: dispatch on funct3
-                        if (funct3 == 2 or funct3 == 3) {
-                            // VirtualAssertHalfwordAlignment/WordAlignment: AddOperands
-                            // Lookup operands: (0, rs1 + imm)
-                            left_op = F.zero();
-                            right_op = left_input.add(right_input); // rs1 + imm
-                        } else {
-                            // VirtualAssertEQ (funct3=0) / VirtualAssertValidDiv0 (funct3=1): interleaved
-                            left_op = left_input;
-                            right_op = right_input;
-                        }
-                    },
-                    0x42 => { // VirtualZeroExtendWord: AddOperands flag (identity path)
-                        // R1CS: LeftLookupOperand=0, RightLookupOperand=F.fromU128(rs1_value)
-                        // AddOperands: left=0, right=left_input+right_input
-                        // Here left_input=rs1, right_input=0, so right=rs1
-                        left_op = F.zero();
-                        right_op = F.fromU128(@as(u128, step.rs1_value));
-                    },
-                    0x62 => { // VirtualAssertValidUnsignedRemainder: Assert flag (interleaved)
-                        // R1CS: LeftLookupOperand=left_input(=rs1), RightLookupOperand=right_input(=rs2)
-                        left_op = left_input;
-                        right_op = right_input;
-                    },
-                    else => {
-                        // Default: NOT Add+Sub+Mul (includes 0x63 Branch)
-                        left_op = left_input;
-                        right_op = right_input;
-                    },
-                }
-
-                // Track which lookup table this cycle uses (for flag claims)
-                const table_idx = getLookupTableIndex(opcode, funct3, funct7);
-                cycle_table_indices[j] = table_idx;
-
-                // For instructions without a lookup table (Load, Store, SLL, etc.):
-                // All three must be zeroed to match the R1CS witness, which sets:
-                //   LeftLookupOperand = 0, RightLookupOperand = 0, LookupOutput = 0
-                // In Jolt, these instructions decompose into virtual sequences and never
-                // appear as raw cycles, so the R1CS witness has all zeros for their operands.
-                // The RAF contribution is handled by the global prefix-suffix polynomials
-                // during address rounds, NOT by per-cycle combined_vals.
-                if (table_idx < 0) {
-                    lookup_output = F.zero();
-                    left_op = F.zero();
-                    right_op = F.zero();
-                }
-
-                // combined = output + gamma*left + gamma^2*right
-                lookups_combined_vals[j] = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
-
-                // Debug: print first 5 right_op values from combined_vals computation
-                if (j < 5) {
-                    if (comptime debug_verbose) {
-                        dbg("[STAGE5 COMBINED] j={}: opcode=0x{x}, left_op=0x{x}, right_op=0x{x}, output=0x{x}, table_idx={}\n", .{
-                            j, opcode, left_op.toU64(), right_op.toU64(), lookup_output.toU64(), table_idx,
-                        });
+            const CombinedCtx = struct {
+                steps_ptr: [*]const tracer.TraceStep,
+                steps_len: usize,
+                combined: []F,
+                idx_lo: []u64,
+                idx_hi: []u64,
+                tbl_ids: []i8,
+                is_id: []bool,
+                g_raf: F,
+                g_raf2: F,
+                c_size: usize,
+            };
+            const cctx = CombinedCtx{
+                .steps_ptr = trace.steps.items.ptr,
+                .steps_len = trace_len,
+                .combined = lookups_combined_vals,
+                .idx_lo = lookups_indices_lo,
+                .idx_hi = lookups_indices_hi,
+                .tbl_ids = cycle_table_indices,
+                .is_id = cycle_is_identity_path,
+                .g_raf = gamma_raf,
+                .g_raf2 = gamma_raf2,
+                .c_size = combined_chunk_size,
+            };
+            const combinedChunkFn = struct {
+                fn f(c: CombinedCtx, chunk_idx: usize) void {
+                    const start = chunk_idx * c.c_size;
+                    const end = @min(start + c.c_size, c.steps_len);
+                    for (start..end) |j| {
+                        processTraceCycleCombined(c.steps_ptr[j], j, c.combined, c.idx_lo, c.idx_hi, c.tbl_ids, c.is_id, c.g_raf, c.g_raf2);
                     }
                 }
-
-                // Determine identity path (not interleaved) based on Jolt's flags:
-                //   - AddOperands: ADD, ADDI, ADDIW, ADDW, LUI, AUIPC, JAL, JALR, Load, Store
-                //   - SubtractOperands: SUB, SUBW
-                //   - MultiplyOperands: MUL, MULHU
-                // Identity path instructions use raw operand value as lookup index (NOT interleaved).
-                // Interleaved path instructions use interleave_bits(left, right) as lookup index.
-                const is_identity_path: bool = switch (opcode) {
-                    0x33 => blk: {
-                        if (funct3 == 0 and funct7 == 0) break :blk true; // ADD (AddOperands)
-                        if (funct3 == 0 and funct7 == 0x20) break :blk true; // SUB (SubtractOperands)
-                        if (funct7 == 0x01 and funct3 == 0) break :blk true; // MUL (MultiplyOperands)
-                        if (funct7 == 0x01 and funct3 == 3) break :blk true; // MULHU (MultiplyOperands)
-                        break :blk false;
-                    },
-                    0x13 => (funct3 == 0), // ADDI (AddOperands)
-                    0x0B => true, // VirtualSignExtendWord (AddOperands)
-                    0x2B => true, // VirtualMULI/Pow2/ShiftRightBitmask: all identity path (MultiplyOperands or AddOperands)
-                    0x1b => (funct3 == 0), // ADDIW (AddOperands)
-                    0x3b => blk: {
-                        if (funct3 == 0 and funct7 == 0) break :blk true; // ADDW (AddOperands)
-                        if (funct3 == 0 and funct7 == 0x20) break :blk true; // SUBW (SubtractOperands)
-                        break :blk false;
-                    },
-                    0x37 => true, // LUI (AddOperands)
-                    0x17 => true, // AUIPC (AddOperands)
-                    0x6f => true, // JAL (AddOperands)
-                    0x67 => true, // JALR (AddOperands)
-                    0x02 => true, // VirtualAdvice (Advice flag → identity path)
-                    0x42 => true, // VirtualZeroExtendWord (AddOperands → identity path)
-                    0x03 => false, // Load: uses (rs1, imm) format, NOT identity path
-                    0x23 => false, // Store: uses (rs1, imm) format, NOT identity path
-                    0x22 => (funct3 == 2 or funct3 == 3), // Alignment assertions: AddOperands (identity); AssertEQ/ValidDiv0: interleaved
-                    0x62 => false, // VirtualAssertValidUnsignedRemainder: interleaved (rs1, rs2)
-                    else => false,
-                };
-                cycle_is_identity_path[j] = is_identity_path;
-
-                // Compute lookup operands and index matching Jolt's to_lookup_operands/to_lookup_index.
-                // For identity-path: left_op_raw=0, right_op_raw=computed_value, index=computed u128
-                //   Jolt's to_lookup_index() for identity-path instructions returns the raw u128 result
-                //   (NOT wrapped at 64 bits). E.g., ADD returns x as u128 + y as u64 as u128.
-                // For interleaved-path: left_op_raw=rs1, right_op_raw=rs2, index=interleave(left,right)
-                var left_op_raw: u64 = undefined;
-                var right_op_raw: u64 = undefined;
-                // lookup_idx_u128 holds the FULL u128 lookup index (not wrapped at u64)
-                var lookup_idx_u128: u128 = undefined;
-
-                if (is_identity_path) {
-                    left_op_raw = 0;
-                    // Compute lookup index in u128 to match Jolt's to_lookup_index()
-                    // Jolt returns the raw computation result, NOT wrapped at 64 bits.
-                    lookup_idx_u128 = switch (opcode) {
-                        // ADD: index = rs1 as u128 + rs2 as u128
-                        0x33 => blk128: {
-                            if (funct3 == 0 and funct7 == 0) {
-                                break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                            }
-                            // SUB: index = rs1 as u128 + (2^64 - rs2 as u128)
-                            if (funct3 == 0 and funct7 == 0x20) {
-                                break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                            }
-                            // MUL: index = rs1 as u128 * rs2 as u128
-                            if (funct7 == 0x01 and funct3 == 0) {
-                                break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                            }
-                            // MULHU: index = rs1 as u128 * rs2 as u128
-                            if (funct7 == 0x01 and funct3 == 3) {
-                                break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                            }
-                            break :blk128 0;
-                        },
-                        // ADDW/SUBW: same computation as ADD/SUB
-                        0x3b => blk128: {
-                            if (funct3 == 0 and funct7 == 0) {
-                                // ADDW: index = rs1 + rs2 (u128)
-                                break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                            }
-                            if (funct3 == 0 and funct7 == 0x20) {
-                                // SUBW: index = rs1 + 2^64 - rs2 (u128)
-                                break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                            }
-                            break :blk128 0;
-                        },
-                        // ADDI: index = rs1 + sign_ext(imm) (u128)
-                        0x13 => blk128: {
-                            const imm12_raw: u32 = @truncate(instr >> 20);
-                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                            const imm_u64: u64 = @bitCast(imm_signed);
-                            break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                        },
-                        // ADDIW: index = rs1 + sign_ext(imm) (u128)
-                        0x1b => blk128: {
-                            const imm12_raw_w: u32 = @truncate(instr >> 20);
-                            const imm_signed_w: i64 = @as(i64, @as(i32, @bitCast(imm12_raw_w << 20)) >> 20);
-                            const imm_u64_w: u64 = @bitCast(imm_signed_w);
-                            break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64_w);
-                        },
-                        // LUI: index = sign_ext_32_to_64(imm) as u128
-                        // Jolt sign-extends the U-type immediate via `as i32 as i64 as u64`
-                        0x37 => blk128: {
-                            const imm_u32: u32 = instr & 0xFFFFF000;
-                            const imm_sext: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32))));
-                            break :blk128 @as(u128, imm_sext);
-                        },
-                        // AUIPC: index = pc + sign_ext_32_to_64(imm) (u128)
-                        0x17 => blk128: {
-                            const imm_u32: u32 = instr & 0xFFFFF000;
-                            const imm_sext: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32))));
-                            break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_sext);
-                        },
-                        // JAL: index = pc + sign_ext(imm) (u128)
-                        0x6f => blk128: {
-                            const imm20: u32 = ((@as(u32, instr >> 31) & 1) << 19) |
-                                ((@as(u32, instr >> 12) & 0xFF) << 11) |
-                                ((@as(u32, instr >> 20) & 1) << 10) |
-                                ((@as(u32, instr >> 21) & 0x3FF));
-                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
-                            const imm_u64: u64 = @bitCast(imm_signed);
-                            break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_u64);
-                        },
-                        // JALR: index = rs1 + sign_ext(imm) (u128)
-                        0x67 => blk128: {
-                            const imm12_raw: u32 = @truncate(instr >> 20);
-                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                            const imm_u64: u64 = @bitCast(imm_signed);
-                            break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                        },
-                        // VirtualSignExtendWord: index = rs1 (the value to sign-extend)
-                        0x0B => @as(u128, step.rs1_value),
-                        // VirtualMULI/Pow2/ShiftRightBitmask: dispatch on funct3
-                        0x2B => blk128: {
-                            if (funct3 == 0) {
-                                // VirtualMULI: index = rs1 * multiplier (u128)
-                                const shamt_raw3: u32 = instr >> 20;
-                                const shamt3: u6 = @truncate(shamt_raw3 & 0x3F);
-                                const multiplier3: u64 = @as(u64, 1) << shamt3;
-                                break :blk128 @as(u128, step.rs1_value) * @as(u128, multiplier3);
-                            } else {
-                                // VirtualPow2/VirtualShiftRightBitmask: AddOperands, index = rs1 + 0 = rs1
-                                break :blk128 @as(u128, step.rs1_value);
-                            }
-                        },
-                        // VirtualAdvice: index = advice_value (rd_value) — Jolt's to_lookup_index returns second operand
-                        0x02 => @as(u128, step.rd_value),
-                        // VirtualZeroExtendWord: index = rs1 + 0 = rs1 — Jolt's to_lookup_operands returns (0, x+y) where y=0
-                        0x42 => @as(u128, step.rs1_value),
-                        // VirtualAssertHalfwordAlignment/WordAlignment (funct3=2,3): AddOperands, index = rs1 + imm (u128)
-                        0x22 => blk128: {
-                            // Wrapping u64 addition matching tracer's lookup index
-                            const imm_u64_22 = computeUnsignedImmediate(instr);
-                            break :blk128 @as(u128, step.rs1_value +% imm_u64_22);
-                        },
-                        else => 0,
-                    };
-                    // right_op_raw is the lower 64 bits of the lookup index (for R1CS witness compatibility)
-                    right_op_raw = @truncate(lookup_idx_u128);
-
-                    // CRITICAL: For identity-path instructions, right_op must be the FULL u128
-                    // lookup index as a field element, matching Jolt's to_lookup_operands() which
-                    // returns u128 results. This is consistent with the RAF decomposition which
-                    // uses the u128 index for the identity polynomial evaluation.
-                    //
-                    // The R1CS witness also uses u128 values (via computeU128LookupOperand),
-                    // ensuring consistency between Stage 2 claims and Stage 5 combined_vals.
-                    right_op = F.fromU128(lookup_idx_u128);
-                } else {
-                    // Interleaved path: left=rs1, right=rs2 (or imm for I-type)
-                    // VirtualChangeDivisorW (0x3b/f3=6/f7=1): left = rs1 as u32 as u64 (truncated to 32 bits)
-                    left_op_raw = if (opcode == 0x3b and funct3 == 6 and funct7 == 0x01)
-                        step.rs1_value & 0xFFFFFFFF
-                    else
-                        step.rs1_value;
-                    right_op_raw = switch (opcode) {
-                        0x33, 0x3b, 0x63 => step.rs2_value,
-                        0x13 => blk: {
-                            // I-type: right operand is sign-extended immediate (as u64)
-                            const imm12_raw: u32 = @truncate(instr >> 20);
-                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                            break :blk @as(u64, @bitCast(imm_signed));
-                        },
-                        0x5B => blk5b: {
-                            if (step.rs2_read) {
-                                // VirtualSRL/VirtualSRA R-type: right operand is rs2
-                                break :blk5b step.rs2_value;
-                            } else {
-                                // VirtualSRLI/VirtualSRAI I-type: right operand is bitmask computed from total shift
-                                const ts_raw: u32 = instr >> 20;
-                                const ts: u7 = @truncate(ts_raw & 0x3F);
-                                const ones_5b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts))) - 1;
-                                break :blk5b @truncate(ones_5b << ts);
-                            }
-                        },
-                        else => step.rs2_value,
-                    };
-                    lookup_idx_u128 = interleaveBits128(left_op_raw, right_op_raw);
+            }.f;
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(combined_chunk_count, cctx, combinedChunkFn);
+            } else {
+                for (0..trace_len) |j| {
+                    processTraceCycleCombined(trace.steps.items[j], j, lookups_combined_vals, lookups_indices_lo, lookups_indices_hi, cycle_table_indices, cycle_is_identity_path, gamma_raf, gamma_raf2);
                 }
+            }
+            // Padding cycles (trace_len..T) keep memset defaults
 
-                // Use the computed u128 lookup index
-                const lookup_idx: u128 = lookup_idx_u128;
-                lookups_indices_lo[j] = @truncate(lookup_idx);
-                lookups_indices_hi[j] = @truncate(lookup_idx >> 64);
 
-                // CRITICAL FIX: Instructions without a lookup table should have
-                // lookup_index = 0, matching Jolt where to_instruction_inputs() = (0, 0)
-                // and interleave(0, 0) = 0.
-                if (table_idx < 0) {
-                    lookups_indices_lo[j] = 0;
-                    lookups_indices_hi[j] = 0;
-                }
+            // Padding cycles (trace_len..T) are NoOp: defaults from @memset are correct.
 
-                // NOTE: Do NOT override lookup_output with materializeTableEntry here!
-                // The initial lookups_combined_vals must match the R1CS witness polynomials
-                // (which use computeLookupOutput = rd_value for most instructions).
-                // The address round prefix-suffix decomposition uses table MLEs independently
-                // via Q arrays, and combined_vals are rematerialized at the phase transition
-                // (init_log_t_rounds) using stored_table_values for the cycle rounds.
-
-                // DIAGNOSTIC: Verify lookup_output matches table materializeEntry for each cycle
-                if (comptime debug_verbose) {
-                    if (table_idx >= 0) {
-                        const t_idx_u: usize = @intCast(table_idx);
-                        const Table = @import("../lookup_table/mod.zig").LookupTable(F, 64);
-                        const table_entry = Table.materializeTableEntry(t_idx_u, lookup_idx);
-                        const table_entry_f = F.fromU64(table_entry);
-                        if (!table_entry_f.eql(lookup_output)) {
-                            dbg("[TABLE MISMATCH] j={}: opcode=0x{x} table={} rd_value=0x{x} table_entry=0x{x} idx=0x{x:0>32}\n", .{
-                                j, opcode, table_idx, lookup_output.toU64(), table_entry, lookup_idx,
-                            });
-                        }
+            // Build lookup_indices_by_table: for each table, collect cycle indices that use it.
+            // This enables per-table parallelism in initPhase (Fix 4).
+            var lookup_indices_by_table: [NUM_TABLES][]usize = undefined;
+            var lookup_indices_by_table_initialized: usize = 0;
+            {
+                // Count cycles per table first
+                var table_counts: [NUM_TABLES]usize = [_]usize{0} ** NUM_TABLES;
+                for (0..T) |j| {
+                    const ti = cycle_table_indices[j];
+                    if (ti >= 0 and @as(usize, @intCast(ti)) < NUM_TABLES) {
+                        table_counts[@intCast(ti)] += 1;
                     }
                 }
-
-                // Debug first 5 cycles with full BE bytes
-                if (comptime debug_verbose) {
-                    if (j < 5) {
-                        dbg("[STAGE5 TRACE DEBUG] j={}: opcode=0x{x}, output={any}, left={any}, right={any}\n", .{
-                            j,
-                            opcode,
-                            lookup_output.toBytesBE()[0..8],
-                            left_op.toBytesBE()[0..8],
-                            right_op.toBytesBE()[0..8],
-                        });
-                        dbg("[STAGE5 INDEX] j={}: is_identity={}, left_raw=0x{x}, right_raw=0x{x}, idx=0x{x:0>32}\n", .{
-                            j, is_identity_path, left_op_raw, right_op_raw, lookup_idx,
-                        });
-                        // Also compute what the OLD interleaved index would have been
-                        const old_idx = interleaveBits128(left_op_raw, right_op_raw);
-                        dbg("[STAGE5 INDEX] j={}: old_interleaved=0x{x:0>32}, changed={}\n", .{
-                            j, old_idx, old_idx != lookup_idx,
-                        });
-                    }
-                    // Debug first 3 cycles
-                    if (j < 3) {
-                        dbg("[STAGE5 LOOKUPS] j={}: opcode=0x{x}, funct3={}, funct7={}, pc=0x{x}\n", .{ j, opcode, funct3, funct7, step.pc });
-                        dbg("  left_op={any}, right_op={any}, output={any}\n", .{
-                            left_op.toBytesBE()[24..32].*,
-                            right_op.toBytesBE()[24..32].*,
-                            lookup_output.toBytesBE()[24..32].*,
-                        });
-                        dbg("  eq={x}, combined={x}\n", .{
-                            lookups_eq_evals[j].toBytesBE()[24..32].*,
-                            lookups_combined_vals[j].toBytesBE()[24..32].*,
-                        });
-                        dbg("  lookup_index: lo=0x{x:0>16}, hi=0x{x:0>16}\n", .{
-                            lookups_indices_lo[j],
-                            lookups_indices_hi[j],
-                        });
+                // Allocate per-table arrays
+                for (0..NUM_TABLES) |t| {
+                    lookup_indices_by_table[t] = try self.allocator.alloc(usize, table_counts[t]);
+                    lookup_indices_by_table_initialized = t + 1;
+                }
+                // Fill per-table arrays
+                var table_offsets: [NUM_TABLES]usize = [_]usize{0} ** NUM_TABLES;
+                for (0..T) |j| {
+                    const ti = cycle_table_indices[j];
+                    if (ti >= 0 and @as(usize, @intCast(ti)) < NUM_TABLES) {
+                        const t: usize = @intCast(ti);
+                        lookup_indices_by_table[t][table_offsets[t]] = j;
+                        table_offsets[t] += 1;
                     }
                 }
             }
-
-            // Removed: per-component sum diagnostic (had unused variable issues)
-
-            // Padding cycles (trace_len..T) are NoOp in Jolt.
-            // NoOp has: lookup_table()=None, is_interleaved_operands()=true.
-            // Defaults from @memset are already correct:
-            //   cycle_table_indices[j] = -1 (no table)
-            //   cycle_is_identity_path[j] = false (interleaved)
-            //   lookup_indices_u128[j] = 0
-            //   lookups_combined_vals[j] = 0
+            defer {
+                for (0..lookup_indices_by_table_initialized) |t| {
+                    self.allocator.free(lookup_indices_by_table[t]);
+                }
+            }
 
             // Debug: count instructions by opcode to see what we have
             if (comptime debug_verbose) {
@@ -2062,7 +1555,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Instance 1: RamRaClaimReduction - initialized later after computed_ram_ra_input is computed
             var ram_ra_current_claim: F = undefined;
             var lookups_claim = lookups_input; // Instance 2: LookupsReadRaf (no scaling, active from round 0)
-            const batch2_inv = batch2.inverse().?; // Pre-compute for deriving Instance 2 from batched claim
+            const batch2_inv = if (comptime debug_verbose) batch2.inverse().? else F.zero(); // Only needed for debug diagnostics
 
             // DEBUG: Print initial claims
             if (comptime debug_verbose) {
@@ -2509,6 +2002,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 }
             }
 
+            if (comptime bench_timing) {
+                std.debug.print("    [STAGE5-INIT] combined+indices:  {d:8.1} ms\n", .{@as(f64, @floatFromInt(init_sub_timer.read())) / 1_000_000.0});
+                init_sub_timer.reset();
+            }
+
             // Initialize suffix polynomials for phase 0
             var suffix_polys = AllSuffixPolys(F).init(self.allocator);
             defer suffix_polys.deinit();
@@ -2523,20 +2021,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var current_phase: usize = 0;
             const initial_m = @as(usize, 1) << @intCast(log_m); // 2^8 = 256 or 2^16 = 65536
 
-            // Initialize Q polynomials for read-checking
-            try suffix_polys.initPhase(0, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
-
-            // Debug: count how many cycles have lookup tables assigned
-            if (comptime debug_verbose) {
-                var cycles_with_tables: usize = 0;
-                for (0..T) |jj| {
-                    if (cycle_table_indices[jj] >= 0) cycles_with_tables += 1;
-                }
-                dbg("[STAGE5] Cycles with lookup tables: {}/{}\n", .{ cycles_with_tables, T });
-            }
-
             // Initialize RAF (Read-Address-Flag) decompositions for left/right/identity
-            // These compute: γ*left + γ²*(identity + right)
+            // Allocated before initPhase so both can run concurrently via tp.join()
             var left_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K, .LeftOperand);
             defer left_raf.deinit();
             var right_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K, .RightOperand);
@@ -2551,8 +2037,73 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 is_interleaved_operands[j] = !cycle_is_identity_path[j];
             }
 
-            // Initialize RAF Q accumulators for phase 0
-            initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
+            // Initialize Q polynomials for read-checking AND RAF Q accumulators concurrently
+            if (self.thread_pool) |tp| {
+                const SuffixInitCtx = struct {
+                    polys: *@TypeOf(suffix_polys),
+                    phases: usize,
+                    eq: []const F,
+                    indices: []const u128,
+                    table_indices: []const i8,
+                    pool: *ThreadPool,
+                    alloc_inner: Allocator,
+                    ibt: ?*const [NUM_TABLES][]usize,
+                };
+                const suffix_ctx = SuffixInitCtx{
+                    .polys = &suffix_polys,
+                    .phases = num_phases,
+                    .eq = lookups_eq_evals,
+                    .indices = lookup_indices_u128,
+                    .table_indices = cycle_table_indices,
+                    .pool = tp,
+                    .alloc_inner = self.allocator,
+                    .ibt = &lookup_indices_by_table,
+                };
+                const RafInitCtx = struct {
+                    left_raf: *@TypeOf(left_raf),
+                    right_raf: *@TypeOf(right_raf),
+                    identity_raf: *@TypeOf(identity_raf),
+                    eq: []const F,
+                    indices: []const u128,
+                    is_interleaved: []const bool,
+                    pool: *ThreadPool,
+                    alloc_inner: Allocator,
+                };
+                const raf_ctx = RafInitCtx{
+                    .left_raf = &left_raf,
+                    .right_raf = &right_raf,
+                    .identity_raf = &identity_raf,
+                    .eq = lookups_eq_evals,
+                    .indices = lookup_indices_u128,
+                    .is_interleaved = is_interleaved_operands,
+                    .pool = tp,
+                    .alloc_inner = self.allocator,
+                };
+                _ = tp.join(
+                    void,
+                    void,
+                    suffix_ctx,
+                    struct {
+                        fn f(c: SuffixInitCtx) void {
+                            c.polys.initPhase(0, c.phases, c.eq, c.indices, c.table_indices, c.pool, c.alloc_inner, c.ibt) catch unreachable;
+                        }
+                    }.f,
+                    raf_ctx,
+                    struct {
+                        fn f(c: RafInitCtx) void {
+                            initQRaf(F, c.left_raf, c.right_raf, c.identity_raf, c.eq, c.indices, c.is_interleaved, c.pool, c.alloc_inner) catch unreachable;
+                        }
+                    }.f,
+                );
+            } else {
+                try suffix_polys.initPhase(0, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices, null, self.allocator, null);
+                try initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands, null, self.allocator);
+            }
+
+            if (comptime bench_timing) {
+                std.debug.print("    [STAGE5-INIT] initPhase+initQRaf:{d:8.1} ms\n", .{@as(f64, @floatFromInt(init_sub_timer.read())) / 1_000_000.0});
+                init_sub_timer.reset();
+            }
 
             // Materialize prefix MLE tables for phase 0
             left_raf.initPrefix();
@@ -2932,6 +2483,26 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 dbg("[STAGE5] Entering main sumcheck loop, max_num_rounds={}\n", .{max_num_rounds});
             }
 
+            // Benchmark timing accumulators
+            var bench_timer = if (comptime bench_timing) std.time.Timer.start() catch unreachable else {};
+            var bench_init_ns: u64 = 0;
+            var bench_phase_transition_ns: u64 = 0;
+            var bench_condense_ns: u64 = 0;
+            var bench_init_phase_ns: u64 = 0;
+            var bench_addr_other_ns: u64 = 0;
+            var bench_addr_compute_ns: u64 = 0;
+            var bench_addr_bind_ns: u64 = 0;
+            var bench_addr_transcript_ns: u64 = 0;
+            var bench_cycle_bind_ns: u64 = 0;
+            var bench_cycle_transcript_ns: u64 = 0;
+            var bench_inst0_compute_ns: u64 = 0;
+            var bench_inst1_compute_ns: u64 = 0;
+            var bench_inst2_addr_compute_ns: u64 = 0;
+            _ = &bench_inst2_addr_compute_ns;
+            var bench_inst2_cycle_compute_ns: u64 = 0;
+            var bench_remat_ns: u64 = 0; // Untimed rematerialization gap
+            var bench_cycle_coeff_ns: u64 = 0; // Untimed coefficient combination gap
+
             // BRUTE FORCE PER-ROUND DIAGNOSTIC (disabled in release)
             var bf_weights: []F = &[_]F{};
             if (comptime debug_verbose) {
@@ -2960,7 +2531,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var split_eq_E_out_len: usize = 0;
             var split_eq_initialized = false;
 
+            // Cached Instance 0 poly evals from compute phase, reused in bind phase
+            var cached_regs_val_evals: ?[4]F = null;
+
+            if (comptime bench_timing) bench_init_ns = bench_overall_timer.read();
+
             for (0..max_num_rounds) |round| {
+                if (comptime bench_timing) bench_timer.reset();
+
                 const remaining_rounds = max_num_rounds - round;
 
                 var combined_poly = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
@@ -2982,7 +2560,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 } else {
                     // Instance is active - compute actual round polynomial
                     const regs_round = regs_val_num_rounds - remaining_rounds;
+                    if (comptime bench_timing) bench_timer.reset();
                     const poly_evals = computeRegsValRoundPoly(inc_evals, wa_evals, lt_evals, regs_round, self.thread_pool);
+                    if (comptime bench_timing) bench_inst0_compute_ns += bench_timer.read();
+                    cached_regs_val_evals = poly_evals;
                     combined_poly[0] = combined_poly[0].add(batch0.mul(poly_evals[0]));
                     combined_poly[1] = combined_poly[1].add(batch0.mul(poly_evals[1]));
                     combined_poly[2] = combined_poly[2].add(batch0.mul(poly_evals[2]));
@@ -3035,18 +2616,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // evals[3] = p_inf = 0 for constant polynomial
                 } else {
                     // Instance is active - compute RamRaClaimReduction sumcheck polynomial
-                    // For sparse traces, we compute directly from RAM accesses
-                    //
-                    // The sumcheck proves: Σ_{k,c} eq_combined(k,c) · ra(k,c) = input_claim
-                    // where:
-                    //   eq_combined(k, c) = eq(r_addr_1, k)·G_A(c) + γ²·eq(r_addr_2, k)·G_B(c)
-                    //   G_A(c) = eq_raf(c) + γ·eq_val(c)
-                    //   G_B(c) = eq_rw(c) + γ·eq_val(c)
-                    //
-                    // Since ra(k,c) is sparse (only 1s at RAM accesses), we iterate over accesses.
-                    //
-                    // PhaseAddress (first log_K rounds): bind address bits
-                    // PhaseCycle (last log_T rounds): bind cycle bits
+                    if (comptime bench_timing) bench_timer.reset();
 
                     const ram_ra_round = ram_ra_num_rounds - remaining_rounds; // 0 to n_cycle_vars-1
 
@@ -3348,7 +2918,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
                     }
+                    if (comptime bench_timing) bench_inst1_compute_ns += bench_timer.read();
                 }
+                if (comptime bench_timing) bench_timer.reset(); // Start timing untimed gap
 
                 // Instance 2: LookupsReadRaf (136 rounds)
                 // Since lookups_num_rounds = max_num_rounds, this instance is always active
@@ -3365,11 +2937,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const r_x: ?F = if (round % 2 == 1) challenges[round - 1] else null;
 
                     // Compute read-checking contribution via prefix-suffix decomposition
+                    if (comptime bench_timing) bench_timer.reset();
                     const read_checking_evals = proverMsgReadChecking(F, round, &suffix_polys, &prefix_checkpoints, r_x, self.thread_pool);
 
                     // Compute RAF contribution via prefix-suffix decomposition
                     // gamma_raf = γ, gamma_raf2 = γ²
                     const raf_evals = proverMsgRaf(F, &left_raf, &right_raf, &identity_raf, gamma_raf, gamma_raf2, self.thread_pool);
+                    if (comptime bench_timing) {
+                        const elapsed = bench_timer.read();
+                        bench_addr_compute_ns += elapsed;
+                        bench_inst2_addr_compute_ns += elapsed;
+                    }
 
                     // Combined: read_checking + raf
                     const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
@@ -3978,12 +3556,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     });
 
                     // Append to transcript: 2 coefficients for degree-2 polynomial
-                    // Matches Jolt's CompressedUniPoly::append_to_transcript which iterates
-                    // over coeffs_except_linear_term (length = degree of polynomial)
+                    if (comptime bench_timing) bench_timer.reset();
                     transcript.appendScalars("sumcheck_poly", coeffs);
 
                     const challenge = transcript.challengeScalar();
                     challenges[round] = challenge;
+                    if (comptime bench_timing) {
+                        bench_addr_transcript_ns += bench_timer.read();
+                        bench_timer.reset();
+                    }
 
                     // DEBUG: Print challenge and coefficients for comparison with Jolt verifier
                     if (comptime debug_verbose) if (round < 4 or round == 7 or round == 127 or round == 128) {
@@ -4349,6 +3930,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // ===================================================================
 
                     // Bind challenge to all suffix polynomials
+                    if (comptime bench_timing) {
+                        bench_addr_other_ns += bench_timer.read();
+                        bench_timer.reset();
+                    }
                     if (self.thread_pool) |tp| {
                         suffix_polys.bindAllParallel(challenge, tp);
                     } else {
@@ -4372,8 +3957,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const suffix_len = LOOKUPS_LOG_K - (current_phase + 1) * log_m;
                         prefix_checkpoints.update(checkpoint_r_x, r_y, round, suffix_len);
                     }
+                    if (comptime bench_timing) bench_addr_bind_ns += bench_timer.read();
 
                     // Check for phase transition (every log_m = 16 rounds)
+                    if (comptime bench_timing) bench_timer.reset();
                     if ((round + 1) % log_m == 0 and round + 1 < LOOKUPS_LOG_K) {
                         const prev_phase = current_phase;
                         current_phase += 1;
@@ -4383,6 +3970,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // DRIFT DEBUG BEFORE CONDENSATION:
                         // Verify the expanding table matches direct EQ computation
+                        if (comptime debug_verbose) {
                         if (current_phase == 1) {
                             // At phase 0→1 transition (round 7 just completed):
                             // expanding_tables[0] should contain EQ(k, [r_0, r_1, ..., r_7]) for k in 0..255
@@ -4449,10 +4037,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 dbg("[PHASE_VERIFY] match = {}\n", .{expected_condensed_sum.eql(lookups_claim)});
                             }
                         }
+                        } // end comptime debug_verbose
 
                         // Condense u_evals (lookups_eq_evals) using the expanding table from the previous phase
-                        // This is the CRITICAL step that was missing!
-                        // u_evals[j] *= v[prev_phase][k_bound] where k_bound = prefix & m_mask
+                        if (comptime bench_timing) bench_timer.reset();
                         condenseUEvals(F, lookups_eq_evals, &expanding_tables[prev_phase], lookup_indices_u128, current_phase, num_phases, self.thread_pool);
                         if (comptime debug_verbose) {
                             dbg("[STAGE5] Phase {} condense done, now calling initPhase...\n", .{current_phase});
@@ -4475,7 +4063,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
 
+                        if (comptime bench_timing) bench_condense_ns += bench_timer.read();
+
                         // Save prefix checkpoints before resetting RAF decompositions
+                        if (comptime bench_timing) bench_timer.reset();
                         left_raf.updateCheckpoint();
                         right_raf.updateCheckpoint();
                         identity_raf.updateCheckpoint();
@@ -4496,6 +4087,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 eq: []const F,
                                 indices: []const u128,
                                 table_indices: []const i8,
+                                pool: *ThreadPool,
+                                alloc_inner: Allocator,
+                                ibt: ?*const [NUM_TABLES][]usize,
                             };
                             const suffix_ctx = SuffixInitCtx{
                                 .polys = &suffix_polys,
@@ -4504,6 +4098,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 .eq = lookups_eq_evals,
                                 .indices = lookup_indices_u128,
                                 .table_indices = cycle_table_indices,
+                                .pool = tp,
+                                .alloc_inner = self.allocator,
+                                .ibt = &lookup_indices_by_table,
                             };
                             const RafInitCtx = struct {
                                 left_raf: *@TypeOf(left_raf),
@@ -4512,6 +4109,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 eq: []const F,
                                 indices: []const u128,
                                 is_interleaved: []const bool,
+                                pool: *ThreadPool,
+                                alloc_inner: Allocator,
                             };
                             const raf_ctx = RafInitCtx{
                                 .left_raf = &left_raf,
@@ -4520,6 +4119,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 .eq = lookups_eq_evals,
                                 .indices = lookup_indices_u128,
                                 .is_interleaved = is_interleaved_operands,
+                                .pool = tp,
+                                .alloc_inner = self.allocator,
                             };
                             _ = tp.join(
                                 void,
@@ -4527,19 +4128,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 suffix_ctx,
                                 struct {
                                     fn f(c: SuffixInitCtx) void {
-                                        c.polys.initPhase(c.phase, c.phases, c.eq, c.indices, c.table_indices) catch unreachable;
+                                        c.polys.initPhase(c.phase, c.phases, c.eq, c.indices, c.table_indices, c.pool, c.alloc_inner, c.ibt) catch unreachable;
                                     }
                                 }.f,
                                 raf_ctx,
                                 struct {
                                     fn f(c: RafInitCtx) void {
-                                        initQRaf(F, c.left_raf, c.right_raf, c.identity_raf, c.eq, c.indices, c.is_interleaved);
+                                        initQRaf(F, c.left_raf, c.right_raf, c.identity_raf, c.eq, c.indices, c.is_interleaved, c.pool, c.alloc_inner) catch unreachable;
                                     }
                                 }.f,
                             );
                         } else {
-                            try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
-                            initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
+                            try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices, null, self.allocator, null);
+                            try initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands, null, self.allocator);
                         }
 
                         // Materialize prefix MLE tables for new phase
@@ -4552,6 +4153,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // Reset the new phase's expanding table to 1
                         expanding_tables[current_phase].reset(F.one());
+                        if (comptime bench_timing) bench_init_phase_ns += bench_timer.read();
 
                         if (comptime debug_verbose) {
                             dbg("[STAGE5] Condensed u_evals with expanding table, reset phase {} table\n", .{current_phase});
@@ -4602,6 +4204,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
+                    if (comptime bench_timing) bench_phase_transition_ns += bench_timer.read();
                     continue; // Skip the rest of the loop for address rounds
                 } else {
                     // Cycle rounds: actual sumcheck over eq_reduction * Π_c ra_chunk[c] * combined_vals
@@ -5467,7 +5070,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         if (comptime debug_verbose) {
                             dbg("[STAGE5 CYCLE] Reinitializing lookups_eq_evals for cycle rounds\n", .{});
                         }
-                        buildFullEqTable(r_reduction, lookups_eq_evals[0..T]);
+                        buildFullEqTable(r_reduction, lookups_eq_evals[0..T], self.thread_pool);
                         if (comptime debug_verbose) {
                             // Debug: verify sum = 1
                             var eq_sum_verify = F.zero();
@@ -5480,6 +5083,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
 
                         // ============================================================
+                        // Allocate ra_chunk_weights now (deferred from init to save 64MB memset)
+                        for (0..ra_num_chunks) |chunk_idx| {
+                            ra_chunk_weights[chunk_idx] = self.allocator.alloc(F, T) catch unreachable;
+                        }
+                        ra_chunk_weights_allocated = true;
+
                         // CRITICAL FIX: Materialize ra_chunk_weights from expanding tables
                         // ============================================================
                         // At the start of cycle rounds (round 128), we need to compute
@@ -5575,6 +5184,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             } else {
                                 for (0..T) |j| rematChunkFn(rctx, j);
                             }
+                        }
+
+                        // Free data structures no longer needed after rematerialization.
+                        // suffix_polys + expanding_tables were only used during address rounds.
+                        // ra_chunk_weights now hold the materialized values for cycle rounds.
+                        suffix_polys.deinit();
+                        suffix_polys = AllSuffixPolys(F).init(self.allocator); // Reset to empty for defer
+                        for (0..num_phases) |phase_idx| {
+                            expanding_tables[phase_idx].deinit();
+                            expanding_tables[phase_idx] = ExpandingTable(F).init(self.allocator, 1) catch unreachable;
                         }
 
                         if (comptime debug_verbose) {
@@ -5876,6 +5495,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
 
                     // Initialize split-eq tables on first cycle round
+                    if (comptime bench_timing) bench_remat_ns += bench_timer.read();
+                    if (comptime bench_timing) bench_timer.reset();
                     if (!split_eq_initialized) {
                         // remaining_vars for first cycle round = n_cycle_vars - 1
                         // j = (x_out << m_in) | x_in
@@ -5916,17 +5537,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         split_eq_initialized = true;
                     }
 
-                    // CRITICAL: current_half_size is the number of pairs we iterate over
-                    // At round k, we have T/2^(k+1) pairs to process
-                    const current_half_size = T >> @intCast(lookups_round + 1);
-
                     // Get r_round for this cycle variable (LowToHigh binding: last element first)
                     const r_round = r_reduction[n_cycle_vars - 1 - lookups_round];
 
                     // Accumulate sum of 9-factor products via parallelReduce with split-eq
                     // eq_prefix(j) = E_out[j >> m_in] * E_in[j & (E_in_len-1)]
-                    const remaining_vars = n_cycle_vars - lookups_round - 1;
-                    _ = remaining_vars;
+                    const current_half_size = T >> @intCast(lookups_round + 1);
                     var sum_evals: [9]F = blk: {
                         const EvalCtx = struct {
                             combined: []const F,
@@ -6082,6 +5698,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // combined_poly only has 4 slots, so we need to extend it
 
                     // Create extended combined polynomial for degree-10
+                    if (comptime bench_timing) bench_inst2_cycle_compute_ns += bench_timer.read();
+                    if (comptime bench_timing) bench_timer.reset();
                     var combined_coeffs = try self.allocator.alloc(F, 11);
                     defer self.allocator.free(combined_coeffs);
                     @memset(combined_coeffs, F.zero());
@@ -6145,10 +5763,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     });
 
                     // Append to transcript
+                    if (comptime bench_timing) bench_cycle_coeff_ns += bench_timer.read();
+                    if (comptime bench_timing) bench_timer.reset();
                     transcript.appendScalars("sumcheck_poly", final_compressed);
 
                     const challenge = transcript.challengeScalar();
                     challenges[round] = challenge;
+                    if (comptime bench_timing) bench_cycle_transcript_ns += bench_timer.read();
 
                     // Debug: print challenge for comparison with Jolt
                     if (round < 4 or round >= 128) {
@@ -6240,13 +5861,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
 
                     // Skip the standard compression/serialization below
+                    if (comptime bench_timing) bench_timer.reset();
                     // Bind the challenge for RegistersValEvaluation if active
                     if (remaining_rounds <= regs_val_num_rounds) {
                         const regs_round = regs_val_num_rounds - remaining_rounds;
 
                         // Update Instance 0 claim: new_claim = p0(challenge)
-                        // Get the polynomial coefficients from Toom-Cook evaluations
-                        const poly_evals = computeRegsValRoundPoly(inc_evals, wa_evals, lt_evals, regs_round, self.thread_pool);
+                        // Reuse poly_evals cached from the compute phase (same round)
+                        const poly_evals = cached_regs_val_evals.?;
                         const inst0_coeffs = UniPoly(F).toomCookToCoeffs(poly_evals);
                         // Evaluate at challenge using Horner's method
                         var p0_at_r = inst0_coeffs[3]; // c3 (highest)
@@ -6280,6 +5902,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             eq_rw_bound = eq_rw_bound.mul(eq_rw_update);
                             eq_val_bound = eq_val_bound.mul(eq_val_update);
 
+                            // Precompute the 6 inverses: each eq_*_bit_at_c only takes
+                            // 2 possible values per round (r_*_bit or 1-r_*_bit).
+                            // Avoids M * 3 field inversions per round (each ~256 muls).
+                            const one_minus_r_raf = F.one().sub(r_raf_bit);
+                            const one_minus_r_rw = F.one().sub(r_rw_bit);
+                            const one_minus_r_val = F.one().sub(r_val_bit);
+                            const inv_r_raf = if (!r_raf_bit.eql(F.zero())) r_raf_bit.inverse().? else F.zero();
+                            const inv_1mr_raf = if (!one_minus_r_raf.eql(F.zero())) one_minus_r_raf.inverse().? else F.zero();
+                            const inv_r_rw = if (!r_rw_bit.eql(F.zero())) r_rw_bit.inverse().? else F.zero();
+                            const inv_1mr_rw = if (!one_minus_r_rw.eql(F.zero())) one_minus_r_rw.inverse().? else F.zero();
+                            const inv_r_val = if (!r_val_bit.eql(F.zero())) r_val_bit.inverse().? else F.zero();
+                            const inv_1mr_val = if (!one_minus_r_val.eql(F.zero())) one_minus_r_val.inverse().? else F.zero();
+
                             for (0..ram_access_count) |access_idx| {
                                 const cycle = ram_cycles[access_idx];
                                 const cycle_usize: usize = @intCast(cycle);
@@ -6290,18 +5925,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 eq_cycle_bound[access_idx] = eq_cycle_bound[access_idx].mul(factor);
 
                                 // Update eq_*_remaining by dividing out eq_bit(r_*[m], c_m)
-                                const eq_raf_bit_at_c = if (c_m == 0) F.one().sub(r_raf_bit) else r_raf_bit;
-                                const eq_rw_bit_at_c = if (c_m == 0) F.one().sub(r_rw_bit) else r_rw_bit;
-                                const eq_val_bit_at_c = if (c_m == 0) F.one().sub(r_val_bit) else r_val_bit;
+                                const inv_raf = if (c_m == 0) inv_1mr_raf else inv_r_raf;
+                                const inv_rw = if (c_m == 0) inv_1mr_rw else inv_r_rw;
+                                const inv_val = if (c_m == 0) inv_1mr_val else inv_r_val;
 
-                                if (!eq_raf_bit_at_c.eql(F.zero())) {
-                                    eq_raf_remaining[access_idx] = eq_raf_remaining[access_idx].mul(eq_raf_bit_at_c.inverse().?);
+                                if (!inv_raf.eql(F.zero())) {
+                                    eq_raf_remaining[access_idx] = eq_raf_remaining[access_idx].mul(inv_raf);
                                 }
-                                if (!eq_rw_bit_at_c.eql(F.zero())) {
-                                    eq_rw_remaining[access_idx] = eq_rw_remaining[access_idx].mul(eq_rw_bit_at_c.inverse().?);
+                                if (!inv_rw.eql(F.zero())) {
+                                    eq_rw_remaining[access_idx] = eq_rw_remaining[access_idx].mul(inv_rw);
                                 }
-                                if (!eq_val_bit_at_c.eql(F.zero())) {
-                                    eq_val_remaining[access_idx] = eq_val_remaining[access_idx].mul(eq_val_bit_at_c.inverse().?);
+                                if (!inv_val.eql(F.zero())) {
+                                    eq_val_remaining[access_idx] = eq_val_remaining[access_idx].mul(inv_val);
                                 }
                             }
 
@@ -6604,8 +6239,58 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
+                    if (comptime bench_timing) bench_cycle_bind_ns += bench_timer.read();
                     continue; // Skip the rest of the loop (we handled everything)
                 }
+            }
+
+            // Post-loop timer
+            if (comptime bench_timing) bench_timer.reset();
+
+            // Print Stage 5 fine-grained timing
+            if (comptime bench_timing) {
+                const toMs = struct {
+                    fn f(ns: u64) f64 {
+                        return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+                    }
+                }.f;
+                const init_ms = toMs(bench_init_ns);
+                const addr_compute_ms = toMs(bench_addr_compute_ns);
+                const addr_bind_ms = toMs(bench_addr_bind_ns);
+                const addr_transcript_ms = toMs(bench_addr_transcript_ns);
+                const addr_other_ms = toMs(bench_addr_other_ns);
+                const addr_phase_ms = toMs(bench_phase_transition_ns);
+                const cycle_compute_ms = toMs(bench_inst0_compute_ns + bench_inst1_compute_ns + bench_inst2_cycle_compute_ns);
+                const cycle_bind_ms = toMs(bench_cycle_bind_ns);
+                const cycle_transcript_ms = toMs(bench_cycle_transcript_ns);
+                const addr_total_ms = addr_compute_ms + addr_bind_ms + addr_transcript_ms + addr_other_ms + addr_phase_ms;
+                const cycle_total_ms = cycle_compute_ms + cycle_bind_ms + cycle_transcript_ms;
+                const total_ms = init_ms + addr_total_ms + cycle_total_ms;
+
+                std.debug.print("\n    [STAGE5-BENCH] === Stage 5 Fine-Grained Timing ===\n", .{});
+                std.debug.print("    [STAGE5-BENCH] Init (alloc+setup):      {d:8.1} ms\n", .{init_ms});
+                std.debug.print("    [STAGE5-BENCH] Address rounds (0-{}):\n", .{LOOKUPS_LOG_K - 1});
+                std.debug.print("    [STAGE5-BENCH]   compute (ReadRaf):     {d:8.1} ms\n", .{addr_compute_ms});
+                std.debug.print("    [STAGE5-BENCH]   bind (suffix+raf):     {d:8.1} ms\n", .{addr_bind_ms});
+                std.debug.print("    [STAGE5-BENCH]   transcript:            {d:8.1} ms\n", .{addr_transcript_ms});
+                std.debug.print("    [STAGE5-BENCH]   claim updates+RamRa:   {d:8.1} ms\n", .{addr_other_ms});
+                std.debug.print("    [STAGE5-BENCH]   phase transitions:     {d:8.1} ms\n", .{addr_phase_ms});
+                std.debug.print("    [STAGE5-BENCH]     condenseUEvals:      {d:8.1} ms\n", .{toMs(bench_condense_ns)});
+                std.debug.print("    [STAGE5-BENCH]     initPhase+initQRaf:  {d:8.1} ms\n", .{toMs(bench_init_phase_ns)});
+                std.debug.print("    [STAGE5-BENCH]   addr subtotal:         {d:8.1} ms\n", .{addr_total_ms});
+                std.debug.print("    [STAGE5-BENCH] Cycle rounds ({}-{}):\n", .{ LOOKUPS_LOG_K, LOOKUPS_LOG_K + n_cycle_vars - 1 });
+                std.debug.print("    [STAGE5-BENCH]   compute total:         {d:8.1} ms\n", .{cycle_compute_ms});
+                std.debug.print("    [STAGE5-BENCH]     inst0 (RegsVal):     {d:8.1} ms\n", .{toMs(bench_inst0_compute_ns)});
+                std.debug.print("    [STAGE5-BENCH]     inst1 (RamRa):       {d:8.1} ms\n", .{toMs(bench_inst1_compute_ns)});
+                std.debug.print("    [STAGE5-BENCH]     inst2 (Lookups):     {d:8.1} ms\n", .{toMs(bench_inst2_cycle_compute_ns)});
+                std.debug.print("    [STAGE5-BENCH]   bind:                  {d:8.1} ms\n", .{cycle_bind_ms});
+                std.debug.print("    [STAGE5-BENCH]   transcript:            {d:8.1} ms\n", .{cycle_transcript_ms});
+                std.debug.print("    [STAGE5-BENCH]   cycle subtotal:        {d:8.1} ms\n", .{cycle_total_ms});
+                std.debug.print("    [STAGE5-BENCH] TOTAL (timed):           {d:8.1} ms\n", .{total_ms});
+                std.debug.print("    [STAGE5-BENCH] Untimed gaps:\n", .{});
+                std.debug.print("    [STAGE5-BENCH]   remat (round 128):     {d:8.1} ms\n", .{toMs(bench_remat_ns)});
+                std.debug.print("    [STAGE5-BENCH]   coeff combo (18 rds):  {d:8.1} ms\n", .{toMs(bench_cycle_coeff_ns)});
+                std.debug.print("    [STAGE5-BENCH] T={}, n_cycle_vars={}\n\n", .{T, n_cycle_vars});
             }
 
             // Debug: print final batched claim (this is output_claim from verifier's perspective)
@@ -6654,7 +6339,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // CRITICAL: Derive correct Instance 2 claim from batched output
             // The batched output_claim is CORRECT (S5P==S5V). Individual claims for
             // inst0 and inst1 are also correct. So we can derive the TRUE inst2 claim.
-            const correct_inst2_from_batched = current_batched_claim.sub(batch0.mul(regs_val_current_claim)).sub(batch1.mul(ram_ra_current_claim)).mul(batch2_inv);
+            const correct_inst2_from_batched = if (comptime debug_verbose) current_batched_claim.sub(batch0.mul(regs_val_current_claim)).sub(batch1.mul(ram_ra_current_claim)).mul(batch2_inv) else F.zero();
             if (comptime debug_verbose) {
                 dbg("  [DRIFT CHECK] lookups_claim (tracked)     = {any}\n", .{lookups_claim.toBytes()});
                 dbg("  [DRIFT CHECK] correct_inst2 (from batch)  = {any}\n", .{correct_inst2_from_batched.toBytes()});
@@ -7013,7 +6698,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
             // Build eq(r_cycle', j) table for all j using O(T) doubling technique
             // instead of O(T * n_cycle_vars) per-element computation
-            buildFullEqTable(r_cycle_prime_be, lookups_eq_evals[0..T]);
+            buildFullEqTable(r_cycle_prime_be, lookups_eq_evals[0..T], self.thread_pool);
 
             // Include ALL T cycles (including NOOPs and padding) in table flags and raf flag.
             // This matches Jolt where all cycles contribute to opening claims.
@@ -7085,146 +6770,43 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // CRITICAL DIAGNOSTIC: Compare combined_vals[0] with val_claim + gamma * raf_claim
-            // The prover's combined_val polynomial should encode: table_val + gamma * raf_val
-            // After all cycle round binding, combined_vals[0] should equal val_claim + gamma * raf_claim
-            const verifier_combined = val_claim.add(gamma_lookups_raf.mul(raf_claim));
+            // (gated behind debug_verbose to avoid expensive runtime checks in release builds)
             if (comptime debug_verbose) {
+                const verifier_combined = val_claim.add(gamma_lookups_raf.mul(raf_claim));
                 dbg("\n  === CRITICAL COMPARISON ===\n", .{});
                 dbg("  combined_vals[0] (bound polynomial) FULL LE = {any}\n", .{lookups_combined_vals[0].toBytes()});
                 dbg("  val+gamma*raf   (from opening claims) FULL LE = {any}\n", .{verifier_combined.toBytes()});
                 dbg("  combined_vals[0] == val+gamma*raf: {}\n", .{lookups_combined_vals[0].eql(verifier_combined)});
-            }
-            if (!lookups_combined_vals[0].eql(verifier_combined)) {
-                // They differ! This means the bound polynomial disagrees with opening claims.
-                // Try other hypotheses:
-                // 1. Maybe combined_vals includes ra_product already?
-                const cv_div_ra = if (!ra_product.eql(F.zero())) lookups_combined_vals[0].mul(ra_product.inverse().?) else F.zero();
-                if (comptime debug_verbose) {
+
+                if (!lookups_combined_vals[0].eql(verifier_combined)) {
+                    const cv_div_ra = if (!ra_product.eql(F.zero())) lookups_combined_vals[0].mul(ra_product.inverse().?) else F.zero();
                     dbg("  combined_vals[0] / ra_product = {any}\n", .{cv_div_ra.toBytes()});
                     dbg("  cv/ra == val+gamma*raf: {}\n", .{cv_div_ra.eql(verifier_combined)});
-                }
 
-                // 2. Maybe combined_vals = ra_product * (val + gamma * raf)?
-                const ra_times_combined = ra_product.mul(verifier_combined);
-                if (comptime debug_verbose) {
-                    dbg("  ra_product * (val+gamma*raf) = {any}\n", .{ra_times_combined.toBytes()});
+                    const ra_times_combined = ra_product.mul(verifier_combined);
                     dbg("  ra*(val+gamma*raf) == combined_vals[0]: {}\n", .{ra_times_combined.eql(lookups_combined_vals[0])});
-                }
 
-                // 3. Compute what correct_inst2 / (eq_r_reduction * ra_product) gives
-                // This should be combined_vals[0] if lookups_output_claim = eq*ra*cv
-                if (!eq_r_reduction.eql(F.zero()) and !ra_product.eql(F.zero())) {
-                    const implied_cv = correct_inst2_from_batched.mul(eq_r_reduction.inverse().?).mul(ra_product.inverse().?);
-                    if (comptime debug_verbose) {
+                    if (!eq_r_reduction.eql(F.zero()) and !ra_product.eql(F.zero())) {
+                        const implied_cv = correct_inst2_from_batched.mul(eq_r_reduction.inverse().?).mul(ra_product.inverse().?);
                         dbg("  correct_inst2 / (eq*ra) = {any}\n", .{implied_cv.toBytes()});
-                        dbg("  implied_cv == combined_vals[0]: {}\n", .{implied_cv.eql(lookups_combined_vals[0])});
-                        dbg("  implied_cv == val+gamma*raf: {}\n", .{implied_cv.eql(verifier_combined)});
                     }
-                }
-
-                // 4. Compute correct_inst2 / (lookups_current_scalar * ra_product)
-                // This might be the true combined_val if current_scalar != eq_r_reduction
-                if (!lookups_current_scalar.eql(F.zero()) and !ra_product.eql(F.zero())) {
-                    const implied_cv2 = correct_inst2_from_batched.mul(lookups_current_scalar.inverse().?).mul(ra_product.inverse().?);
-                    if (comptime debug_verbose) {
+                    if (!lookups_current_scalar.eql(F.zero()) and !ra_product.eql(F.zero())) {
+                        const implied_cv2 = correct_inst2_from_batched.mul(lookups_current_scalar.inverse().?).mul(ra_product.inverse().?);
                         dbg("  correct_inst2 / (scalar*ra) = {any}\n", .{implied_cv2.toBytes()});
-                        dbg("  implied_cv2 == combined_vals[0]: {}\n", .{implied_cv2.eql(lookups_combined_vals[0])});
-                        dbg("  implied_cv2 == val+gamma*raf: {}\n", .{implied_cv2.eql(verifier_combined)});
                     }
-                }
-
-                // 5. Check if eq_r_reduction == lookups_current_scalar
-                if (comptime debug_verbose) {
                     dbg("  eq_r_reduction == lookups_current_scalar: {}\n", .{eq_r_reduction.eql(lookups_current_scalar)});
                 }
-            }
-            if (comptime debug_verbose) {
                 dbg("  === END CRITICAL COMPARISON ===\n\n", .{});
-            }
 
-            // Compute expected output: eq_r_reduction * ra_product * (val_claim + gamma * raf_claim)
-            const expected_output = eq_r_reduction.mul(ra_product).mul(val_claim.add(gamma_lookups_raf.mul(raf_claim)));
-            if (comptime debug_verbose) {
-                dbg("  expected_output (eq*ra*(val+gamma*raf)) FULL LE = {any}\n", .{expected_output.toBytes()});
-                dbg("  expected_output last 16 LE = ", .{});
-                for (expected_output.toBytes()[16..32]) |b| dbg("{x:0>2} ", .{b});
-                dbg("\n", .{});
-                dbg("  lookups_output_claim = {any}\n", .{lookups_output_claim.toBytesBE()[0..8]});
-                dbg("  current_batched_claim = {any}\n", .{current_batched_claim.toBytesBE()[0..8]});
-            }
-
-            // Check if expected matches the sumcheck output
-            if (comptime debug_verbose) {
+                const expected_output = eq_r_reduction.mul(ra_product).mul(val_claim.add(gamma_lookups_raf.mul(raf_claim)));
                 dbg("  expected_output == lookups_output_claim: {}\n", .{expected_output.eql(lookups_output_claim)});
-            }
-
-            // Check if the correct inst2 from batched matches the opening claims
-            if (comptime debug_verbose) {
                 dbg("  correct_inst2_from_batched == lookups_output_claim: {}\n", .{correct_inst2_from_batched.eql(lookups_output_claim)});
             }
-            if (!correct_inst2_from_batched.eql(lookups_output_claim)) {
-                if (comptime debug_verbose) {
+            if (comptime debug_verbose) {
+                if (!correct_inst2_from_batched.eql(lookups_output_claim)) {
                     dbg("  ERROR: correct_inst2_from_batched != lookups_output_claim!\n", .{});
-                    dbg("  correct_inst2 = {any}\n", .{correct_inst2_from_batched.toBytes()});
-                    dbg("  lookups_output = {any}\n", .{lookups_output_claim.toBytes()});
-                }
-                // Compute ratio for debugging
-                if (!lookups_output_claim.eql(F.zero())) {
-                    const ratio = correct_inst2_from_batched.mul(lookups_output_claim.inverse().?);
-                    if (comptime debug_verbose) {
-                        dbg("  ratio (correct/output) = {any}\n", .{ratio.toBytes()});
-                    }
-                }
-
-                // BRUTE FORCE: Compute true Instance 2 output by summing over trace
-                // inst2_output = Σ_j eq(j, r_reduction) * eq(j, r_cycle') * ra(r_addr, K(j)) * cv(r_addr, j)
-                // where cv(r_addr, j) = table_val(r_addr, table(j)) + γ*raf(r_addr, j)
-                var bf_inst2_output = F.zero();
-                for (0..T) |j| {
-                    // eq(j, r_reduction) * eq(j, r_cycle')
-                    const eq_red_j = computeEqAtIndex(r_reduction, j);
-                    const eq_cyc_j = computeEqAtIndex(r_cycle_prime_be, j);
-
-                    // ra(r_addr, K(j)) = product over all chunks of expanding_tables[phase][k_phase]
-                    var ra_j = F.one();
-                    const k_full = lookup_indices_u128[j];
-                    for (0..num_phases) |phase| {
-                        const shift = (num_phases - 1 - phase) * log_m;
-                        const k_phase: usize = @intCast((k_full >> @intCast(shift)) & ((@as(u128, 1) << @intCast(log_m)) - 1));
-                        ra_j = ra_j.mul(expanding_tables[phase].get(k_phase));
-                    }
-
-                    // cv(r_addr, j) = table_values_at_r_addr[table(j)] + raf_val
-                    var cv_j = F.zero();
-                    const table_idx_j = cycle_table_indices[j];
-                    if (table_idx_j >= 0) {
-                        const t_idx: usize = @intCast(table_idx_j);
-                        if (t_idx < NUM_TABLES) {
-                            cv_j = cv_j.add(stored_table_values[t_idx]);
-                        }
-                    }
-                    // Add RAF
-                    const is_interleaved_j = !cycle_is_identity_path[j];
-                    const raf_interleaved_j = gamma_lookups_raf.mul(left_op_eval).add(gamma_raf2.mul(right_op_eval));
-                    const raf_identity_j = gamma_raf2.mul(identity_eval);
-                    if (is_interleaved_j) {
-                        cv_j = cv_j.add(raf_interleaved_j);
-                    } else {
-                        cv_j = cv_j.add(raf_identity_j);
-                    }
-
-                    bf_inst2_output = bf_inst2_output.add(eq_red_j.mul(eq_cyc_j).mul(ra_j).mul(cv_j));
-                }
-                if (comptime debug_verbose) {
-                    dbg("  BF inst2_output = {any}\n", .{bf_inst2_output.toBytes()});
-                    dbg("  BF == lookups_output_claim: {}\n", .{bf_inst2_output.eql(lookups_output_claim)});
-                    dbg("  BF == correct_inst2: {}\n", .{bf_inst2_output.eql(correct_inst2_from_batched)});
-                }
-            } else {
-                if (comptime debug_verbose) {
+                } else {
                     dbg("  GOOD: correct_inst2_from_batched == lookups_output_claim\n", .{});
-                    dbg("  The opening claims are CORRECT. The fix is to use correct_inst2_from_batched\n", .{});
-                    dbg("  as the Instance 2 claim when computing the batched expected output.\n", .{});
                 }
             }
 
@@ -7240,6 +6822,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 dbg("[STAGE5 RAM_RA] ram_ra_claim = H_prime[0] = {x}\n", .{ram_ra_claim.toBytesBE()});
             }
 
+            if (comptime bench_timing) {
+                const post_loop_ms = @as(f64, @floatFromInt(bench_timer.read())) / 1_000_000.0;
+                const post_sc_ms = @as(f64, @floatFromInt(bench_overall_timer.read() - bench_init_ns - bench_addr_compute_ns - bench_addr_bind_ns - bench_addr_transcript_ns - bench_addr_other_ns - bench_phase_transition_ns - bench_inst0_compute_ns - bench_inst1_compute_ns - bench_inst2_cycle_compute_ns - bench_cycle_bind_ns - bench_cycle_transcript_ns)) / 1_000_000.0;
+                std.debug.print("    [STAGE5-BENCH] Post-sumcheck (total gap):  {d:8.1} ms\n", .{post_sc_ms});
+                std.debug.print("    [STAGE5-BENCH]   post-loop code:           {d:8.1} ms\n", .{post_loop_ms});
+                std.debug.print("    [STAGE5-BENCH]   remat (round 128):        {d:8.1} ms\n", .{@as(f64, @floatFromInt(bench_remat_ns)) / 1_000_000.0});
+                std.debug.print("    [STAGE5-BENCH]   coeff combo (18 rds):     {d:8.1} ms\n", .{@as(f64, @floatFromInt(bench_cycle_coeff_ns)) / 1_000_000.0});
+            }
+
             return Stage5Result(F){
                 .challenges = challenges,
                 .regs_val_inc_claim = regs_val_inc_claim,
@@ -7251,6 +6842,567 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .allocator = self.allocator,
             };
         }
+
+        /// Per-cycle instruction decode for combined_vals, lookup indices, table assignments.
+        /// Extracted from the init trace loop for parallel dispatch.
+        /// IMPORTANT: This is a hot function called T times in parallel.
+        fn processTraceCycleCombined(
+            step: tracer.TraceStep,
+            j: usize,
+            combined: []F,
+            idx_lo: []u64,
+            idx_hi: []u64,
+            tbl_ids: []i8,
+            is_id: []bool,
+            g_raf: F,
+            g_raf2: F,
+        ) void {
+            // NOTE: Do NOT skip NOOPs here! In Jolt, NOOPs (ADDI x0,x0,0) are valid
+            // instructions with lookup_table = RangeCheck and is_identity_path = true.
+            // Skipping them causes cycle_table_indices and cycle_is_identity_path to be
+            // wrong, which corrupts Q arrays, rematerialization, and opening claims.
+
+            const instr = step.instruction;
+            const opcode = instr & 0x7f;
+            const funct3: u3 = @truncate((instr >> 12) & 0x7);
+            const funct7: u7 = @truncate(instr >> 25);
+
+            // Determine left_op, right_op, and lookup_output based on instruction type.
+            // This MUST match the verification loop / R1CS witness exactly.
+            // Use field arithmetic with signedI64ToField for signed immediates.
+            var left_op: F = undefined;
+            var right_op: F = undefined;
+            var lookup_output: F = undefined;
+
+            // First compute left_input and right_input (same as R1CS)
+            const left_is_rs1: bool = switch (opcode) {
+                0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                0x22 => true, // VirtualAssertEQ: left = rs1
+                0x42 => true, // VirtualZeroExtendWord: left = rs1
+                0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1
+                // 0x02 (VirtualAdvice): left_is_rs1 = false (instruction_inputs = (0,0))
+                else => false,
+            };
+            const left_is_pc: bool = switch (opcode) {
+                0x17, 0x6f => true,
+                else => false,
+            };
+            const right_is_rs2: bool = switch (opcode) {
+                0x33, 0x63, 0x3b => true,
+                0x22 => (funct3 == 0 or funct3 == 1), // VirtualAssertEQ/ValidDiv0: right = rs2; alignment: right = imm
+                0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
+                0x5B => step.rs2_read, // VirtualSRL/VirtualSRA R-type: rs2; VirtualSRLI/VirtualSRAI I-type: imm
+                else => false,
+            };
+            const right_is_imm: bool = switch (opcode) {
+                0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                0x22 => (funct3 == 2 or funct3 == 3), // alignment assertions: right = imm
+                0x5B => !step.rs2_read, // I-type: imm; R-type: not imm
+                else => false,
+            };
+
+            // For identity-path AddOperands instructions (ADDI, ADDIW, JAL, JALR, VirtualSignExtendWord),
+            // use UNSIGNED u64 immediate to match Jolt's to_lookup_operands() u128 arithmetic.
+            // This ensures RightInstructionInput matches between R1CS, Stage 3, and Stage 5.
+            const is_identity_add_imm: bool = switch (opcode) {
+                0x13 => funct3 == 0, // ADDI
+                0x1b => funct3 == 0, // ADDIW
+                0x0B => true, // VirtualSignExtendWord
+                0x6f => true, // JAL
+                0x67 => true, // JALR
+                else => false,
+            };
+            const imm_val = if (opcode == 0x2B) blk: {
+                if (funct3 == 0) {
+                    // VirtualMULI: IMM = multiplier = 1 << shamt
+                    const shamt_raw2: u32 = instr >> 20;
+                    const shamt2: u6 = @truncate(shamt_raw2 & 0x3F);
+                    const multiplier2: u64 = @as(u64, 1) << shamt2;
+                    break :blk F.fromU64(multiplier2);
+                } else {
+                    // VirtualPow2/VirtualShiftRightBitmask: IMM = 0
+                    break :blk F.zero();
+                }
+            } else if (opcode == 0x5B) blk: {
+                if (step.rs2_read) {
+                    // VirtualSRL/VirtualSRA R-type: no immediate (rs2 used instead)
+                    break :blk F.zero();
+                } else {
+                    // VirtualSRLI/VirtualSRAI I-type: IMM = bitmask computed from total shift
+                    const total_shift_raw2: u32 = instr >> 20;
+                    const total_shift2: u7 = @truncate(total_shift_raw2 & 0x3F);
+                    const ones2: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift2))) - 1;
+                    const bitmask2: u64 = @truncate(ones2 << total_shift2);
+                    break :blk F.fromU64(bitmask2);
+                }
+            } else if (opcode == 0x22 and (funct3 == 2 or funct3 == 3)) blk: {
+                // VirtualAssertHalfwordAlignment/WordAlignment: SIGNED IMM encoding
+                // Must match R1CS witness (now signed) and Jolt verifier val_poly
+                const assert_imm_raw: u32 = @truncate(instr >> 20);
+                const assert_imm_signed: i64 = @as(i64, @as(i32, @bitCast(assert_imm_raw << 20)) >> 20);
+                if (assert_imm_signed < 0) {
+                    break :blk F.fromU64(@intCast(-assert_imm_signed)).neg();
+                } else {
+                    break :blk F.fromU64(@intCast(assert_imm_signed));
+                }
+            } else if (is_identity_add_imm) blk: {
+                // Use unsigned u64 representation (two's complement) for the immediate.
+                // E.g., imm=-1 → F(0xFFFFFFFFFFFFFFFF) instead of F(p-1).
+                break :blk F.fromU64(computeUnsignedImmediate(instr));
+            } else computeImmediate(instr);
+
+            var left_input: F = F.zero();
+            if (left_is_rs1) left_input = F.fromU64(step.rs1_value);
+            // FIX: Use unexpanded_pc (raw RISC-V address) not pc (expanded bytecode index)
+            // This matches R1CS constraints.zig and Jolt's instruction_input.rs
+            if (left_is_pc) left_input = F.fromU64(step.unexpanded_pc);
+
+            var right_input: F = F.zero();
+            if (right_is_rs2) right_input = F.fromU64(step.rs2_value);
+            if (right_is_imm) right_input = imm_val;
+
+            // Compute LookupOutput = materialize_entry(lookup_index) for the instruction's table.
+            // For identity-path (AddOperands/SubtractOperands/MultiplyOperands):
+            //   lookup_output = materialize_entry(right_op_raw) = F.fromU64(right_op_raw) for RangeCheck.
+            // For interleaved path:
+            //   lookup_output = materialize_entry(interleave(left, right)) from the assigned table.
+            // Special cases: JAL, JALR, Branch have their own formulas.
+            //
+            // NOTE: This is computed AFTER the lookup index section below, but we set a
+            // preliminary value here and may override it.
+            switch (opcode) {
+                0x6f => { // JAL: LookupOutput = PC + imm
+                    lookup_output = left_input.add(right_input);
+                },
+                0x67 => { // JALR: LookupOutput = (rs1 + imm) & ~1
+                    const target = left_input.add(right_input);
+                    const target_u64 = target.toU64() & ~@as(u64, 1);
+                    lookup_output = F.fromU64(target_u64);
+                },
+                0x63 => { // Branch: LookupOutput = condition result (0 or 1)
+                    const result: u64 = switch (funct3) {
+                        0x0 => if (step.rs1_value == step.rs2_value) 1 else 0,
+                        0x1 => if (step.rs1_value != step.rs2_value) 1 else 0,
+                        0x4 => if (@as(i64, @bitCast(step.rs1_value)) < @as(i64, @bitCast(step.rs2_value))) 1 else 0,
+                        0x5 => if (@as(i64, @bitCast(step.rs1_value)) >= @as(i64, @bitCast(step.rs2_value))) 1 else 0,
+                        0x6 => if (step.rs1_value < step.rs2_value) 1 else 0,
+                        0x7 => if (step.rs1_value >= step.rs2_value) 1 else 0,
+                        else => 0,
+                    };
+                    lookup_output = F.fromU64(result);
+                },
+                0x22, 0x62 => {
+                    // VirtualAssertEQ and VirtualAssertValidUnsignedRemainder: Assert instructions
+                    // LookupOutput = 1 (assertion passed). Matches R1CS computeLookupOutput.
+                    lookup_output = F.one();
+                },
+                else => {
+                    // Default: rd_value (will be overridden for ADDIW/ADDW/SUBW below)
+                    lookup_output = F.fromU64(step.rd_value);
+                },
+            }
+
+            // Compute LeftLookupOperand and RightLookupOperand
+            switch (opcode) {
+                0x33 => { // R-type
+                    if (funct7 == 0x01) {
+                        // M-extension
+                        if (funct3 == 0x0) { // MUL: MultiplyOperands
+                            left_op = F.zero();
+                            right_op = left_input.mul(right_input); // Product
+                        } else if (funct3 == 0x3) { // MULHU: MultiplyOperands
+                            left_op = F.zero();
+                            right_op = left_input.mul(right_input); // Product
+                        } else {
+                            // DIVU, REMU, MULHSU, etc.: interleaved
+                            left_op = left_input;
+                            right_op = right_input;
+                        }
+                    } else if (funct3 == 0x0 and funct7 == 0x20) {
+                        // SUB: SubtractOperands, left=0, right=rs1-rs2+2^64
+                        const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+                        left_op = F.zero();
+                        right_op = left_input.sub(right_input).add(two_pow_64);
+                    } else if (funct3 == 0x0 and funct7 == 0x0) {
+                        // ADD: AddOperands, left=0, right=rs1+rs2
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input);
+                    } else {
+                        // XOR, AND, OR, SLT, SLTU, SRL, SRA: interleaved operands
+                        left_op = left_input;
+                        right_op = right_input;
+                    }
+                },
+                0x13 => { // I-type ALU: only ADDI (funct3=0) uses AddOperands
+                    // Other I-type ALU instructions (SLLI, SLTI, etc.) use interleaved operands
+                    // Note: Jolt expands SLLI/etc to virtual instructions, but Zolt handles them directly
+                    if (funct3 == 0) {
+                        // ADDI: AddOperands
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input);
+                    } else {
+                        // SLLI, SLTI, SLTIU, XORI, SRLI, SRAI, ORI, ANDI: interleaved
+                        left_op = left_input;
+                        right_op = right_input;
+                    }
+                },
+                0x37 => { // LUI: AddOperands, left_input=0, right_input=imm
+                    left_op = F.zero();
+                    right_op = left_input.add(right_input);
+                },
+                0x17 => { // AUIPC: AddOperands, left_input=PC, right_input=imm
+                    left_op = F.zero();
+                    right_op = left_input.add(right_input);
+                },
+                0x6f => { // JAL: AddOperands, left_input=PC, right_input=imm
+                    left_op = F.zero();
+                    right_op = left_input.add(right_input);
+                },
+                0x67 => { // JALR: AddOperands, left_input=rs1, right_input=imm
+                    left_op = F.zero();
+                    right_op = left_input.add(right_input);
+                },
+                0x1b => { // I-type word ALU (ADDIW, SLLIW, SRLIW, SRAIW)
+                    // Only ADDIW (funct3=0) uses AddOperands; others use interleaved
+                    if (funct3 == 0) {
+                        // ADDIW: AddOperands, left=0, right=rs1+imm
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input);
+                    } else {
+                        // SLLIW, SRLIW, SRAIW: interleaved
+                        left_op = left_input;
+                        right_op = right_input;
+                    }
+                },
+                0x3b => { // ADDW/SUBW/VirtualChangeDivisorW
+                    // In Jolt, ADDW decomposes to ADD+VirtualSEW, SUBW to SUB+VirtualSEW.
+                    // For Zolt's single-cycle model, match the first step's format.
+                    if (funct3 == 0 and funct7 == 0) {
+                        // ADDW: AddOperands, left=0, right=rs1+rs2
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input);
+                    } else if (funct3 == 0 and funct7 == 0x20) {
+                        // SUBW: SubtractOperands, left=0, right=rs1-rs2+2^64
+                        const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+                        left_op = F.zero();
+                        right_op = left_input.sub(right_input).add(two_pow_64);
+                    } else if (funct3 == 6 and funct7 == 0x01) {
+                        // VirtualChangeDivisorW: interleaved, left=rs1 as u32 as u64 (truncated), right=rs2
+                        // Jolt's to_instruction_inputs: (rs1 as u32 as u64, rs2 as i128)
+                        // to_lookup_operands: (rs1 as u32 as u64, rs2 as u64)
+                        const rs1_lower32: u64 = step.rs1_value & 0xFFFFFFFF;
+                        left_op = F.fromU64(rs1_lower32);
+                        right_op = F.fromU64(step.rs2_value);
+                    } else {
+                        // Other 0x3b variants (not AddOperands/SubtractOperands)
+                        left_op = left_input;
+                        right_op = right_input;
+                    }
+                },
+                0x0B => { // VirtualSignExtendWord: AddOperands, left=0, right=rs1
+                    // Lookup operands: (0, rs1_val + 0) = (0, rs1_val)
+                    left_op = F.zero();
+                    right_op = left_input.add(right_input); // rs1 + 0 = rs1
+                },
+                0x2B => { // Virtual I-type: dispatch on funct3
+                    if (funct3 == 0) {
+                        // VirtualMULI: MultiplyOperands, left=0, right=rs1*imm
+                        left_op = F.zero();
+                        right_op = left_input.mul(right_input);
+                    } else {
+                        // VirtualPow2 (funct3=1), VirtualShiftRightBitmask (funct3=2): AddOperands
+                        // Lookup operands: (0, rs1 + 0) = (0, rs1)
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input); // rs1 + 0 = rs1
+                    }
+                },
+                0x03 => { // Load: NOT AddOperands, left=rs1, right=imm
+                    // R1CS witness sets: LeftLookupOperand=left_input, RightLookupOperand=right_input
+                    left_op = left_input;
+                    right_op = right_input;
+                },
+                0x23 => { // Store: NOT AddOperands, left=rs1, right=imm
+                    // R1CS witness sets: LeftLookupOperand=left_input, RightLookupOperand=right_input
+                    left_op = left_input;
+                    right_op = right_input;
+                },
+                0x02 => { // VirtualAdvice: Advice flag (identity path)
+                    // R1CS: LeftLookupOperand=0, RightLookupOperand=F.fromU128(rd_value)
+                    // left_input=0, right_input=0 (no instruction inputs)
+                    // The lookup operand is the advice oracle value (rd_value)
+                    left_op = F.zero();
+                    right_op = F.fromU128(@as(u128, step.rd_value));
+                },
+                0x22 => { // Virtual assert: dispatch on funct3
+                    if (funct3 == 2 or funct3 == 3) {
+                        // VirtualAssertHalfwordAlignment/WordAlignment: AddOperands
+                        // Lookup operands: (0, rs1 + imm)
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input); // rs1 + imm
+                    } else {
+                        // VirtualAssertEQ (funct3=0) / VirtualAssertValidDiv0 (funct3=1): interleaved
+                        left_op = left_input;
+                        right_op = right_input;
+                    }
+                },
+                0x42 => { // VirtualZeroExtendWord: AddOperands flag (identity path)
+                    // R1CS: LeftLookupOperand=0, RightLookupOperand=F.fromU128(rs1_value)
+                    // AddOperands: left=0, right=left_input+right_input
+                    // Here left_input=rs1, right_input=0, so right=rs1
+                    left_op = F.zero();
+                    right_op = F.fromU128(@as(u128, step.rs1_value));
+                },
+                0x62 => { // VirtualAssertValidUnsignedRemainder: Assert flag (interleaved)
+                    // R1CS: LeftLookupOperand=left_input(=rs1), RightLookupOperand=right_input(=rs2)
+                    left_op = left_input;
+                    right_op = right_input;
+                },
+                else => {
+                    // Default: NOT Add+Sub+Mul (includes 0x63 Branch)
+                    left_op = left_input;
+                    right_op = right_input;
+                },
+            }
+
+            // Track which lookup table this cycle uses (for flag claims)
+            const table_idx = getLookupTableIndex(opcode, funct3, funct7);
+            tbl_ids[j] = table_idx;
+
+            // For instructions without a lookup table (Load, Store, SLL, etc.):
+            // All three must be zeroed to match the R1CS witness, which sets:
+            //   LeftLookupOperand = 0, RightLookupOperand = 0, LookupOutput = 0
+            // In Jolt, these instructions decompose into virtual sequences and never
+            // appear as raw cycles, so the R1CS witness has all zeros for their operands.
+            // The RAF contribution is handled by the global prefix-suffix polynomials
+            // during address rounds, NOT by per-cycle combined_vals.
+            if (table_idx < 0) {
+                lookup_output = F.zero();
+                left_op = F.zero();
+                right_op = F.zero();
+            }
+
+            // combined = output + gamma*left + gamma^2*right
+            combined[j] = lookup_output.add(g_raf.mul(left_op)).add(g_raf2.mul(right_op));
+
+            // Determine identity path (not interleaved) based on Jolt's flags:
+            //   - AddOperands: ADD, ADDI, ADDIW, ADDW, LUI, AUIPC, JAL, JALR, Load, Store
+            //   - SubtractOperands: SUB, SUBW
+            //   - MultiplyOperands: MUL, MULHU
+            // Identity path instructions use raw operand value as lookup index (NOT interleaved).
+            // Interleaved path instructions use interleave_bits(left, right) as lookup index.
+            const is_identity_path: bool = switch (opcode) {
+                0x33 => blk: {
+                    if (funct3 == 0 and funct7 == 0) break :blk true; // ADD (AddOperands)
+                    if (funct3 == 0 and funct7 == 0x20) break :blk true; // SUB (SubtractOperands)
+                    if (funct7 == 0x01 and funct3 == 0) break :blk true; // MUL (MultiplyOperands)
+                    if (funct7 == 0x01 and funct3 == 3) break :blk true; // MULHU (MultiplyOperands)
+                    break :blk false;
+                },
+                0x13 => (funct3 == 0), // ADDI (AddOperands)
+                0x0B => true, // VirtualSignExtendWord (AddOperands)
+                0x2B => true, // VirtualMULI/Pow2/ShiftRightBitmask: all identity path (MultiplyOperands or AddOperands)
+                0x1b => (funct3 == 0), // ADDIW (AddOperands)
+                0x3b => blk: {
+                    if (funct3 == 0 and funct7 == 0) break :blk true; // ADDW (AddOperands)
+                    if (funct3 == 0 and funct7 == 0x20) break :blk true; // SUBW (SubtractOperands)
+                    break :blk false;
+                },
+                0x37 => true, // LUI (AddOperands)
+                0x17 => true, // AUIPC (AddOperands)
+                0x6f => true, // JAL (AddOperands)
+                0x67 => true, // JALR (AddOperands)
+                0x02 => true, // VirtualAdvice (Advice flag → identity path)
+                0x42 => true, // VirtualZeroExtendWord (AddOperands → identity path)
+                0x03 => false, // Load: uses (rs1, imm) format, NOT identity path
+                0x23 => false, // Store: uses (rs1, imm) format, NOT identity path
+                0x22 => (funct3 == 2 or funct3 == 3), // Alignment assertions: AddOperands (identity); AssertEQ/ValidDiv0: interleaved
+                0x62 => false, // VirtualAssertValidUnsignedRemainder: interleaved (rs1, rs2)
+                else => false,
+            };
+            is_id[j] = is_identity_path;
+
+            // Compute lookup operands and index matching Jolt's to_lookup_operands/to_lookup_index.
+            // For identity-path: left_op_raw=0, right_op_raw=computed_value, index=computed u128
+            //   Jolt's to_lookup_index() for identity-path instructions returns the raw u128 result
+            //   (NOT wrapped at 64 bits). E.g., ADD returns x as u128 + y as u64 as u128.
+            // For interleaved-path: left_op_raw=rs1, right_op_raw=rs2, index=interleave(left,right)
+            var left_op_raw: u64 = undefined;
+            var right_op_raw: u64 = undefined;
+            // lookup_idx_u128 holds the FULL u128 lookup index (not wrapped at u64)
+            var lookup_idx_u128: u128 = undefined;
+
+            if (is_identity_path) {
+                left_op_raw = 0;
+                // Compute lookup index in u128 to match Jolt's to_lookup_index()
+                // Jolt returns the raw computation result, NOT wrapped at 64 bits.
+                lookup_idx_u128 = switch (opcode) {
+                    // ADD: index = rs1 as u128 + rs2 as u128
+                    0x33 => blk128: {
+                        if (funct3 == 0 and funct7 == 0) {
+                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                        }
+                        // SUB: index = rs1 as u128 + (2^64 - rs2 as u128)
+                        if (funct3 == 0 and funct7 == 0x20) {
+                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
+                        }
+                        // MUL: index = rs1 as u128 * rs2 as u128
+                        if (funct7 == 0x01 and funct3 == 0) {
+                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                        }
+                        // MULHU: index = rs1 as u128 * rs2 as u128
+                        if (funct7 == 0x01 and funct3 == 3) {
+                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                        }
+                        break :blk128 0;
+                    },
+                    // ADDW/SUBW: same computation as ADD/SUB
+                    0x3b => blk128: {
+                        if (funct3 == 0 and funct7 == 0) {
+                            // ADDW: index = rs1 + rs2 (u128)
+                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                        }
+                        if (funct3 == 0 and funct7 == 0x20) {
+                            // SUBW: index = rs1 + 2^64 - rs2 (u128)
+                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
+                        }
+                        break :blk128 0;
+                    },
+                    // ADDI: index = rs1 + sign_ext(imm) (u128)
+                    0x13 => blk128: {
+                        const imm12_raw: u32 = @truncate(instr >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
+                    },
+                    // ADDIW: index = rs1 + sign_ext(imm) (u128)
+                    0x1b => blk128: {
+                        const imm12_raw_w: u32 = @truncate(instr >> 20);
+                        const imm_signed_w: i64 = @as(i64, @as(i32, @bitCast(imm12_raw_w << 20)) >> 20);
+                        const imm_u64_w: u64 = @bitCast(imm_signed_w);
+                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64_w);
+                    },
+                    // LUI: index = sign_ext_32_to_64(imm) as u128
+                    // Jolt sign-extends the U-type immediate via `as i32 as i64 as u64`
+                    0x37 => blk128: {
+                        const imm_u32: u32 = instr & 0xFFFFF000;
+                        const imm_sext: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32))));
+                        break :blk128 @as(u128, imm_sext);
+                    },
+                    // AUIPC: index = pc + sign_ext_32_to_64(imm) (u128)
+                    0x17 => blk128: {
+                        const imm_u32: u32 = instr & 0xFFFFF000;
+                        const imm_sext: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32))));
+                        break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_sext);
+                    },
+                    // JAL: index = pc + sign_ext(imm) (u128)
+                    0x6f => blk128: {
+                        const imm20: u32 = ((@as(u32, instr >> 31) & 1) << 19) |
+                            ((@as(u32, instr >> 12) & 0xFF) << 11) |
+                            ((@as(u32, instr >> 20) & 1) << 10) |
+                            ((@as(u32, instr >> 21) & 0x3FF));
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_u64);
+                    },
+                    // JALR: index = rs1 + sign_ext(imm) (u128)
+                    0x67 => blk128: {
+                        const imm12_raw: u32 = @truncate(instr >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
+                    },
+                    // VirtualSignExtendWord: index = rs1 (the value to sign-extend)
+                    0x0B => @as(u128, step.rs1_value),
+                    // VirtualMULI/Pow2/ShiftRightBitmask: dispatch on funct3
+                    0x2B => blk128: {
+                        if (funct3 == 0) {
+                            // VirtualMULI: index = rs1 * multiplier (u128)
+                            const shamt_raw3: u32 = instr >> 20;
+                            const shamt3: u6 = @truncate(shamt_raw3 & 0x3F);
+                            const multiplier3: u64 = @as(u64, 1) << shamt3;
+                            break :blk128 @as(u128, step.rs1_value) * @as(u128, multiplier3);
+                        } else {
+                            // VirtualPow2/VirtualShiftRightBitmask: AddOperands, index = rs1 + 0 = rs1
+                            break :blk128 @as(u128, step.rs1_value);
+                        }
+                    },
+                    // VirtualAdvice: index = advice_value (rd_value) — Jolt's to_lookup_index returns second operand
+                    0x02 => @as(u128, step.rd_value),
+                    // VirtualZeroExtendWord: index = rs1 + 0 = rs1 — Jolt's to_lookup_operands returns (0, x+y) where y=0
+                    0x42 => @as(u128, step.rs1_value),
+                    // VirtualAssertHalfwordAlignment/WordAlignment (funct3=2,3): AddOperands, index = rs1 + imm (u128)
+                    0x22 => blk128: {
+                        // Wrapping u64 addition matching tracer's lookup index
+                        const imm_u64_22 = computeUnsignedImmediate(instr);
+                        break :blk128 @as(u128, step.rs1_value +% imm_u64_22);
+                    },
+                    else => 0,
+                };
+                // right_op_raw is the lower 64 bits of the lookup index (for R1CS witness compatibility)
+                right_op_raw = @truncate(lookup_idx_u128);
+
+                // CRITICAL: For identity-path instructions, right_op must be the FULL u128
+                // lookup index as a field element, matching Jolt's to_lookup_operands() which
+                // returns u128 results. This is consistent with the RAF decomposition which
+                // uses the u128 index for the identity polynomial evaluation.
+                //
+                // The R1CS witness also uses u128 values (via computeU128LookupOperand),
+                // ensuring consistency between Stage 2 claims and Stage 5 combined_vals.
+                right_op = F.fromU128(lookup_idx_u128);
+            } else {
+                // Interleaved path: left=rs1, right=rs2 (or imm for I-type)
+                // VirtualChangeDivisorW (0x3b/f3=6/f7=1): left = rs1 as u32 as u64 (truncated to 32 bits)
+                left_op_raw = if (opcode == 0x3b and funct3 == 6 and funct7 == 0x01)
+                    step.rs1_value & 0xFFFFFFFF
+                else
+                    step.rs1_value;
+                right_op_raw = switch (opcode) {
+                    0x33, 0x3b, 0x63 => step.rs2_value,
+                    0x13 => blk: {
+                        // I-type: right operand is sign-extended immediate (as u64)
+                        const imm12_raw: u32 = @truncate(instr >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        break :blk @as(u64, @bitCast(imm_signed));
+                    },
+                    0x5B => blk5b: {
+                        if (step.rs2_read) {
+                            // VirtualSRL/VirtualSRA R-type: right operand is rs2
+                            break :blk5b step.rs2_value;
+                        } else {
+                            // VirtualSRLI/VirtualSRAI I-type: right operand is bitmask computed from total shift
+                            const ts_raw: u32 = instr >> 20;
+                            const ts: u7 = @truncate(ts_raw & 0x3F);
+                            const ones_5b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts))) - 1;
+                            break :blk5b @truncate(ones_5b << ts);
+                        }
+                    },
+                    else => step.rs2_value,
+                };
+                lookup_idx_u128 = interleaveBits128(left_op_raw, right_op_raw);
+            }
+
+            // Use the computed u128 lookup index
+            const lookup_idx: u128 = lookup_idx_u128;
+            idx_lo[j] = @truncate(lookup_idx);
+            idx_hi[j] = @truncate(lookup_idx >> 64);
+
+            // CRITICAL FIX: Instructions without a lookup table should have
+            // lookup_index = 0, matching Jolt where to_instruction_inputs() = (0, 0)
+            // and interleave(0, 0) = 0.
+            if (table_idx < 0) {
+                idx_lo[j] = 0;
+                idx_hi[j] = 0;
+            }
+
+            // NOTE: Do NOT override lookup_output with materializeTableEntry here!
+            // The initial lookups_combined_vals must match the R1CS witness polynomials
+            // (which use computeLookupOutput = rd_value for most instructions).
+            // The address round prefix-suffix decomposition uses table MLEs independently
+            // via Q arrays, and combined_vals are rematerialized at the phase transition
+            // (init_log_t_rounds) using stored_table_values for the cycle rounds.
+
+        }
+        // (generated by extracting the original sequential loop body)
 
         /// Compute immediate value from instruction, matching R1CS deriveImmediate
         /// Compute the immediate value as a field element, matching Jolt's per-format encoding.
@@ -7390,29 +7542,52 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             return result;
         }
 
-        /// Build the full EQ table for all indices 0..2^n using the doubling technique.
+        /// Build the full EQ table for all indices 0..2^n using parallel forward butterfly.
         /// O(2^n) field multiplications instead of O(n * 2^n) for element-wise computation.
         /// r is in BIG_ENDIAN order: r[0] is MSB.
         /// output must have length >= 2^r.len.
-        fn buildFullEqTable(r: []const F, output: []F) void {
+        ///
+        /// Algorithm (matches Jolt's EqPolynomial::evals_parallel):
+        /// Process r from LSB (r[n-1]) to MSB (r[0]). At each layer, the left/right
+        /// halves are independent pairs that can be parallelized.
+        fn buildFullEqTable(r: []const F, output: []F, tp: ?*ThreadPool) void {
             const n = r.len;
             if (n == 0) {
                 output[0] = F.one();
                 return;
             }
-            // Start with r[0] (MSB)
-            output[0] = F.one().sub(r[0]);
-            output[1] = r[0];
-            var size: usize = 2;
-            for (1..n) |i| {
-                const ri = r[i];
-                const one_minus_ri = F.one().sub(ri);
-                // Process in reverse to avoid overwriting source values
-                var j: usize = size;
-                while (j > 0) {
-                    j -= 1;
-                    output[2 * j + 1] = output[j].mul(ri);
-                    output[2 * j] = output[j].mul(one_minus_ri);
+            // Seed: output[0] = 1
+            output[0] = F.one();
+            var size: usize = 1;
+
+            // Process from LSB (r[n-1]) to MSB (r[0])
+            for (0..n) |i| {
+                const ri = r[n - 1 - i];
+                const left = output[0..size];
+                const right = output[size .. 2 * size];
+
+                // Each (left[j], right[j]) pair is independent
+                const PARALLEL_THRESHOLD = 256;
+                if (tp != null and size >= PARALLEL_THRESHOLD) {
+                    const EqButterflyCtx = struct {
+                        l: []F,
+                        rr: []F,
+                        r_val: F,
+                    };
+                    const ctx = EqButterflyCtx{ .l = left, .rr = right, .r_val = ri };
+                    tp.?.parallelForForce(size, ctx, struct {
+                        fn f(c: EqButterflyCtx, j: usize) void {
+                            const y = c.l[j].mul(c.r_val);
+                            c.rr[j] = y;
+                            c.l[j] = c.l[j].sub(y);
+                        }
+                    }.f);
+                } else {
+                    for (0..size) |j| {
+                        const y = left[j].mul(ri);
+                        right[j] = y;
+                        left[j] = left[j].sub(y);
+                    }
                 }
                 size *= 2;
             }
@@ -7420,12 +7595,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
         /// Build partial EQ table for first num_vars variables of r.
         /// Output has 2^num_vars entries.
-        fn buildPartialEqTable(r: []const F, num_vars: usize, output: []F) void {
+        fn buildPartialEqTable(r: []const F, num_vars: usize, output: []F, tp: ?*ThreadPool) void {
             if (num_vars == 0) {
                 output[0] = F.one();
                 return;
             }
-            buildFullEqTable(r[0..num_vars], output);
+            buildFullEqTable(r[0..num_vars], output, tp);
         }
 
         /// Compute eq(k, r[0:num_vars]) - partial eq polynomial over first num_vars variables.
@@ -7460,31 +7635,43 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         /// Compute all LT(j, r) evaluations efficiently using Jolt's algorithm
         /// Returns lt_evals where lt_evals[j] = LT(j, r) for all j in [0, 2^n)
         /// r is in BIG_ENDIAN order (MSB first)
-        fn computeAllLtEvals(allocator: Allocator, r: []const F) ![]F {
+        fn computeAllLtEvals(allocator: Allocator, r: []const F, tp: ?*ThreadPool) ![]F {
             const n = r.len;
             const size = @as(usize, 1) << @intCast(n);
             var evals = try allocator.alloc(F, size);
             @memset(evals, F.zero());
 
-            // Jolt's lt_evals algorithm:
-            // for (i, r) in r.r.iter().rev().enumerate() {
-            //     let (evals_left, evals_right) = evals.split_at_mut(1 << i);
-            //     zip(evals_left, evals_right).for_each(|(x, y)| {
-            //         *y = *x * r;
-            //         *x += *r - *y;
-            //     });
-            // }
-            // Note: r.r.iter().rev() means we process from last element to first
-            // Since r is BIG_ENDIAN (MSB first), rev gives us LSB first
+            // Jolt's lt_evals algorithm with parallel butterfly:
+            // Process r from LSB (r[n-1]) to MSB (r[0]).
+            // LT formula: right[j] = left[j] * r_i; left[j] += r_i - right[j]
 
             for (0..n) |i| {
                 const ri = r[n - 1 - i]; // Process from LSB to MSB
                 const half = @as(usize, 1) << @intCast(i);
-                for (0..half) |j| {
-                    const x = evals[j];
-                    const y = x.mul(ri);
-                    evals[half + j] = y;
-                    evals[j] = evals[j].add(ri.sub(y));
+                const left = evals[0..half];
+                const right = evals[half .. 2 * half];
+
+                const PARALLEL_THRESHOLD = 256;
+                if (tp != null and half >= PARALLEL_THRESHOLD) {
+                    const LtButterflyCtx = struct {
+                        l: []F,
+                        rr: []F,
+                        r_val: F,
+                    };
+                    const ctx = LtButterflyCtx{ .l = left, .rr = right, .r_val = ri };
+                    tp.?.parallelForForce(half, ctx, struct {
+                        fn f(c: LtButterflyCtx, j: usize) void {
+                            const y = c.l[j].mul(c.r_val);
+                            c.rr[j] = y;
+                            c.l[j] = c.l[j].add(c.r_val.sub(y));
+                        }
+                    }.f);
+                } else {
+                    for (0..half) |j| {
+                        const y = left[j].mul(ri);
+                        right[j] = y;
+                        left[j] = left[j].add(ri.sub(y));
+                    }
                 }
             }
 

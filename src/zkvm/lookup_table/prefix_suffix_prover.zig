@@ -170,6 +170,17 @@ pub fn AllSuffixPolys(comptime F: type) type {
             }
         }
 
+        // Comptime offset table: suffix_offsets[t] = cumulative suffix count before table t
+        const suffix_offsets = blk: {
+            var offsets: [NUM_TABLES + 1]usize = undefined;
+            offsets[0] = 0;
+            for (0..NUM_TABLES) |t| {
+                offsets[t + 1] = offsets[t] + tableSuffixes(t).len;
+            }
+            break :blk offsets;
+        };
+        const TOTAL_SUFFIX_POLYS: usize = suffix_offsets[NUM_TABLES];
+
         /// Initialize suffix polynomials for a specific phase
         pub fn initPhase(
             self: *Self,
@@ -178,6 +189,9 @@ pub fn AllSuffixPolys(comptime F: type) type {
             u_evals: []const F,
             lookup_indices: []const u128,
             cycle_table_indices: []const i8,
+            tp: ?*ThreadPool,
+            alloc: Allocator,
+            indices_by_table: ?*const [NUM_TABLES][]usize,
         ) !void {
             const log_m = LOG_K / phases;
             const m: usize = @as(usize, 1) << @intCast(log_m);
@@ -186,10 +200,9 @@ pub fn AllSuffixPolys(comptime F: type) type {
 
             // Initialize each table's suffix polynomials
             for (0..NUM_TABLES) |table_idx| {
-                const table_suffixes = tableSuffixes(table_idx);
-                const num_suffixes = table_suffixes.len;
+                const ts = tableSuffixes(table_idx);
+                const num_suffixes = ts.len;
 
-                // Allocate if not already done
                 if (self.tables[table_idx] == null) {
                     self.tables[table_idx] = try TableSuffixPolys(F).init(
                         self.allocator,
@@ -197,7 +210,6 @@ pub fn AllSuffixPolys(comptime F: type) type {
                         m,
                     );
                 } else {
-                    // Reset existing polynomials and restore effective length
                     for (self.tables[table_idx].?.polys) |poly| {
                         @memset(poly[0..m], F.zero());
                     }
@@ -205,58 +217,180 @@ pub fn AllSuffixPolys(comptime F: type) type {
                 }
             }
 
-            // Accumulate contributions from each cycle
-            var cycles_processed: usize = 0;
-            var non_zero_suffix_mle: usize = 0;
-            for (0..u_evals.len) |j| {
-                const table_idx = cycle_table_indices[j];
-                if (table_idx < 0) continue; // No table for this cycle
+            const T = u_evals.len;
 
-                const t_idx: usize = @intCast(table_idx);
-                if (t_idx >= NUM_TABLES) continue;
+            if (tp != null and indices_by_table != null) {
+                // Per-table parallel path: each table processes only its own cycles.
+                // No merge step needed — each table writes to its own disjoint suffix polys.
+                const PerTableCtx = struct {
+                    self_tables: *[NUM_TABLES]?TableSuffixPolys(F),
+                    u_ev: []const F,
+                    indices: []const u128,
+                    ibt: *const [NUM_TABLES][]usize,
+                    suf_len: usize,
+                    mask: u128,
+                    m_val: usize,
+                };
+                const ptctx = PerTableCtx{
+                    .self_tables = &self.tables,
+                    .u_ev = u_evals,
+                    .indices = lookup_indices,
+                    .ibt = indices_by_table.?,
+                    .suf_len = suffix_len,
+                    .mask = m_mask,
+                    .m_val = m,
+                };
+                tp.?.parallelForForce(NUM_TABLES, ptctx, struct {
+                    fn f(c: PerTableCtx, t_idx: usize) void {
+                        const table_cycle_indices = c.ibt[t_idx];
+                        if (table_cycle_indices.len == 0) return; // Empty table — polys already zero
 
-                cycles_processed += 1;
+                        const ts = tableSuffixes(t_idx);
+                        const suf_mask: u128 = (@as(u128, 1) << @intCast(c.suf_len)) - 1;
 
-                const k = lookup_indices[j];
-                const prefix_bits = (k >> @intCast(suffix_len)) & m_mask;
-                const suffix_bits_raw = k & ((@as(u128, 1) << @intCast(suffix_len)) - 1);
-                const suffix_bits = LookupBits(128).new(suffix_bits_raw, suffix_len);
+                        for (table_cycle_indices) |j| {
+                            const k = c.indices[j];
+                            const prefix_bits = (k >> @intCast(c.suf_len)) & c.mask;
+                            const suffix_bits = LookupBits(128).new(k & suf_mask, c.suf_len);
+                            const u = c.u_ev[j];
+                            const idx: usize = @intCast(prefix_bits);
 
-                const u = u_evals[j];
-                const table_suffixes = tableSuffixes(t_idx);
-
-                // Debug: print first few cycles in phase 0
-                if (phase == 0 and cycles_processed <= 5) {
-                    dbg("[SUFFIX INIT] cycle j={} t_idx={} k=0x{x:0>32} prefix_bits={} suffix_len={} suffix_raw=0x{x:0>32}\n", .{
-                        j, t_idx, k, prefix_bits, suffix_len, suffix_bits_raw,
-                    });
-                }
-
-                // Accumulate for each suffix type
-                for (table_suffixes, 0..) |suffix, s_idx| {
-                    const t = suffixMle(suffix, suffix_bits);
-                    if (t != 0) {
-                        non_zero_suffix_mle += 1;
-                        const q_poly = self.tables[t_idx].?.polys[s_idx];
-                        const idx: usize = @intCast(prefix_bits);
-                        if (suffixes_mod.is01Valued(suffix)) {
-                            // {0,1}-valued: t is 1, just add u
-                            q_poly[idx] = q_poly[idx].add(u);
-                        } else {
-                            // General suffix: multiply by t
-                            q_poly[idx] = q_poly[idx].add(u.mul(F.fromU64(t)));
+                            for (ts, 0..) |suffix, s_idx| {
+                                const t = suffixMle(suffix, suffix_bits);
+                                if (t != 0) {
+                                    const q_poly = c.self_tables[t_idx].?.polys[s_idx];
+                                    if (suffixes_mod.is01Valued(suffix)) {
+                                        q_poly[idx] = q_poly[idx].add(u);
+                                    } else {
+                                        q_poly[idx] = q_poly[idx].add(u.mul(F.fromU64(t)));
+                                    }
+                                }
+                            }
                         }
-                        // Debug: print which suffix types contribute
-                        if (phase == 0 and cycles_processed <= 5) {
-                            dbg("  suffix[{}]={s} t={} idx={}\n", .{ s_idx, @tagName(suffix), t, idx });
+                    }
+                }.f);
+            } else if (tp) |pool| {
+                // Fallback: per-chunk parallel path with sequential merge
+                const num_chunks = pool.thread_count + 1;
+                const buf_size = TOTAL_SUFFIX_POLYS * m;
+
+                const chunk_bufs = try alloc.alloc([]F, num_chunks);
+                defer alloc.free(chunk_bufs);
+                var bufs_allocated: usize = 0;
+                errdefer for (chunk_bufs[0..bufs_allocated]) |buf| alloc.free(buf);
+                for (0..num_chunks) |c| {
+                    chunk_bufs[c] = try alloc.alloc(F, buf_size);
+                    bufs_allocated = c + 1;
+                    @memset(chunk_bufs[c], F.zero());
+                }
+                defer for (chunk_bufs) |buf| alloc.free(buf);
+
+                const chunk_size = (T + num_chunks - 1) / num_chunks;
+
+                const Ctx = struct {
+                    chunk_bufs_ptr: [*][]F,
+                    u_ev: []const F,
+                    indices: []const u128,
+                    table_ids: []const i8,
+                    suf_len: usize,
+                    mask: u128,
+                    m_val: usize,
+                    total_T: usize,
+                    c_size: usize,
+                    ph: usize,
+                };
+                const ctx = Ctx{
+                    .chunk_bufs_ptr = chunk_bufs.ptr,
+                    .u_ev = u_evals,
+                    .indices = lookup_indices,
+                    .table_ids = cycle_table_indices,
+                    .suf_len = suffix_len,
+                    .mask = m_mask,
+                    .m_val = m,
+                    .total_T = T,
+                    .c_size = chunk_size,
+                    .ph = phase,
+                };
+
+                pool.parallelForForce(num_chunks, ctx, struct {
+                    fn f(c: Ctx, chunk_idx: usize) void {
+                        const start = chunk_idx * c.c_size;
+                        const end = @min(start + c.c_size, c.total_T);
+                        const buf = c.chunk_bufs_ptr[chunk_idx];
+                        const suf_mask: u128 = (@as(u128, 1) << @intCast(c.suf_len)) - 1;
+
+                        for (start..end) |j| {
+                            const ti = c.table_ids[j];
+                            if (ti < 0) continue;
+                            const t_idx: usize = @intCast(ti);
+                            if (t_idx >= NUM_TABLES) continue;
+
+                            const k = c.indices[j];
+                            const prefix_bits = (k >> @intCast(c.suf_len)) & c.mask;
+                            const suffix_bits = LookupBits(128).new(k & suf_mask, c.suf_len);
+                            const u = c.u_ev[j];
+                            const ts = tableSuffixes(t_idx);
+                            const base_offset = suffix_offsets[t_idx] * c.m_val;
+                            const idx: usize = @intCast(prefix_bits);
+
+                            for (ts, 0..) |suffix, s_idx| {
+                                const t = suffixMle(suffix, suffix_bits);
+                                if (t != 0) {
+                                    const pos = base_offset + s_idx * c.m_val + idx;
+                                    if (suffixes_mod.is01Valued(suffix)) {
+                                        buf[pos] = buf[pos].add(u);
+                                    } else {
+                                        buf[pos] = buf[pos].add(u.mul(F.fromU64(t)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }.f);
+
+                // Merge: add all chunk buffers into self.tables[t].polys[s]
+                for (0..NUM_TABLES) |t_idx| {
+                    const ts = tableSuffixes(t_idx);
+                    for (0..ts.len) |s_idx| {
+                        const q_poly = self.tables[t_idx].?.polys[s_idx];
+                        const base_offset = suffix_offsets[t_idx] * m + s_idx * m;
+                        for (chunk_bufs) |buf| {
+                            for (0..m) |p| {
+                                q_poly[p] = q_poly[p].add(buf[base_offset + p]);
+                            }
                         }
                     }
                 }
-            }
-            if (phase == 0) {
-                dbg("[SUFFIX INIT] phase={}: cycles_processed={}, non_zero_suffix_mle={}\n", .{
-                    phase, cycles_processed, non_zero_suffix_mle,
-                });
+            } else {
+                // Sequential fallback (original code)
+                for (0..T) |j| {
+                    const table_idx = cycle_table_indices[j];
+                    if (table_idx < 0) continue;
+
+                    const t_idx: usize = @intCast(table_idx);
+                    if (t_idx >= NUM_TABLES) continue;
+
+                    const k = lookup_indices[j];
+                    const prefix_bits = (k >> @intCast(suffix_len)) & m_mask;
+                    const suffix_bits_raw = k & ((@as(u128, 1) << @intCast(suffix_len)) - 1);
+                    const suffix_bits = LookupBits(128).new(suffix_bits_raw, suffix_len);
+
+                    const u = u_evals[j];
+                    const ts = tableSuffixes(t_idx);
+
+                    for (ts, 0..) |suffix, s_idx| {
+                        const t = suffixMle(suffix, suffix_bits);
+                        if (t != 0) {
+                            const q_poly = self.tables[t_idx].?.polys[s_idx];
+                            const idx: usize = @intCast(prefix_bits);
+                            if (suffixes_mod.is01Valued(suffix)) {
+                                q_poly[idx] = q_poly[idx].add(u);
+                            } else {
+                                q_poly[idx] = q_poly[idx].add(u.mul(F.fromU64(t)));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1226,7 +1360,9 @@ pub fn initQRaf(
     u_evals: []const F,
     lookup_indices: []const u128,
     is_interleaved_operands: []const bool,
-) void {
+    tp: ?*ThreadPool,
+    alloc: Allocator,
+) !void {
     std.debug.assert(left.Q_size == right.Q_size);
     std.debug.assert(left.Q_size == identity.Q_size);
 
@@ -1234,62 +1370,154 @@ pub fn initQRaf(
     const suffix_len = left.suffixLen();
     const half_suffix_len = suffix_len / 2;
 
-    // Constants for this phase
     const shift_half: u128 = @as(u128, 1) << @intCast(half_suffix_len);
     const shift_full: u128 = @as(u128, 1) << @intCast(suffix_len);
     const shift_half_f = F.fromU128(shift_half);
     const shift_full_f = F.fromU128(shift_full);
 
-    // Reset all Q accumulators
     left.resetQ();
     right.resetQ();
     identity.resetQ();
 
-    // Accumulators for the 5 distinct Q components:
-    // - sh: ShiftHalfSuffix for operands (left.Q[0], right.Q[0])
-    // - l: Left operand suffix (left.Q[1])
-    // - r: Right operand suffix (right.Q[1])
-    // - sf: ShiftFullSuffix for identity (identity.Q[0])
-    // - id: Identity suffix (identity.Q[1])
+    const T = lookup_indices.len;
 
-    for (lookup_indices, 0..) |k, j| {
-        const u = u_evals[j];
-        const suffix_bits = k & ((@as(u128, 1) << @intCast(suffix_len)) - 1);
-        const prefix_bits = (k >> @intCast(suffix_len)) & (@as(u128, poly_len) - 1);
-        const r_index: usize = @intCast(prefix_bits);
+    if (tp) |pool| {
+        // Parallel path: per-chunk local Q accumulators with merge
+        // 6 Q arrays: left.Q[0], left.Q[1], right.Q[0], right.Q[1], identity.Q[0], identity.Q[1]
+        const NUM_QS = 6;
+        const num_chunks = pool.thread_count + 1;
+        const buf_size = NUM_QS * poly_len;
+        const chunk_size = (T + num_chunks - 1) / num_chunks;
 
-        if (is_interleaved_operands[j]) {
-            // Operand path: accumulate raw u (defer shift multiply to after loop)
-            left.Q[0][r_index] = left.Q[0][r_index].add(u);
-            right.Q[0][r_index] = right.Q[0][r_index].add(u);
+        const chunk_bufs = try alloc.alloc([]F, num_chunks);
+        defer alloc.free(chunk_bufs);
+        var bufs_allocated: usize = 0;
+        errdefer for (chunk_bufs[0..bufs_allocated]) |buf| alloc.free(buf);
+        for (0..num_chunks) |c| {
+            chunk_bufs[c] = try alloc.alloc(F, buf_size);
+            bufs_allocated = c + 1;
+            @memset(chunk_bufs[c], F.zero());
+        }
+        defer for (chunk_bufs) |buf| alloc.free(buf);
 
-            // Uninterleave suffix bits to get left and right operand suffixes
-            const lo_bits = uninterleaveBitsLeft(suffix_bits, suffix_len);
-            const ro_bits = uninterleaveBitsRight(suffix_bits, suffix_len);
+        const Ctx = struct {
+            chunk_bufs_ptr: [*][]F,
+            u_ev: []const F,
+            indices: []const u128,
+            is_interleaved: []const bool,
+            suf_len: usize,
+            p_len: usize,
+            total_T: usize,
+            c_size: usize,
+        };
+        const ctx = Ctx{
+            .chunk_bufs_ptr = chunk_bufs.ptr,
+            .u_ev = u_evals,
+            .indices = lookup_indices,
+            .is_interleaved = is_interleaved_operands,
+            .suf_len = suffix_len,
+            .p_len = poly_len,
+            .total_T = T,
+            .c_size = chunk_size,
+        };
 
-            if (lo_bits != 0) {
-                left.Q[1][r_index] = left.Q[1][r_index].add(u.mul(F.fromU64(lo_bits)));
+        pool.parallelForForce(num_chunks, ctx, struct {
+            fn f(c: Ctx, chunk_idx: usize) void {
+                const start = chunk_idx * c.c_size;
+                const end = @min(start + c.c_size, c.total_T);
+                const buf = c.chunk_bufs_ptr[chunk_idx];
+                const suf_mask: u128 = (@as(u128, 1) << @intCast(c.suf_len)) - 1;
+                const p_mask: u128 = @as(u128, c.p_len) - 1;
+                // Layout: [left_Q0 | left_Q1 | right_Q0 | right_Q1 | identity_Q0 | identity_Q1]
+                const lq0 = buf[0 * c.p_len ..][0..c.p_len];
+                const lq1 = buf[1 * c.p_len ..][0..c.p_len];
+                const rq0 = buf[2 * c.p_len ..][0..c.p_len];
+                const rq1 = buf[3 * c.p_len ..][0..c.p_len];
+                const iq0 = buf[4 * c.p_len ..][0..c.p_len];
+                const iq1 = buf[5 * c.p_len ..][0..c.p_len];
+
+                for (start..end) |j| {
+                    const k = c.indices[j];
+                    const u = c.u_ev[j];
+                    const suffix_bits = k & suf_mask;
+                    const prefix_bits = (k >> @intCast(c.suf_len)) & p_mask;
+                    const ri: usize = @intCast(prefix_bits);
+
+                    if (c.is_interleaved[j]) {
+                        lq0[ri] = lq0[ri].add(u);
+                        rq0[ri] = rq0[ri].add(u);
+
+                        const lo_bits = uninterleaveBitsLeft(suffix_bits, c.suf_len);
+                        const ro_bits = uninterleaveBitsRight(suffix_bits, c.suf_len);
+
+                        if (lo_bits != 0) {
+                            lq1[ri] = lq1[ri].add(u.mul(F.fromU64(lo_bits)));
+                        }
+                        if (ro_bits != 0) {
+                            rq1[ri] = rq1[ri].add(u.mul(F.fromU64(ro_bits)));
+                        }
+                    } else {
+                        iq0[ri] = iq0[ri].add(u);
+
+                        if (suffix_bits != 0) {
+                            if (c.suf_len <= 64) {
+                                iq1[ri] = iq1[ri].add(u.mul(F.fromU64(@truncate(suffix_bits))));
+                            } else {
+                                iq1[ri] = iq1[ri].add(u.mul(F.fromU128(suffix_bits)));
+                            }
+                        }
+                    }
+                }
             }
-            if (ro_bits != 0) {
-                right.Q[1][r_index] = right.Q[1][r_index].add(u.mul(F.fromU64(ro_bits)));
-            }
-        } else {
-            // Identity path: accumulate raw u (defer shift multiply to after loop)
-            identity.Q[0][r_index] = identity.Q[0][r_index].add(u);
+        }.f);
 
-            // Identity suffix contribution
-            if (suffix_bits != 0) {
-                if (suffix_len <= 64) {
-                    identity.Q[1][r_index] = identity.Q[1][r_index].add(u.mul(F.fromU64(@truncate(suffix_bits))));
-                } else {
-                    identity.Q[1][r_index] = identity.Q[1][r_index].add(u.mul(F.fromU128(suffix_bits)));
+        // Merge chunk buffers into output Q arrays
+        for (chunk_bufs) |buf| {
+            for (0..poly_len) |i| {
+                left.Q[0][i] = left.Q[0][i].add(buf[0 * poly_len + i]);
+                left.Q[1][i] = left.Q[1][i].add(buf[1 * poly_len + i]);
+                right.Q[0][i] = right.Q[0][i].add(buf[2 * poly_len + i]);
+                right.Q[1][i] = right.Q[1][i].add(buf[3 * poly_len + i]);
+                identity.Q[0][i] = identity.Q[0][i].add(buf[4 * poly_len + i]);
+                identity.Q[1][i] = identity.Q[1][i].add(buf[5 * poly_len + i]);
+            }
+        }
+    } else {
+        // Sequential fallback (original code)
+        for (lookup_indices, 0..) |k, j| {
+            const u = u_evals[j];
+            const suffix_bits = k & ((@as(u128, 1) << @intCast(suffix_len)) - 1);
+            const prefix_bits = (k >> @intCast(suffix_len)) & (@as(u128, poly_len) - 1);
+            const r_index: usize = @intCast(prefix_bits);
+
+            if (is_interleaved_operands[j]) {
+                left.Q[0][r_index] = left.Q[0][r_index].add(u);
+                right.Q[0][r_index] = right.Q[0][r_index].add(u);
+
+                const lo_bits = uninterleaveBitsLeft(suffix_bits, suffix_len);
+                const ro_bits = uninterleaveBitsRight(suffix_bits, suffix_len);
+
+                if (lo_bits != 0) {
+                    left.Q[1][r_index] = left.Q[1][r_index].add(u.mul(F.fromU64(lo_bits)));
+                }
+                if (ro_bits != 0) {
+                    right.Q[1][r_index] = right.Q[1][r_index].add(u.mul(F.fromU64(ro_bits)));
+                }
+            } else {
+                identity.Q[0][r_index] = identity.Q[0][r_index].add(u);
+
+                if (suffix_bits != 0) {
+                    if (suffix_len <= 64) {
+                        identity.Q[1][r_index] = identity.Q[1][r_index].add(u.mul(F.fromU64(@truncate(suffix_bits))));
+                    } else {
+                        identity.Q[1][r_index] = identity.Q[1][r_index].add(u.mul(F.fromU128(suffix_bits)));
+                    }
                 }
             }
         }
     }
 
     // Deferred shift multiply: apply shift constants once per bucket instead of per cycle.
-    // This converts O(T) field muls into O(poly_len) field muls.
     if (shift_half != 1) {
         for (0..poly_len) |i| {
             left.Q[0][i] = left.Q[0][i].mul(shift_half_f);
@@ -1962,7 +2190,7 @@ test "initQRaf basic" {
     const lookup_indices = [_]u128{ 0x0, 0x0 }; // Both at index 0
     const is_interleaved = [_]bool{ true, false };
 
-    initQRaf(F, &left, &right, &identity, &u_evals, &lookup_indices, &is_interleaved);
+    try initQRaf(F, &left, &right, &identity, &u_evals, &lookup_indices, &is_interleaved, null, allocator);
 
     // Interleaved cycle should contribute to left/right Q[0] (shift) and Q[1] (operand)
     // Identity cycle should contribute to identity Q[0] (shift) and Q[1] (identity)

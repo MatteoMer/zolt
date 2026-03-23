@@ -303,15 +303,12 @@ pub fn AllSuffixPolys(comptime F: type) type {
                                 }
                             }
 
-                            // General suffixes — accumulate u*t using Montgomery mul
-                            // (unreduced mulU64Unreduced has precision issues with large T — use safe path)
+                            // General suffixes — multiply u by t (unreduced, no Montgomery)
                             for (0..suffix_other_count) |i| {
                                 const s_idx = suffix_other_indices[i];
                                 const t = suffixMle(ts[s_idx], suffix_bits);
                                 if (t != 0) {
-                                    // Use Montgomery mul, then add to unreduced buffer via addBigInt4
-                                    const product = u.mul(F.fromU64(t));
-                                    c.ubuf[base + s_idx * c.m_val + idx].addBigInt4(product.limbs);
+                                    c.ubuf[base + s_idx * c.m_val + idx].addAssign(field_mod.mulU64Unreduced(u, t));
                                 }
                             }
                         }

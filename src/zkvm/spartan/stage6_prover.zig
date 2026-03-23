@@ -3089,7 +3089,6 @@ pub fn buildBytecodeEntries(
     // the preprocessing and raw-byte path disagree on address or variant.
     if (bytecode_preprocessing) |prep| {
         var sync_count: usize = 0;
-        std.debug.print("[SYNC] prep.bytecode.items.len={}, bytecode_K={}\n", .{prep.bytecode.items.len, bytecode_K});
         for (0..@min(bytecode_K, prep.bytecode.items.len)) |k| {
             const prep_instr = prep.bytecode.items[k];
             const prep_addr = prep_instr.address;
@@ -3103,11 +3102,6 @@ pub fn buildBytecodeEntries(
             if (prep_addr == entry_addr and entry_addr == 0) continue;
 
             sync_count += 1;
-            if (sync_count <= 50) {
-                std.debug.print("[SYNC] k={} prep_addr=0x{x} entry_addr=0x{x} prep_variant={} is_noop={} is_unimpl={}\n", .{
-                    k, prep_addr, entry_addr, @intFromEnum(prep_instr.variant), is_prep_noop, is_prep_unimpl,
-                });
-            }
 
             // Addresses differ — sync to match preprocessing
             if (is_prep_noop) {
@@ -5855,16 +5849,6 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 // If we use external claims that differ from the actual polynomial sum,
                 // the sumcheck will be inconsistent.
                 stage_claims_init[s] = recomputed_claim;
-                // Always print stage match
-                const s6_init_match = recomputed_claim.eql(external_stage_claims[s]);
-                std.debug.print("[S6_INIT] stage {}: match={}\n", .{s, s6_init_match});
-                if (!s6_init_match) {
-                    std.debug.print("[S6_INIT] recomp=0x", .{});
-                    for (recomputed_claim.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n[S6_INIT] extern=0x", .{});
-                    for (external_stage_claims[s].toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
 
                 // Debug: Check if recomputed matches external
                 if (comptime debug_verbose) {
@@ -6331,63 +6315,11 @@ fn BytecodeReadRafProver(comptime F: type) type {
             }
 
             // Debug: verify Π_i ra_chunk_i(c) = eq_addr[PC(c)] for each cycle
-            // ALWAYS ON: check ALL cycles to find mismatches
-            {
+            // Debug: verify RA product vs eq_binding (behind comptime debug_verbose)
+            if (comptime debug_verbose) {
                 // Check RA product vs eq_binding (using LH challenges directly)
                 const eq_binding_check = try computeEqTableParallel(F, self.allocator, r_address_challenges, self.bytecode_log_k, self.pool);
                 defer self.allocator.free(eq_binding_check);
-                var binding_mismatch: usize = 0;
-                for (0..@min(10, T)) |cc| {
-                    var ra_prod_cc = F.one();
-                    for (0..self.bytecode_d) |di| ra_prod_cc = ra_prod_cc.mul(self.ra_chunks.?[di][cc]);
-                    const step_cc = self.trace.steps.items[cc];
-                    const pc_cc = self.pc_map.getPCForStep(step_cc);
-                    const eq_bind_val = if (pc_cc < bytecode_K) eq_binding_check[pc_cc] else F.zero();
-                    if (!ra_prod_cc.eql(eq_bind_val)) {
-                        binding_mismatch += 1;
-                        if (binding_mismatch <= 3) {
-                            std.debug.print("[RA_BIND_CHECK] c={} pc={} ra_prod≠eq_binding\n", .{cc, pc_cc});
-                        }
-                    }
-                }
-                // Full check
-                var full_bind_mm: usize = 0;
-                for (0..T) |cc2| {
-                    var ra_prod2 = F.one();
-                    for (0..self.bytecode_d) |di| ra_prod2 = ra_prod2.mul(self.ra_chunks.?[di][cc2]);
-                    const step2 = self.trace.steps.items[cc2];
-                    const pc2 = self.pc_map.getPCForStep(step2);
-                    const eb2 = if (pc2 < bytecode_K) eq_binding_check[pc2] else F.zero();
-                    if (!ra_prod2.eql(eb2)) full_bind_mm += 1;
-                }
-                std.debug.print("[RA_BIND_CHECK] total: {}/{} mismatches vs eq_binding(LH)\n", .{full_bind_mm, T});
-                // Verify per-stage and combined consistency
-                {
-                    // Method A: Σ_s bv[s]*Σeq_s*Πra
-                    var method_a = F.zero();
-                    for (0..5) |ss| {
-                        var ss_sum = F.zero();
-                        for (0..T) |cc3| {
-                            var rp3 = F.one();
-                            for (0..self.bytecode_d) |di3| rp3 = rp3.mul(self.ra_chunks.?[di3][cc3]);
-                            ss_sum = ss_sum.add(eq_per_stage[ss][cc3].mul(rp3));
-                        }
-                        method_a = method_a.add(bound_vals[ss].mul(ss_sum));
-                    }
-                    // Method B: Σ combined[c]*Πra
-                    var method_b = F.zero();
-                    for (0..T) |cc4| {
-                        var rp4 = F.one();
-                        for (0..self.bytecode_d) |di4| rp4 = rp4.mul(self.ra_chunks.?[di4][cc4]);
-                        method_b = method_b.add(self.combined.?[cc4].mul(rp4));
-                    }
-                    std.debug.print("[COMBINED_CHECK] methodA==methodB? {}\n", .{method_a.eql(method_b)});
-                    std.debug.print("[COMBINED_CHECK] methodA==inst0? {}\n", .{method_a.eql(self.gamma_powers[0].mul(self.stage_claims[0]).add(self.gamma_powers[1].mul(self.stage_claims[1])).add(self.gamma_powers[2].mul(self.stage_claims[2])).add(self.gamma_powers[3].mul(self.stage_claims[3])).add(self.gamma_powers[4].mul(self.stage_claims[4])))});
-                }
-
-                std.debug.print("[BCRAF_RA] bytecode_d={} log_k_chunk={} bytecode_log_k={} T={}\n", .{
-                    self.bytecode_d, self.log_k_chunk, self.bytecode_log_k, T,
-                });
                 var mismatch_count: usize = 0;
                 for (0..T) |c| {
                     var ra_prod = F.one();
@@ -6396,47 +6328,10 @@ fn BytecodeReadRafProver(comptime F: type) type {
                     }
                     const step = self.trace.steps.items[c];
                     const pc = self.pc_map.getPCForStep(step);
-                    const full_eq = if (pc < bytecode_K) eq_addr[pc] else F.zero();
-                    const match_c = if (ra_prod.eql(full_eq)) @as(u8, 1) else @as(u8, 0);
-                    if (match_c == 0) mismatch_count += 1;
-                    if (match_c == 0 and mismatch_count <= 5) {
-                        // Print mismatch details (limited to first 5)
-                        const rp_be = ra_prod.toBytesBE();
-                        const fe_be = full_eq.toBytesBE();
-                        dbg("[BCRAF_RA_MISMATCH] c={} pc={} ra_prod_LE=[", .{ c, pc });
-                        for (0..8) |bi| dbg("{x:0>2}", .{rp_be[31 - bi]});
-                        dbg("] eq_addr[pc]_LE=[", .{});
-                        for (0..8) |bi| dbg("{x:0>2}", .{fe_be[31 - bi]});
-                        dbg("]\n", .{});
-                        // Print per-chunk values
-                        for (0..self.bytecode_d) |i| {
-                            const cv = extractChunkMSB(@intCast(pc), i, self.bytecode_d, self.log_k_chunk);
-                            const rv = self.ra_chunks.?[i][c];
-                            const rv_be = rv.toBytesBE();
-                            dbg("[BCRAF_RA_MISMATCH]   chunk[{}] chunk_val={} ra_LE=[", .{ i, cv });
-                            for (0..8) |bi| dbg("{x:0>2}", .{rv_be[31 - bi]});
-                            dbg("]\n", .{});
-                        }
-                    }
+                    const full_eq = if (pc < bytecode_K) eq_binding_check[pc] else F.zero();
+                    if (!ra_prod.eql(full_eq)) mismatch_count += 1;
                 }
-                std.debug.print("[BCRAF_RA] total mismatches: {}/{}\n", .{ mismatch_count, T });
-
-                // Also check Σ_c eq_s(c) * eq_addr[PC(c)] vs F_s_bound for stage 0
-                var direct_sum = F.zero();
-                for (0..T) |c| {
-                    const step = self.trace.steps.items[c];
-                    const pc = self.pc_map.getPCForStep(step);
-                    if (pc < bytecode_K) {
-                        direct_sum = direct_sum.add(eq_per_stage[0][c].mul(eq_addr[pc]));
-                    }
-                }
-                const ds_be = direct_sum.toBytesBE();
-                const fb_be = self.F_s_arrs[0][0].toBytesBE();
-                dbg("[BCRAF_RA] stage0: Σeq_s*eq_addr[PC]_LE=[", .{});
-                for (0..8) |bi| dbg("{x:0>2}", .{ds_be[31 - bi]});
-                dbg("] F_s_bound_LE=[", .{});
-                for (0..8) |bi| dbg("{x:0>2}", .{fb_be[31 - bi]});
-                dbg("] match={}\n", .{if (direct_sum.eql(self.F_s_arrs[0][0])) @as(u8, 1) else @as(u8, 0)});
+                dbg("[BCRAF_RA] total mismatches: {}/{}\n", .{ mismatch_count, T });
             }
 
             // Debug: verify the claim after transition - PER STAGE
@@ -6493,39 +6388,9 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 self.allocator.free(eq_per_stage[s]);
             }
 
-            // Save F_s[0] before freeing and verify product identity
+            // Save F_s[0] before freeing
             for (0..5) |s| {
                 self.f_s_bound_saved[s] = if (self.F_s_arrs[s].len > 0) self.F_s_arrs[s][0] else F.zero();
-                {
-                    const fs = self.f_s_bound_saved[s];
-                    const vwr = self.val_with_raf[s][0];
-                    const product = fs.mul(vwr);
-                    const claim = self.stage_claims[s];
-                    std.debug.print("[TRANS_DBG] stage[{}]: F*V==claim? {} bv*Fs=0x", .{s, product.eql(claim)});
-                    const bv_fs = bound_vals[s].mul(fs);
-                    for (bv_fs.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
-            }
-
-            // Verify Σ bv*Fs = aggregate claim
-            {
-                var sum_bv_fs = F.zero();
-                for (0..5) |s| {
-                    sum_bv_fs = sum_bv_fs.add(bound_vals[s].mul(self.f_s_bound_saved[s]));
-                }
-                var agg_claim = F.zero();
-                for (0..5) |s| {
-                    agg_claim = agg_claim.add(self.gamma_powers[s].mul(self.stage_claims[s]));
-                }
-                std.debug.print("[TRANS_VERIFY] Σbv*Fs == Σgamma*claims? {}\n", .{sum_bv_fs.eql(agg_claim)});
-                if (!sum_bv_fs.eql(agg_claim)) {
-                    std.debug.print("[TRANS_VERIFY] Σbv*Fs=0x", .{});
-                    for (sum_bv_fs.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n[TRANS_VERIFY] aggclm=0x", .{});
-                    for (agg_claim.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
             }
 
             // Free Phase 1 arrays (no longer needed)
@@ -7178,12 +7043,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             defer lookups_ra_prover.deinit();
 
             // Verify: eq table partition of unity (Σ eq[j] = 1)
-            {
+            if (comptime debug_verbose) {
                 var eq_sum = F.zero();
                 for (0..lookups_ra_prover.current_len) |j| {
                     eq_sum = eq_sum.add(lookups_ra_prover.e_out[j]);
                 }
-                std.debug.print("[LR_EQ] Σeq==1? {} T={}\n", .{eq_sum.eql(F.one()), lookups_ra_prover.current_len});
+                dbg("[LR_EQ] Σeq==1? {} T={}\n", .{eq_sum.eql(F.one()), lookups_ra_prover.current_len});
             }
 
             // Instance 2: Booleanity (degree 3, two-phase)
@@ -7561,44 +7426,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     val5 = val5.add(stage5_gammas[2 + @as(usize, entry.lookup_table_index)]);
                 }
                 bytecode_val_polys[4][k] = val5;
-            }
-
-            // Print val[0] and val[4] for comparison with Jolt verifier
-            {
-                for (0..bytecode_K) |k| {
-                    if (k >= bytecode_entries.len) break;
-                    const entry = bytecode_entries[k];
-                    if (entry.address == 0) continue;
-                    const be = bytecode_val_polys[0][k].toBytesBE();
-                    std.debug.print("[ZV0] k={} v=0x", .{k});
-                    for (be) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                    // Also print stage 4 val
-                    const be4 = bytecode_val_polys[4][k].toBytesBE();
-                    std.debug.print("[ZV4] k={} v=0x", .{k});
-                    for (be4) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
-                // Print detail for first few mismatched entries and stage1_gammas
-                std.debug.print("[DIAG_GAMMA] stage1_gammas:\n", .{});
-                for (0..16) |gi| {
-                    const gbe = stage1_gammas[gi].toBytesBE();
-                    std.debug.print("  g1[{}]=0x", .{gi});
-                    for (gbe) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
-                // Print bytecode entry details for problem indices
-                for ([_]usize{ 1334, 1335, 1336, 1337, 1338 }) |dk| {
-                    if (dk >= bytecode_entries.len) continue;
-                    const de = bytecode_entries[dk];
-                    std.debug.print("[DIAG_ENTRY] k={} addr=0x{x} op=0x{x:0>2} f3={} imm={} vsr={?} first={} cf=[", .{
-                        dk, de.address, de.opcode, de.funct3, de.imm, de.virtual_sequence_remaining, de.is_first_in_sequence,
-                    });
-                    for (0..14) |fi| {
-                        if (de.circuit_flags[fi]) std.debug.print("1", .{}) else std.debug.print("0", .{});
-                    }
-                    std.debug.print("] lt={}\n", .{de.lookup_table_index});
-                }
             }
 
             // Debug: Print Stage 3 Val poly for comparison with Jolt verifier
@@ -8455,9 +8282,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
             var instance_claims: [6]F = input_claims;
             var current_batched_claim = batched_claim;
-            std.debug.print("[ZV_S6] initial_claim=0x", .{});
-            for (batched_claim.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-            std.debug.print("\n", .{});
 
             const num_compressed = max_degree;
 
@@ -8560,24 +8384,11 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             for (0..mono.len) |ci| {
                                 combined_coeffs[ci] = combined_coeffs[ci].add(batch[inst].mul(mono[ci]));
                             }
-                            // Verify: mono represents the correct polynomial
-                            if (round == 11) {
-                                var mono_p01 = mono[0].add(mono[0]); // 2*c0
-                                for (1..mono.len) |ci| mono_p01 = mono_p01.add(mono[ci]); // + c1 + ... + cd
-                                std.debug.print("[R11_INST0] mono p(0)+p(1)==inst[0]? {} polys_len={} mono_len={}\n", .{
-                                    mono_p01.eql(instance_claims[0]), polys.len, mono.len,
-                                });
-                            }
                         }
                     }
                 }
 
                 dbg_inst_p0[0] = combined_coeffs[0];
-                if (round == 11) {
-                    var run_p01 = combined_coeffs[0].add(combined_coeffs[0]);
-                    for (1..max_degree + 1) |ci_v| run_p01 = run_p01.add(combined_coeffs[ci_v]);
-                    std.debug.print("[R11_RUN] after inst0: p01==batch[0]*inst[0]? {}\n", .{run_p01.eql(batch[0].mul(instance_claims[0]))});
-                }
                 dbg_inst_p1[0] = combined_coeffs[1];
 
                 if (debug_r5) {
@@ -8619,13 +8430,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
                 dbg_inst_p0[1] = combined_coeffs[0];
-                if (round == 11) {
-                    var run_p01 = combined_coeffs[0].add(combined_coeffs[0]);
-                    for (1..max_degree + 1) |ci_v| run_p01 = run_p01.add(combined_coeffs[ci_v]);
-                    var exp = F.zero();
-                    for (0..2) |bi| exp = exp.add(batch[bi].mul(instance_claims[bi]));
-                    std.debug.print("[R11_RUN] after inst1: match? {}\n", .{run_p01.eql(exp)});
-                }
                 dbg_inst_p1[1] = combined_coeffs[1];
 
                 if (debug_r5) {
@@ -8653,13 +8457,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
                 dbg_inst_p0[2] = combined_coeffs[0];
-                if (round == 11) {
-                    var rp = combined_coeffs[0].add(combined_coeffs[0]);
-                    for (1..max_degree + 1) |ci_v| rp = rp.add(combined_coeffs[ci_v]);
-                    var ep = F.zero();
-                    for (0..3) |bi| ep = ep.add(batch[bi].mul(instance_claims[bi]));
-                    std.debug.print("[R11_RUN] after inst2: match? {}\n", .{rp.eql(ep)});
-                }
                 dbg_inst_p1[2] = combined_coeffs[1];
 
                 if (debug_r5) {
@@ -8710,13 +8507,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
                 dbg_inst_p0[3] = combined_coeffs[0];
-                if (round == 11) {
-                    var rp3 = combined_coeffs[0].add(combined_coeffs[0]);
-                    for (1..max_degree + 1) |ci_v| rp3 = rp3.add(combined_coeffs[ci_v]);
-                    var ep3 = F.zero();
-                    for (0..4) |bi| ep3 = ep3.add(batch[bi].mul(instance_claims[bi]));
-                    std.debug.print("[R11_RUN] after inst3: match? {}\n", .{rp3.eql(ep3)});
-                }
                 dbg_inst_p1[3] = combined_coeffs[1];
 
                 if (debug_r5) {
@@ -8760,28 +8550,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         // Convert evaluations to monomial coefficients and add to combined_coeffs
                         const mono = try UniPoly(F).fromEvalsVandermonde(self.allocator, polys);
                         defer self.allocator.free(mono);
-                        if (round == 11) {
-                            // Verify: mono p(0)+p(1) should = inst[4]
-                            var m_p01 = mono[0].add(mono[0]);
-                            for (1..mono.len) |ci| m_p01 = m_p01.add(mono[ci]);
-                            std.debug.print("[R11_INST4] polys.len={} mono.len={} p(0)+p(1)==inst[4]? {}\n", .{polys.len, mono.len, m_p01.eql(instance_claims[inst])});
-                            // Also check evals directly
-                            const direct_p01 = polys[0].add(polys[1]);
-                            std.debug.print("[R11_INST4] polys[0]+polys[1]==inst[4]? {}\n", .{direct_p01.eql(instance_claims[inst])});
-                        }
                         for (0..mono.len) |ci| {
                             combined_coeffs[ci] = combined_coeffs[ci].add(batch[inst].mul(mono[ci]));
                         }
                     }
                 }
                 dbg_inst_p0[4] = combined_coeffs[0];
-                if (round == 11) {
-                    var rp4 = combined_coeffs[0].add(combined_coeffs[0]);
-                    for (1..max_degree + 1) |ci_v| rp4 = rp4.add(combined_coeffs[ci_v]);
-                    var ep4 = F.zero();
-                    for (0..5) |bi| ep4 = ep4.add(batch[bi].mul(instance_claims[bi]));
-                    std.debug.print("[R11_RUN] after inst4: match? {}\n", .{rp4.eql(ep4)});
-                }
                 dbg_inst_p1[4] = combined_coeffs[1];
 
                 if (debug_r5) {
@@ -8833,13 +8607,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
                 dbg_inst_p0[5] = combined_coeffs[0];
-                if (round == 11) {
-                    var run_p01_final = combined_coeffs[0].add(combined_coeffs[0]);
-                    for (1..max_degree + 1) |ci_v| run_p01_final = run_p01_final.add(combined_coeffs[ci_v]);
-                    var exp_all = F.zero();
-                    for (0..6) |bi| exp_all = exp_all.add(batch[bi].mul(instance_claims[bi]));
-                    std.debug.print("[R11_RUN] after inst5 (ALL): match? {}\n", .{run_p01_final.eql(exp_all)});
-                }
                 dbg_inst_p1[5] = combined_coeffs[1];
 
                 if (debug_r5) {
@@ -8985,72 +8752,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     compressed[ci_idx] = combined_coeffs[ci_idx + 1]; // c2, c3, ..., c_d
                 }
 
-                // Verify sumcheck invariant: p(0)+p(1) == batched_claim
-                if (round == 11) {
-                    var p01_from_coeffs = combined_coeffs[0].add(combined_coeffs[0]);
-                    for (1..max_degree + 1) |ci_v| p01_from_coeffs = p01_from_coeffs.add(combined_coeffs[ci_v]);
-                    // Print per-coefficient values
-                    for (0..max_degree + 1) |ci_v| {
-                        std.debug.print("[R11_COEFF] c[{}]=0x", .{ci_v});
-                        for (combined_coeffs[ci_v].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                        std.debug.print("\n", .{});
-                    }
-                    // Also compute Σ batch*instance_claims directly
-                    var bi_sum = F.zero();
-                    for (0..6) |bi| bi_sum = bi_sum.add(batch[bi].mul(instance_claims[bi]));
-                    // Check if any combined_coeffs entry is suspiciously large
-                    std.debug.print("[R11_DETAIL] p(0)+p(1)=0x", .{});
-                    for (p01_from_coeffs.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print(" Σbi=0x", .{});
-                    for (bi_sum.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print(" claim=0x", .{});
-                    for (current_batched_claim.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                    // Verify: recalculate
-                    // For each instance that contributed, the p(1) = sum of all monomial coeffs
-                    // and p(0) = c0. So p(0)+p(1) = 2*c0 + c1 + c2 + ... + cd.
-                    // If instance i contributes mono_i coefficients, the batch-weighted p(0)+p(1)
-                    // should be Σ batch[i]*instance_claims[i].
-
-                    // But combined_coeffs is the SUM of all batch*mono, so checking the total is enough.
-                    // Let's instead check if the INACTIVE handling is correct.
-                    // At round 11, all instances should be active. Let me verify:
-                    for (0..6) |ii| {
-                        const rem = max_num_rounds - round;
-                        const active = rem <= num_rounds_arr[ii];
-                        if (!active) {
-                            std.debug.print("[R11] inst[{}] INACTIVE! remaining={} num_rounds={}\n", .{ii, rem, num_rounds_arr[ii]});
-                        }
-                    }
-
-                    // Check per-instance contributions
-                    // combined_coeffs = Σ batch[i]*per_instance_coeffs[i]
-                    // For each instance: p_i(0)+p_i(1) should = instance_claims[i]
-                    // After batching: p(0)+p(1) should = Σ batch[i]*instance_claims[i]
-                    var poly_sum = combined_coeffs[0].add(combined_coeffs[0]);
-                    for (1..max_degree + 1) |ci_v| poly_sum = poly_sum.add(combined_coeffs[ci_v]);
-                    var batch_inst_sum = F.zero();
-                    for (0..6) |bi| batch_inst_sum = batch_inst_sum.add(batch[bi].mul(instance_claims[bi]));
-                    const diff = poly_sum.sub(batch_inst_sum);
-                    std.debug.print("[R11] diff=0x", .{});
-                    for (diff.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                    // Check: is diff a multiple of one specific batch[i]?
-                    for (0..6) |bi| {
-                        const bi_inv = batch[bi].inverse().?;
-                        const inst_diff = diff.mul(bi_inv);
-                        // If inst_diff is small (fits in 64 bits), it's a candidate
-                        const be = inst_diff.toBytesBE();
-                        var is_small = true;
-                        for (0..24) |j| { if (be[j] != 0) { is_small = false; break; } }
-                        if (is_small) {
-                            std.debug.print("[R11] diff/batch[{}] is small: 0x", .{bi});
-                            for (be[24..32]) |b| std.debug.print("{x:0>2}", .{b});
-                            std.debug.print("\n", .{});
-                        }
-                    }
-                }
-
                 // Debug: print compressed coefficients LE for ALL rounds
                 if (comptime debug_verbose) {
                     var c_idx: usize = 0;
@@ -9173,14 +8874,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         }
                         bytecode_addr_challenges[bytecode_prover.addr_rounds_done] = challenge;
                         bytecode_prover.bindChallengePhase1(challenge, cached_bc_phase1_per_stage);
-                        // Check: inst0 == Σgamma*claims after bind?
-                        {
-                            var ac2 = F.zero();
-                            for (0..5) |si3| ac2 = ac2.add(bytecode_prover.gamma_powers[si3].mul(bytecode_prover.stage_claims[si3]));
-                            if (!instance_claims[0].eql(ac2)) {
-                                std.debug.print("[AGG_DIVERGE] round={} inst0≠Σgamma*claims!\n", .{round});
-                            }
-                        }
                         if (comptime debug_verbose) {
                             // Check invariant: instance_claims[0] == Σ gamma^s * stage_claims[s]
                             var agg_check = F.zero();
@@ -9235,59 +8928,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 }
                             }
                             try bytecode_prover.transitionToPhase2(bytecode_addr_challenges);
-                            // ALWAYS check Phase 2 consistency
-                            {
-                                const bc_c = bytecode_prover.combined.?;
-                                const bc_r = bytecode_prover.ra_chunks.?;
-                                const bc_T = bytecode_prover.current_len;
-                                var p2sum = F.zero();
-                                for (0..bc_T) |cc| {
-                                    var rp = F.one();
-                                    for (0..bytecode_prover.bytecode_d) |di| rp = rp.mul(bc_r[di][cc]);
-                                    p2sum = p2sum.add(bc_c[cc].mul(rp));
-                                }
-                                const p2_match = instance_claims[0].eql(p2sum);
-                                // Also check: inst0 == Σgamma*claims?
-                                var agg_chk = F.zero();
-                                for (0..5) |si2| agg_chk = agg_chk.add(bytecode_prover.gamma_powers[si2].mul(bytecode_prover.stage_claims[si2]));
-                                std.debug.print("[P2_CHECK] match={} inst0==Σgamma*claims? {} p2sum==agg? {}\n", .{p2_match, instance_claims[0].eql(agg_chk), p2sum.eql(agg_chk)});
-                                // Is combined the same as what we verified in transition?
-                                std.debug.print("[P2_CHECK] combined[0]=0x", .{});
-                                for (bc_c[0].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                                std.debug.print(" ra[0][0]=0x", .{});
-                                for (bc_r[0][0].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                                std.debug.print("\n", .{});
-                                if (!p2_match) {
-                                    // Per-stage: Σeq*Πra vs F_s_bound
-                                    for (0..5) |si| {
-                                        var stg_sum = F.zero();
-                                        for (0..bc_T) |cc2| {
-                                            var rp2 = F.one();
-                                            for (0..bytecode_prover.bytecode_d) |di2| rp2 = rp2.mul(bc_r[di2][cc2]);
-                                            stg_sum = stg_sum.add(bc_c[cc2].mul(rp2)); // Wrong — this is combined*ra not eq_s*ra
-                                        }
-                                        // Actually compute combined contribution per stage is complex.
-                                        // Let's just check bv[s] * Σeq * Πra instead
-                                        const fs_saved = bytecode_prover.f_s_bound_saved[si];
-                                        const bv_s = bytecode_prover.bound_vals_stored[si];
-                                        std.debug.print("[P2_CHECK] stage[{}]: F_s_bound=0x", .{si});
-                                        for (fs_saved.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                                        std.debug.print(" bv=0x", .{});
-                                        for (bv_s.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                                        std.debug.print("\n", .{});
-                                    }
-                                    // Recompute claim from bv*F_s
-                                    var recomp = F.zero();
-                                    for (0..5) |si| {
-                                        recomp = recomp.add(bytecode_prover.bound_vals_stored[si].mul(bytecode_prover.f_s_bound_saved[si]));
-                                    }
-                                    std.debug.print("[P2_CHECK] Σbv*Fs =0x", .{});
-                                    for (recomp.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                                    std.debug.print("\n[P2_CHECK] inst0   =0x", .{});
-                                    for (instance_claims[0].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                                    std.debug.print("\n[P2_CHECK] bv*Fs==inst0? {}\n", .{recomp.eql(instance_claims[0])});
-                                }
-                            }
                             if (comptime debug_verbose) {
                                 // After transition, check Phase 2 polynomial sum
                                 const bc_combined = bytecode_prover.combined.?;
@@ -9317,21 +8957,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         cached_bc_phase2 = null;
                         bytecode_prover.bindChallengePhase2(challenge);
 
-                        // Verify polynomial sum after binding
-                        {
-                            const bc_c2 = bytecode_prover.combined.?;
-                            const bc_r2 = bytecode_prover.ra_chunks.?;
-                            const bc_T2 = bytecode_prover.current_len;
-                            var p2sum2 = F.zero();
-                            for (0..bc_T2) |cc2| {
-                                var rp2 = F.one();
-                                for (0..bytecode_prover.bytecode_d) |di2| rp2 = rp2.mul(bc_r2[di2][cc2]);
-                                p2sum2 = p2sum2.add(bc_c2[cc2].mul(rp2));
-                            }
-                            if (!instance_claims[0].eql(p2sum2)) {
-                                std.debug.print("[P2_ROUND_ERR] round={} inst0 != poly_sum\n", .{round});
-                            }
-                        }
                     }
                 }
 
@@ -9391,33 +9016,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // instance_claims[i] = input_claims[i] = the correct unscaled claim.
             }
 
-            // Always print final instance claims for comparison with verifier
-            {
-                std.debug.print("\n[S6P_FINAL] Instance claims (hex LE) after sumcheck:\n", .{});
-                for (0..6) |i| {
-                    const be = instance_claims[i].toBytesBE();
-                    std.debug.print("  inst[{}] = 0x", .{i});
-                    for (be) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
-                const bb = current_batched_claim.toBytesBE();
-                std.debug.print("  output  = 0x", .{});
-                for (bb) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n", .{});
-                // Verify output == Σ batch*inst
-                var expected_out = F.zero();
-                for (0..6) |bi| expected_out = expected_out.add(batch[bi].mul(instance_claims[bi]));
-                std.debug.print("  Σb*i   = 0x", .{});
-                for (expected_out.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n  match   = {}\n", .{expected_out.eql(current_batched_claim)});
-                // Also print batch coefficients
-                for (0..6) |i| {
-                    const batchb = batch[i].toBytesBE();
-                    std.debug.print("  batch[{}] = 0x", .{i});
-                    for (batchb) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
-            }
 
             // ====================================================================
             // Extract opening claims from all real provers
@@ -9762,15 +9360,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var bc_ra_prod = F.one();
                 for (bytecode_ra_claims) |c| bc_ra_prod = bc_ra_prod.mul(c);
                 const bc_recomputed = bc_combined_val.mul(bc_ra_prod);
-                // Always print for comparison with verifier
-                std.debug.print("[ZV_BCRAF] val={any}\n", .{bc_combined_val.toBytesBE()});
-                std.debug.print("[ZV_BCRAF] d={}\n", .{bytecode_d});
-                for (0..bytecode_d) |ra_idx| {
-                    std.debug.print("[ZV_BCRAF] ra_claim[{}]={any}\n", .{ra_idx, bytecode_ra_claims[ra_idx].toBytesBE()});
-                }
-                std.debug.print("[ZV_BCRAF] result={any}\n", .{bc_recomputed.toBytesBE()});
-                std.debug.print("[ZV_BCRAF] inst0={any}\n", .{instance_claims[0].toBytesBE()});
-                std.debug.print("[ZV_BCRAF] match={}\n", .{bc_recomputed.eql(instance_claims[0])});
                 dbg("[STAGE6] Consistency check Instance 0:\n", .{});
                 // Print combined[0] as LE hex for comparison with Jolt's "val (sum)"
                 const cval_be = bc_combined_val.toBytesBE();
@@ -9930,33 +9519,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             transcript.appendScalar("opening_claim", ram_inc_claim);
             transcript.appendScalar("opening_claim", rd_inc_claim);
             dbg("[STAGE6] After ALL cache_openings: round={}\n", .{transcript.n_rounds});
-
-            // Print BCRAF components for comparison with verifier
-            {
-                const bc_val = bytecode_prover.combined.?[0];
-                // Decompose combined[0] per stage
-                for (0..5) |si| {
-                    const bv = bytecode_prover.bound_vals_stored[si];
-                    std.debug.print("[ZV_BCRAF] bound_vals[{}]=0x", .{si});
-                    for (bv.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
-                std.debug.print("[ZV_BCRAF] val=0x", .{});
-                for (bc_val.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n[ZV_BCRAF] d={}\n", .{bytecode_d});
-                for (0..bytecode_d) |ri| {
-                    std.debug.print("[ZV_BCRAF] ra[{}]=0x", .{ri});
-                    for (bytecode_ra_claims[ri].toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
-                var prod = bc_val;
-                for (bytecode_ra_claims[0..bytecode_d]) |c| prod = prod.mul(c);
-                std.debug.print("[ZV_BCRAF] result=0x", .{});
-                for (prod.toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n[ZV_BCRAF] inst0=0x", .{});
-                for (instance_claims[0].toBytesBE()) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n", .{});
-            }
 
             return Stage6Result(F){
                 .challenges = challenges,
@@ -10217,11 +9779,6 @@ fn addEvalsAsMonomialToCoeffs(comptime F: type, combined_coeffs: []F, polys: []c
         const c3 = dd2.sub(dd1).mul(inv6);
         const c2 = dd1.mul(inv2).sub(c3.mul(F.fromU64(3)));
         const c1 = d1.sub(c2).sub(c3);
-        // Verify: p(1) = c0+c1+c2+c3 should = polys[1]
-        const check_p1 = c0.add(c1).add(c2).add(c3);
-        if (!check_p1.eql(polys[1])) {
-            std.debug.print("[DEG3_BUG] p(1) mismatch!\n", .{});
-        }
         combined_coeffs[0] = combined_coeffs[0].add(batch_coeff.mul(c0));
         combined_coeffs[1] = combined_coeffs[1].add(batch_coeff.mul(c1));
         combined_coeffs[2] = combined_coeffs[2].add(batch_coeff.mul(c2));
@@ -10310,16 +9867,6 @@ fn addEvalsAsMonomialToCoeffs(comptime F: type, combined_coeffs: []F, polys: []c
             }
         }
 
-        // Verify: evaluate mono at original points should match polys
-        for (0..n_evals) |pt| {
-            const x_pt = F.fromU64(@intCast(pt));
-            var val = mono[n_evals - 1];
-            var j2: usize = n_evals - 1;
-            while (j2 > 0) { j2 -= 1; val = val.mul(x_pt).add(mono[j2]); }
-            if (!val.eql(polys[pt])) {
-                std.debug.print("[NEWTON_BUG] n_evals={} pt={} mismatch!\n", .{n_evals, pt});
-            }
-        }
 
         // Add batch * mono to combined_coeffs
         for (0..n_evals) |i| {

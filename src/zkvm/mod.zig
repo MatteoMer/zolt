@@ -930,7 +930,7 @@ pub fn JoltProver(comptime F: type) type {
             result.log_k_chunk = log_k_chunk;
 
             const commit_time = phase_timer.read();
-            std.debug.print("    [DORY-COMMIT] {d:.1} ms ({} commitments)\n", .{ @as(f64, @floatFromInt(commit_time)) / 1_000_000.0, all_commitments.items.len });
+            if (comptime debug_verbose) std.debug.print("    [DORY-COMMIT] {d:.1} ms ({} commitments)\n", .{ @as(f64, @floatFromInt(commit_time)) / 1_000_000.0, all_commitments.items.len });
             phase_timer.reset();
             dbg("[DORY] All {} commitments computed.\n", .{all_commitments.items.len});
             // Debug: print first 3 commitment bytes

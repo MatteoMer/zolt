@@ -747,7 +747,8 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // --- One-hot index arrays: single-scan build ---
-            var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address, null);
+            const text_sz_for_ra = text_size_opt orelse program_bytecode.len;
+            var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, null, text_sz_for_ra);
             defer bytecode_prep_for_ra.deinit();
 
             {

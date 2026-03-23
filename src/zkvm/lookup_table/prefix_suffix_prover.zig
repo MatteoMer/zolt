@@ -220,8 +220,18 @@ pub fn AllSuffixPolys(comptime F: type) type {
             const T = u_evals.len;
 
             if (tp != null and indices_by_table != null) {
-                // Per-table parallel path: each table processes only its own cycles.
-                // No merge step needed — each table writes to its own disjoint suffix polys.
+                // Per-table parallel path with UNREDUCED ARITHMETIC (matches Jolt's init_suffix_polys).
+                // Each table accumulates into FoldedMulU64 buffers (5 × u128 slots per entry),
+                // deferring Barrett reduction to the end. This avoids Montgomery mul per cycle.
+                const field_mod = @import("../../field/mod.zig");
+                const FoldedMulU64 = field_mod.FoldedMulU64;
+
+                // Pre-allocate unreduced buffers: one flat array per table, sized [num_suffixes × m]
+                // Total: TOTAL_SUFFIX_POLYS × m × 80 bytes ≈ 4MB (fits in memory easily)
+                const unreduced_buf = try alloc.alloc(FoldedMulU64, TOTAL_SUFFIX_POLYS * m);
+                defer alloc.free(unreduced_buf);
+                for (unreduced_buf) |*slot| slot.* = FoldedMulU64.zero();
+
                 const PerTableCtx = struct {
                     self_tables: *[NUM_TABLES]?TableSuffixPolys(F),
                     u_ev: []const F,
@@ -230,6 +240,7 @@ pub fn AllSuffixPolys(comptime F: type) type {
                     suf_len: usize,
                     mask: u128,
                     m_val: usize,
+                    ubuf: []FoldedMulU64,
                 };
                 const ptctx = PerTableCtx{
                     .self_tables = &self.tables,
@@ -239,32 +250,77 @@ pub fn AllSuffixPolys(comptime F: type) type {
                     .suf_len = suffix_len,
                     .mask = m_mask,
                     .m_val = m,
+                    .ubuf = unreduced_buf,
                 };
                 tp.?.parallelForForce(NUM_TABLES, ptctx, struct {
                     fn f(c: PerTableCtx, t_idx: usize) void {
                         const table_cycle_indices = c.ibt[t_idx];
-                        if (table_cycle_indices.len == 0) return; // Empty table — polys already zero
+                        if (table_cycle_indices.len == 0) return;
 
                         const ts = tableSuffixes(t_idx);
+                        const num_suffixes = ts.len;
                         const suf_mask: u128 = (@as(u128, 1) << @intCast(c.suf_len)) - 1;
+                        const base = suffix_offsets[t_idx] * c.m_val;
 
+                        // Pre-classify suffixes (matches Jolt's suffix classification at lines 600-616)
+                        var suffix_one_idx: ?usize = null;
+                        var suffix_01_count: usize = 0;
+                        var suffix_01_indices: [MAX_SUFFIXES_PER_TABLE]usize = undefined;
+                        var suffix_other_count: usize = 0;
+                        var suffix_other_indices: [MAX_SUFFIXES_PER_TABLE]usize = undefined;
+                        for (ts, 0..) |suffix, s_idx| {
+                            if (suffix == .One) {
+                                suffix_one_idx = s_idx;
+                            } else if (suffixes_mod.is01Valued(suffix)) {
+                                suffix_01_indices[suffix_01_count] = s_idx;
+                                suffix_01_count += 1;
+                            } else {
+                                suffix_other_indices[suffix_other_count] = s_idx;
+                                suffix_other_count += 1;
+                            }
+                        }
+
+                        // Accumulate into unreduced buffers
                         for (table_cycle_indices) |j| {
                             const k = c.indices[j];
                             const prefix_bits = (k >> @intCast(c.suf_len)) & c.mask;
                             const suffix_bits = LookupBits(128).new(k & suf_mask, c.suf_len);
                             const u = c.u_ev[j];
+                            const u_limbs = u.limbs;
                             const idx: usize = @intCast(prefix_bits);
 
-                            for (ts, 0..) |suffix, s_idx| {
-                                const t = suffixMle(suffix, suffix_bits);
-                                if (t != 0) {
-                                    const q_poly = c.self_tables[t_idx].?.polys[s_idx];
-                                    if (suffixes_mod.is01Valued(suffix)) {
-                                        q_poly[idx] = q_poly[idx].add(u);
-                                    } else {
-                                        q_poly[idx] = q_poly[idx].add(u.mul(F.fromU64(t)));
-                                    }
+                            // Suffixes::One — just add u (no multiply)
+                            if (suffix_one_idx) |one_idx| {
+                                c.ubuf[base + one_idx * c.m_val + idx].addBigInt4(u_limbs);
+                            }
+
+                            // 01-valued suffixes — add u when suffix_mle == 1
+                            for (0..suffix_01_count) |i| {
+                                const s_idx = suffix_01_indices[i];
+                                const t = suffixMle(ts[s_idx], suffix_bits);
+                                if (t == 1) {
+                                    c.ubuf[base + s_idx * c.m_val + idx].addBigInt4(u_limbs);
                                 }
+                            }
+
+                            // General suffixes — accumulate u*t using Montgomery mul
+                            // (unreduced mulU64Unreduced has precision issues with large T — use safe path)
+                            for (0..suffix_other_count) |i| {
+                                const s_idx = suffix_other_indices[i];
+                                const t = suffixMle(ts[s_idx], suffix_bits);
+                                if (t != 0) {
+                                    // Use Montgomery mul, then add to unreduced buffer via addBigInt4
+                                    const product = u.mul(F.fromU64(t));
+                                    c.ubuf[base + s_idx * c.m_val + idx].addBigInt4(product.limbs);
+                                }
+                            }
+                        }
+
+                        // Barrett reduce into final suffix polys
+                        for (0..num_suffixes) |s_idx| {
+                            const q_poly = c.self_tables[t_idx].?.polys[s_idx];
+                            for (0..c.m_val) |p| {
+                                q_poly[p] = field_mod.reduceMulU64(c.ubuf[base + s_idx * c.m_val + p]);
                             }
                         }
                     }

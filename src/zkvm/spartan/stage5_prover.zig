@@ -907,7 +907,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             //   right_operand = y (rs2 or imm)
             //   lookup_output = result of operation
             //
-            // Parallel dispatch: each thread processes a chunk of cycles
+            // Allocate u128 indices and is_interleaved here so the parallel decode can populate them
+            const lookup_indices_u128 = try self.allocator.alloc(u128, T);
+            defer self.allocator.free(lookup_indices_u128);
+            @memset(lookup_indices_u128, 0);
+
+            const is_interleaved_operands = try self.allocator.alloc(bool, T);
+            defer self.allocator.free(is_interleaved_operands);
+            @memset(is_interleaved_operands, false);
+
+            // Parallel dispatch: each thread processes a chunk of cycles.
+            // Populates combined_vals, idx_lo, idx_hi, tbl_ids, is_id, idx_u128, is_interleaved
+            // all in a single pass (matching Jolt's par_iter approach).
             const combined_chunk_count = if (self.thread_pool) |tp| @as(usize, tp.thread_count + 1) else @as(usize, 1);
             const combined_chunk_size = (trace_len + combined_chunk_count - 1) / combined_chunk_count;
 
@@ -922,6 +933,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 g_raf: F,
                 g_raf2: F,
                 c_size: usize,
+                idx_u128: []u128,
+                is_inter: []bool,
             };
             const cctx = CombinedCtx{
                 .steps_ptr = trace.steps.items.ptr,
@@ -934,13 +947,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .g_raf = gamma_raf,
                 .g_raf2 = gamma_raf2,
                 .c_size = combined_chunk_size,
+                .idx_u128 = lookup_indices_u128,
+                .is_inter = is_interleaved_operands,
             };
             const combinedChunkFn = struct {
                 fn f(c: CombinedCtx, chunk_idx: usize) void {
                     const start = chunk_idx * c.c_size;
                     const end = @min(start + c.c_size, c.steps_len);
                     for (start..end) |j| {
-                        processTraceCycleCombined(c.steps_ptr[j], j, c.combined, c.idx_lo, c.idx_hi, c.tbl_ids, c.is_id, c.g_raf, c.g_raf2);
+                        processTraceCycleCombined(c.steps_ptr[j], j, c.combined, c.idx_lo, c.idx_hi, c.tbl_ids, c.is_id, c.g_raf, c.g_raf2, c.idx_u128, c.is_inter);
                     }
                 }
             }.f;
@@ -948,13 +963,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 tp.parallelForForce(combined_chunk_count, cctx, combinedChunkFn);
             } else {
                 for (0..trace_len) |j| {
-                    processTraceCycleCombined(trace.steps.items[j], j, lookups_combined_vals, lookups_indices_lo, lookups_indices_hi, cycle_table_indices, cycle_is_identity_path, gamma_raf, gamma_raf2);
+                    processTraceCycleCombined(trace.steps.items[j], j, lookups_combined_vals, lookups_indices_lo, lookups_indices_hi, cycle_table_indices, cycle_is_identity_path, gamma_raf, gamma_raf2, lookup_indices_u128, is_interleaved_operands);
                 }
             }
             // Padding cycles (trace_len..T) keep memset defaults
 
-
-            // Padding cycles (trace_len..T) are NoOp: defaults from @memset are correct.
+            if (comptime bench_timing) {
+                std.debug.print("    [STAGE5-INIT]   parallel decode:  {d:8.1} ms\n", .{@as(f64, @floatFromInt(init_sub_timer.read())) / 1_000_000.0});
+                init_sub_timer.reset();
+            }
 
             // Build lookup_indices_by_table: for each table, collect cycle indices that use it.
             // This enables per-table parallelism in initPhase (Fix 4).
@@ -1987,20 +2004,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // ===================================================================
             // Prefix-Suffix Decomposition Initialization for LookupsReadRaf
             // ===================================================================
-            // Build u128 lookup indices array for prefix-suffix decomposition
-            var lookup_indices_u128 = try self.allocator.alloc(u128, T);
-            defer self.allocator.free(lookup_indices_u128);
-            for (0..T) |j| {
-                lookup_indices_u128[j] = (@as(u128, lookups_indices_hi[j]) << 64) | lookups_indices_lo[j];
-            }
-            // Print first 5 lookup indices (VERIFY FIX APPLIED)
-            for (0..@min(5, T)) |j| {
-                if (comptime debug_verbose) {
-                    dbg("[LOOKUP IDX] j={}: idx=0x{x:0>32}, lo=0x{x:0>16}, hi=0x{x:0>16}\n", .{
-                        j, lookup_indices_u128[j], lookups_indices_lo[j], lookups_indices_hi[j],
-                    });
-                }
-            }
+            // lookup_indices_u128 already populated by parallel decode pass above
 
             if (comptime bench_timing) {
                 std.debug.print("    [STAGE5-INIT] combined+indices:  {d:8.1} ms\n", .{@as(f64, @floatFromInt(init_sub_timer.read())) / 1_000_000.0});
@@ -2030,12 +2034,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var identity_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K, .Identity);
             defer identity_raf.deinit();
 
-            // Create is_interleaved_operands array (inverse of cycle_is_identity_path)
-            var is_interleaved_operands = try self.allocator.alloc(bool, T);
-            defer self.allocator.free(is_interleaved_operands);
-            for (0..T) |j| {
-                is_interleaved_operands[j] = !cycle_is_identity_path[j];
-            }
+            // is_interleaved_operands already populated by parallel decode pass above
 
             // Initialize Q polynomials for read-checking AND RAF Q accumulators concurrently
             if (self.thread_pool) |tp| {
@@ -6856,6 +6855,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             is_id: []bool,
             g_raf: F,
             g_raf2: F,
+            idx_u128: ?[]u128,
+            is_interleaved_out: ?[]bool,
         ) void {
             // NOTE: Do NOT skip NOOPs here! In Jolt, NOOPs (ADDI x0,x0,0) are valid
             // instructions with lookup_table = RangeCheck and is_identity_path = true.
@@ -7401,6 +7402,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // via Q arrays, and combined_vals are rematerialized at the phase transition
             // (init_log_t_rounds) using stored_table_values for the cycle rounds.
 
+            // Merge: compute u128 lookup index and is_interleaved in the same pass
+            if (idx_u128) |u128_out| {
+                u128_out[j] = (@as(u128, idx_hi[j]) << 64) | idx_lo[j];
+            }
+            if (is_interleaved_out) |interleaved| {
+                interleaved[j] = !is_id[j];
+            }
         }
         // (generated by extracting the original sequential loop body)
 

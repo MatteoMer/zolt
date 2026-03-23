@@ -1317,47 +1317,6 @@ pub fn JoltProver(comptime F: type) type {
             const compact_witnesses = try r1cs_evaluators.buildCompactWitnesses(F, padded_witnesses, self.allocator, self.thread_pool);
             defer self.allocator.free(compact_witnesses);
 
-            // Create UniSkip proof for Stage 1 with actual constraint evaluations
-            // Use padded witnesses so that NoOp cycles are included in the polynomial evaluation
-            // DEBUG: Validate compact vs field for second group
-            {
-                var sg_mismatch: usize = 0;
-                for (0..@min(padded_witnesses.len, compact_witnesses.len)) |ci| {
-                    const cw = &compact_witnesses[ci];
-                    const ws = padded_witnesses[ci].asSlice();
-                    const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
-                    const bz_field_sg = r1cs_evaluators.computeBzSecondGroupDirect(F, ws, two_pow_64);
-                    for (0..9) |t| {
-                        const field_bz = bz_field_sg[t];
-                        const s192_bz = cw.bz_second[t];
-                        // Convert S192 to field for comparison
-                        // Convert S192 magnitude to field element
-                        const lo: u128 = @as(u128, s192_bz.magnitude[0]) | (@as(u128, s192_bz.magnitude[1]) << 64);
-                        const hi: u64 = s192_bz.magnitude[2];
-                        const lo_f = F.fromU128(lo);
-                        const hi_f = F.fromU64(hi).mul(F.fromU128(@as(u128, 1) << 64).mul(F.fromU128(@as(u128, 1) << 64)));
-                        const mag_f = lo_f.add(hi_f);
-                        const s192_as_field = if (s192_bz.is_positive) mag_f else F.zero().sub(mag_f);
-                        if (!field_bz.eql(s192_as_field)) {
-                            if (sg_mismatch < 3) {
-                                const rl_f = ws[r1cs.R1CSInputIndex.RightLookupOperand.toIndex()];
-                                const rl_std = rl_f.fromMontgomery();
-                                const upc = ws[r1cs.R1CSInputIndex.UnexpandedPC.toIndex()].toU64();
-                                std.debug.print("SG BZ MISMATCH: cycle={d} SG[{d}] UPC=0x{x} RL_limbs=[{x},{x},{x},{x}]\n", .{
-                                    ci, t, upc, rl_std.limbs[0], rl_std.limbs[1], rl_std.limbs[2], rl_std.limbs[3],
-                                });
-                            }
-                            sg_mismatch += 1;
-                        }
-                    }
-                }
-                if (sg_mismatch > 0) {
-                    std.debug.print("SG BZ: {d} mismatches\n", .{sg_mismatch});
-                } else {
-                    std.debug.print("SG BZ: All match!\n", .{});
-                }
-            }
-
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
                 padded_witnesses,
                 tau,
@@ -2597,57 +2556,6 @@ pub fn JoltProver(comptime F: type) type {
             const pc_map_ptr = config.bytecode_pc_map orelse return error.MissingBytecodepcMap;
             const bytecode_entries = try stage6_mod.buildBytecodeEntries(self.allocator, the_trace, bytecode_K_val, pc_map_ptr, config.program_code_bytes, config.code_base_address, the_memory_layout.termination, config.text_size, config.bytecode_preprocessing);
             defer self.allocator.free(bytecode_entries);
-
-            // Diagnostic: compare val_poly stage 0 with R1CS witness for first 5 differing cycles
-            {
-                const r1cs_mod = @import("r1cs/constraints.zig");
-                var diff_count: usize = 0;
-                for (0..the_trace.steps.items.len) |c| {
-                    if (c >= cycle_witnesses.len) break;
-                    const step = the_trace.steps.items[c];
-                    const pc_idx = pc_map_ptr.getPCForStep(step);
-                    if (pc_idx >= bytecode_entries.len) continue;
-                    const entry = bytecode_entries[pc_idx];
-                    // Compute val_poly stage 0 from bytecode entry
-                    const opcode_for_imm = entry.opcode;
-                    _ = opcode_for_imm;
-                    // Compare UnexpandedPC
-                    const witness = cycle_witnesses[c];
-                    const witness_upc = witness.values[r1cs_mod.R1CSInputIndex.UnexpandedPC.toIndex()];
-                    const entry_upc = F.fromU64(entry.address);
-                    if (!witness_upc.eql(entry_upc) and diff_count < 3) {
-                        std.debug.print("[DIAG] c={} pc_idx={}: UPC mismatch!\n", .{c, pc_idx});
-                        diff_count += 1;
-                    }
-                    // Check Imm
-                    const witness_imm = witness.values[r1cs_mod.R1CSInputIndex.Imm.toIndex()];
-                    const is_signed = (entry.opcode == 0x63) or (entry.opcode == 0x23) or (entry.opcode == 0x03) or (entry.opcode == 0x22);
-                    const entry_imm = if (is_signed)
-                        (if (entry.imm < 0) F.fromU64(@intCast(-entry.imm)).neg() else F.fromU64(@intCast(entry.imm)))
-                    else
-                        F.fromU64(@as(u64, @bitCast(entry.imm)));
-                    if (!witness_imm.eql(entry_imm) and diff_count < 3) {
-                        std.debug.print("[DIAG] c={} pc={} op=0x{x:0>2}: IMM mismatch\n", .{c, pc_idx, entry.opcode});
-                        diff_count += 1;
-                    }
-                    // Check OpFlags (circuit flags)
-                    for (0..14) |fi| {
-                        const witness_flag = witness.values[r1cs_mod.R1CSInputIndex.FlagAddOperands.toIndex() + fi];
-                        const entry_flag = if (entry.circuit_flags[fi]) F.one() else F.zero();
-                        if (!witness_flag.eql(entry_flag) and diff_count < 5) {
-                            std.debug.print("[DIAG] c={} pc={} addr=0x{x} op=0x{x:0>2} vsr={?} first={}: FLAG[{}] w={} e={}\n", .{
-                                c, pc_idx, entry.address, entry.opcode,
-                                entry.virtual_sequence_remaining, entry.is_first_in_sequence,
-                                fi,
-                                if (witness_flag.eql(F.one())) @as(u8, 1) else 0,
-                                if (entry_flag.eql(F.one())) @as(u8, 1) else 0,
-                            });
-                            diff_count += 1;
-                        }
-                    }
-                }
-                if (diff_count > 0) std.debug.print("[DIAG] Total mismatches: {}\n", .{diff_count});
-            }
 
             // Get register address opening points for Stages 4 and 5
             // Stage 4: from RegistersReadWriteChecking (address portion)

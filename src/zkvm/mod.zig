@@ -1295,42 +1295,6 @@ pub fn JoltProver(comptime F: type) type {
                 );
                 defer self.allocator.free(joint_row_commitments);
 
-                // Debug: print joint_claim and transcript state
-                {
-                    var ejc_check = F.zero();
-                    for (0..num_claims) |ic| ejc_check = ejc_check.add(gamma_powers[ic].mul(claims_ordered[ic]));
-                    // Evaluate joint_poly at both opening_point and dory_point
-                    const poly_mod = @import("../poly/mod.zig");
-                    const eq_orig = try poly_mod.EqPolynomial(F).evalsSliceWithScaling(F, self.allocator, opening_point, null);
-                    defer self.allocator.free(eq_orig);
-                    var eval_orig = F.zero();
-                    for (0..@min(joint_poly.len, eq_orig.len)) |j| eval_orig = eval_orig.add(joint_poly[j].mul(eq_orig[j]));
-                    const eq_rev = try poly_mod.EqPolynomial(F).evalsSliceWithScaling(F, self.allocator, dory_point, null);
-                    defer self.allocator.free(eq_rev);
-                    var eval_rev = F.zero();
-                    for (0..@min(joint_poly.len, eq_rev.len)) |j| eval_rev = eval_rev.add(joint_poly[j].mul(eq_rev[j]));
-                    std.debug.print("[STAGE8] joint_claim=0x", .{});
-                    for (ejc_check.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print(" eval@orig=0x", .{});
-                    for (eval_orig.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print(" eval@rev=0x", .{});
-                    for (eval_rev.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print(" orig==claim? {} rev==claim? {}\n", .{eval_orig.eql(ejc_check), eval_rev.eql(ejc_check)});
-                    // Check dense-only evaluation
-                    var dense_only = try self.allocator.alloc(F, total_poly_size);
-                    defer self.allocator.free(dense_only);
-                    @memcpy(dense_only, joint_poly);
-                    // Zero out sparse entries (addr > 0)
-                    for (trace_length..total_poly_size) |j| dense_only[j] = F.zero();
-                    var eval_dense = F.zero();
-                    for (0..total_poly_size) |j| eval_dense = eval_dense.add(dense_only[j].mul(eq_orig[j]));
-                    const expected_dense = gamma_powers[0].mul(claims_ordered[0]).add(gamma_powers[1].mul(claims_ordered[1]));
-                    std.debug.print("[STAGE8] dense: eval=0x", .{});
-                    for (eval_dense.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print(" expected=0x", .{});
-                    for (expected_dense.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print(" match={}\n", .{eval_dense.eql(expected_dense)});
-                }
                 if (comptime debug_verbose) {
                     // Compute joint_claim = Σ γ^i * claim_i
                     var expected_joint_claim = F.zero();
@@ -1357,9 +1321,6 @@ pub fn JoltProver(comptime F: type) type {
                         std.debug.print("]\n", .{});
                     }
                 }
-                std.debug.print("[STAGE8] total_poly_size={} num_claims={} point_len={} gamma[0]=0x", .{ total_poly_size, num_claims, dory_point.len });
-                for (gamma_powers[0].toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n", .{});
                 dbg("[STAGE8] Starting Dory opening proof (total_poly_size={}, num_claims={})...\n", .{ total_poly_size, num_claims });
                 if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] Stage 8 prep (hints+poly): {d:.1} ms\n", .{@as(f64, @floatFromInt(phase_timer.read())) / 1_000_000.0});
                 phase_timer.reset();
@@ -1373,11 +1334,6 @@ pub fn JoltProver(comptime F: type) type {
                     self.thread_pool,
                 );
                 dbg("[STAGE8] Dory opening proof generated.\n", .{});
-                std.debug.print("[STAGE8] Dory proof: nu={} sigma={} rounds={} first_msgs={} second_msgs={}\n", .{
-                    dory_proof.nu, dory_proof.sigma,
-                    @max(dory_proof.nu, dory_proof.sigma),
-                    dory_proof.first_messages.len, dory_proof.second_messages.len,
-                });
                 result.dory_opening_proof = dory_proof;
                 result.opening_point = opening_point;
                 const stage8_time = phase_timer.read();

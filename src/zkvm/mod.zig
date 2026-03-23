@@ -1337,19 +1337,6 @@ pub fn JoltProver(comptime F: type) type {
                     self.thread_pool,
                 );
                 dbg("[STAGE8] Dory opening proof generated.\n", .{});
-                // Compute evaluation at opening point for diagnostic
-                {
-                    const poly_mod = @import("../poly/mod.zig");
-                    const eq_at_pt = try poly_mod.EqPolynomial(F).evalsSliceWithScaling(F, self.allocator, dory_point, null);
-                    defer self.allocator.free(eq_at_pt);
-                    var eval_at_pt = F.zero();
-                    for (0..@min(joint_poly.len, eq_at_pt.len)) |j| {
-                        eval_at_pt = eval_at_pt.add(joint_poly[j].mul(eq_at_pt[j]));
-                    }
-                    std.debug.print("[STAGE8] poly_eval=0x", .{});
-                    for (eval_at_pt.toBytesBE()[0..8]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                }
                 std.debug.print("[STAGE8] Dory proof: nu={} sigma={} rounds={} first_msgs={} second_msgs={}\n", .{
                     dory_proof.nu, dory_proof.sigma,
                     @max(dory_proof.nu, dory_proof.sigma),

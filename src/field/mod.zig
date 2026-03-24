@@ -6,6 +6,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// LLVM carry/borrow intrinsics — map to single adc/sbb instructions on x86-64
+extern fn @"llvm.x86.addcarry.u64"(c_in: u8, a: u64, b: u64, result: *u64) u8;
+extern fn @"llvm.x86.subborrow.u64"(b_in: u8, a: u64, b: u64, result: *u64) u8;
+
 /// Comptime flag: true when x86-64 BMI2+ADX instructions are available
 const use_asm_mul = blk: {
     if (builtin.cpu.arch != .x86_64) break :blk false;
@@ -258,22 +262,25 @@ pub fn MontgomeryField(
 
         /// Add with carry
         inline fn addCarry(a: u64, b: u64, carry_in: u64) struct { result: u64, carry: u64 } {
+            if (comptime builtin.cpu.arch == .x86_64) {
+                var result: u64 = undefined;
+                const c = @"llvm.x86.addcarry.u64"(@truncate(carry_in), a, b, &result);
+                return .{ .result = result, .carry = c };
+            }
             const sum = @as(u128, a) + @as(u128, b) + @as(u128, carry_in);
-            return .{
-                .result = @truncate(sum),
-                .carry = @truncate(sum >> 64),
-            };
+            return .{ .result = @truncate(sum), .carry = @truncate(sum >> 64) };
         }
 
-        /// Subtract with borrow — wrapping arithmetic (no branch)
         inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
+            if (comptime builtin.cpu.arch == .x86_64) {
+                var result: u64 = undefined;
+                const b_out = @"llvm.x86.subborrow.u64"(@truncate(borrow_in), a, b, &result);
+                return .{ .result = result, .borrow = b_out };
+            }
             const wide_a = @as(u128, a);
             const wide_b = @as(u128, b) + @as(u128, borrow_in);
             const diff = wide_a -% wide_b;
-            return .{
-                .result = @truncate(diff),
-                .borrow = @truncate(diff >> 127),
-            };
+            return .{ .result = @truncate(diff), .borrow = @truncate(diff >> 127) };
         }
 
         /// Montgomery multiplication: computes a*b*R^{-1} mod p
@@ -1019,25 +1026,25 @@ pub const BN254Scalar = struct {
 
     /// Add with carry
     inline fn addCarry(a: u64, b: u64, carry_in: u64) struct { result: u64, carry: u64 } {
-        // Use u128 addition — LLVM recognizes this as adc pattern
+        if (comptime builtin.cpu.arch == .x86_64) {
+            var result: u64 = undefined;
+            const c = @"llvm.x86.addcarry.u64"(@truncate(carry_in), a, b, &result);
+            return .{ .result = result, .carry = c };
+        }
         const sum = @as(u128, a) + @as(u128, b) + @as(u128, carry_in);
-        return .{
-            .result = @truncate(sum),
-            .carry = @truncate(sum >> 64),
-        };
+        return .{ .result = @truncate(sum), .carry = @truncate(sum >> 64) };
     }
 
-    /// Subtract with borrow — wrapping arithmetic (no branch)
     inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
-        // Wrapping subtract via u128, extract borrow from high bit
-        // This avoids the i128 `if (diff < 0)` branch
+        if (comptime builtin.cpu.arch == .x86_64) {
+            var result: u64 = undefined;
+            const b_out = @"llvm.x86.subborrow.u64"(@truncate(borrow_in), a, b, &result);
+            return .{ .result = result, .borrow = b_out };
+        }
         const wide_a = @as(u128, a);
         const wide_b = @as(u128, b) + @as(u128, borrow_in);
         const diff = wide_a -% wide_b;
-        return .{
-            .result = @truncate(diff),
-            .borrow = @truncate(diff >> 127), // sign bit = borrow
-        };
+        return .{ .result = @truncate(diff), .borrow = @truncate(diff >> 127) };
     }
 
     /// Montgomery multiplication: computes a*b*R^{-1} mod p

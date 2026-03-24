@@ -2008,15 +2008,18 @@ pub const FoldedMulU64 = struct {
         return .{ .slots = out };
     }
 
-    /// Propagate deferred carries → [5]u64.
-    pub fn normalize(self: @This()) [5]u64 {
-        var out: [5]u64 = undefined;
+    /// Propagate deferred carries → [6]u64.
+    /// Uses 6 limbs (not 5) to capture carry overflow from heavy accumulation.
+    /// With N additions of 320-bit products, the result can be up to 320+log2(N) bits.
+    pub fn normalize(self: @This()) [6]u64 {
+        var out: [6]u64 = .{0} ** 6;
         var carry: u128 = 0;
         inline for (0..5) |i| {
             const sum = self.slots[i] +% carry;
             out[i] = @truncate(sum);
             carry = sum >> 64;
         }
+        out[5] = @truncate(carry);
         return out;
     }
 };
@@ -2186,8 +2189,9 @@ pub fn mulU192Unreduced(self: BN254Scalar, scalar: [3]u64) FoldedMulU128Accum {
 }
 
 /// Reduce FoldedMulU64 (5 slots) → BN254Scalar via Barrett.
+/// normalize() returns [6]u64 to handle carry overflow from heavy accumulation.
 pub fn reduceMulU64(folded: FoldedMulU64) BN254Scalar {
-    return barrettReduce(5, folded.normalize());
+    return barrettReduce(6, folded.normalize());
 }
 
 /// Reduce FoldedMulU128 (6 slots) → BN254Scalar via Barrett.
@@ -3286,6 +3290,48 @@ test "Barrett reduce round-trip: mulU64Unreduced sum" {
     }
 
     const actual = reduceMulU64(folded);
+    try std.testing.expect(expected.eql(actual));
+}
+
+test "Barrett reduce round-trip: mulU64Unreduced STRESS (large N, large values)" {
+    // Stress test with N=100000 and full-range field values to catch overflow/precision bugs
+    const N = 100_000;
+    var folded = FoldedMulU64.zero();
+    var expected = BN254Scalar.zero();
+
+    for (0..N) |i| {
+        // Use large field values (close to modulus) and large scalars
+        const w = BN254Scalar.fromU64(@as(u64, i) * 0x123456789ABCDEF + 0xFEDCBA9876543210);
+        const scalar: u64 = @as(u64, i) * 0xABCD + 0xFFFF;
+        folded.addAssign(mulU64Unreduced(w, scalar));
+        expected = expected.add(w.mul(BN254Scalar.fromU64(scalar)));
+    }
+
+    const actual = reduceMulU64(folded);
+    if (!expected.eql(actual)) {
+        std.debug.print("MISMATCH at N={}\n", .{N});
+        std.debug.print("expected: {any}\n", .{expected.limbs});
+        std.debug.print("actual:   {any}\n", .{actual.limbs});
+
+        // Binary search for first failure
+        var folded2 = FoldedMulU64.zero();
+        var expected2 = BN254Scalar.zero();
+        for (0..N) |i| {
+            const w = BN254Scalar.fromU64(@as(u64, i) * 0x123456789ABCDEF + 0xFEDCBA9876543210);
+            const scalar: u64 = @as(u64, i) * 0xABCD + 0xFFFF;
+            folded2.addAssign(mulU64Unreduced(w, scalar));
+            expected2 = expected2.add(w.mul(BN254Scalar.fromU64(scalar)));
+            const check = reduceMulU64(folded2);
+            if (!expected2.eql(check)) {
+                std.debug.print("First mismatch at i={}\n", .{i});
+                std.debug.print("  w.limbs = {any}\n", .{w.limbs});
+                std.debug.print("  scalar = {}\n", .{scalar});
+                std.debug.print("  folded slots = {any}\n", .{folded2.slots});
+                std.debug.print("  normalized = {any}\n", .{folded2.normalize()});
+                break;
+            }
+        }
+    }
     try std.testing.expect(expected.eql(actual));
 }
 

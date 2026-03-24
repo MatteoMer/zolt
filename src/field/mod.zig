@@ -2518,22 +2518,36 @@ pub const S192 = struct {
 
     fn addMagnitudes(a: [3]u64, b: [3]u64) [3]u64 {
         var result: [3]u64 = undefined;
-        var carry: u64 = 0;
-        inline for (0..3) |i| {
-            const tmp = @as(u128, a[i]) + @as(u128, b[i]) + @as(u128, carry);
-            result[i] = @truncate(tmp);
-            carry = @truncate(tmp >> 64);
+        if (comptime builtin.cpu.arch == .x86_64) {
+            var c: u8 = 0;
+            inline for (0..3) |i| {
+                c = @"llvm.x86.addcarry.u64"(c, a[i], b[i], &result[i]);
+            }
+        } else {
+            var carry: u64 = 0;
+            inline for (0..3) |i| {
+                const tmp = @as(u128, a[i]) + @as(u128, b[i]) + @as(u128, carry);
+                result[i] = @truncate(tmp);
+                carry = @truncate(tmp >> 64);
+            }
         }
         return result;
     }
 
     fn subMagnitudes(a: [3]u64, b: [3]u64) [3]u64 {
         var result: [3]u64 = undefined;
-        var borrow: u64 = 0;
-        inline for (0..3) |i| {
-            const tmp = (@as(u128, 1) << 64) + @as(u128, a[i]) - @as(u128, b[i]) - @as(u128, borrow);
-            result[i] = @truncate(tmp);
-            borrow = if ((tmp >> 64) == 0) @as(u64, 1) else @as(u64, 0);
+        if (comptime builtin.cpu.arch == .x86_64) {
+            var b_out: u8 = 0;
+            inline for (0..3) |i| {
+                b_out = @"llvm.x86.subborrow.u64"(b_out, a[i], b[i], &result[i]);
+            }
+        } else {
+            var borrow: u64 = 0;
+            inline for (0..3) |i| {
+                const tmp = (@as(u128, 1) << 64) + @as(u128, a[i]) - @as(u128, b[i]) - @as(u128, borrow);
+                result[i] = @truncate(tmp);
+                borrow = if ((tmp >> 64) == 0) @as(u64, 1) else @as(u64, 0);
+            }
         }
         return result;
     }

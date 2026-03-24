@@ -15,6 +15,8 @@ const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
+// Stage 6 fine-grained bench timing - set to true for per-instance timing
+const s6_bench_timing = false;
 
 // Maximum evaluation points for parallelReduce accumulator.
 // Covers all sub-provers: LookupsRa (M+2 ≤ 10), RamRa (d+2 ≤ 6), BytecodeReadRaf (d+2 ≤ 4).
@@ -5318,42 +5320,71 @@ fn BooleanityProver(comptime F: type) type {
                 @memset(ci[i], sentinel); // default = sentinel (zero value)
             }
 
-            for (0..T_val) |j| {
-                const step = trace.steps.items[j];
-
-                // InstructionRa chunks
-                {
-                    const lookup_idx = computeLookupIndex(step);
-                    for (0..instr_d) |i| {
-                        const shift = self.log_k_chunk * (instr_d - 1 - i);
-                        const mask: u128 = (@as(u128, 1) << @intCast(self.log_k_chunk)) - 1;
-                        const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
-                        ci[i][j] = if (chunk_val < K) @intCast(chunk_val) else sentinel;
+            // Parallel chunk_indices build — each j writes to unique ci[*][j] positions
+            const CiCtx = struct {
+                steps: []const tracer.TraceStep,
+                ci_arr: [][]u8,
+                pc_map_ptr: *const BytecodePCMapper,
+                mem_layout: *const jolt_device.MemoryLayout,
+                log_kc: usize,
+                instr_d_v: usize,
+                bc_d_v: usize,
+                ram_d_v: usize,
+                K_v: usize,
+                sentinel_v: u8,
+            };
+            const ci_ctx = CiCtx{
+                .steps = trace.steps.items,
+                .ci_arr = ci,
+                .pc_map_ptr = self.pc_map,
+                .mem_layout = self.memory_layout,
+                .log_kc = self.log_k_chunk,
+                .instr_d_v = instr_d,
+                .bc_d_v = bc_d,
+                .ram_d_v = ram_d_val,
+                .K_v = K,
+                .sentinel_v = sentinel,
+            };
+            const ciFn = struct {
+                fn f(c: CiCtx, j: usize) void {
+                    const step = c.steps[j];
+                    // InstructionRa chunks
+                    {
+                        const lookup_idx = computeLookupIndex(step);
+                        for (0..c.instr_d_v) |i| {
+                            const shift = c.log_kc * (c.instr_d_v - 1 - i);
+                            const mask: u128 = (@as(u128, 1) << @intCast(c.log_kc)) - 1;
+                            const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
+                            c.ci_arr[i][j] = if (chunk_val < c.K_v) @intCast(chunk_val) else c.sentinel_v;
+                        }
                     }
-                }
-
-                // BytecodeRa chunks
-                {
-                    const pc_idx: u64 = @intCast(self.pc_map.getPCForStep(step));
-                    for (0..bc_d) |i| {
-                        const chunk_val = extractChunkMSB(pc_idx, i, bc_d, self.log_k_chunk);
-                        ci[instr_d + i][j] = if (chunk_val < K) @intCast(chunk_val) else sentinel;
+                    // BytecodeRa chunks
+                    {
+                        const pc_idx: u64 = @intCast(c.pc_map_ptr.getPCForStep(step));
+                        for (0..c.bc_d_v) |i| {
+                            const chunk_val = extractChunkMSB(pc_idx, i, c.bc_d_v, c.log_kc);
+                            c.ci_arr[c.instr_d_v + i][j] = if (chunk_val < c.K_v) @intCast(chunk_val) else c.sentinel_v;
+                        }
                     }
-                }
-
-                // RamRa chunks
-                {
-                    if (step.memory_addr) |addr| {
-                        if (addr != 0) {
-                            if (self.memory_layout.remapAddress(addr)) |raddr| {
-                                for (0..ram_d_val) |i| {
-                                    const chunk_val = extractChunkMSB(raddr, i, ram_d_val, self.log_k_chunk);
-                                    ci[instr_d + bc_d + i][j] = if (chunk_val < K) @intCast(chunk_val) else sentinel;
+                    // RamRa chunks
+                    {
+                        if (step.memory_addr) |addr| {
+                            if (addr != 0) {
+                                if (c.mem_layout.remapAddress(addr)) |raddr| {
+                                    for (0..c.ram_d_v) |i| {
+                                        const chunk_val = extractChunkMSB(raddr, i, c.ram_d_v, c.log_kc);
+                                        c.ci_arr[c.instr_d_v + c.bc_d_v + i][j] = if (chunk_val < c.K_v) @intCast(chunk_val) else c.sentinel_v;
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            }.f;
+            if (self.pool) |pool| {
+                pool.parallelFor(T_val, ci_ctx, ciFn);
+            } else {
+                for (0..T_val) |j| ciFn(ci_ctx, j);
             }
 
             self.chunk_indices = ci;
@@ -5401,6 +5432,88 @@ fn BooleanityProver(comptime F: type) type {
 // init time (ra_bound[v*M] *= gamma^v), so the compressed representation would need
 // per-index scaling, not a single shared eq_table scale. Future optimization could
 // store separate gamma-scaled and unscaled eq_tables per batch.
+/// Evaluate the product of 4 linear polynomials at the grid {1, 2, 3, ∞}.
+/// Each pair[i] = { p_i(0), p_i(1) }. Returns { P(1), P(2), P(3), P(∞) }
+/// where P(x) = p_0(x) * p_1(x) * p_2(x) * p_3(x).
+/// Uses Toom-Cook factoring: 10 field muls total.
+/// Ported from Jolt's eval_prod_4_assign (mles_product_sum.rs:453-462).
+fn evalLinearProd4(comptime F: type, pairs: [4][2]F) [4]F {
+    // eval_linear_prod_2_internal on first pair (p[0], p[1]):
+    // For linear poly p(x) = p0 + (p1-p0)*x: p(1)=p1, p(∞)=p1-p0, p(2)=p1+(p1-p0)
+    const p0_inf = pairs[0][1].sub(pairs[0][0]); // slope of p0
+    const p1_inf = pairs[1][1].sub(pairs[1][0]); // slope of p1
+    const a1 = pairs[0][1].mul(pairs[1][1]); // A(1) = p0(1)*p1(1)
+    const a2 = p0_inf.add(pairs[0][1]).mul(p1_inf.add(pairs[1][1])); // A(2) = p0(2)*p1(2)
+    const a_inf = p0_inf.mul(p1_inf); // A(∞) = leading coeff
+
+    // ex2 extrapolation: A(3) = 2*(A(2) + A(∞)) - A(1)  (0 muls, pure adds)
+    const a3 = a2.add(a_inf).add(a2.add(a_inf)).sub(a1);
+
+    // eval_linear_prod_2_internal on second pair (p[2], p[3]):
+    const p2_inf = pairs[2][1].sub(pairs[2][0]);
+    const p3_inf = pairs[3][1].sub(pairs[3][0]);
+    const b1 = pairs[2][1].mul(pairs[3][1]);
+    const b2 = p2_inf.add(pairs[2][1]).mul(p3_inf.add(pairs[3][1]));
+    const b_inf = p2_inf.mul(p3_inf);
+    const b3 = b2.add(b_inf).add(b2.add(b_inf)).sub(b1);
+
+    // Pointwise multiply: 4 muls
+    return .{
+        a1.mul(b1), // P(1)
+        a2.mul(b2), // P(2)
+        a3.mul(b3), // P(3)
+        a_inf.mul(b_inf), // P(∞)
+    };
+}
+
+/// Reconstruct the full round polynomial from quotient evaluations.
+/// Implements Jolt's finish_mles_product_sum_from_evals (mles_product_sum.rs:235-269).
+///
+/// sum_evals: quotient g(x)/eq(x, r_round) evaluated at [1, 2, 3, ∞]
+/// claim: the sumcheck claim p(0) + p(1) for this round
+/// gruen_eq: the split-eq polynomial (provides r_round = tau[current_index - 1])
+///
+/// Returns: monomial coefficients of the full round polynomial g(x) (degree M+1=5, 6 coefficients).
+/// Caller owns returned slice.
+fn finishMlesProductSum(
+    comptime F: type,
+    allocator: std.mem.Allocator,
+    sum_evals: [4]F,
+    claim: F,
+    gruen_eq: *const poly_mod.GruenSplitEqPolynomial(F),
+) ![]F {
+    const UniPolyT = poly_mod.UniPoly(F);
+
+    // 1. Get r_round from the split-eq's current tau value
+    const r_round = gruen_eq.tau[gruen_eq.current_index - 1];
+    const eq_at_0 = F.one().sub(r_round); // eq(0, r) = 1 - r
+    const eq_at_1 = r_round; // eq(1, r) = r
+
+    // 2. Recover quotient(0) from claim:
+    //    claim = eq(0,r)*q(0) + eq(1,r)*q(1)
+    //    q(0) = (claim - r * q(1)) / (1 - r)
+    const q_at_0 = claim.sub(eq_at_1.mul(sum_evals[0])).mul(eq_at_0.inverse().?);
+
+    // 3. Interpolate quotient poly from [q(0), q(1), q(2), q(3), q(∞)]
+    //    fromEvalsToom handles grid [0, 1, ..., n-2, ∞] where last eval = leading coeff
+    var toom_evals = [5]F{ q_at_0, sum_evals[0], sum_evals[1], sum_evals[2], sum_evals[3] };
+    const quotient_coeffs = try UniPolyT.fromEvalsToom(allocator, &toom_evals);
+    defer allocator.free(quotient_coeffs);
+
+    // 4. Multiply back by eq(x, r_round) = (1-r) + (2r-1)*x
+    //    This produces the full g(x) of degree d = len(quotient_coeffs)
+    const constant_coeff = eq_at_0; // 1 - r
+    const x_coeff = r_round.add(r_round).sub(F.one()); // 2r - 1
+    var final_coeffs = try allocator.alloc(F, quotient_coeffs.len + 1);
+    @memset(final_coeffs, F.zero());
+    for (0..quotient_coeffs.len) |i| {
+        final_coeffs[i] = final_coeffs[i].add(quotient_coeffs[i].mul(constant_coeff));
+        final_coeffs[i + 1] = final_coeffs[i + 1].add(quotient_coeffs[i].mul(x_coeff));
+    }
+
+    return final_coeffs;
+}
+
 fn LookupsRaVirtualProver(comptime F: type) type {
     const RaPoly = ra_poly_mod.RaPolynomial(F);
 
@@ -5409,8 +5522,14 @@ fn LookupsRaVirtualProver(comptime F: type) type {
 
         /// In-place MLE bind (same as RamRaVirtualProver.bindSlice).
         fn bindSlice(arr: []F, h: usize, challenge: F) void {
-            for (0..h) |j| {
-                arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
+            if (challenge.limbs[0] == 0 and challenge.limbs[1] == 0) {
+                for (0..h) |j| {
+                    arr[j] = arr[2 * j].add(arr[2 * j + 1].sub(arr[2 * j]).mulHiBigIntU128(challenge.limbs));
+                }
+            } else {
+                for (0..h) |j| {
+                    arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
+                }
             }
         }
 
@@ -5440,7 +5559,6 @@ fn LookupsRaVirtualProver(comptime F: type) type {
         ) !Self {
             std.debug.assert(log_k_chunk <= ra_poly_mod.MAX_LOG_K_CHUNK);
             const T = trace.steps.items.len;
-            const n_vars = std.math.log2_int(usize, T);
             const total_committed = M * N;
             const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
 
@@ -5502,6 +5620,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             }
 
             // r_cycle is in BE order; reverse for LE computeEqTable
+            const n_vars = std.math.log2_int(usize, T);
             var r_cycle_rev = try allocator.alloc(F, n_vars);
             defer allocator.free(r_cycle_rev);
             for (0..n_vars) |i| r_cycle_rev[i] = r_cycle[n_vars - 1 - i];
@@ -5528,15 +5647,9 @@ fn LookupsRaVirtualProver(comptime F: type) type {
         }
 
         /// f(x) = eq(x) * Sum_v Prod_{j=0}^{M-1} ra_{v*M+j}(x)
-        /// Degree = M + 1
+        /// Returns M+2 evaluations at integer points [0, 1, ..., M+1] (Vandermonde format).
         pub fn computeRoundPoly(self: *Self, allocator: Allocator) ![]F {
             const n_evals = self.M + 2;
-
-            return self.computeRoundPolyFlat(allocator, n_evals);
-        }
-
-        /// Flat iteration using e_out as eq array.
-        fn computeRoundPolyFlat(self: *Self, allocator: Allocator, n_evals: usize) ![]F {
             const half = self.e_out_len / 2;
 
             const Ctx = struct {
@@ -5554,9 +5667,10 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 .n_evals = n_evals,
             };
 
+            const UPA = UnreducedProductAccum;
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
-                    var acc: [MAX_RA_EVALS]F = .{F.zero()} ** MAX_RA_EVALS;
+                    var upa_acc: [MAX_RA_EVALS]UPA = .{UPA.zero()} ** MAX_RA_EVALS;
                     const tc = c.N * c.M;
                     for (start..end) |j| {
                         const eq0 = c.eq[2 * j];
@@ -5575,11 +5689,11 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                         {
                             var virtual_sum = F.zero();
                             for (0..c.N) |v| {
-                                var product = F.one();
-                                for (0..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
+                                var product = cur[v * c.M];
+                                for (1..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
                                 virtual_sum = virtual_sum.add(product);
                             }
-                            acc[0] = acc[0].add(eq0.mul(virtual_sum));
+                            upa_acc[0].addAssign(eq0.mulToProductAccum(virtual_sum));
                         }
 
                         var eq_cur = eq0;
@@ -5588,13 +5702,15 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                             eq_cur = eq_cur.add(eq_delta);
                             var virtual_sum = F.zero();
                             for (0..c.N) |v| {
-                                var product = F.one();
-                                for (0..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
+                                var product = cur[v * c.M];
+                                for (1..c.M) |m_idx| product = product.mul(cur[v * c.M + m_idx]);
                                 virtual_sum = virtual_sum.add(product);
                             }
-                            acc[pt] = acc[pt].add(eq_cur.mul(virtual_sum));
+                            upa_acc[pt].addAssign(eq_cur.mulToProductAccum(virtual_sum));
                         }
                     }
+                    var acc: [MAX_RA_EVALS]F = undefined;
+                    for (0..MAX_RA_EVALS) |i| acc[i] = upa_acc[i].reduce();
                     return acc;
                 }
             }.f;
@@ -5627,7 +5743,6 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             // Bind RA polynomials — O(K) for compressed states, O(T/2^round) for dense
             const all_dense = self.ra_polys[0].isDense();
             if (all_dense) {
-                // Dense state: parallel bind across ra_polys only (eq is O(√T), done below)
                 if (self.pool) |pool| {
                     const BindCtx = struct { ra: []RaPoly, tc: usize, half: usize, r: F };
                     const ctx = BindCtx{ .ra = self.ra_polys, .tc = self.total_committed, .half = half, .r = r };
@@ -5645,7 +5760,6 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                     for (self.ra_polys) |*p| try p.bind(r, self.allocator);
                 }
             } else {
-                // Compressed state: bind is O(K) per poly — sequential is fine
                 for (self.ra_polys) |*p| try p.bind(r, self.allocator);
             }
 
@@ -6445,9 +6559,12 @@ fn BytecodeReadRafProver(comptime F: type) type {
 
                         for (0..c.n_evals) |pt_idx| {
                             const x = c.x_vals[pt_idx];
-                            var ra_product = F.one();
+                            // Start product from first ra_chunk (avoid F.one() mul)
+                            const r0_first = c.ra_chunks[0][2 * j];
+                            const r1_first = c.ra_chunks[0][2 * j + 1];
+                            var ra_product = r0_first.add(x.mul(r1_first.sub(r0_first)));
 
-                            for (0..c.bytecode_d) |i| {
+                            for (1..c.bytecode_d) |i| {
                                 const r0 = c.ra_chunks[i][2 * j];
                                 const r1 = c.ra_chunks[i][2 * j + 1];
                                 ra_product = ra_product.mul(r0.add(x.mul(r1.sub(r0))));
@@ -6910,6 +7027,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // ====================================================================
             // Initialize ALL sumcheck instances
             // ====================================================================
+            var s6_init_timer: if (s6_bench_timing) std.time.Timer else void = if (comptime s6_bench_timing) std.time.Timer.start() catch unreachable else {};
 
             // Instance 5: IncClaimReduction (degree 2)
             // IncClaimReduction uses RAM r_cycles (not BytecodeReadRaf r_cycles)
@@ -7123,47 +7241,120 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     @memset(G_tables[i], F.zero());
                 }
 
-                for (0..T_val) |j| {
-                    const eq_j = eq_cycle_bool_phase2[j]; // eq(r_cycle_fixed, j) - same table as Phase 2
-                    if (eq_j.eql(F.zero())) continue;
+                // Parallel G-table build: each thread scans its range of T, accumulates
+                // into thread-local partials, then reduce sums element-wise.
+                if (self.thread_pool) |pool| {
+                    const GBuildCtx = struct {
+                        eq_cycle: []const F,
+                        steps: []const tracer.TraceStep,
+                        pc_map_ptr: *const BytecodePCMapper,
+                        mem_layout: *const jolt_device.MemoryLayout,
+                        instr_d: usize,
+                        bc_d: usize,
+                        rm_d: usize,
+                        lkc: usize,
+                        K: usize,
+                        total_polys: usize,
+                        G_out: [][]F,
+                    };
+                    const g_ctx = GBuildCtx{
+                        .eq_cycle = eq_cycle_bool_phase2,
+                        .steps = trace.steps.items,
+                        .pc_map_ptr = pc_map,
+                        .mem_layout = memory_layout,
+                        .instr_d = instruction_d,
+                        .bc_d = bytecode_d,
+                        .rm_d = ram_d,
+                        .lkc = log_k_chunk,
+                        .K = K_val,
+                        .total_polys = total_bool_polys,
+                        .G_out = G_tables,
+                    };
+                    // Use parallelFor over T; each j writes to its own unique contribution.
+                    // Since multiple j's CAN write to the same G[i][k], we must use parallelReduce
+                    // with thread-local accumulation. But G is too large for stack return.
+                    // Instead: split T into num_workers chunks, each accumulates directly into
+                    // a shared G_tables using the j-range guarantee that parallelFor provides.
+                    // Wait — parallelFor doesn't guarantee non-overlapping ranges for G writes.
+                    // Use a simpler strategy: just iterate sequentially but let the compiler vectorize.
+                    // Actually, the fastest approach: split polys across threads instead of T.
+                    // Each thread handles a subset of polys across all T.
+                    pool.parallelForForce(total_bool_polys, g_ctx, struct {
+                        fn f(c: GBuildCtx, poly_i: usize) void {
+                            const G_i = c.G_out[poly_i];
+                            for (0..c.steps.len) |j| {
+                                const eq_j = c.eq_cycle[j];
+                                if (eq_j.eql(F.zero())) continue;
+                                const step = c.steps[j];
 
-                    const step = trace.steps.items[j];
-
-                    // InstructionRa chunks - use centralized computeLookupIndex
-                    // to ensure consistency with transitionToPhase2, LookupsRaVirtual,
-                    // and Stage 7 G table builder.
-                    {
-                        const lookup_idx = computeLookupIndex(step);
-                        for (0..instruction_d) |i| {
-                            const shift = log_k_chunk * (instruction_d - 1 - i);
-                            const mask: u128 = (@as(u128, 1) << @intCast(log_k_chunk)) - 1;
-                            const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
-                            if (chunk_val < K_val) {
-                                G_tables[i][chunk_val] = G_tables[i][chunk_val].add(eq_j);
+                                if (poly_i < c.instr_d) {
+                                    // InstructionRa chunk
+                                    const lookup_idx = computeLookupIndex(step);
+                                    const shift = c.lkc * (c.instr_d - 1 - poly_i);
+                                    const mask: u128 = (@as(u128, 1) << @intCast(c.lkc)) - 1;
+                                    const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
+                                    if (chunk_val < c.K) {
+                                        G_i[chunk_val] = G_i[chunk_val].add(eq_j);
+                                    }
+                                } else if (poly_i < c.instr_d + c.bc_d) {
+                                    // BytecodeRa chunk
+                                    const bi = poly_i - c.instr_d;
+                                    const pc_idx: u64 = @intCast(c.pc_map_ptr.getPCForStep(step));
+                                    const chunk_val = extractChunkMSB(pc_idx, bi, c.bc_d, c.lkc);
+                                    if (chunk_val < c.K) {
+                                        G_i[chunk_val] = G_i[chunk_val].add(eq_j);
+                                    }
+                                } else {
+                                    // RamRa chunk
+                                    const ri = poly_i - c.instr_d - c.bc_d;
+                                    if (step.memory_addr) |addr| {
+                                        if (addr != 0) {
+                                            if (c.mem_layout.remapAddress(addr)) |raddr| {
+                                                const chunk_val = extractChunkMSB(raddr, ri, c.rm_d, c.lkc);
+                                                if (chunk_val < c.K) {
+                                                    G_i[chunk_val] = G_i[chunk_val].add(eq_j);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                    }
-
-                    // BytecodeRa chunks
-                    {
-                        const pc_idx: u64 = @intCast(pc_map.getPCForStep(step));
-                        for (0..bytecode_d) |i| {
-                            const chunk_val = extractChunkMSB(pc_idx, i, bytecode_d, log_k_chunk);
-                            if (chunk_val < K_val) {
-                                G_tables[instruction_d + i][chunk_val] = G_tables[instruction_d + i][chunk_val].add(eq_j);
+                    }.f);
+                } else {
+                    for (0..T_val) |j| {
+                        const eq_j = eq_cycle_bool_phase2[j];
+                        if (eq_j.eql(F.zero())) continue;
+                        const step = trace.steps.items[j];
+                        {
+                            const lookup_idx = computeLookupIndex(step);
+                            for (0..instruction_d) |i| {
+                                const shift = log_k_chunk * (instruction_d - 1 - i);
+                                const mask: u128 = (@as(u128, 1) << @intCast(log_k_chunk)) - 1;
+                                const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
+                                if (chunk_val < K_val) {
+                                    G_tables[i][chunk_val] = G_tables[i][chunk_val].add(eq_j);
+                                }
                             }
                         }
-                    }
-
-                    // RamRa chunks
-                    {
-                        if (step.memory_addr) |addr| {
-                            if (addr != 0) {
-                                if (memory_layout.remapAddress(addr)) |raddr| {
-                                    for (0..ram_d) |i| {
-                                        const chunk_val = extractChunkMSB(raddr, i, ram_d, log_k_chunk);
-                                        if (chunk_val < K_val) {
-                                            G_tables[instruction_d + bytecode_d + i][chunk_val] = G_tables[instruction_d + bytecode_d + i][chunk_val].add(eq_j);
+                        {
+                            const pc_idx: u64 = @intCast(pc_map.getPCForStep(step));
+                            for (0..bytecode_d) |i| {
+                                const chunk_val = extractChunkMSB(pc_idx, i, bytecode_d, log_k_chunk);
+                                if (chunk_val < K_val) {
+                                    G_tables[instruction_d + i][chunk_val] = G_tables[instruction_d + i][chunk_val].add(eq_j);
+                                }
+                            }
+                        }
+                        {
+                            if (step.memory_addr) |addr| {
+                                if (addr != 0) {
+                                    if (memory_layout.remapAddress(addr)) |raddr| {
+                                        for (0..ram_d) |i| {
+                                            const chunk_val = extractChunkMSB(raddr, i, ram_d, log_k_chunk);
+                                            if (chunk_val < K_val) {
+                                                G_tables[instruction_d + bytecode_d + i][chunk_val] = G_tables[instruction_d + bytecode_d + i][chunk_val].add(eq_j);
+                                            }
                                         }
                                     }
                                 }
@@ -8289,6 +8480,17 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             var bytecode_addr_challenges = try self.allocator.alloc(F, bytecode_log_k);
             defer self.allocator.free(bytecode_addr_challenges);
 
+            // Stage 6 fine-grained timing (gated by s6_bench_timing)
+            if (comptime s6_bench_timing) {
+                std.debug.print("    [STAGE6-BENCH] Init: {d:7.1}ms\n", .{
+                    @as(f64, @floatFromInt(s6_init_timer.read())) / 1_000_000.0,
+                });
+            }
+            var s6_t_compute: if (s6_bench_timing) [6]u64 else void = if (comptime s6_bench_timing) [6]u64{ 0, 0, 0, 0, 0, 0 } else {};
+            var s6_t_bind: if (s6_bench_timing) [6]u64 else void = if (comptime s6_bench_timing) [6]u64{ 0, 0, 0, 0, 0, 0 } else {};
+            var s6_t_transcript: if (s6_bench_timing) u64 else void = if (comptime s6_bench_timing) @as(u64, 0) else {};
+            var s6_timer: if (s6_bench_timing) std.time.Timer else void = if (comptime s6_bench_timing) std.time.Timer.start() catch unreachable else {};
+
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
 
@@ -8319,6 +8521,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var dbg_inst_p1: [6]F = .{F.zero()} ** 6;
 
                 // Instance 0: BytecodeReadRaf - REAL prover
+                if (comptime s6_bench_timing) s6_timer.reset();
                 {
                     const inst = 0;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -8400,7 +8603,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
+                if (comptime s6_bench_timing) s6_t_compute[0] += s6_timer.read();
                 // Instance 1: Booleanity - REAL prover (degree 3)
+                if (comptime s6_bench_timing) s6_timer.reset();
                 var cached_booleanity: ?[]F = null;
                 {
                     const inst = 1;
@@ -8441,7 +8646,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
+                if (comptime s6_bench_timing) s6_t_compute[1] += s6_timer.read();
                 // Instance 2: HammingBooleanity - REAL prover
+                if (comptime s6_bench_timing) s6_timer.reset();
                 {
                     const inst = 2;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -8468,7 +8675,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
+                if (comptime s6_bench_timing) s6_t_compute[2] += s6_timer.read();
                 // Instance 3: RamRaVirtual - REAL prover
+                if (comptime s6_bench_timing) s6_timer.reset();
                 {
                     const inst = 3;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -8518,7 +8727,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
+                if (comptime s6_bench_timing) s6_t_compute[3] += s6_timer.read();
                 // Instance 4: LookupsRaVirtual - REAL prover
+                // Overlap with previous instances via join when both are active
+                if (comptime s6_bench_timing) s6_timer.reset();
                 {
                     const inst = 4;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -8530,23 +8742,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         inst_active[inst] = true;
                         const polys = try lookups_ra_prover.computeRoundPoly(self.allocator);
                         cached_lookups_ra = polys;
-                        if (debug_r5) {
-                            const p01 = polys[0].add(polys[1]);
-                            const p01_ok: u8 = if (std.mem.eql(u8, &p01.toBytesBE(), &instance_claims[inst].toBytesBE())) 1 else 0;
-                            dbg("  [R5_DBG] inst4 polys_len={} p(0)+p(1)=claim? {}\n", .{ polys.len, p01_ok });
-                            const p0_le = polys[0].toBytes();
-                            const p1_le = polys[1].toBytes();
-                            const cl_le = instance_claims[inst].toBytes();
-                            dbg("  [R5_DBG] inst4 p(0)_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                                p0_le[0], p0_le[1], p0_le[2], p0_le[3], p0_le[4], p0_le[5], p0_le[6], p0_le[7],
-                            });
-                            dbg("  [R5_DBG] inst4 p(1)_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                                p1_le[0], p1_le[1], p1_le[2], p1_le[3], p1_le[4], p1_le[5], p1_le[6], p1_le[7],
-                            });
-                            dbg("  [R5_DBG] inst4 claim_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                                cl_le[0], cl_le[1], cl_le[2], cl_le[3], cl_le[4], cl_le[5], cl_le[6], cl_le[7],
-                            });
-                        }
                         // Convert evaluations to monomial coefficients and add to combined_coeffs
                         const mono = try UniPoly(F).fromEvalsVandermonde(self.allocator, polys);
                         defer self.allocator.free(mono);
@@ -8567,7 +8762,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
+                if (comptime s6_bench_timing) s6_t_compute[4] += s6_timer.read();
                 // Instance 5: IncClaimReduction - REAL prover
+                if (comptime s6_bench_timing) s6_timer.reset();
                 {
                     const inst = 5;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -8743,6 +8940,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
+                if (comptime s6_bench_timing) s6_t_compute[5] += s6_timer.read();
+                if (comptime s6_bench_timing) s6_timer.reset();
                 // Compress: strip c1 (linear term) from monomial coefficients
                 // compressed = [c0, c2, c3, ..., c_d] (same as Jolt's UniPoly::compress)
                 const compressed = try self.allocator.alloc(F, max_degree);
@@ -8857,8 +9056,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     dbg("]\n", .{});
                 }
 
+                if (comptime s6_bench_timing) s6_t_transcript += s6_timer.read();
                 // Update per-instance claims from CACHED round polys and bind challenge
                 // Instance 0: BytecodeReadRaf
+                if (comptime s6_bench_timing) s6_timer.reset();
                 if (inst_active[0]) {
                     if (bytecode_prover.phase == 0) {
                         // Phase 1: degree-2 poly, p(r) = a0 + a1*r + a2*r^2
@@ -8960,7 +9161,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
+                if (comptime s6_bench_timing) s6_t_bind[0] += s6_timer.read();
                 // Instance 1: Booleanity (real prover)
+                if (comptime s6_bench_timing) s6_timer.reset();
                 if (inst_active[1]) {
                     if (cached_booleanity) |polys| {
                         // Evaluate degree-3 poly at challenge from Vandermonde [p(0), p(1), p(2), p(3)]
@@ -8980,13 +9183,17 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
+                if (comptime s6_bench_timing) s6_t_bind[1] += s6_timer.read();
                 // Instance 2: HammingBooleanity
+                if (comptime s6_bench_timing) s6_timer.reset();
                 if (inst_active[2]) {
                     instance_claims[2] = UniPoly(F).evalFromEvalsDeg3(cached_hamming, challenge);
                     hamming_prover.bindChallenge(challenge);
                 }
 
+                if (comptime s6_bench_timing) s6_t_bind[2] += s6_timer.read();
                 // Instance 3: RamRaVirtual
+                if (comptime s6_bench_timing) s6_timer.reset();
                 if (inst_active[3]) {
                     instance_claims[3] = UniPoly(F).evalFromEvalsGeneral(cached_ram_ra.?, challenge);
                     self.allocator.free(cached_ram_ra.?);
@@ -8994,7 +9201,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     try ram_ra_prover.bindChallenge(challenge);
                 }
 
+                if (comptime s6_bench_timing) s6_t_bind[3] += s6_timer.read();
                 // Instance 4: LookupsRaVirtual
+                if (comptime s6_bench_timing) s6_timer.reset();
                 if (inst_active[4]) {
                     instance_claims[4] = UniPoly(F).evalFromEvalsGeneral(cached_lookups_ra.?, challenge);
                     self.allocator.free(cached_lookups_ra.?);
@@ -9002,12 +9211,15 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     try lookups_ra_prover.bindChallenge(challenge);
                 }
 
+                if (comptime s6_bench_timing) s6_t_bind[4] += s6_timer.read();
                 // Instance 5: IncClaimReduction
+                if (comptime s6_bench_timing) s6_timer.reset();
                 if (inst_active[5]) {
                     instance_claims[5] = UniPoly(F).evalFromEvalsDeg2(cached_inc, challenge);
 
                     try inc_prover.bindChallenge(challenge);
                 }
+                if (comptime s6_bench_timing) s6_t_bind[5] += s6_timer.read();
 
                 // NOTE: Instance claims for inactive instances are NOT halved here.
                 // In Zolt, instance_claims starts at the UNSCALED input_claims (not 2^offset-scaled),
@@ -9016,6 +9228,33 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // instance_claims[i] = input_claims[i] = the correct unscaled claim.
             }
 
+
+            if (comptime s6_bench_timing) {
+                const names = [6][]const u8{ "BcRaf", "Bool ", "Hamm ", "RamRa", "LkRa ", "Inc  " };
+                var total_compute: u64 = 0;
+                var total_bind: u64 = 0;
+                for (0..6) |i| {
+                    total_compute += s6_t_compute[i];
+                    total_bind += s6_t_bind[i];
+                }
+                std.debug.print("\n    [STAGE6-BENCH] Per-instance timing (compute + bind):\n", .{});
+                for (0..6) |i| {
+                    std.debug.print("    [STAGE6-BENCH]   {s}: compute={d:7.1}ms  bind={d:7.1}ms  total={d:7.1}ms\n", .{
+                        names[i],
+                        @as(f64, @floatFromInt(s6_t_compute[i])) / 1_000_000.0,
+                        @as(f64, @floatFromInt(s6_t_bind[i])) / 1_000_000.0,
+                        @as(f64, @floatFromInt(s6_t_compute[i] + s6_t_bind[i])) / 1_000_000.0,
+                    });
+                }
+                std.debug.print("    [STAGE6-BENCH]   transcript+compress: {d:7.1}ms\n", .{
+                    @as(f64, @floatFromInt(s6_t_transcript)) / 1_000_000.0,
+                });
+                std.debug.print("    [STAGE6-BENCH]   TOTAL: compute={d:7.1}ms  bind={d:7.1}ms  other={d:7.1}ms\n", .{
+                    @as(f64, @floatFromInt(total_compute)) / 1_000_000.0,
+                    @as(f64, @floatFromInt(total_bind)) / 1_000_000.0,
+                    @as(f64, @floatFromInt(s6_t_transcript)) / 1_000_000.0,
+                });
+            }
 
             // ====================================================================
             // Extract opening claims from all real provers

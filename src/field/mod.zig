@@ -20,7 +20,6 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
 
-
 /// Number of bytes in a field element (256 bits = 32 bytes)
 pub const FIELD_ELEMENT_BYTES: usize = 32;
 
@@ -266,18 +265,14 @@ pub fn MontgomeryField(
             };
         }
 
-        /// Subtract with borrow
+        /// Subtract with borrow — wrapping arithmetic (no branch)
         inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
-            const diff = @as(i128, a) - @as(i128, b) - @as(i128, borrow_in);
-            if (diff < 0) {
-                return .{
-                    .result = @truncate(@as(u128, @bitCast(diff + (@as(i128, 1) << 64)))),
-                    .borrow = 1,
-                };
-            }
+            const wide_a = @as(u128, a);
+            const wide_b = @as(u128, b) + @as(u128, borrow_in);
+            const diff = wide_a -% wide_b;
             return .{
-                .result = @truncate(@as(u128, @bitCast(diff))),
-                .borrow = 0,
+                .result = @truncate(diff),
+                .borrow = @truncate(diff >> 127),
             };
         }
 
@@ -479,8 +474,7 @@ pub fn MontgomeryField(
                   [_b] "{rsi}" (&b),
                   [_mod] "{r14}" (&mod_arr),
                   [_inv] "{rbx}" (montgomery_inv),
-                : .{ .rax = true, .rcx = true, .rdx = true, .r13 = true, .cc = true, .memory = true }
-            );
+                : .{ .rax = true, .rcx = true, .rdx = true, .r13 = true, .cc = true, .memory = true });
 
             var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
             if (!result.lessThanModulus()) {
@@ -816,14 +810,11 @@ pub fn MontgomeryField(
         }
 
         inline fn lessThanModulus(self: Self) bool {
-            @setEvalBranchQuota(10000);
-            var i: usize = 3;
-            while (true) : (i -= 1) {
-                if (self.limbs[i] < modulus[i]) return true;
-                if (self.limbs[i] > modulus[i]) return false;
-                if (i == 0) break;
-            }
-            return false;
+            // Unrolled MSB-first comparison — const modulus enables LLVM to emit cmpq with immediates
+            if (self.limbs[3] != modulus[3]) return self.limbs[3] < modulus[3];
+            if (self.limbs[2] != modulus[2]) return self.limbs[2] < modulus[2];
+            if (self.limbs[1] != modulus[1]) return self.limbs[1] < modulus[1];
+            return self.limbs[0] < modulus[0];
         }
 
         inline fn subtractModulus(self: Self) Self {
@@ -1028,6 +1019,7 @@ pub const BN254Scalar = struct {
 
     /// Add with carry
     inline fn addCarry(a: u64, b: u64, carry_in: u64) struct { result: u64, carry: u64 } {
+        // Use u128 addition — LLVM recognizes this as adc pattern
         const sum = @as(u128, a) + @as(u128, b) + @as(u128, carry_in);
         return .{
             .result = @truncate(sum),
@@ -1035,18 +1027,16 @@ pub const BN254Scalar = struct {
         };
     }
 
-    /// Subtract with borrow
+    /// Subtract with borrow — wrapping arithmetic (no branch)
     inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
-        const diff = @as(i128, a) - @as(i128, b) - @as(i128, borrow_in);
-        if (diff < 0) {
-            return .{
-                .result = @truncate(@as(u128, @bitCast(diff + (@as(i128, 1) << 64)))),
-                .borrow = 1,
-            };
-        }
+        // Wrapping subtract via u128, extract borrow from high bit
+        // This avoids the i128 `if (diff < 0)` branch
+        const wide_a = @as(u128, a);
+        const wide_b = @as(u128, b) + @as(u128, borrow_in);
+        const diff = wide_a -% wide_b;
         return .{
-            .result = @truncate(@as(u128, @bitCast(diff))),
-            .borrow = 0,
+            .result = @truncate(diff),
+            .borrow = @truncate(diff >> 127), // sign bit = borrow
         };
     }
 
@@ -1101,15 +1091,12 @@ pub const BN254Scalar = struct {
     pub fn add(self: Self, other: Self) Self {
         var result: [4]u64 = undefined;
         var carry: u64 = 0;
-
         inline for (0..4) |i| {
             const ac = addCarry(self.limbs[i], other.limbs[i], carry);
             result[i] = ac.result;
             carry = ac.carry;
         }
-
         var res = Self{ .limbs = result };
-        // Reduce if >= p
         if (carry != 0 or !res.lessThanModulus()) {
             res = res.subtractModulus();
         }
@@ -1277,8 +1264,7 @@ pub const BN254Scalar = struct {
               [_b] "{rsi}" (&b),
               [_mod] "{r14}" (&mod_arr),
               [_inv] "{rbx}" (BN254_INV),
-            : .{ .rax = true, .rcx = true, .rdx = true, .r13 = true, .cc = true, .memory = true }
-        );
+            : .{ .rax = true, .rcx = true, .rdx = true, .r13 = true, .cc = true, .memory = true });
 
         var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
         if (!result.lessThanModulus()) {
@@ -1346,6 +1332,106 @@ pub const BN254Scalar = struct {
     /// This is equivalent to: self * (limb2 + limb3 * 2^64) mod p
     /// where the 128-bit value is stored in positions [2] and [3] of a 4-limb BigInt.
     pub fn mulHiBigIntU128(self: Self, hi_limbs: [4]u64) Self {
+        return self.mulHiBigIntU128Soft(hi_limbs);
+    }
+
+    /// x86-64 BMI2+ADX accelerated 2-round CIOS for 128-bit hi-limb multiply.
+    /// Computes self * [0, 0, limb2, limb3] mod p using only 2 CIOS rounds.
+    noinline fn mulHiBigIntU128X86(self: Self, limb2: u64, limb3: u64) Self {
+        const a = self.limbs;
+        const mod_arr: [4]u64 = BN254_MODULUS;
+        var r0: u64 = undefined;
+        var r1: u64 = undefined;
+        var r2: u64 = undefined;
+        var r3: u64 = undefined;
+
+        asm volatile (
+            // Clear CF and OF for initial carry chains
+            \\xorq %%r13, %%r13
+            //
+            // Round 0: limb2 × self[0..3] (first non-zero round)
+            // rdx = limb2 (already set via input constraint)
+            \\mulxq (%%rdi), %%r8, %%r9
+            \\mulxq 8(%%rdi), %%rax, %%r10
+            \\adcxq %%rax, %%r9
+            \\mulxq 16(%%rdi), %%rax, %%r11
+            \\adcxq %%rax, %%r10
+            \\mulxq 24(%%rdi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r11
+            \\adcxq %%r13, %%rcx
+            // Montgomery reduction: k = r8 * INV
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r8, %%rdx, %%rax
+            // k × modulus
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r8, %%rax
+            \\adoxq %%r13, %%r9
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 24(%%r14), %%rax, %%r8
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%rcx, %%r8
+            \\adcxq %%r13, %%r8
+            //
+            // Round 1: limb3 × self[0..3]
+            \\movq %%rsi, %%rdx
+            \\mulxq (%%rdi), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 8(%%rdi), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 16(%%rdi), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 24(%%rdi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%rcx
+            \\adcxq %%r13, %%rcx
+            // Montgomery reduction: k = r9 * INV
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r9, %%rdx, %%rax
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r9, %%rax
+            \\adoxq %%r13, %%r10
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 24(%%r14), %%rax, %%r9
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%rcx, %%r9
+            \\adcxq %%r13, %%r9
+            : [_r0] "={r10}" (r0),
+              [_r1] "={r11}" (r1),
+              [_r2] "={r8}" (r2),
+              [_r3] "={r9}" (r3),
+            : [_a] "{rdi}" (&a),
+              [_limb2] "{rdx}" (limb2),
+              [_limb3] "{rsi}" (limb3),
+              [_mod] "{r14}" (&mod_arr),
+              [_inv] "{rbx}" (BN254_INV),
+            : .{ .rax = true, .rcx = true, .r13 = true, .cc = true, .memory = true }
+        );
+
+        var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
+        if (!result.lessThanModulus()) {
+            result = result.subtractModulus();
+        }
+        return result;
+    }
+
+    fn mulHiBigIntU128Soft(self: Self, hi_limbs: [4]u64) Self {
         const limb_n2 = hi_limbs[2];
         const limb_n1 = hi_limbs[3];
 
@@ -1614,14 +1700,12 @@ pub const BN254Scalar = struct {
     }
 
     inline fn lessThanModulus(self: Self) bool {
-        @setEvalBranchQuota(10000);
-        var i: usize = 3;
-        while (true) : (i -= 1) {
-            if (self.limbs[i] < BN254_MODULUS[i]) return true;
-            if (self.limbs[i] > BN254_MODULUS[i]) return false;
-            if (i == 0) break;
-        }
-        return false;
+        // Unrolled MSB-first comparison — matches arkworks BigInt::cmp pattern
+        // Const modulus values allow LLVM to emit cmpq with immediates
+        if (self.limbs[3] != BN254_MODULUS[3]) return self.limbs[3] < BN254_MODULUS[3];
+        if (self.limbs[2] != BN254_MODULUS[2]) return self.limbs[2] < BN254_MODULUS[2];
+        if (self.limbs[1] != BN254_MODULUS[1]) return self.limbs[1] < BN254_MODULUS[1];
+        return self.limbs[0] < BN254_MODULUS[0];
     }
 
     inline fn subtractModulus(self: Self) Self {
@@ -3390,4 +3474,3 @@ test {
 }
 
 // Benchmark removed — was temporary for profiling
-

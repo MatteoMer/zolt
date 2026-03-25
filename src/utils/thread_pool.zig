@@ -275,16 +275,27 @@ const WorkerData = struct {
         const total = pool.thread_count + 1; // workers + main thread slot
         if (total <= 1) return null;
 
-        const start = self.nextRandom() % @as(u32, @intCast(total));
-        for (0..total) |offset| {
-            const victim_idx = (@as(usize, start) + offset) % total;
-            if (victim_idx == self.index) continue;
+        // Retry full sweep on CAS contention (max 3 sweeps).
+        // .retry means work EXISTS but another stealer won the CAS race.
+        var retries: u32 = 0;
+        while (retries < 3) {
+            const start = self.nextRandom() % @as(u32, @intCast(total));
+            var got_retry = false;
+            for (0..total) |offset| {
+                const victim_idx = (@as(usize, start) + offset) % total;
+                if (victim_idx == self.index) continue;
 
-            switch (pool.workers[victim_idx].deque.steal()) {
-                .success => |job| return job,
-                .empty => continue,
-                .retry => continue,
+                switch (pool.workers[victim_idx].deque.steal()) {
+                    .success => |job| return job,
+                    .empty => continue,
+                    .retry => {
+                        got_retry = true;
+                        break; // restart sweep from new random start
+                    },
+                }
             }
+            if (!got_retry) break; // full sweep found nothing
+            retries += 1;
         }
         return null;
     }
@@ -724,7 +735,7 @@ pub const ThreadPool = struct {
         self: *ThreadPool,
         comptime R: type,
         len: usize,
-        identity: R,
+        _: R, // identity (unused — inline root returns complete result)
         context: anytype,
         comptime map: fn (@TypeOf(context), usize, usize) R,
         comptime reduce_fn: fn (R, R) R,
@@ -847,33 +858,16 @@ pub const ThreadPool = struct {
         };
         defer if (worker.index == self.thread_count) releaseWorkerClaim(worker);
 
-        var result: R = identity;
-        var ctx_copy = context;
-        var latch = CompletionLatch.init(1); // Root uses CompletionLatch (futex for main thread)
-
-        // Start with 2x threads. Stolen jobs reset to max(num_threads, splits/2).
-        const initial_splits: u32 = @intCast(actual_threads * 2);
-
-        const payload = ReduceJobPayload{
-            .signal_fn = @ptrCast(&Signals.signalCompletion),
-            .context_ptr = @ptrCast(&ctx_copy),
-            .start = 0,
-            .end = len,
-            .latch = @ptrCast(&latch),
-            .partial_ptr = @ptrCast(&result),
-            .splits_remaining = initial_splits,
-            .pusher_index = @intCast(worker.index),
-        };
-
-        const root_job = Job.initFrom(ReduceJobPayload, payload, &Executor.execute);
-        if (!worker.deque.push(root_job)) {
-            return map(context, 0, len);
-        }
-
+        // Wake workers FIRST so they're stealing when we start pushing sub-jobs.
         self.wakeWorkers(@min(actual_threads - 1, self.thread_count));
-        latch.waitWhileWorking(worker, self);
 
-        return result;
+        // Inline root execution: call computeRange directly instead of push/pop/latch.
+        // computeRange pushes right halves to our deque (stealable by woken workers)
+        // and recurses into left halves. SpinLatches handle stolen sub-tasks internally.
+        // Matches Rayon's Splitter::new() initial splits = num_threads.
+        const initial_splits: u32 = @intCast(actual_threads);
+        var ctx_copy = context;
+        return Executor.computeRange(&ctx_copy, 0, len, initial_splits, worker, self);
     }
 
     // ========================================================================
@@ -964,9 +958,9 @@ pub const ThreadPool = struct {
                 continue;
             }
 
-            // Phase 1: Spin
+            // Phase 1: Spin (check deque + steal every 8th iteration)
             var found_work = false;
-            for (0..SPIN_ITERS) |_| {
+            for (0..SPIN_ITERS) |spin_i| {
                 atomic.spinLoopHint();
                 if (worker.state.load(.acquire) == @intFromEnum(WorkerState.shutdown)) return;
                 const g = self.generation.load(.acquire);
@@ -974,12 +968,20 @@ pub const ThreadPool = struct {
                     found_work = true;
                     break;
                 }
-                // Also check deque/steal during spin
-                if (worker.deque.pop()) |*j| {
-                    var job = j.*;
-                    job.execute_fn(&job, worker);
-                    found_work = true;
-                    break;
+                // Check deque + steal periodically during spin
+                if (spin_i % 8 == 7) {
+                    if (worker.deque.pop()) |*j| {
+                        var job = j.*;
+                        job.execute_fn(&job, worker);
+                        found_work = true;
+                        break;
+                    }
+                    if (worker.tryStealing(self)) |*j| {
+                        var job = j.*;
+                        job.execute_fn(&job, worker);
+                        found_work = true;
+                        break;
+                    }
                 }
             }
             if (found_work) continue;
@@ -1015,6 +1017,9 @@ pub const ThreadPool = struct {
     }
 
     /// Process available work until deques are empty (with steal retries).
+    /// Uses a hybrid idle strategy matching Rayon's persistence (~32 rounds):
+    /// first 8 rounds spin (fast, lets pusher threads push sub-jobs),
+    /// remaining 24 rounds yield (gives other threads CPU time).
     fn workerProcessWork(self: *ThreadPool, worker: *WorkerData) void {
         var consecutive_steal_failures: u32 = 0;
         while (true) {
@@ -1030,10 +1035,14 @@ pub const ThreadPool = struct {
                 consecutive_steal_failures = 0;
                 continue;
             }
-            // Retry a few times before giving up — work may be in-flight to other deques
             consecutive_steal_failures += 1;
-            if (consecutive_steal_failures >= 3) break;
-            atomic.spinLoopHint();
+            if (consecutive_steal_failures >= 32) break;
+            // Hybrid: spin first (fast ~5ns PAUSE), then yield (lets pushers run)
+            if (consecutive_steal_failures <= 8) {
+                atomic.spinLoopHint();
+            } else {
+                std.Thread.yield() catch {};
+            }
         }
     }
 

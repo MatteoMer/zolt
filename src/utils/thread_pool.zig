@@ -316,7 +316,7 @@ const ReduceJobPayload = struct {
     end: usize,
     latch: *anyopaque, // *CompletionLatch (root) or *SpinLatch (internal)
     partial_ptr: *anyopaque,
-    split_threshold: usize,
+    splits_remaining: usize, // Rayon-style: halves each level, stop at 0
 };
 
 comptime {
@@ -555,10 +555,6 @@ pub const ThreadPool = struct {
 
     /// Parallel reduce: split 0..len into chunks, each producing a partial result via
     /// `map(context, start, end) -> R`, then combine with `reduce(a, b) -> R`.
-    /// Minimum items for reduce to parallelize. Higher than parallelFor because
-    /// reduce has per-split overhead (latch + waitWhileWorking per recursion level).
-    const MIN_ITEMS_PER_REDUCE_THREAD: usize = 2048;
-
     pub fn parallelReduce(
         self: *ThreadPool,
         comptime R: type,
@@ -570,10 +566,7 @@ pub const ThreadPool = struct {
     ) R {
         if (len == 0) return identity;
 
-        if (len < MIN_ITEMS_PER_REDUCE_THREAD) {
-            return map(context, 0, len);
-        }
-        const actual_threads = @min(self.thread_count + 1, len / MIN_ITEMS_PER_REDUCE_THREAD);
+        const actual_threads = self.effectiveThreads(len, 1);
         if (actual_threads <= 1) {
             return map(context, 0, len);
         }
@@ -760,7 +753,7 @@ pub const ThreadPool = struct {
                 const pool: *ThreadPool = worker.pool_ptr;
 
                 // Compute via direct recursion (no Job round-trip for right half)
-                result_ptr.* = computeRange(ctx_ptr, p.start, p.end, p.split_threshold, worker, pool);
+                result_ptr.* = computeRange(ctx_ptr, p.start, p.end, p.splits_remaining, worker, pool);
 
                 // Signal parent: CompletionLatch (root) or SpinLatch (internal)
                 const signal: *const fn (*anyopaque) void = @ptrCast(@alignCast(p.signal_fn));
@@ -769,17 +762,19 @@ pub const ThreadPool = struct {
 
             /// Direct recursion — no Job/payload overhead for the right half.
             /// Left halves are pushed to the deque (stealable by other workers).
+            /// Uses Rayon-style splits counter: halves each level, stops at 0.
             fn computeRange(
                 ctx_ptr: *const Ctx,
                 start: usize,
                 end: usize,
-                split_threshold: usize,
+                splits: usize,
                 worker: *WorkerData,
                 pool: *ThreadPool,
             ) R {
                 const range_len = end - start;
 
-                if (range_len <= split_threshold) {
+                // Stop splitting when counter exhausted or range too small
+                if (splits == 0 or range_len < 2) {
                     return map(ctx_ptr.*, start, end);
                 }
 
@@ -796,7 +791,7 @@ pub const ThreadPool = struct {
                     .end = mid,
                     .latch = @ptrCast(&left_spin),
                     .partial_ptr = @ptrCast(&left_result),
-                    .split_threshold = split_threshold,
+                    .splits_remaining = splits / 2,
                 };
 
                 const left_job = Job.initFrom(ReduceJobPayload, left_payload, &execute);
@@ -807,8 +802,8 @@ pub const ThreadPool = struct {
                     left_spin.set();
                 }
 
-                // Tail-recurse right (no Job, no latch, no overhead)
-                const right_result = computeRange(ctx_ptr, mid, end, split_threshold, worker, pool);
+                // Tail-recurse right with halved splits (no Job, no latch)
+                const right_result = computeRange(ctx_ptr, mid, end, splits / 2, worker, pool);
 
                 // Wait for left (spin + steal, no futex)
                 left_spin.waitWhileWorking(worker, pool);
@@ -822,11 +817,15 @@ pub const ThreadPool = struct {
         };
         defer if (worker.index == self.thread_count) releaseWorkerClaim(worker);
 
-        const split_threshold = @max(MIN_ITEMS_PER_REDUCE_THREAD, len / (actual_threads * 4));
-
         var result: R = identity;
         var ctx_copy = context;
         var latch = CompletionLatch.init(1); // Root uses CompletionLatch (futex for main thread)
+
+        // Rayon-style splits counter: start with actual_threads * 4.
+        // Each level halves → creates ~8*threads leaf tasks.
+        // The counter approach adapts: small N gets few splits (fast),
+        // large N gets deep enough for good parallelism.
+        const initial_splits = actual_threads * 4;
 
         const payload = ReduceJobPayload{
             .signal_fn = @ptrCast(&Signals.signalCompletion),
@@ -835,7 +834,7 @@ pub const ThreadPool = struct {
             .end = len,
             .latch = @ptrCast(&latch),
             .partial_ptr = @ptrCast(&result),
-            .split_threshold = split_threshold,
+            .splits_remaining = initial_splits,
         };
 
         const root_job = Job.initFrom(ReduceJobPayload, payload, &Executor.execute);

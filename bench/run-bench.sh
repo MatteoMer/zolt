@@ -7,6 +7,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZOLT_BIN="$ROOT/zig-out/bin/zolt"
 JOLT_BIN="$ROOT/jolt-bench/target/release/jolt-bench"
+VERIFIER_BIN="$ROOT/jolt-verifier/target/release/jolt-verifier"
 
 PROGRAMS=(fibonacci factorial bitwise collatz primes sum gcd signed primes_large sha256_128 sha256 sha256_512 sha256_1024 sha256_2048)
 
@@ -14,7 +15,34 @@ if [ $# -ge 1 ]; then
     PROGRAMS=("$@")
 fi
 
-declare -A ZOLT_TOTAL JOLT_TOTAL JOLT_PROVE ZOLT_PROVE CYCLES TRACE_LEN
+# --- Build binaries if needed ---
+if [ ! -f "$ZOLT_BIN" ]; then
+    echo "  Building Zolt..."
+    (cd "$ROOT" && zig build -Doptimize=ReleaseFast) || { echo "ERROR: Zolt build failed"; exit 1; }
+fi
+
+if [ ! -f "$JOLT_BIN" ]; then
+    echo "  Building Jolt bench (release)..."
+    (cd "$ROOT/jolt-bench" && cargo build --release) || { echo "ERROR: Jolt bench build failed"; exit 1; }
+fi
+
+if [ ! -f "$VERIFIER_BIN" ]; then
+    echo "  Building Jolt verifier (release)..."
+    (cd "$ROOT/jolt-verifier" && cargo build --release) || { echo "ERROR: Jolt verifier build failed"; exit 1; }
+fi
+
+# --- OS-portable helpers ---
+# grep -oP (PCRE) is GNU-only; use sed as a portable alternative.
+extract() {
+    # Usage: extract "pattern with (capture group)" <<< "$text"
+    # Returns the first capture group match, or the fallback.
+    local pattern="$1" fallback="${2:-0}"
+    sed -nE "s/.*$pattern.*/\1/p" | head -1 | grep . || echo "$fallback"
+}
+
+# Use temp files instead of associative arrays (bash 3 compat)
+RESULTS_DIR=$(mktemp -d)
+trap 'rm -rf "$RESULTS_DIR"' EXIT
 
 echo ""
 echo "  Benchmarking Zolt vs Jolt (${#PROGRAMS[@]} programs)"
@@ -28,23 +56,31 @@ for prog in "${PROGRAMS[@]}"; do
 
     # --- Zolt ---
     zolt_out=$("$ZOLT_BIN" prove "$elf" --jolt-format -o /tmp/zolt_bench_proof.bin --export-preprocessing /tmp/zolt_bench_preproc.bin 2>&1)
-    zt=$(echo "$zolt_out" | grep -oP '^\s+Time: \K[0-9.]+' || echo "0")
-    zp=$(echo "$zolt_out" | grep -oP '^\s+Time: \K[0-9.]+' || echo "0")
-    ZOLT_TOTAL[$prog]="$zt"
-    ZOLT_PROVE[$prog]="$zp"
+    zt=$(echo "$zolt_out" | extract 'Time: ([0-9.]+)')
+    zp="$zt"
+    echo "$zt" > "$RESULTS_DIR/${prog}_zt"
+    echo "$zp" > "$RESULTS_DIR/${prog}_zp"
+
+    # --- Verify Zolt proof ---
+    if "$VERIFIER_BIN" --proof /tmp/zolt_bench_proof.bin --preprocessing /tmp/zolt_bench_preproc.bin >/dev/null 2>&1; then
+        echo "VERIFIED" > "$RESULTS_DIR/${prog}_verified"
+    else
+        echo "FAILED" > "$RESULTS_DIR/${prog}_verified"
+    fi
 
     # --- Jolt ---
     jolt_out=$("$JOLT_BIN" "$elf" 2>&1)
-    jt=$(echo "$jolt_out" | grep -oP 'Total:\s+\K[0-9.]+' || echo "0")
-    jp=$(echo "$jolt_out" | grep -oP 'Prove:\s+\K[0-9.]+' || echo "0")
-    cy=$(echo "$jolt_out" | grep -oP '\((\K[0-9]+)(?= cycles)' || echo "?")
-    tl=$(echo "$jolt_out" | grep -oP 'padded to \K[0-9]+' || echo "?")
-    JOLT_TOTAL[$prog]="$jt"
-    JOLT_PROVE[$prog]="$jp"
-    CYCLES[$prog]="$cy"
-    TRACE_LEN[$prog]="$tl"
+    jt=$(echo "$jolt_out" | extract 'Total:[[:space:]]+([0-9.]+)')
+    jp=$(echo "$jolt_out" | extract 'Prove:[[:space:]]+([0-9.]+)')
+    cy=$(echo "$jolt_out" | extract '\(([0-9]+) cycles' "?")
+    tl=$(echo "$jolt_out" | extract 'padded to ([0-9]+)' "?")
+    echo "$jt" > "$RESULTS_DIR/${prog}_jt"
+    echo "$jp" > "$RESULTS_DIR/${prog}_jp"
+    echo "$cy" > "$RESULTS_DIR/${prog}_cy"
+    echo "$tl" > "$RESULTS_DIR/${prog}_tl"
 
-    printf "done\n"
+    verified=$(cat "$RESULTS_DIR/${prog}_verified")
+    printf "done (%s)\n" "$verified"
 done
 
 # ── Results ──
@@ -60,11 +96,11 @@ total_z=0
 total_j=0
 
 for prog in "${PROGRAMS[@]}"; do
-    [ -z "${ZOLT_TOTAL[$prog]+x}" ] && continue
-    zt="${ZOLT_TOTAL[$prog]}"
-    jt="${JOLT_TOTAL[$prog]}"
-    cy="${CYCLES[$prog]}"
-    tl="${TRACE_LEN[$prog]}"
+    [ ! -f "$RESULTS_DIR/${prog}_zt" ] && continue
+    zt=$(cat "$RESULTS_DIR/${prog}_zt")
+    jt=$(cat "$RESULTS_DIR/${prog}_jt")
+    cy=$(cat "$RESULTS_DIR/${prog}_cy")
+    tl=$(cat "$RESULTS_DIR/${prog}_tl")
 
     if [ "$jt" != "0" ] && [ "$zt" != "0" ]; then
         ratio=$(awk "BEGIN{printf \"%.2fx\", $zt/$jt}")

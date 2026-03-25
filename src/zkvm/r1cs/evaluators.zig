@@ -1124,7 +1124,8 @@ test "compact witness bz_second with large u128 values" {
     // Verify bz_second[1] = RightLookup - LeftInput - RightInput (wrapping)
     const large_as_i128: i128 = @bitCast(large_val);
     const expected_i128: i128 = large_as_i128 -% 100 -% 200;
-    try std.testing.expectEqual(expected_i128, cw.bz_second[1]);
+    const expected_s192 = field_mod.S192.fromI128(expected_i128);
+    try std.testing.expectEqual(expected_s192, cw.bz_second[1]);
 
     // Verify round-trip through fieldFromI128 produces correct field element
     const field_val = fieldFromI128(F, expected_i128);

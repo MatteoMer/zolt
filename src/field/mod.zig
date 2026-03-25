@@ -6,9 +6,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// LLVM carry/borrow intrinsics — map to single adc/sbb instructions on x86-64
-extern fn @"llvm.x86.addcarry.u64"(c_in: u8, a: u64, b: u64, result: *u64) u8;
-extern fn @"llvm.x86.subborrow.u64"(b_in: u8, a: u64, b: u64, result: *u64) u8;
+/// LLVM carry/borrow intrinsics — map to single adc/sbb instructions on x86-64.
+/// Wrapped in a comptime-conditional struct so they are not emitted on non-x86 targets.
+const x86 = if (builtin.cpu.arch == .x86_64) struct {
+    extern fn @"llvm.x86.addcarry.u64"(c_in: u8, a: u64, b: u64, result: *u64) u8;
+    extern fn @"llvm.x86.subborrow.u64"(b_in: u8, a: u64, b: u64, result: *u64) u8;
+
+    pub inline fn addcarry(c_in: u8, a: u64, b: u64, result: *u64) u8 {
+        return @"llvm.x86.addcarry.u64"(c_in, a, b, result);
+    }
+    pub inline fn subborrow(b_in: u8, a: u64, b: u64, result: *u64) u8 {
+        return @"llvm.x86.subborrow.u64"(b_in, a, b, result);
+    }
+} else struct {};
 
 /// Comptime flag: true when x86-64 BMI2+ADX instructions are available
 const use_asm_mul = blk: {
@@ -17,6 +27,391 @@ const use_asm_mul = blk: {
     break :blk features.isEnabled(@intFromEnum(std.Target.x86.Feature.bmi2)) and
         features.isEnabled(@intFromEnum(std.Target.x86.Feature.adx));
 };
+
+/// Comptime flag: true when targeting AArch64 (all AArch64 has adds/adcs/subs/sbcs).
+const use_arm64_asm = (builtin.cpu.arch == .aarch64);
+
+// ── ARM64 (AArch64) inline-asm helpers for 256-bit / 192-bit field ops ──────
+// These use proper adds/adcs/subs/sbcs carry chains instead of the u128 fallback
+// which generates catastrophic cinc + asr #63 codegen on ARM64.
+
+/// Field subtraction: (a - b) mod p, branch-based.
+/// subs/sbcs chain, then b.cs skips correction if no borrow.
+inline fn arm64SubMod256(a: [4]u64, b: [4]u64, mod: [4]u64) [4]u64 {
+    if (comptime builtin.cpu.arch != .aarch64) unreachable;
+    var r0: u64 = undefined;
+    var r1: u64 = undefined;
+    var r2: u64 = undefined;
+    var r3: u64 = undefined;
+    asm volatile (
+        \\ subs %[r0], %[a0], %[b0]
+        \\ sbcs %[r1], %[a1], %[b1]
+        \\ sbcs %[r2], %[a2], %[b2]
+        \\ sbcs %[r3], %[a3], %[b3]
+        \\ b.cs 1f
+        \\ adds %[r0], %[r0], %[m0]
+        \\ adcs %[r1], %[r1], %[m1]
+        \\ adcs %[r2], %[r2], %[m2]
+        \\ adc  %[r3], %[r3], %[m3]
+        \\ 1:
+        : [r0] "=&r" (r0),
+          [r1] "=&r" (r1),
+          [r2] "=&r" (r2),
+          [r3] "=&r" (r3),
+        : [a0] "r" (a[0]),
+          [a1] "r" (a[1]),
+          [a2] "r" (a[2]),
+          [a3] "r" (a[3]),
+          [b0] "r" (b[0]),
+          [b1] "r" (b[1]),
+          [b2] "r" (b[2]),
+          [b3] "r" (b[3]),
+          [m0] "r" (mod[0]),
+          [m1] "r" (mod[1]),
+          [m2] "r" (mod[2]),
+          [m3] "r" (mod[3]),
+        : .{ .nzcv = true }
+    );
+    return .{ r0, r1, r2, r3 };
+}
+
+/// Unconditional 4-limb subtraction (no modular reduction).
+inline fn arm64Sub256(a: [4]u64, b: [4]u64) [4]u64 {
+    if (comptime builtin.cpu.arch != .aarch64) unreachable;
+    var r0: u64 = undefined;
+    var r1: u64 = undefined;
+    var r2: u64 = undefined;
+    var r3: u64 = undefined;
+    asm volatile (
+        \\ subs %[r0], %[a0], %[b0]
+        \\ sbcs %[r1], %[a1], %[b1]
+        \\ sbcs %[r2], %[a2], %[b2]
+        \\ sbc  %[r3], %[a3], %[b3]
+        : [r0] "=&r" (r0),
+          [r1] "=&r" (r1),
+          [r2] "=&r" (r2),
+          [r3] "=&r" (r3),
+        : [a0] "r" (a[0]),
+          [a1] "r" (a[1]),
+          [a2] "r" (a[2]),
+          [a3] "r" (a[3]),
+          [b0] "r" (b[0]),
+          [b1] "r" (b[1]),
+          [b2] "r" (b[2]),
+          [b3] "r" (b[3]),
+        : .{ .nzcv = true }
+    );
+    return .{ r0, r1, r2, r3 };
+}
+
+/// Unconditional 4-limb addition (no modular reduction).
+inline fn arm64Add256(a: [4]u64, b: [4]u64) [4]u64 {
+    if (comptime builtin.cpu.arch != .aarch64) unreachable;
+    var r0: u64 = undefined;
+    var r1: u64 = undefined;
+    var r2: u64 = undefined;
+    var r3: u64 = undefined;
+    asm volatile (
+        \\ adds %[r0], %[a0], %[b0]
+        \\ adcs %[r1], %[a1], %[b1]
+        \\ adcs %[r2], %[a2], %[b2]
+        \\ adc  %[r3], %[a3], %[b3]
+        : [r0] "=&r" (r0),
+          [r1] "=&r" (r1),
+          [r2] "=&r" (r2),
+          [r3] "=&r" (r3),
+        : [a0] "r" (a[0]),
+          [a1] "r" (a[1]),
+          [a2] "r" (a[2]),
+          [a3] "r" (a[3]),
+          [b0] "r" (b[0]),
+          [b1] "r" (b[1]),
+          [b2] "r" (b[2]),
+          [b3] "r" (b[3]),
+        : .{ .nzcv = true }
+    );
+    return .{ r0, r1, r2, r3 };
+}
+
+/// 3-limb unsigned addition (for S192 magnitudes).
+inline fn arm64Add192(a: [3]u64, b: [3]u64) [3]u64 {
+    if (comptime builtin.cpu.arch != .aarch64) unreachable;
+    var r0: u64 = undefined;
+    var r1: u64 = undefined;
+    var r2: u64 = undefined;
+    asm volatile (
+        \\ adds %[r0], %[a0], %[b0]
+        \\ adcs %[r1], %[a1], %[b1]
+        \\ adc  %[r2], %[a2], %[b2]
+        : [r0] "=&r" (r0),
+          [r1] "=&r" (r1),
+          [r2] "=&r" (r2),
+        : [a0] "r" (a[0]),
+          [a1] "r" (a[1]),
+          [a2] "r" (a[2]),
+          [b0] "r" (b[0]),
+          [b1] "r" (b[1]),
+          [b2] "r" (b[2]),
+        : .{ .nzcv = true }
+    );
+    return .{ r0, r1, r2 };
+}
+
+/// 3-limb unsigned subtraction (for S192 magnitudes).
+inline fn arm64Sub192(a: [3]u64, b: [3]u64) [3]u64 {
+    if (comptime builtin.cpu.arch != .aarch64) unreachable;
+    var r0: u64 = undefined;
+    var r1: u64 = undefined;
+    var r2: u64 = undefined;
+    asm volatile (
+        \\ subs %[r0], %[a0], %[b0]
+        \\ sbcs %[r1], %[a1], %[b1]
+        \\ sbc  %[r2], %[a2], %[b2]
+        : [r0] "=&r" (r0),
+          [r1] "=&r" (r1),
+          [r2] "=&r" (r2),
+        : [a0] "r" (a[0]),
+          [a1] "r" (a[1]),
+          [a2] "r" (a[2]),
+          [b0] "r" (b[0]),
+          [b1] "r" (b[1]),
+          [b2] "r" (b[2]),
+        : .{ .nzcv = true }
+    );
+    return .{ r0, r1, r2 };
+}
+
+/// ARM64 4-limb CIOS Montgomery multiplication.
+/// Computes a * b * R^{-1} mod p using fully-unrolled CIOS with two-pass
+/// carry accumulation (ARM64 substitute for x86 ADX dual carry chains).
+/// All constants (b, mod, inv) are preloaded into registers.
+fn arm64MontgomeryMul256(a: *const [4]u64, b: *const [4]u64, mod: *const [4]u64, inv: u64) [4]u64 {
+    if (comptime builtin.cpu.arch != .aarch64) unreachable;
+    // After 4 iterations of register rotation, the result limbs end up in:
+    //   iter 0: t=[x0,x1,x2,x3,x14] → shift → [x1,x2,x3,x14], t4=x0
+    //   iter 1: [x1,x2,x3,x14,x0]   → shift → [x2,x3,x14,x0], t4=x1
+    //   iter 2: [x2,x3,x14,x0,x1]   → shift → [x3,x14,x0,x1], t4=x2
+    //   iter 3: [x3,x14,x0,x1,x2]   → shift → [x14,x0,x1,x2], t4=x3
+    // Final result: limbs = {x14, x0, x1, x2}
+    var r0: u64 = undefined;
+    var r1: u64 = undefined;
+    var r2: u64 = undefined;
+    var r3: u64 = undefined;
+    asm volatile (
+    // ── Preload constants ──
+        \\ ldp x4, x5, [x25]
+        \\ ldp x6, x7, [x25, #16]
+        \\ ldp x8, x9, [x26]
+        \\ ldp x10, x11, [x26, #16]
+        //
+        // ════════════════════════════════════════════════
+        // Iteration 0: mul_1 (t starts at 0) + reduce
+        // Accumulator: t0=x0, t1=x1, t2=x2, t3=x3, t4=x14
+        // ════════════════════════════════════════════════
+        \\ ldr x15, [x13]
+        // a[0] * b[0..3] → products; t starts at 0 so just store directly
+        \\ mul  x0,  x15, x4
+        \\ umulh x1,  x15, x4
+        \\ mul  x16, x15, x5
+        \\ umulh x2,  x15, x5
+        \\ mul  x17, x15, x6
+        \\ umulh x3,  x15, x6
+        \\ mul  x19, x15, x7
+        \\ umulh x14, x15, x7
+        // Single carry chain (t was 0, only need to add lo parts)
+        \\ adds x1, x1, x16
+        \\ adcs x2, x2, x17
+        \\ adcs x3, x3, x19
+        \\ adc  x14, x14, xzr
+        // k = t[0] * inv
+        \\ mul  x15, x0, x12
+        // k * mod[0..3]
+        \\ mul  x16, x15, x8
+        \\ umulh x17, x15, x8
+        \\ mul  x19, x15, x9
+        \\ umulh x20, x15, x9
+        \\ mul  x21, x15, x10
+        \\ umulh x22, x15, x10
+        \\ mul  x23, x15, x11
+        \\ umulh x24, x15, x11
+        // Cancel t[0]: t[0] + lo(k*m0) = 0 mod 2^64, carry propagates
+        \\ adds x0, x0, x16
+        // Pass 1: hi parts
+        \\ adcs x1, x1, x17
+        \\ adcs x2, x2, x20
+        \\ adcs x3, x3, x22
+        \\ adc  x14, x14, x24
+        // Pass 2: lo parts
+        \\ adds x1, x1, x19
+        \\ adcs x2, x2, x21
+        \\ adcs x3, x3, x23
+        \\ adc  x14, x14, xzr
+        // After shift: t = [x1, x2, x3, x14], x0 = 0 (new t4)
+        // (x0 held the cancelled value = 0)
+        //
+        // ════════════════════════════════════════════════
+        // Iteration 1: mul_add_1 + reduce
+        // Accumulator: t0=x1, t1=x2, t2=x3, t3=x14, t4=x0
+        // ════════════════════════════════════════════════
+        \\ ldr x15, [x13, #8]
+        \\ mul  x16, x15, x4
+        \\ umulh x17, x15, x4
+        \\ mul  x19, x15, x5
+        \\ umulh x20, x15, x5
+        \\ mul  x21, x15, x6
+        \\ umulh x22, x15, x6
+        \\ mul  x23, x15, x7
+        \\ umulh x24, x15, x7
+        // Pass 1: lo(b0) to t0, hi parts to t1..t4
+        \\ adds x1, x1, x16
+        \\ adcs x2, x2, x17
+        \\ adcs x3, x3, x20
+        \\ adcs x14, x14, x22
+        \\ adc  x0, x0, x24
+        // Pass 2: remaining lo parts
+        \\ adds x2, x2, x19
+        \\ adcs x3, x3, x21
+        \\ adcs x14, x14, x23
+        \\ adc  x0, x0, xzr
+        // k = t[0] * inv
+        \\ mul  x15, x1, x12
+        // k * mod[0..3]
+        \\ mul  x16, x15, x8
+        \\ umulh x17, x15, x8
+        \\ mul  x19, x15, x9
+        \\ umulh x20, x15, x9
+        \\ mul  x21, x15, x10
+        \\ umulh x22, x15, x10
+        \\ mul  x23, x15, x11
+        \\ umulh x24, x15, x11
+        // Cancel t[0]
+        \\ adds x1, x1, x16
+        // Pass 1: hi parts
+        \\ adcs x2, x2, x17
+        \\ adcs x3, x3, x20
+        \\ adcs x14, x14, x22
+        \\ adc  x0, x0, x24
+        // Pass 2: lo parts
+        \\ adds x2, x2, x19
+        \\ adcs x3, x3, x21
+        \\ adcs x14, x14, x23
+        \\ adc  x0, x0, xzr
+        // After shift: t = [x2, x3, x14, x0], t4 = x1 (= 0)
+        //
+        // ════════════════════════════════════════════════
+        // Iteration 2: mul_add_1 + reduce
+        // Accumulator: t0=x2, t1=x3, t2=x14, t3=x0, t4=x1
+        // ════════════════════════════════════════════════
+        \\ ldr x15, [x13, #16]
+        \\ mul  x16, x15, x4
+        \\ umulh x17, x15, x4
+        \\ mul  x19, x15, x5
+        \\ umulh x20, x15, x5
+        \\ mul  x21, x15, x6
+        \\ umulh x22, x15, x6
+        \\ mul  x23, x15, x7
+        \\ umulh x24, x15, x7
+        // Pass 1
+        \\ adds x2, x2, x16
+        \\ adcs x3, x3, x17
+        \\ adcs x14, x14, x20
+        \\ adcs x0, x0, x22
+        \\ adc  x1, x1, x24
+        // Pass 2
+        \\ adds x3, x3, x19
+        \\ adcs x14, x14, x21
+        \\ adcs x0, x0, x23
+        \\ adc  x1, x1, xzr
+        // k = t[0] * inv
+        \\ mul  x15, x2, x12
+        // k * mod[0..3]
+        \\ mul  x16, x15, x8
+        \\ umulh x17, x15, x8
+        \\ mul  x19, x15, x9
+        \\ umulh x20, x15, x9
+        \\ mul  x21, x15, x10
+        \\ umulh x22, x15, x10
+        \\ mul  x23, x15, x11
+        \\ umulh x24, x15, x11
+        // Cancel t[0]
+        \\ adds x2, x2, x16
+        // Pass 1
+        \\ adcs x3, x3, x17
+        \\ adcs x14, x14, x20
+        \\ adcs x0, x0, x22
+        \\ adc  x1, x1, x24
+        // Pass 2
+        \\ adds x3, x3, x19
+        \\ adcs x14, x14, x21
+        \\ adcs x0, x0, x23
+        \\ adc  x1, x1, xzr
+        // After shift: t = [x3, x14, x0, x1], t4 = x2 (= 0)
+        //
+        // ════════════════════════════════════════════════
+        // Iteration 3: mul_add_1 + reduce
+        // Accumulator: t0=x3, t1=x14, t2=x0, t3=x1, t4=x2
+        // ════════════════════════════════════════════════
+        \\ ldr x15, [x13, #24]
+        \\ mul  x16, x15, x4
+        \\ umulh x17, x15, x4
+        \\ mul  x19, x15, x5
+        \\ umulh x20, x15, x5
+        \\ mul  x21, x15, x6
+        \\ umulh x22, x15, x6
+        \\ mul  x23, x15, x7
+        \\ umulh x24, x15, x7
+        // Pass 1
+        \\ adds x3, x3, x16
+        \\ adcs x14, x14, x17
+        \\ adcs x0, x0, x20
+        \\ adcs x1, x1, x22
+        \\ adc  x2, x2, x24
+        // Pass 2
+        \\ adds x14, x14, x19
+        \\ adcs x0, x0, x21
+        \\ adcs x1, x1, x23
+        \\ adc  x2, x2, xzr
+        // k = t[0] * inv
+        \\ mul  x15, x3, x12
+        // k * mod[0..3]
+        \\ mul  x16, x15, x8
+        \\ umulh x17, x15, x8
+        \\ mul  x19, x15, x9
+        \\ umulh x20, x15, x9
+        \\ mul  x21, x15, x10
+        \\ umulh x22, x15, x10
+        \\ mul  x23, x15, x11
+        \\ umulh x24, x15, x11
+        // Cancel t[0]
+        \\ adds x3, x3, x16
+        // Pass 1
+        \\ adcs x14, x14, x17
+        \\ adcs x0, x0, x20
+        \\ adcs x1, x1, x22
+        \\ adc  x2, x2, x24
+        // Pass 2
+        \\ adds x14, x14, x19
+        \\ adcs x0, x0, x21
+        \\ adcs x1, x1, x23
+        \\ adc  x2, x2, xzr
+        // Final result: limbs = {x14, x0, x1, x2}
+        : [_r0] "={x14}" (r0),
+          [_r1] "={x0}" (r1),
+          [_r2] "={x1}" (r2),
+          [_r3] "={x2}" (r3),
+        : [_a] "{x13}" (a),
+          [_b] "{x25}" (b),
+          [_mod] "{x26}" (mod),
+          [_inv] "{x12}" (inv),
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true,
+             .x6 = true, .x7 = true, .x8 = true, .x9 = true, .x10 = true, .x11 = true,
+             .x14 = true, .x15 = true, .x16 = true, .x17 = true,
+             .x19 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true,
+             .x25 = true, .x26 = true,
+             .nzcv = true, .memory = true }
+    );
+    return .{ r0, r1, r2, r3 };
+}
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
@@ -264,7 +659,7 @@ pub fn MontgomeryField(
         inline fn addCarry(a: u64, b: u64, carry_in: u64) struct { result: u64, carry: u64 } {
             if (comptime builtin.cpu.arch == .x86_64) {
                 var result: u64 = undefined;
-                const c = @"llvm.x86.addcarry.u64"(@truncate(carry_in), a, b, &result);
+                const c = x86.addcarry(@truncate(carry_in), a, b, &result);
                 return .{ .result = result, .carry = c };
             }
             const sum = @as(u128, a) + @as(u128, b) + @as(u128, carry_in);
@@ -274,7 +669,7 @@ pub fn MontgomeryField(
         inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
             if (comptime builtin.cpu.arch == .x86_64) {
                 var result: u64 = undefined;
-                const b_out = @"llvm.x86.subborrow.u64"(@truncate(borrow_in), a, b, &result);
+                const b_out = x86.subborrow(@truncate(borrow_in), a, b, &result);
                 return .{ .result = result, .borrow = b_out };
             }
             const wide_a = @as(u128, a);
@@ -680,6 +1075,7 @@ pub fn MontgomeryField(
 
         /// Field subtraction
         pub inline fn sub(self: Self, other: Self) Self {
+            if (comptime use_arm64_asm) return Self{ .limbs = arm64SubMod256(self.limbs, other.limbs, modulus) };
             @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var borrow: u64 = 0;
@@ -699,17 +1095,25 @@ pub fn MontgomeryField(
 
         /// Field multiplication
         pub inline fn mul(self: Self, other: Self) Self {
-            if (comptime use_asm_mul) {
-                return self.montgomeryMulX86(other);
+            if (comptime use_arm64_asm) {
+                const mod_arr: [4]u64 = modulus;
+                var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &other.limbs, &mod_arr, montgomery_inv) };
+                if (!r.lessThanModulus()) r = r.subtractModulus();
+                return r;
             }
+            if (comptime use_asm_mul) return self.montgomeryMulX86(other);
             return self.montgomeryMul(other);
         }
 
         /// Field squaring
         pub inline fn square(self: Self) Self {
-            if (comptime use_asm_mul) {
-                return self.montgomeryMulX86(self);
+            if (comptime use_arm64_asm) {
+                const mod_arr: [4]u64 = modulus;
+                var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &self.limbs, &mod_arr, montgomery_inv) };
+                if (!r.lessThanModulus()) r = r.subtractModulus();
+                return r;
             }
+            if (comptime use_asm_mul) return self.montgomeryMulX86(self);
             return self.montgomeryMul(self);
         }
 
@@ -825,6 +1229,7 @@ pub fn MontgomeryField(
         }
 
         inline fn subtractModulus(self: Self) Self {
+            if (comptime use_arm64_asm) return Self{ .limbs = arm64Sub256(self.limbs, modulus) };
             @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var borrow: u64 = 0;
@@ -839,6 +1244,7 @@ pub fn MontgomeryField(
         }
 
         inline fn addModulus(self: Self) Self {
+            if (comptime use_arm64_asm) return Self{ .limbs = arm64Add256(self.limbs, modulus) };
             @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var carry: u64 = 0;
@@ -1028,7 +1434,7 @@ pub const BN254Scalar = struct {
     inline fn addCarry(a: u64, b: u64, carry_in: u64) struct { result: u64, carry: u64 } {
         if (comptime builtin.cpu.arch == .x86_64) {
             var result: u64 = undefined;
-            const c = @"llvm.x86.addcarry.u64"(@truncate(carry_in), a, b, &result);
+            const c = x86.addcarry(@truncate(carry_in), a, b, &result);
             return .{ .result = result, .carry = c };
         }
         const sum = @as(u128, a) + @as(u128, b) + @as(u128, carry_in);
@@ -1038,7 +1444,7 @@ pub const BN254Scalar = struct {
     inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
         if (comptime builtin.cpu.arch == .x86_64) {
             var result: u64 = undefined;
-            const b_out = @"llvm.x86.subborrow.u64"(@truncate(borrow_in), a, b, &result);
+            const b_out = x86.subborrow(@truncate(borrow_in), a, b, &result);
             return .{ .result = result, .borrow = b_out };
         }
         const wide_a = @as(u128, a);
@@ -1112,6 +1518,7 @@ pub const BN254Scalar = struct {
 
     /// Field subtraction
     pub fn sub(self: Self, other: Self) Self {
+        if (comptime use_arm64_asm) return Self{ .limbs = arm64SubMod256(self.limbs, other.limbs, BN254_MODULUS) };
         var result: [4]u64 = undefined;
         var borrow: u64 = 0;
 
@@ -1327,9 +1734,12 @@ pub const BN254Scalar = struct {
 
     /// Field multiplication
     pub inline fn mul(self: Self, other: Self) Self {
-        if (comptime use_asm_mul) {
-            return self.montgomeryMulX86(other);
+        if (comptime use_arm64_asm) {
+            var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &other.limbs, &BN254_MODULUS, BN254_INV) };
+            if (!r.lessThanModulus()) r = r.subtractModulus();
+            return r;
         }
+        if (comptime use_asm_mul) return self.montgomeryMulX86(other);
         return self.montgomeryMul(other);
     }
 
@@ -1565,9 +1975,12 @@ pub const BN254Scalar = struct {
     /// Field squaring (optimized using Karatsuba-like technique)
     /// Saves ~25% multiplications compared to naive multiplication
     pub inline fn square(self: Self) Self {
-        if (comptime use_asm_mul) {
-            return self.montgomeryMulX86(self);
+        if (comptime use_arm64_asm) {
+            var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &self.limbs, &BN254_MODULUS, BN254_INV) };
+            if (!r.lessThanModulus()) r = r.subtractModulus();
+            return r;
         }
+        if (comptime use_asm_mul) return self.montgomeryMulX86(self);
         // Optimized squaring: we can compute a^2 with fewer multiplications
         // Since (a0 + a1*2^64 + a2*2^128 + a3*2^192)^2 has symmetric terms
         // For example: 2*a0*a1 instead of a0*a1 + a1*a0
@@ -1716,6 +2129,7 @@ pub const BN254Scalar = struct {
     }
 
     inline fn subtractModulus(self: Self) Self {
+        if (comptime use_arm64_asm) return Self{ .limbs = arm64Sub256(self.limbs, BN254_MODULUS) };
         @setEvalBranchQuota(10000);
         var result: [4]u64 = undefined;
         var borrow: u64 = 0;
@@ -1730,6 +2144,7 @@ pub const BN254Scalar = struct {
     }
 
     fn addModulus(self: Self) Self {
+        if (comptime use_arm64_asm) return Self{ .limbs = arm64Add256(self.limbs, BN254_MODULUS) };
         var result: [4]u64 = undefined;
         var carry: u64 = 0;
 
@@ -2517,11 +2932,12 @@ pub const S192 = struct {
     }
 
     fn addMagnitudes(a: [3]u64, b: [3]u64) [3]u64 {
+        if (comptime use_arm64_asm) return arm64Add192(a, b);
         var result: [3]u64 = undefined;
         if (comptime builtin.cpu.arch == .x86_64) {
             var c: u8 = 0;
             inline for (0..3) |i| {
-                c = @"llvm.x86.addcarry.u64"(c, a[i], b[i], &result[i]);
+                c = x86.addcarry(c, a[i], b[i], &result[i]);
             }
         } else {
             var carry: u64 = 0;
@@ -2535,11 +2951,12 @@ pub const S192 = struct {
     }
 
     fn subMagnitudes(a: [3]u64, b: [3]u64) [3]u64 {
+        if (comptime use_arm64_asm) return arm64Sub192(a, b);
         var result: [3]u64 = undefined;
         if (comptime builtin.cpu.arch == .x86_64) {
             var b_out: u8 = 0;
             inline for (0..3) |i| {
-                b_out = @"llvm.x86.subborrow.u64"(b_out, a[i], b[i], &result[i]);
+                b_out = x86.subborrow(b_out, a[i], b[i], &result[i]);
             }
         } else {
             var borrow: u64 = 0;

@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use std::time::Instant;
 
 const WARMUP: usize = 3;
-const ITERS: usize = 10;
+const ITERS: usize = 50;
 
 fn bench_parallel_reduce(a: &[Fr], b: &[Fr], half: usize) -> f64 {
     // Warmup

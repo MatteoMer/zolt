@@ -11,7 +11,7 @@ const ThreadPool = zolt.utils.ThreadPool;
 const UnreducedProductAccum = zolt.field.UnreducedProductAccum;
 
 const WARMUP = 3;
-const ITERS = 10;
+const ITERS = 50;
 
 fn benchParallelReduce(tp: *ThreadPool, a: []const F, b: []const F, half: usize) f64 {
     const Ctx = struct { a: []const F, b: []const F };

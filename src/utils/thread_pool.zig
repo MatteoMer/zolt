@@ -316,7 +316,8 @@ const ReduceJobPayload = struct {
     end: usize,
     latch: *anyopaque, // *CompletionLatch (root) or *SpinLatch (internal)
     partial_ptr: *anyopaque,
-    splits_remaining: usize, // Rayon-style: halves each level, stop at 0
+    splits_remaining: u32, // Rayon-style: halves each level, stop at 0
+    pusher_index: u32, // worker index that pushed this job (for theft detection)
 };
 
 comptime {
@@ -752,8 +753,15 @@ pub const ThreadPool = struct {
                 const result_ptr: *R = @ptrCast(@alignCast(p.partial_ptr));
                 const pool: *ThreadPool = worker.pool_ptr;
 
-                // Compute via direct recursion (no Job round-trip for right half)
-                result_ptr.* = computeRange(ctx_ptr, p.start, p.end, p.splits_remaining, worker, pool);
+                // Rayon-style theft detection: if we're on a different worker
+                // than the one that pushed this job, reset splits counter
+                const stolen = (worker.index != p.pusher_index);
+                var splits = p.splits_remaining;
+                if (stolen) {
+                    splits = @max(@as(u32, @intCast(pool.thread_count + 1)), splits / 2);
+                }
+
+                result_ptr.* = computeRange(ctx_ptr, p.start, p.end, splits, worker, pool);
 
                 // Signal parent: CompletionLatch (root) or SpinLatch (internal)
                 const signal: *const fn (*anyopaque) void = @ptrCast(@alignCast(p.signal_fn));
@@ -767,13 +775,12 @@ pub const ThreadPool = struct {
                 ctx_ptr: *const Ctx,
                 start: usize,
                 end: usize,
-                splits: usize,
+                splits: u32,
                 worker: *WorkerData,
                 pool: *ThreadPool,
             ) R {
                 const range_len = end - start;
 
-                // Stop splitting when counter exhausted or range too small
                 if (splits == 0 or range_len < 2) {
                     return map(ctx_ptr.*, start, end);
                 }
@@ -792,6 +799,7 @@ pub const ThreadPool = struct {
                     .latch = @ptrCast(&left_spin),
                     .partial_ptr = @ptrCast(&left_result),
                     .splits_remaining = splits / 2,
+                    .pusher_index = @intCast(worker.index),
                 };
 
                 const left_job = Job.initFrom(ReduceJobPayload, left_payload, &execute);
@@ -821,11 +829,8 @@ pub const ThreadPool = struct {
         var ctx_copy = context;
         var latch = CompletionLatch.init(1); // Root uses CompletionLatch (futex for main thread)
 
-        // Rayon-style splits counter: start with actual_threads * 4.
-        // Each level halves → creates ~8*threads leaf tasks.
-        // The counter approach adapts: small N gets few splits (fast),
-        // large N gets deep enough for good parallelism.
-        const initial_splits = actual_threads * 4;
+        // Start with 2x threads. Stolen jobs reset to max(num_threads, splits/2).
+        const initial_splits: u32 = @intCast(actual_threads * 2);
 
         const payload = ReduceJobPayload{
             .signal_fn = @ptrCast(&Signals.signalCompletion),
@@ -835,6 +840,7 @@ pub const ThreadPool = struct {
             .latch = @ptrCast(&latch),
             .partial_ptr = @ptrCast(&result),
             .splits_remaining = initial_splits,
+            .pusher_index = @intCast(worker.index),
         };
 
         const root_job = Job.initFrom(ReduceJobPayload, payload, &Executor.execute);

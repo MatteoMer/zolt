@@ -486,7 +486,7 @@ pub fn JoltProver(comptime F: type) type {
             const ram_K: usize = @as(usize, 1) << @intCast(log_k);
 
             // Run Fiat-Shamir preamble to match Jolt verifier
-            jolt_device.fiatShamirPreamble(F, &transcript, &device, ram_K, trace_length);
+            jolt_device.fiatShamirPreamble(F, &transcript, &device, ram_K, trace_length, entry_point);
 
             // Build polynomial evaluations and compute Dory commitments
             const bytecode_poly_size = if (program_bytecode.len < 2) 2 else std.math.ceilPowerOfTwo(usize, program_bytecode.len) catch program_bytecode.len;
@@ -1036,6 +1036,7 @@ pub fn JoltProver(comptime F: type) type {
                     .program_code_bytes = program_bytecode,
                     .code_base_address = common.constants.RAM_START_ADDRESS,
                     .text_size = text_sz,
+                    .entry_address = entry_point,
                 },
                 cycle_witnesses,
                 tau,

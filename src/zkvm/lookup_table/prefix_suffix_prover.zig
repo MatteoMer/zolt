@@ -31,11 +31,11 @@ const Suffixes = suffixes_mod.Suffixes;
 const suffixMle = suffixes_mod.suffixMle;
 const tableSuffixes = suffixes_mod.tableSuffixes;
 
-/// Number of lookup tables in Jolt
-pub const NUM_TABLES: usize = 41;
+/// Number of lookup tables in Jolt (ValidSignedRemainder removed in PR #1355)
+pub const NUM_TABLES: usize = 40;
 
-/// Maximum number of suffixes any table can have (ValidSignedRemainderTable has 5)
-pub const MAX_SUFFIXES_PER_TABLE: usize = 5;
+/// Maximum number of suffixes any table can have (was 5 for ValidSignedRemainder, now 4)
+pub const MAX_SUFFIXES_PER_TABLE: usize = 4;
 
 /// Compute 2^exp as a field element
 /// Handles large exponents (up to 128) that don't fit in u64
@@ -823,38 +823,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 15: ValidSignedRemainder:
-        // Jolt formula: RightOperandIsZero*right_is_zero + PositiveRemainderEqualsDivisor*less_than
-        // + PositiveRemainderLessThanDivisor*one + NegativeDivisorZeroRemainder*left_is_zero
-        // + NegativeDivisorEqualsRemainder*greater_than + NegativeDivisorGreaterThanRemainder*one
+        // 15: ValidUnsignedRemainder: RightOperandIsZero*right_is_zero + LessThan*one + Eq*less_than
         15 => blk: {
-            // Suffixes (Jolt order): [one, less_than, greater_than, left_operand_is_zero, right_operand_is_zero]
-            var result = F.zero();
-            if (suffixes.len >= 1) {
-                // PositiveRemainderLessThanDivisor*one + NegativeDivisorGreaterThanRemainder*one
-                result = result.add(prefixes[@intFromEnum(Prefixes.PositiveRemainderLessThanDivisor)].mul(suffixes[0]));
-                result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorGreaterThanRemainder)].mul(suffixes[0]));
-            }
-            if (suffixes.len >= 2) {
-                // PositiveRemainderEqualsDivisor*less_than
-                result = result.add(prefixes[@intFromEnum(Prefixes.PositiveRemainderEqualsDivisor)].mul(suffixes[1]));
-            }
-            if (suffixes.len >= 3) {
-                // NegativeDivisorEqualsRemainder*greater_than
-                result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorEqualsRemainder)].mul(suffixes[2]));
-            }
-            if (suffixes.len >= 4) {
-                // NegativeDivisorZeroRemainder*left_operand_is_zero
-                result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorZeroRemainder)].mul(suffixes[3]));
-            }
-            if (suffixes.len >= 5) {
-                // RightOperandIsZero*right_operand_is_zero
-                result = result.add(prefixes[@intFromEnum(Prefixes.RightOperandIsZero)].mul(suffixes[4]));
-            }
-            break :blk result;
-        },
-        // 16: ValidUnsignedRemainder: RightOperandIsZero*right_is_zero + LessThan*one + Eq*less_than
-        16 => blk: {
             // Suffixes (Jolt order): [one, less_than, right_operand_is_zero]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -871,8 +841,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 17: ValidDiv0: one - LeftOperandIsZero*left_is_zero + DivByZero*div_by_zero
-        17 => blk: {
+        // 16: ValidDiv0: one - LeftOperandIsZero*left_is_zero + DivByZero*div_by_zero
+        16 => blk: {
             // Suffixes: [one, left_operand_is_zero, div_by_zero]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -886,8 +856,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 18: HalfwordAlignment: one - Lsb*lsb
-        18 => blk: {
+        // 17: HalfwordAlignment: one - Lsb*lsb
+        17 => blk: {
             // Suffixes: [one, lsb]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -898,16 +868,16 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 19: WordAlignment: TwoLsb*two_lsb
-        19 => blk: {
+        // 18: WordAlignment: TwoLsb*two_lsb
+        18 => blk: {
             // Suffixes: [two_lsb]
             if (suffixes.len >= 1) {
                 break :blk prefixes[@intFromEnum(Prefixes.TwoLsb)].mul(suffixes[0]);
             }
             break :blk F.zero();
         },
-        // 20: LowerHalfWord: LowerHalfWord*one + lower_half_word
-        20 => blk: {
+        // 19: LowerHalfWord: LowerHalfWord*one + lower_half_word
+        19 => blk: {
             // Suffixes: [one, lower_half_word]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -918,8 +888,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 21: SignExtendHalfWord: LowerHalfWord*one + lower_half_word + SignExtensionUpperHalf*sign_ext
-        21 => blk: {
+        // 20: SignExtendHalfWord: LowerHalfWord*one + lower_half_word + SignExtensionUpperHalf*sign_ext
+        20 => blk: {
             // Suffixes: [one, lower_half_word, sign_extension_upper_half]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -933,24 +903,24 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 22: Pow2: Pow2*pow2
-        22 => blk: {
+        // 21: Pow2: Pow2*pow2
+        21 => blk: {
             // Suffixes: [pow2]
             if (suffixes.len >= 1) {
                 break :blk prefixes[@intFromEnum(Prefixes.Pow2)].mul(suffixes[0]);
             }
             break :blk F.zero();
         },
-        // 23: Pow2W: Pow2W*pow2w
-        23 => blk: {
+        // 22: Pow2W: Pow2W*pow2w
+        22 => blk: {
             // Suffixes: [pow2w]
             if (suffixes.len >= 1) {
                 break :blk prefixes[@intFromEnum(Prefixes.Pow2W)].mul(suffixes[0]);
             }
             break :blk F.zero();
         },
-        // 24: ShiftRightBitmask: 2^XLEN * one - Pow2*pow2
-        24 => blk: {
+        // 23: ShiftRightBitmask: 2^XLEN * one - Pow2*pow2
+        23 => blk: {
             // Suffixes: [one, pow2]
             const two_pow_xlen = F.fromU64(1).add(F.fromU64(0xFFFFFFFF_FFFFFFFF)); // 2^64
             var result = F.zero();
@@ -962,8 +932,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 25: VirtualRev8W: Rev8W*one + rev8w
-        25 => blk: {
+        // 24: VirtualRev8W: Rev8W*one + rev8w
+        24 => blk: {
             // Suffixes: [one, rev8w]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -974,8 +944,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 26: VirtualSRL: RightShift*right_shift_helper + right_shift
-        26 => blk: {
+        // 25: VirtualSRL: RightShift*right_shift_helper + right_shift
+        25 => blk: {
             // Suffixes: [right_shift_helper, right_shift]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -986,8 +956,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 27: VirtualSRA: RightShift*helper + right_shift + LeftOperandMsb*sign_ext + SignExtension*one
-        27 => blk: {
+        // 26: VirtualSRA: RightShift*helper + right_shift + LeftOperandMsb*sign_ext + SignExtension*one
+        26 => blk: {
             // Suffixes: [right_shift_helper, right_shift, sign_extension, one]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -1004,8 +974,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 28: VirtualROTR: RightShift*helper + right_shift + LeftShiftHelper*left_shift + LeftShift*one
-        28 => blk: {
+        // 27: VirtualROTR: RightShift*helper + right_shift + LeftShiftHelper*left_shift + LeftShift*one
+        27 => blk: {
             // Suffixes: [right_shift_helper, right_shift, left_shift, one]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -1022,8 +992,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 29: VirtualROTRW: RightShiftW*helper + right_shift_w + LeftShiftWHelper*left_shift_w + LeftShiftW*one
-        29 => blk: {
+        // 28: VirtualROTRW: RightShiftW*helper + right_shift_w + LeftShiftWHelper*left_shift_w + LeftShiftW*one
+        28 => blk: {
             // Suffixes: [right_shift_w_helper, right_shift_w, left_shift_w, one]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -1040,8 +1010,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 30: VirtualChangeDivisor: RightOperand*one + right_operand + ChangeDivisor*change_divisor
-        30 => blk: {
+        // 29: VirtualChangeDivisor: RightOperand*one + right_operand + ChangeDivisor*change_divisor
+        29 => blk: {
             // Suffixes: [one, right_operand, change_divisor]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -1055,8 +1025,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 31: VirtualChangeDivisorW: RightOperandW*one + right_op_w + ChangeDivisorW*change + SignExtRightOp*sign_ext
-        31 => blk: {
+        // 30: VirtualChangeDivisorW: RightOperandW*one + right_op_w + ChangeDivisorW*change + SignExtRightOp*sign_ext
+        30 => blk: {
             // Suffixes: [one, right_operand_w, change_divisor_w, sign_extension]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -1073,16 +1043,16 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 32: MulUNoOverflow: OverflowBitsZero*overflow_bits_zero
-        32 => blk: {
+        // 31: MulUNoOverflow: OverflowBitsZero*overflow_bits_zero
+        31 => blk: {
             // Suffixes: [overflow_bits_zero]
             if (suffixes.len >= 1) {
                 break :blk prefixes[@intFromEnum(Prefixes.OverflowBitsZero)].mul(suffixes[0]);
             }
             break :blk F.zero();
         },
-        // 33: VirtualXORROT32: XorRot32*one + xor_rot
-        33 => blk: {
+        // 32: VirtualXORROT32: XorRot32*one + xor_rot
+        32 => blk: {
             // Suffixes: [one, xor_rot]
             var result = F.zero();
             if (suffixes.len >= 1) {
@@ -1093,8 +1063,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 34: VirtualXORROT24: XorRot24*one + xor_rot
-        34 => blk: {
+        // 33: VirtualXORROT24: XorRot24*one + xor_rot
+        33 => blk: {
             var result = F.zero();
             if (suffixes.len >= 1) {
                 result = prefixes[@intFromEnum(Prefixes.XorRot24)].mul(suffixes[0]);
@@ -1104,8 +1074,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 35: VirtualXORROT16: XorRot16*one + xor_rot
-        35 => blk: {
+        // 34: VirtualXORROT16: XorRot16*one + xor_rot
+        34 => blk: {
             var result = F.zero();
             if (suffixes.len >= 1) {
                 result = prefixes[@intFromEnum(Prefixes.XorRot16)].mul(suffixes[0]);
@@ -1115,8 +1085,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 36: VirtualXORROT63: XorRot63*one + xor_rot
-        36 => blk: {
+        // 35: VirtualXORROT63: XorRot63*one + xor_rot
+        35 => blk: {
             var result = F.zero();
             if (suffixes.len >= 1) {
                 result = prefixes[@intFromEnum(Prefixes.XorRot63)].mul(suffixes[0]);
@@ -1126,8 +1096,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 37: VirtualXORROTW16: XorRotW16*one + xor_rot
-        37 => blk: {
+        // 36: VirtualXORROTW16: XorRotW16*one + xor_rot
+        36 => blk: {
             var result = F.zero();
             if (suffixes.len >= 1) {
                 result = prefixes[@intFromEnum(Prefixes.XorRotW16)].mul(suffixes[0]);
@@ -1137,8 +1107,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 38: VirtualXORROTW12: XorRotW12*one + xor_rot
-        38 => blk: {
+        // 37: VirtualXORROTW12: XorRotW12*one + xor_rot
+        37 => blk: {
             var result = F.zero();
             if (suffixes.len >= 1) {
                 result = prefixes[@intFromEnum(Prefixes.XorRotW12)].mul(suffixes[0]);
@@ -1148,8 +1118,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 39: VirtualXORROTW8: XorRotW8*one + xor_rot
-        39 => blk: {
+        // 38: VirtualXORROTW8: XorRotW8*one + xor_rot
+        38 => blk: {
             var result = F.zero();
             if (suffixes.len >= 1) {
                 result = prefixes[@intFromEnum(Prefixes.XorRotW8)].mul(suffixes[0]);
@@ -1159,8 +1129,8 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 40: VirtualXORROTW7: XorRotW7*one + xor_rot
-        40 => blk: {
+        // 39: VirtualXORROTW7: XorRotW7*one + xor_rot
+        39 => blk: {
             var result = F.zero();
             if (suffixes.len >= 1) {
                 result = prefixes[@intFromEnum(Prefixes.XorRotW7)].mul(suffixes[0]);

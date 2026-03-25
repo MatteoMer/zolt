@@ -341,7 +341,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Allocate opening claim arrays
-            const num_lookup_tables: usize = 41;
+            const num_lookup_tables: usize = 40;
             const lookups_ra_d = LOOKUPS_LOG_K / lookups_ra_virtual_log_k_chunk;
 
             const table_flags = try self.allocator.alloc(F, num_lookup_tables);
@@ -608,8 +608,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Store table MLE evaluations at r_address (populated during rematerialization)
             // These are used for computing val_claim = Σ table_flags[i] * table_values[i]
-            // Note: Jolt has 41 tables (LookupTables::COUNT = 41)
-            const MAX_LOOKUP_TABLES: usize = 41;
+            // Note: Jolt has 40 tables (LookupTables::COUNT = 40, ValidSignedRemainder removed)
+            const MAX_LOOKUP_TABLES: usize = 40;
             var stored_table_values: [MAX_LOOKUP_TABLES]F = [_]F{F.zero()} ** MAX_LOOKUP_TABLES;
 
             // Build eq_reduction[j] = eq(j, r_reduction) for all cycles j
@@ -6474,7 +6474,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // We need to find ra_claim, val_claim, raf_claim such that:
             //   eq_r_reduction * ra_claim * (val_claim + gamma * raf_claim) = lookups_output_claim
 
-            const num_lookup_tables: usize = 41;
+            const num_lookup_tables: usize = 40;
             const lookups_ra_d = LOOKUPS_LOG_K / lookups_ra_virtual_log_k_chunk;
 
             // Extract r_address (first 128 challenges) and r_cycle' (last 8 challenges)
@@ -8190,8 +8190,8 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
             if (funct3 == 6) break :blk 4; // OR -> OrTable
             if (funct3 == 4) break :blk 5; // XOR -> XorTable
             if (funct3 == 1) break :blk -1; // SLL -> uses virtual decomposition
-            if (funct3 == 5 and funct7 == 0) break :blk 26; // SRL -> VirtualSRLTable
-            if (funct3 == 5 and funct7 == 0x20) break :blk 27; // SRA -> VirtualSRATable
+            if (funct3 == 5 and funct7 == 0) break :blk 25; // SRL -> VirtualSRLTable
+            if (funct3 == 5 and funct7 == 0x20) break :blk 26; // SRA -> VirtualSRATable
             if (funct7 == 0x01 and funct3 == 0) break :blk 0; // MUL -> RangeCheckTable
             if (funct7 == 0x01 and funct3 == 3) break :blk 13; // MULHU -> UpperWordTable
             if (funct3 == 2) break :blk 10; // SLT -> SignedLessThanTable
@@ -8204,8 +8204,8 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
             if (funct3 == 6) break :blk 4; // ORI -> OrTable
             if (funct3 == 4) break :blk 5; // XORI -> XorTable
             if (funct3 == 1) break :blk -1; // SLLI -> uses virtual decomposition
-            if (funct3 == 5 and (funct7 & 0x40) == 0) break :blk 26; // SRLI -> VirtualSRLTable
-            if (funct3 == 5 and (funct7 & 0x40) != 0) break :blk 27; // SRAI -> VirtualSRATable
+            if (funct3 == 5 and (funct7 & 0x40) == 0) break :blk 25; // SRLI -> VirtualSRLTable
+            if (funct3 == 5 and (funct7 & 0x40) != 0) break :blk 26; // SRAI -> VirtualSRATable
             if (funct3 == 2) break :blk 10; // SLTI -> SignedLessThanTable
             if (funct3 == 3) break :blk 11; // SLTIU -> UnsignedLessThanTable
             break :blk -1;
@@ -8217,7 +8217,7 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
         0x3b => blk: { // OP-32
             if (funct3 == 0 and funct7 == 0) break :blk 0; // ADDW -> RangeCheckTable
             if (funct3 == 0 and funct7 == 0x20) break :blk 0; // SUBW -> RangeCheckTable
-            if (funct3 == 6 and funct7 == 0x01) break :blk 31; // VirtualChangeDivisorW -> VirtualChangeDivisorWTable
+            if (funct3 == 6 and funct7 == 0x01) break :blk 30; // VirtualChangeDivisorW -> VirtualChangeDivisorWTable
             break :blk -1;
         },
         0x63 => blk: { // B-type (branches)
@@ -8229,25 +8229,25 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
             if (funct3 == 7) break :blk 8; // BGEU -> UnsignedGreaterThanEqualTable
             break :blk -1;
         },
-        0x0B => 21, // VirtualSignExtendWord -> SignExtendHalfWordTable
+        0x0B => 20, // VirtualSignExtendWord -> SignExtendHalfWordTable
         0x2B => blk2b: { // Virtual I-type
-            if (funct3 == 1) break :blk2b 22; // VirtualPow2 -> Pow2Table
-            if (funct3 == 2) break :blk2b 24; // VirtualShiftRightBitmask -> ShiftRightBitmaskTable
+            if (funct3 == 1) break :blk2b 21; // VirtualPow2 -> Pow2Table
+            if (funct3 == 2) break :blk2b 23; // VirtualShiftRightBitmask -> ShiftRightBitmaskTable
             break :blk2b 0; // VirtualMULI (funct3=0) -> RangeCheckTable
         },
         0x5B => blk5b: { // Virtual shift right
-            if (funct3 == 5) break :blk5b 27; // VirtualSRAI -> VirtualSRATable
-            break :blk5b 26; // VirtualSRLI -> VirtualSRLTable (funct3=0)
+            if (funct3 == 5) break :blk5b 26; // VirtualSRAI -> VirtualSRATable
+            break :blk5b 25; // VirtualSRLI -> VirtualSRLTable (funct3=0)
         },
         0x02 => 0, // VirtualAdvice -> RangeCheckTable
         0x22 => blk22: { // Virtual assert
-            if (funct3 == 1) break :blk22 17; // VirtualAssertValidDiv0 -> ValidDiv0Table
-            if (funct3 == 2) break :blk22 18; // VirtualAssertHalfwordAlignment -> HalfwordAlignmentTable
-            if (funct3 == 3) break :blk22 19; // VirtualAssertWordAlignment -> WordAlignmentTable
+            if (funct3 == 1) break :blk22 16; // VirtualAssertValidDiv0 -> ValidDiv0Table
+            if (funct3 == 2) break :blk22 17; // VirtualAssertHalfwordAlignment -> HalfwordAlignmentTable
+            if (funct3 == 3) break :blk22 18; // VirtualAssertWordAlignment -> WordAlignmentTable
             break :blk22 6; // VirtualAssertEQ -> EqualTable (funct3=0)
         },
-        0x42 => 20, // VirtualZeroExtendWord -> LowerHalfWordTable
-        0x62 => 16, // VirtualAssertValidUnsignedRemainder -> ValidUnsignedRemainderTable
+        0x42 => 19, // VirtualZeroExtendWord -> LowerHalfWordTable
+        0x62 => 15, // VirtualAssertValidUnsignedRemainder -> ValidUnsignedRemainderTable
         0x37 => 0, // LUI -> RangeCheckTable
         0x17 => 0, // AUIPC -> RangeCheckTable
         0x6f => 0, // JAL -> RangeCheckTable

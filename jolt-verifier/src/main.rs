@@ -46,6 +46,9 @@ fn main() {
 
     let pp_consumed = pp_cursor.position() as usize;
     eprintln!("Preprocessing loaded ({} bytes consumed out of {})", pp_consumed, preprocessing_bytes.len());
+    eprintln!("  entry_address: 0x{:x}", preprocessing.shared.bytecode.entry_address);
+    eprintln!("  entry_bytecode_index: {}", preprocessing.shared.bytecode.entry_bytecode_index());
+    eprintln!("  code_size: {}", preprocessing.shared.bytecode.code_size);
 
     // Load proof
     eprintln!("Loading proof from {}...", cli.proof);

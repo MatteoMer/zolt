@@ -526,60 +526,57 @@ pub fn tableSuffixes(table_idx: usize) []const Suffixes {
         13 => &[_]Suffixes{ .One, .UpperWord },
         // 14: LessThanEqual (UnsignedLessThanEqual)
         14 => &[_]Suffixes{ .One, .LessThan, .Eq },
-        // 15: ValidSignedRemainder
-        // Jolt order: [One, LessThan, GreaterThan, LeftOperandIsZero, RightOperandIsZero]
-        15 => &[_]Suffixes{ .One, .LessThan, .GreaterThan, .LeftOperandIsZero, .RightOperandIsZero },
-        // 16: ValidUnsignedRemainder
+        // 15: ValidUnsignedRemainder
         // Jolt order: [One, LessThan, RightOperandIsZero]
-        16 => &[_]Suffixes{ .One, .LessThan, .RightOperandIsZero },
-        // 17: ValidDiv0
-        17 => &[_]Suffixes{ .One, .LeftOperandIsZero, .DivByZero },
-        // 18: HalfwordAlignment
-        18 => &[_]Suffixes{ .One, .Lsb },
-        // 19: WordAlignment
-        19 => &[_]Suffixes{.TwoLsb},
-        // 20: LowerHalfWord
-        20 => &[_]Suffixes{ .One, .LowerHalfWord },
-        // 21: SignExtendHalfWord
-        21 => &[_]Suffixes{ .One, .LowerHalfWord, .SignExtensionUpperHalf },
-        // 22: Pow2
-        22 => &[_]Suffixes{.Pow2},
-        // 23: Pow2W
-        23 => &[_]Suffixes{.Pow2W},
-        // 24: ShiftRightBitmask
-        24 => &[_]Suffixes{ .One, .Pow2 },
-        // 25: VirtualRev8W
-        25 => &[_]Suffixes{ .One, .Rev8W },
-        // 26: VirtualSRL
-        26 => &[_]Suffixes{ .RightShiftHelper, .RightShift },
-        // 27: VirtualSRA
-        27 => &[_]Suffixes{ .RightShiftHelper, .RightShift, .SignExtension, .One },
-        // 28: VirtualROTR
-        28 => &[_]Suffixes{ .RightShiftHelper, .RightShift, .LeftShift, .One },
-        // 29: VirtualROTRW
-        29 => &[_]Suffixes{ .RightShiftWHelper, .RightShiftW, .LeftShiftW, .One },
-        // 30: VirtualChangeDivisor
-        30 => &[_]Suffixes{ .One, .RightOperand, .ChangeDivisor },
-        // 31: VirtualChangeDivisorW
-        31 => &[_]Suffixes{ .One, .RightOperandW, .ChangeDivisorW, .SignExtensionRightOperand },
-        // 32: MulUNoOverflow
-        32 => &[_]Suffixes{.OverflowBitsZero},
-        // 33: VirtualXORROT32
-        33 => &[_]Suffixes{ .One, .XorRot32 },
-        // 34: VirtualXORROT24
-        34 => &[_]Suffixes{ .One, .XorRot24 },
-        // 35: VirtualXORROT16
-        35 => &[_]Suffixes{ .One, .XorRot16 },
-        // 36: VirtualXORROT63
-        36 => &[_]Suffixes{ .One, .XorRot63 },
-        // 37: VirtualXORROTW16
-        37 => &[_]Suffixes{ .One, .XorRotW16 },
-        // 38: VirtualXORROTW12
-        38 => &[_]Suffixes{ .One, .XorRotW12 },
-        // 39: VirtualXORROTW8
-        39 => &[_]Suffixes{ .One, .XorRotW8 },
-        // 40: VirtualXORROTW7
-        40 => &[_]Suffixes{ .One, .XorRotW7 },
+        15 => &[_]Suffixes{ .One, .LessThan, .RightOperandIsZero },
+        // 16: ValidDiv0
+        16 => &[_]Suffixes{ .One, .LeftOperandIsZero, .DivByZero },
+        // 17: HalfwordAlignment
+        17 => &[_]Suffixes{ .One, .Lsb },
+        // 18: WordAlignment
+        18 => &[_]Suffixes{.TwoLsb},
+        // 19: LowerHalfWord
+        19 => &[_]Suffixes{ .One, .LowerHalfWord },
+        // 20: SignExtendHalfWord
+        20 => &[_]Suffixes{ .One, .LowerHalfWord, .SignExtensionUpperHalf },
+        // 21: Pow2
+        21 => &[_]Suffixes{.Pow2},
+        // 22: Pow2W
+        22 => &[_]Suffixes{.Pow2W},
+        // 23: ShiftRightBitmask
+        23 => &[_]Suffixes{ .One, .Pow2 },
+        // 24: VirtualRev8W
+        24 => &[_]Suffixes{ .One, .Rev8W },
+        // 25: VirtualSRL
+        25 => &[_]Suffixes{ .RightShiftHelper, .RightShift },
+        // 26: VirtualSRA
+        26 => &[_]Suffixes{ .RightShiftHelper, .RightShift, .SignExtension, .One },
+        // 27: VirtualROTR
+        27 => &[_]Suffixes{ .RightShiftHelper, .RightShift, .LeftShift, .One },
+        // 28: VirtualROTRW
+        28 => &[_]Suffixes{ .RightShiftWHelper, .RightShiftW, .LeftShiftW, .One },
+        // 29: VirtualChangeDivisor
+        29 => &[_]Suffixes{ .One, .RightOperand, .ChangeDivisor },
+        // 30: VirtualChangeDivisorW
+        30 => &[_]Suffixes{ .One, .RightOperandW, .ChangeDivisorW, .SignExtensionRightOperand },
+        // 31: MulUNoOverflow
+        31 => &[_]Suffixes{.OverflowBitsZero},
+        // 32: VirtualXORROT32
+        32 => &[_]Suffixes{ .One, .XorRot32 },
+        // 33: VirtualXORROT24
+        33 => &[_]Suffixes{ .One, .XorRot24 },
+        // 34: VirtualXORROT16
+        34 => &[_]Suffixes{ .One, .XorRot16 },
+        // 35: VirtualXORROT63
+        35 => &[_]Suffixes{ .One, .XorRot63 },
+        // 36: VirtualXORROTW16
+        36 => &[_]Suffixes{ .One, .XorRotW16 },
+        // 37: VirtualXORROTW12
+        37 => &[_]Suffixes{ .One, .XorRotW12 },
+        // 38: VirtualXORROTW8
+        38 => &[_]Suffixes{ .One, .XorRotW8 },
+        // 39: VirtualXORROTW7
+        39 => &[_]Suffixes{ .One, .XorRotW7 },
         // Fallback
         else => &[_]Suffixes{.One},
     };

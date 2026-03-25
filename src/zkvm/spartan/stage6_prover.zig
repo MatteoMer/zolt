@@ -63,7 +63,7 @@ pub const BytecodeEntry = struct {
     circuit_flags: [14]bool,
     /// Instruction flags (7 flags, matches InstructionFlags enum)
     instruction_flags: [7]bool,
-    /// Lookup table index (0..41, or 255 for no lookup table)
+    /// Lookup table index (0..39, or 255 for no lookup table)
     lookup_table_index: u8,
     /// Whether operands are interleaved (not combined arithmetically)
     is_interleaved: bool,
@@ -147,7 +147,7 @@ fn populateVirtualMULIEntry(
 
 /// Populate a BytecodeEntry for a VirtualSignExtendWord instruction.
 /// VirtualSignExtendWord has opcode 0x0B with: AddOperands, WriteLookupOutputToRD,
-/// LeftOperandIsRs1Value, RightOperandIsImm, lookup table = SignExtendHalfWord (21).
+/// LeftOperandIsRs1Value, RightOperandIsImm, lookup table = SignExtendHalfWord (20).
 fn populateVirtualSignExtendWordEntry(
     entry: *BytecodeEntry,
     rd: u8,
@@ -187,7 +187,7 @@ fn populateVirtualSignExtendWordEntry(
         inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
     }
 
-    entry.lookup_table_index = 21; // SignExtendHalfWord
+    entry.lookup_table_index = 20; // SignExtendHalfWord
     // AddOperands is set, so is_interleaved = false
     entry.is_interleaved = false;
     // VirtualSignExtendWord is always the last in a sequence: vsr=Some(0)
@@ -237,7 +237,7 @@ fn populateVirtualSignExtendWordEntryWithParams(
         inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
     }
 
-    entry.lookup_table_index = 21; // SignExtendHalfWord
+    entry.lookup_table_index = 20; // SignExtendHalfWord
     entry.is_interleaved = false;
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
@@ -245,7 +245,7 @@ fn populateVirtualSignExtendWordEntryWithParams(
 
 /// Populate a BytecodeEntry for a VirtualSRLI instruction.
 /// VirtualSRLI has opcode 0x5B with: WriteLookupOutputToRD (NO AddOperands, NO MultiplyOperands),
-/// LeftOperandIsRs1Value, RightOperandIsImm, lookup table = VirtualSRL (26).
+/// LeftOperandIsRs1Value, RightOperandIsImm, lookup table = VirtualSRL (25).
 /// The immediate is a BITMASK reconstructed from the total shift amount.
 fn populateVirtualSRLIEntry(
     entry: *BytecodeEntry,
@@ -277,7 +277,7 @@ fn populateVirtualSRLIEntry(
     var cf = &entry.circuit_flags;
     cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
     // VirtualSRLI does NOT set AddOperands, SubtractOperands, or MultiplyOperands.
-    // It uses interleaved operands with VirtualSRL table (table index 26).
+    // It uses interleaved operands with VirtualSRL table (table index 25).
     if (virtual_sequence_remaining != null) {
         cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
     }
@@ -297,7 +297,7 @@ fn populateVirtualSRLIEntry(
         inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
     }
 
-    entry.lookup_table_index = 26; // VirtualSRL
+    entry.lookup_table_index = 25; // VirtualSRL
     // VirtualSRLI uses interleaved operands (NOT identity path)
     entry.is_interleaved = true;
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
@@ -451,7 +451,7 @@ fn populateVirtualZeroExtendWordEntry(
         inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
     }
 
-    entry.lookup_table_index = 20; // LowerHalfWord
+    entry.lookup_table_index = 19; // LowerHalfWord
     // AddOperands set → identity-path (not interleaved)
     entry.is_interleaved = false;
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
@@ -460,7 +460,7 @@ fn populateVirtualZeroExtendWordEntry(
 
 /// Populate a BytecodeEntry for a VirtualAssertValidUnsignedRemainder instruction (opcode 0x62).
 /// VirtualAssertValidUnsignedRemainder: Assert flag set, LeftOperandIsRs1Value, RightOperandIsRs2Value.
-/// Lookup table = ValidUnsignedRemainder (16), interleaved-path.
+/// Lookup table = ValidUnsignedRemainder (15), interleaved-path.
 fn populateVirtualAssertValidUnsignedRemainderEntry(
     entry: *BytecodeEntry,
     rs1: u8,
@@ -500,7 +500,7 @@ fn populateVirtualAssertValidUnsignedRemainderEntry(
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
 
-    entry.lookup_table_index = 16; // ValidUnsignedRemainder
+    entry.lookup_table_index = 15; // ValidUnsignedRemainder
     // No AddOperands/SubtractOperands/MultiplyOperands/Advice → interleaved
     entry.is_interleaved = true;
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
@@ -508,7 +508,7 @@ fn populateVirtualAssertValidUnsignedRemainderEntry(
 }
 
 /// Populate a BytecodeEntry for a VirtualAssertValidDiv0 instruction.
-/// Assert + VirtualInstruction flags. Lookup table = ValidDiv0 (17).
+/// Assert + VirtualInstruction flags. Lookup table = ValidDiv0 (16).
 fn populateVirtualAssertValidDiv0Entry(
     entry: *BytecodeEntry,
     rs1: u8,
@@ -534,14 +534,14 @@ fn populateVirtualAssertValidDiv0Entry(
     var inf = &entry.instruction_flags;
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
-    entry.lookup_table_index = 17; // ValidDiv0
+    entry.lookup_table_index = 16; // ValidDiv0
     entry.is_interleaved = true;
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
 }
 
 /// Populate a BytecodeEntry for a VirtualChangeDivisorW instruction (R-format).
-/// WriteLookupOutputToRD + VirtualInstruction flags. Lookup table = VirtualChangeDivisorW (31).
+/// WriteLookupOutputToRD + VirtualInstruction flags. Lookup table = VirtualChangeDivisorW (30).
 fn populateVirtualChangeDivisorWEntry(
     entry: *BytecodeEntry,
     rd: u8,
@@ -569,7 +569,7 @@ fn populateVirtualChangeDivisorWEntry(
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
     if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-    entry.lookup_table_index = 31; // VirtualChangeDivisorW
+    entry.lookup_table_index = 30; // VirtualChangeDivisorW
     entry.is_interleaved = true; // No Add/Sub/Mul/Advice flags
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
@@ -614,7 +614,7 @@ fn populateVirtualRTypeEntry(
 
 /// Populate a BytecodeEntry for a VirtualSRAI instruction within a virtual sequence.
 /// VirtualSRAI has: WriteLookupOutputToRD, LeftOperandIsRs1Value, RightOperandIsImm,
-/// lookup table = VirtualSRA (27), is_interleaved = true.
+/// lookup table = VirtualSRA (26), is_interleaved = true.
 /// The immediate is a BITMASK (not a shift amount): bitmask = ((1 << (64 - shift)) - 1) << shift.
 fn populateVirtualSRAIEntry(
     entry: *BytecodeEntry,
@@ -645,7 +645,7 @@ fn populateVirtualSRAIEntry(
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
     if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-    entry.lookup_table_index = 27; // VirtualSRA
+    entry.lookup_table_index = 26; // VirtualSRA
     entry.is_interleaved = true; // No Add/Sub/Mul/Advice flags
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
@@ -653,7 +653,7 @@ fn populateVirtualSRAIEntry(
 
 /// Populate a BytecodeEntry for a VirtualPow2 instruction.
 /// VirtualPow2 computes 2^(rs1 % 64). It uses AddOperands + WriteLookupOutputToRD,
-/// lookup table = Pow2 (22), NOT interleaved (AddOperands set).
+/// lookup table = Pow2 (21), NOT interleaved (AddOperands set).
 fn populateVirtualPow2Entry(
     entry: *BytecodeEntry,
     rd: u8,
@@ -683,7 +683,7 @@ fn populateVirtualPow2Entry(
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
     if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-    entry.lookup_table_index = 22; // Pow2
+    entry.lookup_table_index = 21; // Pow2
     entry.is_interleaved = false; // AddOperands set → NOT interleaved
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
@@ -691,7 +691,7 @@ fn populateVirtualPow2Entry(
 
 /// Populate a BytecodeEntry for a VirtualShiftRightBitmask instruction.
 /// Computes bitmask for right shift from register value.
-/// Uses AddOperands + WriteLookupOutputToRD, lookup table = ShiftRightBitmask (24).
+/// Uses AddOperands + WriteLookupOutputToRD, lookup table = ShiftRightBitmask (23).
 fn populateVirtualShiftRightBitmaskEntry(
     entry: *BytecodeEntry,
     rd: u8,
@@ -721,7 +721,7 @@ fn populateVirtualShiftRightBitmaskEntry(
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
     if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-    entry.lookup_table_index = 24; // ShiftRightBitmask
+    entry.lookup_table_index = 23; // ShiftRightBitmask
     entry.is_interleaved = false; // AddOperands set
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
@@ -729,7 +729,7 @@ fn populateVirtualShiftRightBitmaskEntry(
 
 /// Populate a BytecodeEntry for VirtualAssertHalfwordAlignment.
 /// Assert that (rs1 + imm) is halfword-aligned (divisible by 2).
-/// Uses Assert + AddOperands, lookup table = HalfwordAlignment (18).
+/// Uses Assert + AddOperands, lookup table = HalfwordAlignment (17).
 fn populateVirtualAssertHalfwordAlignmentEntry(
     entry: *BytecodeEntry,
     rs1: u8,
@@ -759,7 +759,7 @@ fn populateVirtualAssertHalfwordAlignmentEntry(
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
     // Assert: no rd, so IsRdNotZero = false
-    entry.lookup_table_index = 18; // HalfwordAlignment
+    entry.lookup_table_index = 17; // HalfwordAlignment
     entry.is_interleaved = false; // AddOperands set
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
@@ -767,7 +767,7 @@ fn populateVirtualAssertHalfwordAlignmentEntry(
 
 /// Populate a BytecodeEntry for VirtualAssertWordAlignment.
 /// Assert that (rs1 + imm) is word-aligned (divisible by 4).
-/// Uses Assert + AddOperands, lookup table = WordAlignment (19).
+/// Uses Assert + AddOperands, lookup table = WordAlignment (18).
 fn populateVirtualAssertWordAlignmentEntry(
     entry: *BytecodeEntry,
     rs1: u8,
@@ -796,14 +796,14 @@ fn populateVirtualAssertWordAlignmentEntry(
     var inf = &entry.instruction_flags;
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
-    entry.lookup_table_index = 19; // WordAlignment
+    entry.lookup_table_index = 18; // WordAlignment
     entry.is_interleaved = false; // AddOperands set
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
 }
 
 /// Populate a BytecodeEntry for VirtualSRL (R-type, register-based logical right shift).
-/// Uses WriteLookupOutputToRD ONLY (NO AddOperands), lookup table = VirtualSRL (26).
+/// Uses WriteLookupOutputToRD ONLY (NO AddOperands), lookup table = VirtualSRL (25).
 /// Interleaved (no arithmetic combination of operands).
 fn populateVirtualSRLEntry(
     entry: *BytecodeEntry,
@@ -834,14 +834,14 @@ fn populateVirtualSRLEntry(
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
     if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-    entry.lookup_table_index = 26; // VirtualSRL
+    entry.lookup_table_index = 25; // VirtualSRL
     entry.is_interleaved = true; // No Add/Sub/Mul flags
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
 }
 
 /// Populate a BytecodeEntry for VirtualSRA (R-type, register-based arithmetic right shift).
-/// Uses WriteLookupOutputToRD ONLY (NO AddOperands), lookup table = VirtualSRA (27).
+/// Uses WriteLookupOutputToRD ONLY (NO AddOperands), lookup table = VirtualSRA (26).
 fn populateVirtualSRAEntry(
     entry: *BytecodeEntry,
     rd: u8,
@@ -871,7 +871,7 @@ fn populateVirtualSRAEntry(
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
     inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
     if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-    entry.lookup_table_index = 27; // VirtualSRA
+    entry.lookup_table_index = 26; // VirtualSRA
     entry.is_interleaved = true;
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
@@ -1205,7 +1205,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             // VirtualSignExtendWord does NOT set RightOperandIsImm
             if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-            entry.lookup_table_index = 21; // SignExtendHalfWord
+            entry.lookup_table_index = 20; // SignExtendHalfWord
             entry.is_interleaved = false;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1227,7 +1227,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             var inf = &entry.instruction_flags;
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-            entry.lookup_table_index = 20; // LowerHalfWord
+            entry.lookup_table_index = 19; // LowerHalfWord
             entry.is_interleaved = false;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1249,7 +1249,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
             if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-            entry.lookup_table_index = 26; // VirtualSRL
+            entry.lookup_table_index = 25; // VirtualSRL
             entry.is_interleaved = true;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1271,7 +1271,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
             if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-            entry.lookup_table_index = 27; // VirtualSRA
+            entry.lookup_table_index = 26; // VirtualSRA
             entry.is_interleaved = true;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1293,7 +1293,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
             if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-            entry.lookup_table_index = 26; // VirtualSRL
+            entry.lookup_table_index = 25; // VirtualSRL
             entry.is_interleaved = true;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1315,7 +1315,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
             if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-            entry.lookup_table_index = 27; // VirtualSRA
+            entry.lookup_table_index = 26; // VirtualSRA
             entry.is_interleaved = true;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1399,7 +1399,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             var inf = &entry.instruction_flags;
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
-            entry.lookup_table_index = 17; // ValidDiv0
+            entry.lookup_table_index = 16; // ValidDiv0
             entry.is_interleaved = true;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1420,7 +1420,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             var inf = &entry.instruction_flags;
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
-            entry.lookup_table_index = 16; // ValidUnsignedRemainder
+            entry.lookup_table_index = 15; // ValidUnsignedRemainder
             entry.is_interleaved = true;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1442,7 +1442,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             var inf = &entry.instruction_flags;
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
-            entry.lookup_table_index = 18; // HalfwordAlignment
+            entry.lookup_table_index = 17; // HalfwordAlignment
             entry.is_interleaved = false;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1464,7 +1464,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             var inf = &entry.instruction_flags;
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
-            entry.lookup_table_index = 19; // WordAlignment
+            entry.lookup_table_index = 18; // WordAlignment
             entry.is_interleaved = false;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1486,7 +1486,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
             if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-            entry.lookup_table_index = 31; // VirtualChangeDivisorW
+            entry.lookup_table_index = 30; // VirtualChangeDivisorW
             entry.is_interleaved = true;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1509,7 +1509,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
             if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-            entry.lookup_table_index = 22; // Pow2
+            entry.lookup_table_index = 21; // Pow2
             entry.is_interleaved = false;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -1532,7 +1532,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
             if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
-            entry.lookup_table_index = 24; // ShiftRightBitmask
+            entry.lookup_table_index = 23; // ShiftRightBitmask
             entry.is_interleaved = false;
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
@@ -3234,12 +3234,12 @@ fn isKnownInstruction(opcode: u8, funct3: u3, funct7: u7) bool {
 ///   0=RangeCheck, 1=RangeCheckAligned, 2=And, 3=Andn, 4=Or, 5=Xor,
 ///   6=Equal, 7=SignedGTE, 8=UnsignedGTE, 9=NotEqual, 10=SignedLT,
 ///   11=UnsignedLT, 12=Movsign, 13=UpperWord, 14=UnsignedLTE,
-///   15=ValidSignedRemainder, 16=ValidUnsignedRemainder, 17=ValidDiv0,
-///   18=HalfwordAlignment, 19=WordAlignment, 20=LowerHalfWord,
-///   21=SignExtendHalfWord, 22=Pow2, 23=Pow2W, 24=ShiftRightBitmask,
-///   25=VirtualRev8W, 26=VirtualSRL, 27=VirtualSRA, 28=VirtualROTR,
-///   29=VirtualROTRW, 30=VirtualChangeDivisor, 31=VirtualChangeDivisorW,
-///   32=MulUNoOverflow, 33-40=VirtualXORROT variants
+///   15=ValidUnsignedRemainder, 16=ValidDiv0,
+///   17=HalfwordAlignment, 18=WordAlignment, 19=LowerHalfWord,
+///   20=SignExtendHalfWord, 21=Pow2, 22=Pow2W, 23=ShiftRightBitmask,
+///   24=VirtualRev8W, 25=VirtualSRL, 26=VirtualSRA, 27=VirtualROTR,
+///   28=VirtualROTRW, 29=VirtualChangeDivisor, 30=VirtualChangeDivisorW,
+///   31=MulUNoOverflow, 32-39=VirtualXORROT variants
 fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
     return switch (opcode) {
         0x33 => switch (funct3) { // R-type
@@ -3288,25 +3288,25 @@ fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
             0 => if (funct7 == 0) @as(u8, 0) // ADDW → RangeCheck
             else if (funct7 == 0x20) 0 // SUBW → RangeCheck
             else 255,
-            6 => 31, // VirtualChangeDivisorW → VirtualChangeDivisorW table
+            6 => 30, // VirtualChangeDivisorW → VirtualChangeDivisorW table
             else => 255,
         },
-        0x0B => 21, // VirtualSignExtendWord → SignExtendHalfWord
+        0x0B => 20, // VirtualSignExtendWord → SignExtendHalfWord
         0x2B => switch (funct3) { // Virtual I-type
-            1 => 22, // VirtualPow2 → Pow2
-            2 => 24, // VirtualShiftRightBitmask → ShiftRightBitmask
+            1 => 21, // VirtualPow2 → Pow2
+            2 => 23, // VirtualShiftRightBitmask → ShiftRightBitmask
             else => 0, // VirtualMULI (funct3=0) → RangeCheck
         },
-        0x5B => if (funct3 == 5) @as(u8, 27) else 26, // VirtualSRAI/VirtualSRA → VirtualSRA, VirtualSRLI/VirtualSRL → VirtualSRL
+        0x5B => if (funct3 == 5) @as(u8, 26) else 25, // VirtualSRAI/VirtualSRA → VirtualSRA, VirtualSRLI/VirtualSRL → VirtualSRL
         0x02 => 0, // VirtualAdvice → RangeCheck
         0x22 => switch (funct3) { // Virtual assert
-            1 => 17, // VirtualAssertValidDiv0 → ValidDiv0
-            2 => 18, // VirtualAssertHalfwordAlignment → HalfwordAlignment
-            3 => 19, // VirtualAssertWordAlignment → WordAlignment
+            1 => 16, // VirtualAssertValidDiv0 → ValidDiv0
+            2 => 17, // VirtualAssertHalfwordAlignment → HalfwordAlignment
+            3 => 18, // VirtualAssertWordAlignment → WordAlignment
             else => 6, // VirtualAssertEQ → Equal
         },
-        0x42 => 20, // VirtualZeroExtendWord → LowerHalfWord
-        0x62 => 16, // VirtualAssertValidUnsignedRemainder → ValidUnsignedRemainder
+        0x42 => 19, // VirtualZeroExtendWord → LowerHalfWord
+        0x62 => 15, // VirtualAssertValidUnsignedRemainder → ValidUnsignedRemainder
         else => 255, // Load, Store, ECALL, FENCE - no lookup table
     };
 }
@@ -5839,11 +5839,17 @@ fn BytecodeReadRafProver(comptime F: type) type {
         trace: *const ExecutionTrace,
         pc_map: *const BytecodePCMapper,
         stage_r_cycles: [5][]const F,
-        gamma_powers: [7]F,
+        gamma_powers: [8]F,
         /// Val polynomials per stage: val_polys[s][k]
         val_polys: [5][]F,
         /// Identity polynomial: int_poly[k] = k as field element
         int_poly: []F,
+
+        entry_gamma: F,
+        entry_val: F,
+        entry_ri: usize,
+        bound_f_entry: F,
+        eq_zero_scalar: F,
 
         allocator: Allocator,
         pool: ?*ThreadPool = null,
@@ -5857,10 +5863,11 @@ fn BytecodeReadRafProver(comptime F: type) type {
             n_cycle_vars: usize,
             bytecode_d: usize,
             log_k_chunk: usize,
-            gamma_powers: [7]F,
+            gamma_powers: [8]F,
             stage_r_cycles: [5][]const F,
             int_poly: []F,
             external_stage_claims: [5]F, // From opening claims: claim_per_stage[s]
+            entry_bytecode_index: usize,
             init_pool: ?*ThreadPool,
         ) !Self {
             const bytecode_K: usize = @as(usize, 1) << @intCast(bytecode_log_k);
@@ -6028,6 +6035,11 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 .gamma_powers = gamma_powers,
                 .val_polys = val_polys,
                 .int_poly = int_poly,
+                .entry_gamma = gamma_powers[7],
+                .entry_val = F.one(),
+                .entry_ri = entry_bytecode_index,
+                .bound_f_entry = F.zero(),
+                .eq_zero_scalar = F.one(),
                 .allocator = allocator,
                 .pool = init_pool,
             };
@@ -6120,6 +6132,16 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 agg_eval_2 = agg_eval_2.add(self.gamma_powers[s].mul(per_stage[s][1]));
             }
 
+            const entry_bit = self.entry_ri & 1;
+            const ev_sq = self.entry_val.mul(self.entry_val);
+            const eg_ev = self.entry_gamma.mul(ev_sq);
+            if (entry_bit == 0) {
+                agg_eval_0 = agg_eval_0.add(eg_ev);
+                agg_eval_2 = agg_eval_2.add(eg_ev);
+            } else {
+                agg_eval_2 = agg_eval_2.add(eg_ev.add(eg_ev).add(eg_ev).add(eg_ev));
+            }
+
             return .{ .agg = [2]F{ agg_eval_0, agg_eval_2 }, .per_stage = per_stage };
         }
 
@@ -6202,6 +6224,15 @@ fn BytecodeReadRafProver(comptime F: type) type {
                     );
                 }
             }
+
+
+            const entry_bit = self.entry_ri & 1;
+            if (entry_bit == 0) {
+                self.entry_val = self.entry_val.mul(F.one().sub(r));
+            } else {
+                self.entry_val = self.entry_val.mul(r);
+            }
+            self.entry_ri >>= 1;
 
             self.current_len = half;
             self.addr_rounds_done += 1;
@@ -6516,6 +6547,10 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 self.val_with_raf[s] = try self.allocator.alloc(F, 0);
             }
 
+
+            self.bound_f_entry = self.entry_val;
+            self.combined.?[0] = self.combined.?[0].add(self.entry_gamma.mul(self.bound_f_entry));
+
             self.current_len = T;
             self.phase = 1;
         }
@@ -6699,6 +6734,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             r_register_5: []const F, // From RegistersValEvaluation (address portion)
             // BytecodePCMapper for converting ELF addresses to bytecode array indices
             pc_map: *const BytecodePCMapper,
+            entry_address: u64,
             // Stage 4 inc_poly copy for diagnostic comparison (pass null slice to skip)
             stage4_inc_poly_copy: []const F,
         ) !Stage6Result(F) {
@@ -6748,7 +6784,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             }
 
             dbg("[STAGE6] Transcript at entry: round={}\n", .{transcript.n_rounds});
-            const bytecode_raf_gamma_powers = try transcript.challengeScalarPowers(self.allocator, 7);
+            const bytecode_raf_gamma_powers = try transcript.challengeScalarPowers(self.allocator, 8);
             defer self.allocator.free(bytecode_raf_gamma_powers);
 
             // Debug: print first gamma to verify transcript sync
@@ -6772,7 +6808,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             const stage4_gammas = try transcript.challengeScalarPowers(self.allocator, 3);
             defer self.allocator.free(stage4_gammas);
 
-            const NUM_LOOKUP_TABLES: usize = 41;
+            const NUM_LOOKUP_TABLES: usize = 40;
             const stage5_gammas = try transcript.challengeScalarPowers(self.allocator, 2 + NUM_LOOKUP_TABLES);
             defer self.allocator.free(stage5_gammas);
 
@@ -6839,7 +6875,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 stage4_gammas,
                 stage5_gammas,
             );
-            var bytecodeReadRaf_input = bcraf_result.total;
+            var bytecodeReadRaf_input = bcraf_result.total.add(bytecode_raf_gamma_powers[7]);
             const bcraf_per_stage_claims = bcraf_result.per_stage;
 
             const hammingBooleanity_input = F.zero();
@@ -7613,7 +7649,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 if (!entry.is_interleaved) {
                     val5 = val5.add(stage5_gammas[1]);
                 }
-                if (entry.lookup_table_index < 41) {
+                if (entry.lookup_table_index < 40) {
                     val5 = val5.add(stage5_gammas[2 + @as(usize, entry.lookup_table_index)]);
                 }
                 bytecode_val_polys[4][k] = val5;
@@ -8195,8 +8231,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 const REG_COUNT5: usize = 128;
                 var bc_rd5_sum = F.zero();
                 var bc_iraf_sum = F.zero();
-                var bc_table_sums: [41]F = undefined;
-                for (0..41) |t| bc_table_sums[t] = F.zero();
+                var bc_table_sums: [40]F = undefined;
+                for (0..40) |t| bc_table_sums[t] = F.zero();
                 for (0..bytecode_K) |k| {
                     if (k >= bytecode_entries.len) break;
                     const entry = bytecode_entries[k];
@@ -8206,7 +8242,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     if (!entry.is_interleaved) {
                         bc_iraf_sum = bc_iraf_sum.add(F_s5[k]);
                     }
-                    if (entry.lookup_table_index < 41) {
+                    if (entry.lookup_table_index < 40) {
                         bc_table_sums[entry.lookup_table_index] = bc_table_sums[entry.lookup_table_index].add(F_s5[k]);
                     }
                 }
@@ -8244,7 +8280,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
                 // Check first few table flags
                 var table_mismatches: usize = 0;
-                for (0..41) |t| {
+                for (0..40) |t| {
                     const oc_tf = getClaim5(opening_claims, .{ .Virtual = .{ .poly = .{ .LookupTableFlag = t }, .sumcheck_id = .InstructionReadRaf } });
                     if (!bc_table_sums[t].eql(oc_tf)) {
                         table_mismatches += 1;
@@ -8330,10 +8366,11 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 dbg("[BCRAF_FIELD_CMP4] Done\n\n", .{});
             }
 
-            var bytecode_gamma_arr: [7]F = undefined;
-            for (0..7) |i| {
+            var bytecode_gamma_arr: [8]F = undefined;
+            for (0..8) |i| {
                 bytecode_gamma_arr[i] = bytecode_raf_gamma_powers[i];
             }
+            const entry_bytecode_index = pc_map.getPC(entry_address, 0);
             var bytecode_prover = try BytecodeReadRafProver(F).init(
                 self.allocator, trace, pc_map, bytecode_val_polys,
                 bytecode_log_k, n_cycle_vars, bytecode_d, log_k_chunk,
@@ -8347,6 +8384,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 },
                 bytecode_int_poly,
                 bcraf_per_stage_claims,
+                entry_bytecode_index,
                 self.thread_pool,
             );
             defer bytecode_prover.deinit();
@@ -9876,7 +9914,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } })));
 
             // rv_claim_5 (Stage 5)
-            const NUM_LOOKUP_TABLES: usize = 41;
+            const NUM_LOOKUP_TABLES: usize = 40;
             var rv5 = F.zero();
             const rv5_rdwa = getClaim(opening_claims,
                 .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersValEvaluation } });

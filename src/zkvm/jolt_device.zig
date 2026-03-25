@@ -318,6 +318,7 @@ pub fn fiatShamirPreamble(
     device: *const JoltDevice,
     ram_K: usize,
     trace_length: usize,
+    entry_address: u64,
 ) void {
     const Blake2bTranscript = @import("../transcripts/blake2b.zig").Blake2bTranscript;
 
@@ -329,6 +330,7 @@ pub fn fiatShamirPreamble(
     transcript.appendU64("panic", if (device.panic) 1 else 0);
     transcript.appendU64("ram_K", @intCast(ram_K));
     transcript.appendU64("trace_length", @intCast(trace_length));
+    transcript.appendU64("entry_address", entry_address);
 
     _ = F;
     _ = Blake2bTranscript;

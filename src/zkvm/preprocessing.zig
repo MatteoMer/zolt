@@ -400,6 +400,8 @@ pub const BytecodePreprocessing = struct {
     /// Raw 32-bit instruction words (one per bytecode entry, including NoOp=0 at index 0
     /// and virtual instruction words). Used by Jolt verifier for Zolt-compatible flag computation.
     raw_words: std.ArrayListUnmanaged(u32),
+    /// ELF entry point address (e_entry). Serialized after pc_map to match upstream.
+    entry_address: u64,
 
     allocator: Allocator,
 
@@ -409,6 +411,7 @@ pub const BytecodePreprocessing = struct {
             .bytecode = .{},
             .pc_map = BytecodePCMapper.init(allocator),
             .raw_words = .{},
+            .entry_address = 0,
             .allocator = allocator,
         };
     }
@@ -433,6 +436,7 @@ pub const BytecodePreprocessing = struct {
     pub fn preprocessWithTextSize(allocator: Allocator, code_bytes: []const u8, base_address: u64, termination_address_opt: ?u64, text_size: usize) !BytecodePreprocessing {
         const termination_address = termination_address_opt orelse 0x7FFFC008; // Default from MemoryLayout with standard 4KB sizes
         var self = BytecodePreprocessing.init(allocator);
+        self.entry_address = base_address;
         errdefer self.deinit();
 
         // Prepend a single NoOp instruction (as Jolt does)
@@ -2206,6 +2210,9 @@ pub const BytecodePreprocessing = struct {
 
         // pc_map
         try self.pc_map.serialize(writer);
+
+        // entry_address (u64, added in upstream PR #1335)
+        try writer.writeInt(u64, self.entry_address, .little);
     }
 };
 

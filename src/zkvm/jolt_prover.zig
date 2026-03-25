@@ -2454,8 +2454,8 @@ pub fn JoltProver(comptime F: type) type {
             );
 
             // LookupsReadRaf claims (Stage 5 - LookupsReadRafSumcheckVerifier)
-            // LookupTableFlag(i) for each of the 41 lookup tables
-            const num_lookup_tables: usize = 41; // LookupTables::<XLEN>::COUNT (41 variants)
+            // LookupTableFlag(i) for each of the 40 lookup tables
+            const num_lookup_tables: usize = 40; // LookupTables::<XLEN>::COUNT (40 variants, ValidSignedRemainder removed)
             for (0..num_lookup_tables) |i| {
                 const flag_value = stage5_result.lookups_table_flags[i];
                 if (!flag_value.eql(F.zero())) {
@@ -2603,6 +2603,8 @@ pub fn JoltProver(comptime F: type) type {
                 r_register_5,
                 // BytecodePCMapper for converting ELF addresses to bytecode array indices
                 pc_map_ptr,
+                // ELF entry point address for entry-point constraint (PR #1335)
+                config.entry_address,
                 // Stage 4 inc_poly copy for diagnostic
                 if (stage4_inc_poly_copy) |v| v else &[_]F{},
             );
@@ -4592,6 +4594,8 @@ pub const JoltProverConfig = struct {
     text_size: usize = 0,
     /// Preprocessing bytecode (source of truth for verifier; used to build val_polys)
     bytecode_preprocessing: ?*const @import("preprocessing.zig").BytecodePreprocessing = null,
+    /// ELF entry point address (e_entry). Used for Stage 6 entry-point constraint.
+    entry_address: u64 = 0,
 };
 
 // =============================================================================

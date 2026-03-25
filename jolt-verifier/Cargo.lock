@@ -403,7 +403,7 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 [[package]]
 name = "common"
 version = "0.2.0"
-source = "git+https://github.com/a16z/jolt.git?rev=2e05fe88#2e05fe883920054df2ee3a6df8f85c2caba77c99"
+source = "git+https://github.com/a16z/jolt.git?rev=997c1543#997c1543efd49eb193ca403bb7722fc4b2f8e65b"
 dependencies = [
  "allocative",
  "ark-serialize",
@@ -834,7 +834,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 [[package]]
 name = "jolt-core"
 version = "0.1.0"
-source = "git+https://github.com/a16z/jolt.git?rev=2e05fe88#2e05fe883920054df2ee3a6df8f85c2caba77c99"
+source = "git+https://github.com/a16z/jolt.git?rev=997c1543#997c1543efd49eb193ca403bb7722fc4b2f8e65b"
 dependencies = [
  "allocative",
  "ark-bn254",
@@ -878,7 +878,7 @@ dependencies = [
 [[package]]
 name = "jolt-inlines-keccak256"
 version = "0.1.0"
-source = "git+https://github.com/a16z/jolt.git?rev=2e05fe88#2e05fe883920054df2ee3a6df8f85c2caba77c99"
+source = "git+https://github.com/a16z/jolt.git?rev=997c1543#997c1543efd49eb193ca403bb7722fc4b2f8e65b"
 dependencies = [
  "ctor 0.6.3",
  "tracer",
@@ -888,7 +888,7 @@ dependencies = [
 [[package]]
 name = "jolt-inlines-sha2"
 version = "0.1.0"
-source = "git+https://github.com/a16z/jolt.git?rev=2e05fe88#2e05fe883920054df2ee3a6df8f85c2caba77c99"
+source = "git+https://github.com/a16z/jolt.git?rev=997c1543#997c1543efd49eb193ca403bb7722fc4b2f8e65b"
 dependencies = [
  "ctor 0.6.3",
  "tracer",
@@ -916,7 +916,7 @@ dependencies = [
 [[package]]
 name = "jolt-platform"
 version = "0.1.0"
-source = "git+https://github.com/a16z/jolt.git?rev=2e05fe88#2e05fe883920054df2ee3a6df8f85c2caba77c99"
+source = "git+https://github.com/a16z/jolt.git?rev=997c1543#997c1543efd49eb193ca403bb7722fc4b2f8e65b"
 dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
@@ -1487,7 +1487,7 @@ dependencies = [
 [[package]]
 name = "tracer"
 version = "0.2.0"
-source = "git+https://github.com/a16z/jolt.git?rev=2e05fe88#2e05fe883920054df2ee3a6df8f85c2caba77c99"
+source = "git+https://github.com/a16z/jolt.git?rev=997c1543#997c1543efd49eb193ca403bb7722fc4b2f8e65b"
 dependencies = [
  "addr2line",
  "ark-serialize",

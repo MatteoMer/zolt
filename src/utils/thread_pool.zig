@@ -509,6 +509,10 @@ pub const ThreadPool = struct {
 
     /// Parallel reduce: split 0..len into chunks, each producing a partial result via
     /// `map(context, start, end) -> R`, then combine with `reduce(a, b) -> R`.
+    /// Minimum items for reduce to parallelize. Higher than parallelFor because
+    /// reduce has per-split overhead (latch + waitWhileWorking per recursion level).
+    const MIN_ITEMS_PER_REDUCE_THREAD: usize = 2048;
+
     pub fn parallelReduce(
         self: *ThreadPool,
         comptime R: type,
@@ -520,7 +524,10 @@ pub const ThreadPool = struct {
     ) R {
         if (len == 0) return identity;
 
-        const actual_threads = self.effectiveThreads(len, 1);
+        if (len < MIN_ITEMS_PER_REDUCE_THREAD) {
+            return map(context, 0, len);
+        }
+        const actual_threads = @min(self.thread_count + 1, len / MIN_ITEMS_PER_REDUCE_THREAD);
         if (actual_threads <= 1) {
             return map(context, 0, len);
         }

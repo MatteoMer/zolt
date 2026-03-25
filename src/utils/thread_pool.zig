@@ -768,9 +768,9 @@ pub const ThreadPool = struct {
                 signal(p.latch);
             }
 
-            /// Direct recursion — no Job/payload overhead for the right half.
-            /// Left halves are pushed to the deque (stealable by other workers).
-            /// Uses Rayon-style splits counter: halves each level, stops at 0.
+            /// Rayon join pattern: push right half to deque, execute left inline,
+            /// try to pop right back. If right wasn't stolen, run it inline
+            /// with ZERO latch overhead. If stolen, spin-wait.
             fn computeRange(
                 ctx_ptr: *const Ctx,
                 start: usize,
@@ -787,34 +787,56 @@ pub const ThreadPool = struct {
 
                 const mid = start + range_len / 2;
 
-                // Stack-allocate SpinLatch (4 bytes) for left child
-                var left_result: R = undefined;
-                var left_spin = SpinLatch{};
+                // Push RIGHT half to deque (stealable). Execute LEFT inline.
+                var right_result: R = undefined;
+                var right_spin = SpinLatch{};
 
-                const left_payload = ReduceJobPayload{
+                const right_payload = ReduceJobPayload{
                     .signal_fn = @ptrCast(&Signals.signalSpin),
                     .context_ptr = @ptrCast(ctx_ptr),
-                    .start = start,
-                    .end = mid,
-                    .latch = @ptrCast(&left_spin),
-                    .partial_ptr = @ptrCast(&left_result),
+                    .start = mid,
+                    .end = end,
+                    .latch = @ptrCast(&right_spin),
+                    .partial_ptr = @ptrCast(&right_result),
                     .splits_remaining = splits / 2,
                     .pusher_index = @intCast(worker.index),
                 };
 
-                const left_job = Job.initFrom(ReduceJobPayload, left_payload, &execute);
+                const right_job = Job.initFrom(ReduceJobPayload, right_payload, &execute);
 
-                if (!worker.deque.push(left_job)) {
-                    // Deque full: compute left inline
-                    left_result = map(ctx_ptr.*, start, mid);
-                    left_spin.set();
+                const pushed = worker.deque.push(right_job);
+                if (!pushed) {
+                    // Deque full: compute right inline (no overhead)
+                    right_result = computeRange(ctx_ptr, mid, end, splits / 2, worker, pool);
                 }
 
-                // Tail-recurse right with halved splits (no Job, no latch)
-                const right_result = computeRange(ctx_ptr, mid, end, splits / 2, worker, pool);
+                // Execute LEFT inline (this is the "task A" in Rayon's join)
+                const left_result = computeRange(ctx_ptr, start, mid, splits / 2, worker, pool);
 
-                // Wait for left (spin + steal, no futex)
-                left_spin.waitWhileWorking(worker, pool);
+                if (pushed) {
+                    // Try to pop right back (it may not have been stolen)
+                    if (!right_spin.probe()) {
+                        // Not done yet — try to pop from our deque
+                        // If we get it back, run inline (zero latch overhead!)
+                        if (worker.deque.pop()) |*popped| {
+                            var job = popped.*;
+                            // Check if this is our right job by checking the partial_ptr
+                            const popped_payload = job.getPayload(ReduceJobPayload);
+                            if (popped_payload.partial_ptr == @as(*anyopaque, @ptrCast(&right_result))) {
+                                // Got it back! Run inline, no latch overhead
+                                right_result = computeRange(ctx_ptr, mid, end, splits / 2, worker, pool);
+                            } else {
+                                // Got a different job — execute it and keep waiting
+                                job.execute_fn(&job, worker);
+                                right_spin.waitWhileWorking(worker, pool);
+                            }
+                        } else {
+                            // Deque empty, right was stolen — wait
+                            right_spin.waitWhileWorking(worker, pool);
+                        }
+                    }
+                    // else: right already completed (stolen and finished fast)
+                }
 
                 return reduce_fn(left_result, right_result);
             }

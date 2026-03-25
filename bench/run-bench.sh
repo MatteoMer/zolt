@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZOLT_BIN="$ROOT/zig-out/bin/zolt"
 JOLT_BIN="$ROOT/jolt-bench/target/release/jolt-bench"
 
-PROGRAMS=(fibonacci factorial bitwise collatz primes sum gcd signed primes_large)
+PROGRAMS=(fibonacci factorial bitwise collatz primes sum gcd signed primes_large sha256_128 sha256 sha256_512 sha256_1024 sha256_2048)
 
 if [ $# -ge 1 ]; then
     PROGRAMS=("$@")

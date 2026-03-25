@@ -60,7 +60,7 @@ fn main() {
 
     // Decode bytecode
     let t_decode = Instant::now();
-    let (bytecode, init_memory_state, program_size) = guest::program::decode(&elf_bytes);
+    let (bytecode, init_memory_state, program_size, entry_address) = guest::program::decode(&elf_bytes);
     let decode_ms = t_decode.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
         "Decode: {:.2} ms ({} instructions, program_size={})",
@@ -111,8 +111,9 @@ fn main() {
         memory_layout,
         init_memory_state,
         padded_trace_len.max(cli.max_trace),
+        entry_address,
     );
-    let prover_preprocessing = ProverPreproc::new(shared);
+    let prover_preprocessing = ProverPreproc::new(shared.expect("preprocessing failed"));
     let preproc_ms = t_preproc.elapsed().as_secs_f64() * 1000.0;
     eprintln!("Preprocessing: {:.2} ms", preproc_ms);
 

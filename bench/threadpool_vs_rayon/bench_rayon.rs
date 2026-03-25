@@ -8,8 +8,9 @@ use ark_ff::{Field, AdditiveGroup};
 use rayon::prelude::*;
 use std::time::Instant;
 
-const WARMUP: usize = 3;
-const ITERS: usize = 50;
+const WARMUP: usize = 5;
+const ITERS: usize = 100;
+const RUNS: usize = 5;
 
 fn bench_parallel_reduce(a: &[Fr], b: &[Fr], half: usize) -> f64 {
     // Warmup
@@ -60,7 +61,8 @@ fn main() {
     let threads = rayon::current_num_threads();
     println!("Rayon micro-benchmark (Rust)");
     println!("Threads: {threads}");
-    println!("Workload: parallel reduce Σ a[i]*b[i] with ark-bn254 Fr\n");
+    println!("Workload: parallel reduce Σ a[i]*b[i] with ark-bn254 Fr");
+    println!("Config: {WARMUP} warmup, {ITERS} iters, {RUNS} runs (min-of-runs)\n");
 
     let sizes = [1024, 4096, 16384, 65536, 262144, 524288];
 
@@ -81,12 +83,18 @@ fn main() {
             .map(|i| Fr::from((i as u64).wrapping_mul(0x517CC1B727220A95).wrapping_add(1)))
             .collect();
 
-        let seq_ms = bench_sequential(&a, &b, half);
-        let par_ms = bench_parallel_reduce(&a, &b, half);
-        let speedup = seq_ms / par_ms;
+        let mut best_seq = f64::INFINITY;
+        let mut best_par = f64::INFINITY;
+        for _ in 0..RUNS {
+            let s = bench_sequential(&a, &b, half);
+            let p = bench_parallel_reduce(&a, &b, half);
+            if s < best_seq { best_seq = s; }
+            if p < best_par { best_par = p; }
+        }
+        let speedup = best_seq / best_par;
 
         println!(
-            "{n:>10} {seq_ms:>10.3} ms {par_ms:>10.3} ms {speedup:>9.2}x"
+            "{n:>10} {best_seq:>10.3} ms {best_par:>10.3} ms {speedup:>9.2}x"
         );
     }
 }

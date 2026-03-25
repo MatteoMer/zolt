@@ -761,10 +761,7 @@ pub const ThreadPool = struct {
         };
         defer if (worker.index == self.thread_count) releaseWorkerClaim(worker);
 
-        // Use actual_threads * 2 (not * 4) because reduce has higher per-split
-        // overhead than for_each (latch creation + waitWhileWorking per level).
-        // This targets ~2x more leaves than threads → ~1 level of splitting.
-        const split_threshold = @max(MIN_ITEMS_PER_THREAD, len / (actual_threads * 2));
+        const split_threshold = @max(MIN_ITEMS_PER_REDUCE_THREAD, len / (actual_threads * 4));
 
         var result: R = identity;
         var ctx_copy = context;

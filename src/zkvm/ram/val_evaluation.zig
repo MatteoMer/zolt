@@ -25,6 +25,8 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
 
 const mod = @import("mod.zig");
 const MemoryOp = mod.MemoryOp;
@@ -455,6 +457,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
         /// Parameters
         params: ValEvaluationParams(F),
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(
             allocator: Allocator,
@@ -672,53 +675,88 @@ pub fn ValEvaluationProver(comptime F: type) type {
         /// This matches upstream a16z/jolt's RamValCheckSumcheckProver::compute_message exactly.
         /// Returns [eval_at_0, eval_at_1, eval_at_2, eval_at_inf] in Toom-Cook format.
         pub fn computeRoundPolynomialCombined(self: *Self, gamma: F) [4]F {
-            var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
             const n = self.effectiveLen();
             const half = n / 2;
 
             if (half == 0) {
+                var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
                 if (n > 0) {
                     evals[0] = self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0].add(gamma));
                 }
                 return evals;
             }
 
-            for (0..half) |i| {
-                const inc_0 = self.inc_evals[2 * i];
-                const wa_0 = self.wa_evals[2 * i];
-                const lt_0 = self.lt_evals[2 * i];
-                const inc_1 = self.inc_evals[2 * i + 1];
-                const wa_1 = self.wa_evals[2 * i + 1];
-                const lt_1 = self.lt_evals[2 * i + 1];
+            const ComputeCtx = struct {
+                inc: []const F,
+                wa: []const F,
+                lt: []const F,
+                gamma: F,
+            };
+            const ctx = ComputeCtx{
+                .inc = self.inc_evals,
+                .wa = self.wa_evals,
+                .lt = self.lt_evals,
+                .gamma = gamma,
+            };
 
-                const two = F.fromU64(2);
+            const mapFn = struct {
+                fn f(c: ComputeCtx, start: usize, end: usize) [4]F {
+                    @setEvalBranchQuota(10000);
+                    const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
+                    const two = F.fromU64(2);
 
-                // Extrapolate to x=2
-                const inc_2 = two.mul(inc_1).sub(inc_0);
-                const wa_2 = two.mul(wa_1).sub(wa_0);
-                const lt_2 = two.mul(lt_1).sub(lt_0);
+                    if (use_deferred) {
+                        var acc: [4]UnreducedProductAccum = .{
+                            UnreducedProductAccum.zero(), UnreducedProductAccum.zero(),
+                            UnreducedProductAccum.zero(), UnreducedProductAccum.zero(),
+                        };
+                        for (start..end) |i| {
+                            const inc_0 = c.inc[2 * i]; const wa_0 = c.wa[2 * i]; const lt_0 = c.lt[2 * i];
+                            const inc_1 = c.inc[2 * i + 1]; const wa_1 = c.wa[2 * i + 1]; const lt_1 = c.lt[2 * i + 1];
+                            const inc_2 = two.mul(inc_1).sub(inc_0);
+                            const wa_2 = two.mul(wa_1).sub(wa_0);
+                            const lt_2 = two.mul(lt_1).sub(lt_0);
+                            // t1: inc*wa*lt (cubic) — defer last mul
+                            acc[0].addAssign(inc_0.mul(wa_0).mulToProductAccum(lt_0));
+                            acc[1].addAssign(inc_1.mul(wa_1).mulToProductAccum(lt_1));
+                            acc[2].addAssign(inc_2.mul(wa_2).mulToProductAccum(lt_2));
+                            acc[3].addAssign(inc_1.sub(inc_0).mul(wa_1.sub(wa_0)).mulToProductAccum(lt_1.sub(lt_0)));
+                            // t2: gamma*inc*wa (quadratic) — defer last mul
+                            acc[0].addAssign(inc_0.mul(wa_0).mulToProductAccum(c.gamma));
+                            acc[1].addAssign(inc_1.mul(wa_1).mulToProductAccum(c.gamma));
+                            acc[2].addAssign(inc_2.mul(wa_2).mulToProductAccum(c.gamma));
+                            // t2 has no contribution to acc[3] (eval_at_inf)
+                        }
+                        return .{ acc[0].reduce(), acc[1].reduce(), acc[2].reduce(), acc[3].reduce() };
+                    } else {
+                        var local: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
+                        for (start..end) |i| {
+                            const inc_0 = c.inc[2 * i]; const wa_0 = c.wa[2 * i]; const lt_0 = c.lt[2 * i];
+                            const inc_1 = c.inc[2 * i + 1]; const wa_1 = c.wa[2 * i + 1]; const lt_1 = c.lt[2 * i + 1];
+                            const inc_2 = two.mul(inc_1).sub(inc_0);
+                            const wa_2 = two.mul(wa_1).sub(wa_0);
+                            const lt_2 = two.mul(lt_1).sub(lt_0);
+                            local[0] = local[0].add(inc_0.mul(wa_0).mul(lt_0).add(c.gamma.mul(inc_0.mul(wa_0))));
+                            local[1] = local[1].add(inc_1.mul(wa_1).mul(lt_1).add(c.gamma.mul(inc_1.mul(wa_1))));
+                            local[2] = local[2].add(inc_2.mul(wa_2).mul(lt_2).add(c.gamma.mul(inc_2.mul(wa_2))));
+                            local[3] = local[3].add(inc_1.sub(inc_0).mul(wa_1.sub(wa_0)).mul(lt_1.sub(lt_0)));
+                        }
+                        return local;
+                    }
+                }
+            }.f;
 
-                // Slopes (for eval_at_inf)
-                const inc_slope = inc_1.sub(inc_0);
-                const wa_slope = wa_1.sub(wa_0);
-                const lt_slope = lt_1.sub(lt_0);
+            const reduceFn = struct {
+                fn f(a: [4]F, b: [4]F) [4]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]), a[3].add(b[3]) };
+                }
+            }.f;
 
-                // Term 1: inc * wa * lt (degree 3)
-                const t1_at_0 = inc_0.mul(wa_0).mul(lt_0);
-                const t1_at_1 = inc_1.mul(wa_1).mul(lt_1);
-                const t1_at_2 = inc_2.mul(wa_2).mul(lt_2);
-                const t1_at_inf = inc_slope.mul(wa_slope).mul(lt_slope);
-
-                // Term 2: gamma * inc * wa (degree 2, no contribution to eval_at_inf)
-                const t2_at_0 = gamma.mul(inc_0.mul(wa_0));
-                const t2_at_1 = gamma.mul(inc_1.mul(wa_1));
-                const t2_at_2 = gamma.mul(inc_2.mul(wa_2));
-
-                evals[0] = evals[0].add(t1_at_0.add(t2_at_0));
-                evals[1] = evals[1].add(t1_at_1.add(t2_at_1));
-                evals[2] = evals[2].add(t1_at_2.add(t2_at_2));
-                evals[3] = evals[3].add(t1_at_inf); // Only cubic term contributes
-            }
+            const identity = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+            const evals = if (self.thread_pool) |tp|
+                tp.parallelReduce([4]F, half, identity, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
 
             return evals;
         }
@@ -736,44 +774,63 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 return;
             }
 
-            const one_minus_r = F.one().sub(r);
+            _ = round_poly;
 
-            // Fold all three polynomials using LowToHigh binding:
-            // new[i] = (1-r)*old[2*i] + r*old[2*i+1]
-            // This binds the variable corresponding to bit 0 of the index (LSB).
-            for (0..half) |i| {
-                // inc: interpolate between adjacent pairs
-                self.inc_evals[i] = one_minus_r.mul(self.inc_evals[2 * i]).add(r.mul(self.inc_evals[2 * i + 1]));
-                // wa: interpolate
-                self.wa_evals[i] = one_minus_r.mul(self.wa_evals[2 * i]).add(r.mul(self.wa_evals[2 * i + 1]));
-                // lt: interpolate
-                self.lt_evals[i] = one_minus_r.mul(self.lt_evals[2 * i]).add(r.mul(self.lt_evals[2 * i + 1]));
+            // Bind 3 independent arrays in parallel: inc, wa, lt
+            const BindCtx = struct {
+                slices: [3][]F,
+                r: F,
+                half: usize,
+                n: usize,
+            };
+            const bind_ctx = BindCtx{
+                .slices = .{ self.inc_evals, self.wa_evals, self.lt_evals },
+                .r = r,
+                .half = half,
+                .n = n,
+            };
+            const bindFn = struct {
+                fn f(ctx: BindCtx, idx: usize) void {
+                    const arr = ctx.slices[idx];
+                    const one_minus_r = F.one().sub(ctx.r);
+                    for (0..ctx.half) |i| {
+                        arr[i] = one_minus_r.mul(arr[2 * i]).add(ctx.r.mul(arr[2 * i + 1]));
+                    }
+                    for (ctx.half..ctx.n) |i| {
+                        arr[i] = F.zero();
+                    }
+                }
+            }.f;
+
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(3, bind_ctx, bindFn);
+            } else {
+                for (0..3) |idx| bindFn(bind_ctx, idx);
             }
-
-            // Conceptually shrink the arrays (we'll use fewer elements)
-            // In practice we just track via round and use effectiveLen
-            // Zero out the upper half that we just folded from
-            for (half..n) |i| {
-                self.inc_evals[i] = F.zero();
-                self.wa_evals[i] = F.zero();
-                self.lt_evals[i] = F.zero();
-            }
-
-            _ = round_poly; // The round_poly is only used for the transcript, not for internal claim tracking
 
             self.round += 1;
 
-            // CRITICAL FIX: After binding, the new claim is the actual sum of products over the bound arrays.
-            // The round_poly parameter contains the hinted polynomial (for the transcript), but the
-            // prover's internal claim must track the actual polynomial sum: Σ inc[j]*wa[j]*lt[j]
-            // This is because the hint mechanism modifies H(1) = claim - H(0) for the sumcheck invariant,
-            // but the actual polynomial arrays are independent of this hint.
-            var new_claim = F.zero();
+            // Recompute new claim: Σ inc[j]*wa[j]*lt[j]
             const new_len = self.effectiveLen();
-            for (0..new_len) |j| {
-                new_claim = new_claim.add(self.inc_evals[j].mul(self.wa_evals[j]).mul(self.lt_evals[j]));
-            }
-            self.current_claim = new_claim;
+            const ClaimCtx = struct { inc: []const F, wa: []const F, lt: []const F };
+            const claim_ctx = ClaimCtx{ .inc = self.inc_evals, .wa = self.wa_evals, .lt = self.lt_evals };
+            const claimMapFn = struct {
+                fn f(c: ClaimCtx, start: usize, end: usize) F {
+                    var s = F.zero();
+                    for (start..end) |j| {
+                        s = s.add(c.inc[j].mul(c.wa[j]).mul(c.lt[j]));
+                    }
+                    return s;
+                }
+            }.f;
+            const claimReduceFn = struct {
+                fn f(a: F, b: F) F { return a.add(b); }
+            }.f;
+
+            self.current_claim = if (self.thread_pool) |tp|
+                tp.parallelReduce(F, new_len, F.zero(), claim_ctx, claimMapFn, claimReduceFn)
+            else
+                claimMapFn(claim_ctx, 0, new_len);
         }
 
         /// Bind the current variable to challenge r (DEPRECATED - use bindChallengeWithPoly)

@@ -25,6 +25,8 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
 
 const mod = @import("mod.zig");
 const MemoryOp = mod.MemoryOp;
@@ -311,6 +313,7 @@ pub fn RafEvaluationProver(comptime F: type) type {
         /// Bound values from previous rounds
         bound_values: std.ArrayListUnmanaged(F),
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(
             allocator: Allocator,
@@ -372,79 +375,91 @@ pub fn RafEvaluationProver(comptime F: type) type {
         /// Uses LowToHigh indexing: ra(x=0) at index 2*i, ra(x=1) at index 2*i+1
         pub fn computeRoundPolynomialCubic(self: *Self) [4]F {
             const current_claim = self.current_claim;
-            // Active length is 2^(num_vars - round)
             const active_len: usize = @as(usize, 1) << @intCast(self.ra.num_vars);
             const half = active_len / 2;
-            var s0: F = F.zero();
-            var s2: F = F.zero();
 
-            // Compute the base contribution from already-bound variables
-            // unmap(k) = start_address + 8 * Σ_j bound_values[j] * 2^j + 8 * current_var * 2^round + ...
+            // Pre-compute base contribution from already-bound variables
             var base_contribution = F.fromU64(self.unmap.start_address);
             var power: u64 = 8;
             for (self.bound_values.items) |v| {
                 base_contribution = base_contribution.add(v.mul(F.fromU64(power)));
                 power *= 2;
             }
-
-            // Power for the current round variable
             const current_power = power;
 
-            for (0..half) |i| {
-                // For LowToHigh binding, x=0 is at index 2*i (bit 0 = 0)
-                // and x=1 is at index 2*i+1 (bit 0 = 1)
-                // ra(x) = (1-x)*ra_lo + x*ra_hi (linear interpolation)
-                // ra(0) = ra_lo
-                // ra(1) = ra_hi
-                // ra(2) = 2*ra_hi - ra_lo
-                const ra_lo = self.ra.evals[2 * i];
-                const ra_hi = self.ra.evals[2 * i + 1];
-                const ra_at_2 = ra_hi.add(ra_hi).sub(ra_lo); // 2*ra_hi - ra_lo
+            const RafCtx = struct {
+                ra_evals: []const F,
+                base: F,
+                current_power: u64,
+                remaining_vars: usize,
+            };
+            const ctx = RafCtx{
+                .ra_evals = self.ra.evals,
+                .base = base_contribution,
+                .current_power = current_power,
+                .remaining_vars = self.unmap.num_vars - self.round - 1,
+            };
 
-                // Compute remaining contribution for the index i
-                // With LowToHigh binding, i represents the higher bits (bits round+1, round+2, ...)
-                // The remaining contribution comes from these higher bits
-                var remaining_contrib = F.zero();
-                var remaining_power: u64 = current_power * 2;
-                const remaining_vars = self.unmap.num_vars - self.round - 1;
-                var idx = i;
-                for (0..remaining_vars) |_| {
-                    const bit = idx & 1;
-                    if (bit == 1) {
-                        remaining_contrib = remaining_contrib.add(F.fromU64(remaining_power));
+            const mapFn = struct {
+                fn f(c: RafCtx, start: usize, end: usize) [2]F {
+                    @setEvalBranchQuota(10000);
+                    const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
+                    if (use_deferred) {
+                        var acc_s0 = UnreducedProductAccum.zero();
+                        var acc_s2 = UnreducedProductAccum.zero();
+                        for (start..end) |i| {
+                            const ra_lo = c.ra_evals[2 * i];
+                            const ra_hi = c.ra_evals[2 * i + 1];
+                            const ra_at_2 = ra_hi.add(ra_hi).sub(ra_lo);
+                            var remaining_contrib = F.zero();
+                            var rp: u64 = c.current_power * 2;
+                            var idx = i;
+                            for (0..c.remaining_vars) |_| {
+                                if (idx & 1 == 1) remaining_contrib = remaining_contrib.add(F.fromU64(rp));
+                                idx >>= 1;
+                                rp *= 2;
+                            }
+                            acc_s0.addAssign(ra_lo.mulToProductAccum(c.base.add(remaining_contrib)));
+                            acc_s2.addAssign(ra_at_2.mulToProductAccum(c.base.add(F.fromU64(c.current_power * 2)).add(remaining_contrib)));
+                        }
+                        return .{ acc_s0.reduce(), acc_s2.reduce() };
+                    } else {
+                        var local_s0 = F.zero();
+                        var local_s2 = F.zero();
+                        for (start..end) |i| {
+                            const ra_lo = c.ra_evals[2 * i];
+                            const ra_hi = c.ra_evals[2 * i + 1];
+                            const ra_at_2 = ra_hi.add(ra_hi).sub(ra_lo);
+                            var remaining_contrib = F.zero();
+                            var rp: u64 = c.current_power * 2;
+                            var idx = i;
+                            for (0..c.remaining_vars) |_| {
+                                if (idx & 1 == 1) remaining_contrib = remaining_contrib.add(F.fromU64(rp));
+                                idx >>= 1;
+                                rp *= 2;
+                            }
+                            local_s0 = local_s0.add(ra_lo.mul(c.base.add(remaining_contrib)));
+                            local_s2 = local_s2.add(ra_at_2.mul(c.base.add(F.fromU64(c.current_power * 2)).add(remaining_contrib)));
+                        }
+                        return .{ local_s0, local_s2 };
                     }
-                    idx >>= 1;
-                    remaining_power *= 2;
                 }
+            }.f;
 
-                // unmap at x = 0, 2:
-                // unmap(x) = base + x*current_power + remaining
-                const unmap_at_0 = base_contribution.add(remaining_contrib);
-                const unmap_at_2 = base_contribution.add(F.fromU64(current_power * 2)).add(remaining_contrib);
+            const reduceFn = struct {
+                fn f(a: [2]F, b: [2]F) [2]F { return .{ a[0].add(b[0]), a[1].add(b[1]) }; }
+            }.f;
 
-                // Accumulate s(0) = Σ ra(0) * unmap(0) and s(2) = Σ ra(2) * unmap(2)
-                s0 = s0.add(ra_lo.mul(unmap_at_0));
-                s2 = s2.add(ra_at_2.mul(unmap_at_2));
-            }
+            const identity = [2]F{ F.zero(), F.zero() };
+            const sums = if (self.thread_pool) |tp|
+                tp.parallelReduce([2]F, half, identity, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
 
-            // Compute s(1) from sumcheck constraint: s(0) + s(1) = current_claim
+            const s0 = sums[0];
             const s1 = current_claim.sub(s0);
-
-            // For degree-2 polynomial: s(X) = c0 + c1*X + c2*X^2
-            // s(0) = c0
-            // s(1) = c0 + c1 + c2
-            // s(2) = c0 + 2*c1 + 4*c2
-            // Solve for c2: c2 = (s(2) - 2*s(1) + s(0)) / 2
-            // s(3) = c0 + 3*c1 + 9*c2
-            //      = s(0) + 3*(s(1) - s(0) - c2) + 9*c2
-            //      = s(0) + 3*s(1) - 3*s(0) + 6*c2
-            //      = -2*s(0) + 3*s(1) + 6*c2
-            //      = -2*s(0) + 3*s(1) + 3*(s(2) - 2*s(1) + s(0))
-            //      = -2*s(0) + 3*s(1) + 3*s(2) - 6*s(1) + 3*s(0)
-            //      = s(0) - 3*s(1) + 3*s(2)
-            const s3 = s0.sub(s1.mul(F.fromU64(3))).add(s2.mul(F.fromU64(3)));
-
-            return [4]F{ s0, s1, s2, s3 };
+            const s3 = s0.sub(s1.mul(F.fromU64(3))).add(sums[1].mul(F.fromU64(3)));
+            return [4]F{ s0, s1, sums[1], s3 };
         }
 
         /// Process a challenge and bind the current variable

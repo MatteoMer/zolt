@@ -30,6 +30,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 const poly_mod = @import("../../poly/mod.zig");
 const transcripts = @import("../../transcripts/mod.zig");
 const jolt_types = @import("../jolt_types.zig");
@@ -233,6 +234,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 r_product,
                 shift_gamma_powers,
             );
+            shift_prover.thread_pool = self.thread_pool;
             defer shift_prover.deinit();
 
             // RegistersClaimReduction uses EqPolynomial prefix-suffix with 1 (P,Q) pair
@@ -244,6 +246,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 reg_gamma,
                 reg_gamma_sqr,
             );
+            reg_prover.thread_pool = self.thread_pool;
             defer reg_prover.deinit();
 
             // InstructionInputSumcheck uses direct computation (no prefix-suffix in Jolt)
@@ -1265,6 +1268,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
         phase2_eq_plus_one_prod: ?[]F,
 
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(
             allocator: Allocator,
@@ -1642,59 +1646,84 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
         }
 
         fn computeRoundEvalsPhase1(self: *Self, previous_claim: F) [3]F {
-            // Phase1: Use P*Q formula for prefix-suffix sumcheck
-            // For LowToHigh binding, we're binding the first variable X
-            // H(X) = sum_j P[2j + X] * Q[2j + X]
-            // So H(0) = sum_j P[2j] * Q[2j]    (X=0)
-            //    H(1) = sum_j P[2j+1] * Q[2j+1] (X=1)
             const half = self.current_prefix_size / 2;
 
-            // Process all 4 (P, Q) pairs
-            const pairs: [4]struct { P: []F, Q: []F } = .{
-                .{ .P = self.P_0_outer, .Q = self.Q_0_outer },
-                .{ .P = self.P_1_outer, .Q = self.Q_1_outer },
-                .{ .P = self.P_0_prod, .Q = self.Q_0_prod },
-                .{ .P = self.P_1_prod, .Q = self.Q_1_prod },
+            const P1Ctx = struct {
+                P0o: []const F, Q0o: []const F,
+                P1o: []const F, Q1o: []const F,
+                P0p: []const F, Q0p: []const F,
+                P1p: []const F, Q1p: []const F,
+            };
+            const ctx = P1Ctx{
+                .P0o = self.P_0_outer, .Q0o = self.Q_0_outer,
+                .P1o = self.P_1_outer, .Q1o = self.Q_1_outer,
+                .P0p = self.P_0_prod, .Q0p = self.Q_0_prod,
+                .P1p = self.P_1_prod, .Q1p = self.Q_1_prod,
             };
 
-            // Use deferred Montgomery reduction when F supports it
-            const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
-            var evals: [3]F = undefined;
-
-            if (use_deferred) {
-                var accum: [3]UnreducedProductAccum = .{ UnreducedProductAccum.zero(), UnreducedProductAccum.zero(), UnreducedProductAccum.zero() };
-                for (pairs) |pair| {
-                    for (0..half) |i| {
-                        const p_at_0 = pair.P[2 * i];
-                        const p_at_1 = pair.P[2 * i + 1];
-                        const q_at_0 = pair.Q[2 * i];
-                        const q_at_1 = pair.Q[2 * i + 1];
-                        const p_at_2 = p_at_1.add(p_at_1).sub(p_at_0);
-                        const q_at_2 = q_at_1.add(q_at_1).sub(q_at_0);
-
-                        accum[0].addAssign(p_at_0.mulToProductAccum(q_at_0));
-                        accum[1].addAssign(p_at_1.mulToProductAccum(q_at_1));
-                        accum[2].addAssign(p_at_2.mulToProductAccum(q_at_2));
+            const mapFn = struct {
+                fn f(c: P1Ctx, start: usize, end: usize) [3]F {
+                    @setEvalBranchQuota(10000);
+                    const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
+                    if (use_deferred) {
+                        var accum: [3]UnreducedProductAccum = .{ UnreducedProductAccum.zero(), UnreducedProductAccum.zero(), UnreducedProductAccum.zero() };
+                        const all_pairs = [4][2][]const F{
+                            .{ c.P0o, c.Q0o }, .{ c.P1o, c.Q1o },
+                            .{ c.P0p, c.Q0p }, .{ c.P1p, c.Q1p },
+                        };
+                        for (all_pairs) |pair| {
+                            const P = pair[0];
+                            const Q = pair[1];
+                            for (start..end) |i| {
+                                const p0 = P[2 * i];
+                                const p1 = P[2 * i + 1];
+                                const q0 = Q[2 * i];
+                                const q1 = Q[2 * i + 1];
+                                const p2 = p1.add(p1).sub(p0);
+                                const q2 = q1.add(q1).sub(q0);
+                                accum[0].addAssign(p0.mulToProductAccum(q0));
+                                accum[1].addAssign(p1.mulToProductAccum(q1));
+                                accum[2].addAssign(p2.mulToProductAccum(q2));
+                            }
+                        }
+                        return .{ accum[0].reduce(), accum[1].reduce(), accum[2].reduce() };
+                    } else {
+                        var local: [3]F = .{ F.zero(), F.zero(), F.zero() };
+                        const all_pairs = [4][2][]const F{
+                            .{ c.P0o, c.Q0o }, .{ c.P1o, c.Q1o },
+                            .{ c.P0p, c.Q0p }, .{ c.P1p, c.Q1p },
+                        };
+                        for (all_pairs) |pair| {
+                            const P = pair[0];
+                            const Q = pair[1];
+                            for (start..end) |i| {
+                                const p0 = P[2 * i];
+                                const p1 = P[2 * i + 1];
+                                const q0 = Q[2 * i];
+                                const q1 = Q[2 * i + 1];
+                                const p2 = p1.add(p1).sub(p0);
+                                const q2 = q1.add(q1).sub(q0);
+                                local[0] = local[0].add(p0.mul(q0));
+                                local[1] = local[1].add(p1.mul(q1));
+                                local[2] = local[2].add(p2.mul(q2));
+                            }
+                        }
+                        return local;
                     }
                 }
-                evals = .{ accum[0].reduce(), accum[1].reduce(), accum[2].reduce() };
-            } else {
-                evals = .{ F.zero(), F.zero(), F.zero() };
-                for (pairs) |pair| {
-                    for (0..half) |i| {
-                        const p_at_0 = pair.P[2 * i];
-                        const p_at_1 = pair.P[2 * i + 1];
-                        const q_at_0 = pair.Q[2 * i];
-                        const q_at_1 = pair.Q[2 * i + 1];
-                        const p_at_2 = p_at_1.add(p_at_1).sub(p_at_0);
-                        const q_at_2 = q_at_1.add(q_at_1).sub(q_at_0);
+            }.f;
 
-                        evals[0] = evals[0].add(p_at_0.mul(q_at_0));
-                        evals[1] = evals[1].add(p_at_1.mul(q_at_1));
-                        evals[2] = evals[2].add(p_at_2.mul(q_at_2));
-                    }
+            const reduceFn = struct {
+                fn f(a: [3]F, b: [3]F) [3]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]) };
                 }
-            }
+            }.f;
+
+            const identity = [3]F{ F.zero(), F.zero(), F.zero() };
+            const evals = if (self.thread_pool) |tp|
+                tp.parallelReduce([3]F, half, identity, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
 
             // DEBUG: Verify sumcheck invariant p(0) + p(1) = previous_claim
             if (comptime debug_verbose) {
@@ -1828,25 +1857,36 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
         }
 
         fn bindPhase1(self: *Self, r_j: F) void {
-            // Bind P and Q buffers: new[i] = old[2i] + r * (old[2i+1] - old[2i])
             const new_prefix_size = self.current_prefix_size / 2;
 
-            for (0..new_prefix_size) |i| {
-                // P_0_outer
-                self.P_0_outer[i] = self.P_0_outer[2 * i].add(r_j.mul(self.P_0_outer[2 * i + 1].sub(self.P_0_outer[2 * i])));
-                self.Q_0_outer[i] = self.Q_0_outer[2 * i].add(r_j.mul(self.Q_0_outer[2 * i + 1].sub(self.Q_0_outer[2 * i])));
+            const BindP1Ctx = struct {
+                slices: [8][]F,
+                r: F,
+                n: usize,
+            };
+            const bctx = BindP1Ctx{
+                .slices = .{
+                    self.P_0_outer, self.Q_0_outer,
+                    self.P_1_outer, self.Q_1_outer,
+                    self.P_0_prod, self.Q_0_prod,
+                    self.P_1_prod, self.Q_1_prod,
+                },
+                .r = r_j,
+                .n = new_prefix_size,
+            };
+            const bindOneFn = struct {
+                fn f(c: BindP1Ctx, idx: usize) void {
+                    const arr = c.slices[idx];
+                    for (0..c.n) |i| {
+                        arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                    }
+                }
+            }.f;
 
-                // P_1_outer
-                self.P_1_outer[i] = self.P_1_outer[2 * i].add(r_j.mul(self.P_1_outer[2 * i + 1].sub(self.P_1_outer[2 * i])));
-                self.Q_1_outer[i] = self.Q_1_outer[2 * i].add(r_j.mul(self.Q_1_outer[2 * i + 1].sub(self.Q_1_outer[2 * i])));
-
-                // P_0_prod
-                self.P_0_prod[i] = self.P_0_prod[2 * i].add(r_j.mul(self.P_0_prod[2 * i + 1].sub(self.P_0_prod[2 * i])));
-                self.Q_0_prod[i] = self.Q_0_prod[2 * i].add(r_j.mul(self.Q_0_prod[2 * i + 1].sub(self.Q_0_prod[2 * i])));
-
-                // P_1_prod
-                self.P_1_prod[i] = self.P_1_prod[2 * i].add(r_j.mul(self.P_1_prod[2 * i + 1].sub(self.P_1_prod[2 * i])));
-                self.Q_1_prod[i] = self.Q_1_prod[2 * i].add(r_j.mul(self.Q_1_prod[2 * i + 1].sub(self.Q_1_prod[2 * i])));
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(8, bctx, bindOneFn);
+            } else {
+                for (0..8) |idx| bindOneFn(bctx, idx);
             }
 
             self.current_prefix_size = new_prefix_size;
@@ -2163,43 +2203,45 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {
-            // Bind witness MLEs and eq+1 polynomials using LowToHigh order
-            // Formula: new[i] = old[2*i] + r * (old[2*i+1] - old[2*i])
             const new_size = self.current_witness_size / 2;
 
-            // Debug: print current state before binding
-            if (comptime debug_verbose) {
-                if (self.current_witness_size <= 16) {
-                    dbg("[ZOLT] SHIFT_BIND: size={}, r_j={any}\n", .{ self.current_witness_size, r_j.toBytes()[0..8] });
-                    if (self.phase2_eq_plus_one_outer) |eq| {
-                        dbg("[ZOLT] SHIFT_BIND: eq+1_outer[0]={any}, eq+1_outer[1]={any}\n", .{ eq[0].toBytes()[0..8], eq[1].toBytes()[0..8] });
+            // Count how many arrays we actually need to bind
+            var num_arrays: usize = 5; // 5 witness MLEs always
+            if (self.phase2_eq_plus_one_outer != null) num_arrays += 1;
+            if (self.phase2_eq_plus_one_prod != null) num_arrays += 1;
+
+            const BindP2Ctx = struct {
+                slices: [7]?[]F,
+                r: F,
+                n: usize,
+                count: usize,
+            };
+            const bctx = BindP2Ctx{
+                .slices = .{
+                    self.unexpanded_pc, self.pc, self.is_virtual,
+                    self.is_first_in_sequence, self.is_noop,
+                    self.phase2_eq_plus_one_outer,
+                    self.phase2_eq_plus_one_prod,
+                },
+                .r = r_j,
+                .n = new_size,
+                .count = num_arrays,
+            };
+            const bindOneFn = struct {
+                fn f(c: BindP2Ctx, idx: usize) void {
+                    const arr = c.slices[idx] orelse return;
+                    for (0..c.n) |i| {
+                        arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
                     }
                 }
+            }.f;
+
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(num_arrays, bctx, bindOneFn);
+            } else {
+                for (0..num_arrays) |idx| bindOneFn(bctx, idx);
             }
 
-            for (0..new_size) |i| {
-                self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
-                self.pc[i] = self.pc[2 * i].add(r_j.mul(self.pc[2 * i + 1].sub(self.pc[2 * i])));
-                self.is_virtual[i] = self.is_virtual[2 * i].add(r_j.mul(self.is_virtual[2 * i + 1].sub(self.is_virtual[2 * i])));
-                self.is_first_in_sequence[i] = self.is_first_in_sequence[2 * i].add(r_j.mul(self.is_first_in_sequence[2 * i + 1].sub(self.is_first_in_sequence[2 * i])));
-
-                // Debug after last binding
-                if (comptime debug_verbose) {
-                    if (new_size == 1 and self.phase2_eq_plus_one_outer != null) {
-                        const eq_dbg = self.phase2_eq_plus_one_outer.?;
-                        const new_val = eq_dbg[0].add(r_j.mul(eq_dbg[1].sub(eq_dbg[0])));
-                        dbg("[ZOLT] SHIFT_BIND_FINAL: new eq+1_outer[0]={any}\n", .{new_val.toBytes()});
-                    }
-                }
-                self.is_noop[i] = self.is_noop[2 * i].add(r_j.mul(self.is_noop[2 * i + 1].sub(self.is_noop[2 * i])));
-
-                if (self.phase2_eq_plus_one_outer) |eq| {
-                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
-                }
-                if (self.phase2_eq_plus_one_prod) |eq| {
-                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
-                }
-            }
             self.current_witness_size = new_size;
         }
 
@@ -2269,7 +2311,6 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 // =============================================================================
 
 fn InstructionInputProver(comptime F: type) type {
-    const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
     return struct {
         const Self = @This();
 
@@ -2649,6 +2690,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         prefix_challenges: std.ArrayListUnmanaged(F),
 
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(
             allocator: Allocator,
@@ -2899,21 +2941,36 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
         fn bindPhase1(self: *Self, r_j: F) void {
             const new_prefix_size = self.current_prefix_size / 2;
+            const witness_new_size = self.current_witness_size / 2;
 
-            for (0..new_prefix_size) |i| {
-                self.P[i] = self.P[2 * i].add(r_j.mul(self.P[2 * i + 1].sub(self.P[2 * i])));
-                self.Q[i] = self.Q[2 * i].add(r_j.mul(self.Q[2 * i + 1].sub(self.Q[2 * i])));
+            // Bind 5 independent arrays: P, Q, rd_write_value, rs1_value, rs2_value
+            const RegBindCtx = struct {
+                slices: [5][]F,
+                r: F,
+                sizes: [5]usize, // P/Q use prefix size, witnesses use witness size
+            };
+            const bctx = RegBindCtx{
+                .slices = .{ self.P, self.Q, self.rd_write_value, self.rs1_value, self.rs2_value },
+                .r = r_j,
+                .sizes = .{ new_prefix_size, new_prefix_size, witness_new_size, witness_new_size, witness_new_size },
+            };
+            const bindOneFn = struct {
+                fn f(c: RegBindCtx, idx: usize) void {
+                    const arr = c.slices[idx];
+                    const n = c.sizes[idx];
+                    for (0..n) |i| {
+                        arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                    }
+                }
+            }.f;
+
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(5, bctx, bindOneFn);
+            } else {
+                for (0..5) |idx| bindOneFn(bctx, idx);
             }
 
             self.current_prefix_size = new_prefix_size;
-
-            // Also bind witness MLEs in LowToHigh order to match computeRoundEvals indexing
-            const witness_new_size = self.current_witness_size / 2;
-            for (0..witness_new_size) |i| {
-                self.rd_write_value[i] = self.rd_write_value[2 * i].add(r_j.mul(self.rd_write_value[2 * i + 1].sub(self.rd_write_value[2 * i])));
-                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
-                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
-            }
             self.current_witness_size = witness_new_size;
 
             // Record challenge for Phase 2 initialization
@@ -2961,18 +3018,38 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {
-            // Bind in LowToHigh order to match computeRoundEvalsPhase2 indexing (2*j, 2*j+1)
             const new_size = self.current_witness_size / 2;
 
-            for (0..new_size) |i| {
-                self.rd_write_value[i] = self.rd_write_value[2 * i].add(r_j.mul(self.rd_write_value[2 * i + 1].sub(self.rd_write_value[2 * i])));
-                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
-                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
+            var num_arrays: usize = 3;
+            if (self.phase2_eq != null) num_arrays = 4;
 
-                if (self.phase2_eq) |eq| {
-                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
+            const RegBP2Ctx = struct {
+                slices: [4]?[]F,
+                r: F,
+                n: usize,
+                count: usize,
+            };
+            const bctx = RegBP2Ctx{
+                .slices = .{ self.rd_write_value, self.rs1_value, self.rs2_value, self.phase2_eq },
+                .r = r_j,
+                .n = new_size,
+                .count = num_arrays,
+            };
+            const bindOneFn = struct {
+                fn f(c: RegBP2Ctx, idx: usize) void {
+                    const arr = c.slices[idx] orelse return;
+                    for (0..c.n) |i| {
+                        arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                    }
                 }
+            }.f;
+
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(num_arrays, bctx, bindOneFn);
+            } else {
+                for (0..num_arrays) |idx| bindOneFn(bctx, idx);
             }
+
             self.current_witness_size = new_size;
         }
 

@@ -38,6 +38,9 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const field_mod = @import("../../field/mod.zig");
+const UnreducedProductAccum = field_mod.UnreducedProductAccum;
 
 const constraints = @import("../r1cs/constraints.zig");
 const univariate_skip = @import("../r1cs/univariate_skip.zig");
@@ -150,6 +153,8 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
         current_claim: F,
         /// Allocator
         allocator: Allocator,
+        /// Thread pool for parallel compute/bind
+        thread_pool: ?*ThreadPool = null,
 
         /// Initialize the prover after univariate skip
         ///
@@ -279,43 +284,87 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
 
             // Compute t0 and t_inf using the Gruen structure (matching Jolt's remaining_quadratic_evals)
             // Uses interleaved format: left[2*g] = lo, left[2*g+1] = hi
-            var t0_sum: F = F.zero();
-            var t_inf_sum: F = F.zero();
+            // Flattened parallel reduce over all groups g = (x_out << num_xin_bits) | x_in
+            const ComputeCtx = struct {
+                left: []const F,
+                right: []const F,
+                e_out: []const F,
+                e_in: []const F,
+                num_xin_bits: u6,
+            };
+            const ctx = ComputeCtx{
+                .left = self.left_poly.evaluations,
+                .right = self.right_poly.evaluations,
+                .e_out = E_out,
+                .e_in = E_in,
+                .num_xin_bits = num_xin_bits,
+            };
 
-            for (0..E_out.len) |x_out| {
-                var inner_t0: F = F.zero();
-                var inner_t_inf: F = F.zero();
+            const mapFn = struct {
+                fn f(c: ComputeCtx, start: usize, end: usize) [2]F {
+                    @setEvalBranchQuota(10000);
+                    const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
+                    const e_in_len = c.e_in.len;
+                    const xin_mask: usize = if (e_in_len > 1) e_in_len - 1 else 0;
 
-                for (0..E_in.len) |x_in| {
-                    const g = (x_out << num_xin_bits) | x_in;
-
-                    // Interleaved layout: lo at 2*g, hi at 2*g+1
-                    if (g < num_groups) {
-                        // Get left/right at lo and hi positions (adjacent pairs)
-                        const l_lo = self.left_poly.evaluations[2 * g];
-                        const l_hi = self.left_poly.evaluations[2 * g + 1];
-                        const r_lo = self.right_poly.evaluations[2 * g];
-                        const r_hi = self.right_poly.evaluations[2 * g + 1];
-
-                        // t0 = left_lo * right_lo
-                        const p0 = l_lo.mul(r_lo);
-
-                        // t_inf = (left_hi - left_lo) * (right_hi - right_lo)
-                        // This is the "slope" term that becomes the quadratic coefficient
-                        const slope = l_hi.sub(l_lo).mul(r_hi.sub(r_lo));
-
-                        // Weight by E_in
-                        const e_in = E_in[x_in];
-                        inner_t0 = inner_t0.add(p0.mul(e_in));
-                        inner_t_inf = inner_t_inf.add(slope.mul(e_in));
+                    if (use_deferred) {
+                        var acc_t0 = UnreducedProductAccum.zero();
+                        var acc_tinf = UnreducedProductAccum.zero();
+                        for (start..end) |g| {
+                            const l_lo = c.left[2 * g];
+                            const l_hi = c.left[2 * g + 1];
+                            const r_lo = c.right[2 * g];
+                            const r_hi = c.right[2 * g + 1];
+                            const p0 = l_lo.mul(r_lo);
+                            const slope = l_hi.sub(l_lo).mul(r_hi.sub(r_lo));
+                            const x_in = g & xin_mask;
+                            const x_out = g >> @intCast(c.num_xin_bits);
+                            const e_weight = if (x_out < c.e_out.len and (e_in_len <= 1 or x_in < e_in_len))
+                                c.e_out[x_out].mul(if (e_in_len <= 1) F.one() else c.e_in[x_in])
+                            else
+                                F.zero();
+                            acc_t0.addAssign(p0.mulToProductAccum(e_weight));
+                            acc_tinf.addAssign(slope.mulToProductAccum(e_weight));
+                        }
+                        return .{ acc_t0.reduce(), acc_tinf.reduce() };
+                    } else {
+                        var t0_local: F = F.zero();
+                        var tinf_local: F = F.zero();
+                        for (start..end) |g| {
+                            const l_lo = c.left[2 * g];
+                            const l_hi = c.left[2 * g + 1];
+                            const r_lo = c.right[2 * g];
+                            const r_hi = c.right[2 * g + 1];
+                            const p0 = l_lo.mul(r_lo);
+                            const slope = l_hi.sub(l_lo).mul(r_hi.sub(r_lo));
+                            const x_in = g & xin_mask;
+                            const x_out = g >> @intCast(c.num_xin_bits);
+                            const e_weight = if (x_out < c.e_out.len and (e_in_len <= 1 or x_in < e_in_len))
+                                c.e_out[x_out].mul(if (e_in_len <= 1) F.one() else c.e_in[x_in])
+                            else
+                                F.zero();
+                            t0_local = t0_local.add(p0.mul(e_weight));
+                            tinf_local = tinf_local.add(slope.mul(e_weight));
+                        }
+                        return .{ t0_local, tinf_local };
                     }
                 }
+            }.f;
 
-                // Weight by E_out
-                const e_out = E_out[x_out];
-                t0_sum = t0_sum.add(inner_t0.mul(e_out));
-                t_inf_sum = t_inf_sum.add(inner_t_inf.mul(e_out));
-            }
+            const reduceFn = struct {
+                fn f(a: [2]F, b: [2]F) [2]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]) };
+                }
+            }.f;
+
+            const identity = [2]F{ F.zero(), F.zero() };
+            const sums = if (self.thread_pool) |tp|
+                tp.parallelReduce([2]F, num_groups, identity, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, num_groups);
+
+            const t0_sum = sums[0];
+            const t_inf_sum = sums[1];
 
             // Debug output for first 3 rounds (matching Jolt's debug)
             if (self.current_round < 3) {
@@ -363,11 +412,21 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
 
         /// Bind the challenge for this round and update state
         pub fn bindChallenge(self: *Self, challenge: F) !void {
-            // Bind left and right polynomials
-            self.left_poly.bindLow(challenge);
-            self.right_poly.bindLow(challenge);
+            // Bind left and right polynomials concurrently
+            if (self.thread_pool) |tp| {
+                const BindCtx = struct { left: *DensePolynomial(F), right: *DensePolynomial(F), c: F };
+                const bctx = BindCtx{ .left = &self.left_poly, .right = &self.right_poly, .c = challenge };
+                tp.parallelForForce(2, bctx, struct {
+                    fn f(bc: BindCtx, idx: usize) void {
+                        if (idx == 0) bc.left.bindLow(bc.c) else bc.right.bindLow(bc.c);
+                    }
+                }.f);
+            } else {
+                self.left_poly.bindLow(challenge);
+                self.right_poly.bindLow(challenge);
+            }
 
-            // Bind split eq
+            // Bind split eq (fast, O(window_size))
             self.split_eq.bind(challenge);
 
             self.current_round += 1;

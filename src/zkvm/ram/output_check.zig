@@ -22,6 +22,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 const poly_mod = @import("../../poly/mod.zig");
 const jolt_device = @import("../jolt_device.zig");
@@ -106,6 +107,7 @@ pub fn OutputSumcheckProver(comptime F: type) type {
         current_claim: F,
         /// Allocator
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         /// Initialize from RAM states, memory layout, and program I/O
         ///
@@ -388,62 +390,52 @@ pub fn OutputSumcheckProver(comptime F: type) type {
         pub fn computeRoundPolynomial(self: *Self) [3]F {
             const half = self.current_size / 2;
 
-            // Evaluate s(0), s(1), s(2), s(3)
-            var s0 = F.zero();
-            var s1 = F.zero();
-            var s2 = F.zero();
-            var s3 = F.zero();
+            const OCtx = struct {
+                eq: []const F, io: []const F, vf: []const F, vio: []const F,
+            };
+            const ctx = OCtx{
+                .eq = self.eq_r_address, .io = self.io_mask,
+                .vf = self.val_final, .vio = self.val_io,
+            };
 
-            // For each pair (2g, 2g+1)
-            for (0..half) |g| {
-                const idx0 = 2 * g;
-                const idx1 = 2 * g + 1;
+            const mapFn = struct {
+                fn f(c: OCtx, start: usize, end: usize) [4]F {
+                    var ls: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
+                    for (start..end) |g| {
+                        const idx0 = 2 * g;
+                        const idx1 = 2 * g + 1;
+                        const eq0 = c.eq[idx0]; const eq1 = c.eq[idx1];
+                        const io0 = c.io[idx0]; const io1 = c.io[idx1];
+                        const v0 = c.vf[idx0].sub(c.vio[idx0]);
+                        const v1 = c.vf[idx1].sub(c.vio[idx1]);
+                        const deq = eq1.sub(eq0);
+                        const dio = io1.sub(io0);
+                        const dv = v1.sub(v0);
+                        ls[0] = ls[0].add(eq0.mul(io0).mul(v0));
+                        ls[1] = ls[1].add(eq1.mul(io1).mul(v1));
+                        const eq2 = eq0.add(deq).add(deq);
+                        const io2 = io0.add(dio).add(dio);
+                        const v2 = v0.add(dv).add(dv);
+                        ls[2] = ls[2].add(eq2.mul(io2).mul(v2));
+                        ls[3] = ls[3].add(eq2.add(deq).mul(io2.add(dio)).mul(v2.add(dv)));
+                    }
+                    return ls;
+                }
+            }.f;
 
-                // Get values at X=0 and X=1
-                const eq0 = self.eq_r_address[idx0];
-                const eq1 = self.eq_r_address[idx1];
-                const io0 = self.io_mask[idx0];
-                const io1 = self.io_mask[idx1];
-                const vf0 = self.val_final[idx0];
-                const vf1 = self.val_final[idx1];
-                const vio0 = self.val_io[idx0];
-                const vio1 = self.val_io[idx1];
+            const reduceFn = struct {
+                fn f(a: [4]F, b: [4]F) [4]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]), a[3].add(b[3]) };
+                }
+            }.f;
 
-                // v0 = vf0 - vio0, v1 = vf1 - vio1
-                const v0 = vf0.sub(vio0);
-                const v1 = vf1.sub(vio1);
+            const identity = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+            const sums = if (self.thread_pool) |tp|
+                tp.parallelReduce([4]F, half, identity, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
 
-                // p(X) = eq(X) * io(X) * v(X) where all are linear in X
-                // eq(X) = eq0 + (eq1 - eq0) * X = eq0 + deq * X
-                // io(X) = io0 + (io1 - io0) * X = io0 + dio * X
-                // v(X) = v0 + (v1 - v0) * X = v0 + dv * X
-                const deq = eq1.sub(eq0);
-                const dio = io1.sub(io0);
-                const dv = v1.sub(v0);
-
-                // p(0) = eq0 * io0 * v0
-                const p0 = eq0.mul(io0).mul(v0);
-
-                // p(1) = eq1 * io1 * v1
-                const p1 = eq1.mul(io1).mul(v1);
-
-                // p(2) = (eq0 + 2*deq) * (io0 + 2*dio) * (v0 + 2*dv)
-                const eq2 = eq0.add(deq).add(deq);
-                const io2 = io0.add(dio).add(dio);
-                const v2 = v0.add(dv).add(dv);
-                const p2 = eq2.mul(io2).mul(v2);
-
-                // p(3) = (eq0 + 3*deq) * (io0 + 3*dio) * (v0 + 3*dv)
-                const eq3 = eq2.add(deq);
-                const io3 = io2.add(dio);
-                const v3 = v2.add(dv);
-                const p3 = eq3.mul(io3).mul(v3);
-
-                s0 = s0.add(p0);
-                s1 = s1.add(p1);
-                s2 = s2.add(p2);
-                s3 = s3.add(p3);
-            }
+            const s0 = sums[0]; const s1 = sums[1]; const s2 = sums[2]; const s3 = sums[3];
 
             // Debug: verify sumcheck soundness s0 + s1 == current_claim
             const sum_check = s0.add(s1);
@@ -463,29 +455,29 @@ pub fn OutputSumcheckProver(comptime F: type) type {
         pub fn bindChallenge(self: *Self, r: F) void {
             const half = self.current_size / 2;
 
-            // Bind all polynomials
-            for (0..half) |g| {
-                const idx0 = 2 * g;
-                const idx1 = 2 * g + 1;
+            const OBindCtx = struct {
+                slices: [5][]F,
+                r: F,
+                n: usize,
+            };
+            const bctx = OBindCtx{
+                .slices = .{ self.eq_r_address, self.io_mask, self.val_final, self.val_io, self.val_init },
+                .r = r,
+                .n = half,
+            };
+            const bindOneFn = struct {
+                fn f(c: OBindCtx, idx: usize) void {
+                    const arr = c.slices[idx];
+                    for (0..c.n) |i| {
+                        arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                    }
+                }
+            }.f;
 
-                // eq[g] = eq0 + r * (eq1 - eq0)
-                self.eq_r_address[g] = self.eq_r_address[idx0].add(
-                    r.mul(self.eq_r_address[idx1].sub(self.eq_r_address[idx0])),
-                );
-
-                // Same for other polynomials
-                self.io_mask[g] = self.io_mask[idx0].add(
-                    r.mul(self.io_mask[idx1].sub(self.io_mask[idx0])),
-                );
-                self.val_final[g] = self.val_final[idx0].add(
-                    r.mul(self.val_final[idx1].sub(self.val_final[idx0])),
-                );
-                self.val_io[g] = self.val_io[idx0].add(
-                    r.mul(self.val_io[idx1].sub(self.val_io[idx0])),
-                );
-                self.val_init[g] = self.val_init[idx0].add(
-                    r.mul(self.val_init[idx1].sub(self.val_init[idx0])),
-                );
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(5, bctx, bindOneFn);
+            } else {
+                for (0..5) |idx| bindOneFn(bctx, idx);
             }
 
             self.current_size = half;

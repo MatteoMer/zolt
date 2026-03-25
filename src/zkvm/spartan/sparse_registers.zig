@@ -6,6 +6,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
 const one_hot = @import("one_hot_coeffs.zig");
 const OneHotCoeffLookupTable = one_hot.OneHotCoeffLookupTable;
 const LookupTableIndex = one_hot.LookupTableIndex;
@@ -681,6 +682,7 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
             inc: []const F,
             gruen_eq: *const GruenSplitEqPolynomial(F),
             previous_claim: F,
+            pool: ?*ThreadPool,
         ) [4]F {
             const E_in = gruen_eq.E_in_current();
             const E_out = gruen_eq.E_out_current();
@@ -691,52 +693,108 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
             const ra_tbl = if (use_lookups) &self.ra_lookup_table else {};
             const wa_tbl = if (use_lookups) &self.wa_lookup_table else {};
 
-            var q_0 = F.zero();
-            var q_X2 = F.zero();
+            if (self.entries.len == 0) return gruen_eq.gruenPolyDeg3(F.zero(), F.zero(), previous_claim);
 
-            // Iterate over entries grouped by row-pair (row/2)
-            var idx: usize = 0;
-            while (idx < self.entries.len) {
-                const pair_id = self.entries[idx].row / 2;
-                const group_start = idx;
-                while (idx < self.entries.len and self.entries[idx].row / 2 == pair_id) {
-                    idx += 1;
+            const CMCtx = struct {
+                entries: []const Entry,
+                inc: []const F,
+                E_in: []const F,
+                E_out: []const F,
+                E_in_len: usize,
+                num_x_in_bits: u6,
+                x_bitmask: usize,
+                ra_tbl: if (use_lookups) *const OneHotCoeffLookupTable(F) else void,
+                wa_tbl: if (use_lookups) *const OneHotCoeffLookupTable(F) else void,
+            };
+            const ctx = CMCtx{
+                .entries = self.entries,
+                .inc = inc,
+                .E_in = E_in,
+                .E_out = E_out,
+                .E_in_len = E_in_len,
+                .num_x_in_bits = num_x_in_bits,
+                .x_bitmask = x_bitmask,
+                .ra_tbl = ra_tbl,
+                .wa_tbl = wa_tbl,
+            };
+
+            // Split by ENTRY range (not group index) to avoid O(N) skip-to-start scan.
+            // Each thread processes complete groups whose first entry falls in its range.
+            const mapFn = struct {
+                fn f(c: CMCtx, entry_start: usize, entry_end: usize) [2]F {
+                    @setEvalBranchQuota(10000);
+                    const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
+                    var acc_q0 = if (use_deferred) UnreducedProductAccum.zero() else {};
+                    var acc_qX2 = if (use_deferred) UnreducedProductAccum.zero() else {};
+                    var local_q0 = if (!use_deferred) F.zero() else {};
+                    var local_qX2 = if (!use_deferred) F.zero() else {};
+
+                    // Align start to a group boundary (skip partial group at start)
+                    var scan = entry_start;
+                    if (scan > 0 and scan < c.entries.len) {
+                        const prev_pid = c.entries[scan - 1].row / 2;
+                        const cur_pid = c.entries[scan].row / 2;
+                        if (cur_pid == prev_pid) {
+                            // We're mid-group — skip to next group
+                            while (scan < entry_end and c.entries[scan].row / 2 == cur_pid) scan += 1;
+                        }
+                    }
+
+                    while (scan < entry_end) {
+                        const pair_id = c.entries[scan].row / 2;
+                        const group_start = scan;
+                        // Extend to full group (may go past entry_end)
+                        while (scan < c.entries.len and c.entries[scan].row / 2 == pair_id) scan += 1;
+                        const group = c.entries[group_start..scan];
+
+                        var split: usize = 0;
+                        for (group) |e| {
+                            if (e.row & 1 == 0) split += 1 else break;
+                        }
+
+                        const j_prime = @as(usize, pair_id);
+                        const x_in = if (c.num_x_in_bits > 0) (j_prime & c.x_bitmask) else 0;
+                        const x_out = j_prime >> @intCast(c.num_x_in_bits);
+                        const E_in_eval = if (c.E_in_len <= 1) F.one() else if (x_in < c.E_in_len) c.E_in[x_in] else F.one();
+                        const E_out_eval = if (x_out < c.E_out.len) c.E_out[x_out] else F.one();
+
+                        const j_even = j_prime * 2;
+                        const j_odd = j_even + 1;
+                        const inc_0 = if (j_even < c.inc.len) c.inc[j_even] else F.zero();
+                        const inc_1 = if (j_odd < c.inc.len) c.inc[j_odd] else F.zero();
+                        const inc_evals_local = [2]F{ inc_0, inc_1.sub(inc_0) };
+
+                        const pair_evals = seqMergeComputeEvals(group[0..split], group[split..], inc_evals_local, c.ra_tbl, c.wa_tbl);
+                        const weight = E_out_eval.mul(E_in_eval);
+
+                        if (use_deferred) {
+                            acc_q0.addAssign(weight.mulToProductAccum(pair_evals[0]));
+                            acc_qX2.addAssign(weight.mulToProductAccum(pair_evals[1]));
+                        } else {
+                            local_q0 = local_q0.add(weight.mul(pair_evals[0]));
+                            local_qX2 = local_qX2.add(weight.mul(pair_evals[1]));
+                        }
+                    }
+                    return if (use_deferred)
+                        .{ acc_q0.reduce(), acc_qX2.reduce() }
+                    else
+                        .{ local_q0, local_qX2 };
                 }
-                const group = self.entries[group_start..idx];
+            }.f;
 
-                // Split into even and odd rows
-                var split: usize = 0;
-                for (group) |e| {
-                    if (e.row & 1 == 0) {
-                        split += 1;
-                    } else break;
+            const reduceFn = struct {
+                fn f(a: [2]F, b: [2]F) [2]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]) };
                 }
-                const even_row = group[0..split];
-                const odd_row = group[split..];
+            }.f;
 
-                const j_prime = @as(usize, pair_id);
-                const x_in = if (num_x_in_bits > 0) (j_prime & x_bitmask) else 0;
-                const x_out = j_prime >> num_x_in_bits;
-                const E_in_eval = if (E_in_len <= 1) F.one() else if (x_in < E_in_len) E_in[x_in] else F.one();
-                const E_out_eval = if (x_out < E_out.len) E_out[x_out] else F.one();
+            const identity = [2]F{ F.zero(), F.zero() };
+            const sums = if (pool) |tp|
+                tp.parallelReduce([2]F, self.entries.len, identity, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, self.entries.len);
 
-                // Inc evals
-                const j_even = j_prime * 2;
-                const j_odd = j_even + 1;
-                const inc_0 = if (j_even < inc.len) inc[j_even] else F.zero();
-                const inc_1 = if (j_odd < inc.len) inc[j_odd] else F.zero();
-                const inc_evals = [2]F{ inc_0, inc_1.sub(inc_0) };
-
-                // Two-pointer merge over columns
-                const pair_evals = seqMergeComputeEvals(even_row, odd_row, inc_evals, ra_tbl, wa_tbl);
-
-                // Weight by E_out * E_in
-                const weight = E_out_eval.mul(E_in_eval);
-                q_0 = q_0.add(weight.mul(pair_evals[0]));
-                q_X2 = q_X2.add(weight.mul(pair_evals[1]));
-            }
-
-            return gruen_eq.gruenPolyDeg3(q_0, q_X2, previous_claim);
+            return gruen_eq.gruenPolyDeg3(sums[0], sums[1], previous_claim);
         }
 
         fn seqMergeComputeEvals(
@@ -1016,38 +1074,73 @@ pub fn SparseRegistersAddressMajor(comptime F: type) type {
             self: *const Self,
             inc: []const F,
             merged_eq: []const F,
+            pool: ?*ThreadPool,
         ) [2]F {
-            var eval_0 = F.zero();
-            var eval_2 = F.zero();
+            if (self.entries.len == 0) return .{ F.zero(), F.zero() };
 
-            // Iterate over entries grouped by column-pair (col/2)
-            var idx: usize = 0;
-            while (idx < self.entries.len) {
-                const pair_id = self.entries[idx].col / 2;
-                const group_start = idx;
-                while (idx < self.entries.len and self.entries[idx].col / 2 == pair_id) idx += 1;
-                const group = self.entries[group_start..idx];
+            const AMCtx = struct {
+                entries: []const Entry,
+                val_init: []const F,
+                inc: []const F,
+                merged_eq: []const F,
+            };
+            const ctx = AMCtx{
+                .entries = self.entries,
+                .val_init = self.val_init,
+                .inc = inc,
+                .merged_eq = merged_eq,
+            };
 
-                // Split into even and odd columns
-                var split: usize = 0;
-                for (group) |e| {
-                    if (e.col & 1 == 0) split += 1 else break;
+            // Split by entry range, align to group boundaries
+            const mapFn = struct {
+                fn f(c: AMCtx, entry_start: usize, entry_end: usize) [2]F {
+                    var local_e0 = F.zero();
+                    var local_e2 = F.zero();
+
+                    var scan = entry_start;
+                    if (scan > 0 and scan < c.entries.len) {
+                        const prev_pid = c.entries[scan - 1].col / 2;
+                        const cur_pid = c.entries[scan].col / 2;
+                        if (cur_pid == prev_pid) {
+                            while (scan < entry_end and c.entries[scan].col / 2 == cur_pid) scan += 1;
+                        }
+                    }
+
+                    while (scan < entry_end) {
+                        const pair_id = c.entries[scan].col / 2;
+                        const group_start = scan;
+                        while (scan < c.entries.len and c.entries[scan].col / 2 == pair_id) scan += 1;
+                        const group = c.entries[group_start..scan];
+
+                        var split: usize = 0;
+                        for (group) |e| {
+                            if (e.col & 1 == 0) split += 1 else break;
+                        }
+
+                        const even_col_idx: usize = @as(usize, pair_id) * 2;
+                        const odd_col_idx = even_col_idx + 1;
+                        const even_cp = if (even_col_idx < c.val_init.len) c.val_init[even_col_idx] else F.zero();
+                        const odd_cp = if (odd_col_idx < c.val_init.len) c.val_init[odd_col_idx] else F.zero();
+
+                        const pair_evals = seqMergeComputeColEvals(group[0..split], group[split..], even_cp, odd_cp, c.inc, c.merged_eq);
+                        local_e0 = local_e0.add(pair_evals[0]);
+                        local_e2 = local_e2.add(pair_evals[1]);
+                    }
+                    return .{ local_e0, local_e2 };
                 }
-                const even_col = group[0..split];
-                const odd_col = group[split..];
+            }.f;
 
-                // Checkpoints from val_init
-                const even_col_idx: usize = @as(usize, pair_id) * 2;
-                const odd_col_idx = even_col_idx + 1;
-                const even_cp = if (even_col_idx < self.val_init.len) self.val_init[even_col_idx] else F.zero();
-                const odd_cp = if (odd_col_idx < self.val_init.len) self.val_init[odd_col_idx] else F.zero();
+            const reduceFn = struct {
+                fn f(a: [2]F, b: [2]F) [2]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]) };
+                }
+            }.f;
 
-                const pair_evals = seqMergeComputeColEvals(even_col, odd_col, even_cp, odd_cp, inc, merged_eq);
-                eval_0 = eval_0.add(pair_evals[0]);
-                eval_2 = eval_2.add(pair_evals[1]);
-            }
-
-            return .{ eval_0, eval_2 };
+            const identity = [2]F{ F.zero(), F.zero() };
+            return if (pool) |tp|
+                tp.parallelReduce([2]F, self.entries.len, identity, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, self.entries.len);
         }
 
         fn seqMergeComputeColEvals(

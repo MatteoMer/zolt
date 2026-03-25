@@ -1311,6 +1311,8 @@ pub fn JoltProver(comptime F: type) type {
 
             // Per-stage timing
             var stage_timer = std.time.Timer.start() catch unreachable;
+            var bench_timer = std.time.Timer.start() catch unreachable;
+            const bench = config.bench_output;
 
             // Build compact integer witnesses for fast evaluation
             const r1cs_evaluators = @import("r1cs/evaluators.zig");
@@ -1322,6 +1324,8 @@ pub fn JoltProver(comptime F: type) type {
                 tau,
                 compact_witnesses,
             );
+            const s1_init_ns = bench_timer.read();
+            bench_timer.reset();
 
             // Stage 1: Outer Spartan Remaining - use streaming prover with transcript
             // Use padded witnesses so Az/Bz MLE evaluations match the verifier's computation
@@ -1344,6 +1348,8 @@ pub fn JoltProver(comptime F: type) type {
                 );
             }
             defer if (stage1_result) |*r| r.deinit();
+            const s1_sumcheck_ns = bench_timer.read();
+            bench_timer.reset();
 
             // Add Stage 1 opening claims with computed MLE evaluations
             if (stage1_result) |result| {
@@ -1386,10 +1392,24 @@ pub fn JoltProver(comptime F: type) type {
                 try self.addSpartanOuterOpeningClaims(&jolt_proof.opening_claims);
             }
 
-            if (comptime stage_timing_enabled) {
-                std.debug.print("    [STAGE-TIMING] Stage 1: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            {
+                const s1_claims_ns = bench_timer.read();
+                const s1_total_ns = stage_timer.read();
+                if (comptime stage_timing_enabled) {
+                    std.debug.print("    [STAGE-TIMING] Stage 1: {d:.1} ms\n", .{@as(f64, @floatFromInt(s1_total_ns)) / 1_000_000.0});
+                }
+                if (bench) {
+                    const ms = 1_000_000.0;
+                    std.debug.print("[BENCH] stage=1 total={d:.1} init={d:.1} sumcheck={d:.1} claims={d:.1}\n", .{
+                        @as(f64, @floatFromInt(s1_total_ns)) / ms,
+                        @as(f64, @floatFromInt(s1_init_ns)) / ms,
+                        @as(f64, @floatFromInt(s1_sumcheck_ns)) / ms,
+                        @as(f64, @floatFromInt(s1_claims_ns)) / ms,
+                    });
+                }
             }
             stage_timer.reset();
+            bench_timer.reset();
 
             // Create UniSkip proof for Stage 2
             // Jolt samples a NEW tau_high for Stage 2 from the transcript (see ProductVirtualUniSkipParams::new)
@@ -1555,6 +1575,9 @@ pub fn JoltProver(comptime F: type) type {
             if (tau_stage2.len > 0) {
             }
 
+            const s2_init_ns = bench_timer.read();
+            bench_timer.reset();
+
             var stage2_result = try self.generateStage2BatchedSumcheckProof(
                 &jolt_proof.stage2_sumcheck_proof,
                 transcript,
@@ -1568,6 +1591,8 @@ pub fn JoltProver(comptime F: type) type {
                 &jolt_proof.opening_claims,
                 config,
             );
+            const s2_sumcheck_ns = bench_timer.read();
+            bench_timer.reset();
 
             // Add remaining opening claims - use actual final claims from provers
             // Instance 1 (RAF): RamRa opening is the final claim
@@ -1718,10 +1743,24 @@ pub fn JoltProver(comptime F: type) type {
             transcript.appendScalar("opening_claim", stage2_result.output_val_final_claim);
 
 
-            if (comptime stage_timing_enabled) {
-                std.debug.print("    [STAGE-TIMING] Stage 2: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            {
+                const s2_claims_ns = bench_timer.read();
+                const s2_total_ns = stage_timer.read();
+                if (comptime stage_timing_enabled) {
+                    std.debug.print("    [STAGE-TIMING] Stage 2: {d:.1} ms\n", .{@as(f64, @floatFromInt(s2_total_ns)) / 1_000_000.0});
+                }
+                if (bench) {
+                    const ms = 1_000_000.0;
+                    std.debug.print("[BENCH] stage=2 total={d:.1} init={d:.1} sumcheck={d:.1} claims={d:.1}\n", .{
+                        @as(f64, @floatFromInt(s2_total_ns)) / ms,
+                        @as(f64, @floatFromInt(s2_init_ns)) / ms,
+                        @as(f64, @floatFromInt(s2_sumcheck_ns)) / ms,
+                        @as(f64, @floatFromInt(s2_claims_ns)) / ms,
+                    });
+                }
             }
             stage_timer.reset();
+            bench_timer.reset();
 
             // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction
             // Extract r_product from Stage 2 challenges (last n_cycle_vars in BIG_ENDIAN)
@@ -1744,6 +1783,9 @@ pub fn JoltProver(comptime F: type) type {
             }
 
 
+            const s3_init_ns = bench_timer.read();
+            bench_timer.reset();
+
             // Generate Stage 3 proof using the proper sumcheck prover
             var stage3_prover_instance = Stage3Prover(F).init(self.allocator);
             stage3_prover_instance.thread_pool = self.thread_pool;
@@ -1757,6 +1799,8 @@ pub fn JoltProver(comptime F: type) type {
                 r_product, // r_product in BIG_ENDIAN
             );
             defer stage3_result.deinit();
+            const s3_sumcheck_ns = bench_timer.read();
+            bench_timer.reset();
 
             // Debug: Print Stage 3 challenges for comparison with Jolt
             // NOTE: Stage 3 challenges are MontU128Challenge-style [0, 0, low, high] limbs
@@ -1862,10 +1906,24 @@ pub fn JoltProver(comptime F: type) type {
 
             // LookupOutput at InstructionClaimReduction was already added in Stage 2
 
-            if (comptime stage_timing_enabled) {
-                std.debug.print("    [STAGE-TIMING] Stage 3: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            {
+                const s3_claims_ns = bench_timer.read();
+                const s3_total_ns = stage_timer.read();
+                if (comptime stage_timing_enabled) {
+                    std.debug.print("    [STAGE-TIMING] Stage 3: {d:.1} ms\n", .{@as(f64, @floatFromInt(s3_total_ns)) / 1_000_000.0});
+                }
+                if (bench) {
+                    const ms = 1_000_000.0;
+                    std.debug.print("[BENCH] stage=3 total={d:.1} init={d:.1} sumcheck={d:.1} claims={d:.1}\n", .{
+                        @as(f64, @floatFromInt(s3_total_ns)) / ms,
+                        @as(f64, @floatFromInt(s3_init_ns)) / ms,
+                        @as(f64, @floatFromInt(s3_sumcheck_ns)) / ms,
+                        @as(f64, @floatFromInt(s3_claims_ns)) / ms,
+                    });
+                }
             }
             stage_timer.reset();
+            bench_timer.reset();
 
             // Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation
             // RegistersReadWriteChecking has LOG_K + log2(T) rounds where LOG_K = log2(REGISTER_COUNT)
@@ -1927,6 +1985,7 @@ pub fn JoltProver(comptime F: type) type {
 
 
             // Use Stage 4 prover if we have execution and memory trace data.
+            var s4_sumcheck_ns: u64 = 0;
             stage4_block: {
                 const trace = config.execution_trace orelse {
                     try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 2);
@@ -2140,6 +2199,7 @@ pub fn JoltProver(comptime F: type) type {
                     start_address,
                     config.memory_layout, // Pass memory_layout to filter synthetic writes
                 );
+                val_eval_prover_early.thread_pool = self.thread_pool;
                 defer val_eval_prover_early.deinit();
 
                 // Debug: verify which r_cycle was passed
@@ -2190,6 +2250,7 @@ pub fn JoltProver(comptime F: type) type {
                     try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValCheck } }, F.zero());
                     break :stage4_block;
                 };
+                regs_prover.thread_pool = self.thread_pool;
                 defer regs_prover.deinit();
 
 
@@ -2226,6 +2287,7 @@ pub fn JoltProver(comptime F: type) type {
                 stage4_inc_poly_copy = try self.allocator.alloc(F, @as(usize, 1) << @intCast(n_cycle_vars));
                 @memcpy(stage4_inc_poly_copy.?, regs_prover.inc_poly[0..stage4_inc_poly_copy.?.len]);
 
+                bench_timer.reset(); // start sumcheck timing (init already captured by total - sumcheck - claims)
                 for (0..stage4_max_rounds) |round_idx| {
                     var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
 
@@ -2293,6 +2355,9 @@ pub fn JoltProver(comptime F: type) type {
                 }
 
                 // Verify batched = sum of weighted claims
+
+                s4_sumcheck_ns = bench_timer.read();
+                bench_timer.reset();
 
                 const regs_claims = regs_prover.getFinalClaims();
                 const val_eval_openings = val_eval_prover_early.getFinalOpenings();
@@ -2374,10 +2439,29 @@ pub fn JoltProver(comptime F: type) type {
                 }
             } // end stage4_block
 
-            if (comptime stage_timing_enabled) {
-                std.debug.print("    [STAGE-TIMING] Stage 4: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            {
+                const s4_total_ns = stage_timer.read();
+                if (comptime stage_timing_enabled) {
+                    std.debug.print("    [STAGE-TIMING] Stage 4: {d:.1} ms\n", .{@as(f64, @floatFromInt(s4_total_ns)) / 1_000_000.0});
+                }
+                if (bench) {
+                    const ms = 1_000_000.0;
+                    // s4_sumcheck_ns and s4_claims_ns are only defined on the main path;
+                    // if stage4_block was skipped (zero proof), bench_timer was never reset
+                    // so just report total.
+                    const s4_sc = if (stage4_regs_r_address != null) s4_sumcheck_ns else 0;
+                    const s4_cl = bench_timer.read(); // claims = time since sumcheck ended
+                    const s4_init = s4_total_ns -| s4_sc -| s4_cl;
+                    std.debug.print("[BENCH] stage=4 total={d:.1} init={d:.1} sumcheck={d:.1} claims={d:.1}\n", .{
+                        @as(f64, @floatFromInt(s4_total_ns)) / ms,
+                        @as(f64, @floatFromInt(s4_init)) / ms,
+                        @as(f64, @floatFromInt(s4_sc)) / ms,
+                        @as(f64, @floatFromInt(s4_cl)) / ms,
+                    });
+                }
             }
             stage_timer.reset();
+            bench_timer.reset();
 
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
             // LookupsReadRaf has max rounds: LOG_K + log_T where LOG_K = XLEN * 2 = 128
@@ -2391,6 +2475,9 @@ pub fn JoltProver(comptime F: type) type {
             // So we must squeeze in the SAME order.
             const gamma_lookups_raf = transcript.challengeScalarFull();
             const gamma_ram_ra = transcript.challengeScalarFull();
+
+            const s5_init_ns = bench_timer.read();
+            bench_timer.reset();
 
             // Generate Stage 5 proof using the batched sumcheck prover
             var stage5_prover_instance = Stage5BatchedProver(F).init(self.allocator);
@@ -2435,7 +2522,8 @@ pub fn JoltProver(comptime F: type) type {
                 );
             }
             defer stage5_result.deinit();
-
+            const s5_sumcheck_ns = bench_timer.read();
+            bench_timer.reset();
 
             // RegistersValEvaluation claims
             try jolt_proof.opening_claims.insert(
@@ -2510,10 +2598,24 @@ pub fn JoltProver(comptime F: type) type {
                 // ALWAYS-ON: Print transcript state after Stage 5 cache_openings
             }
 
-            if (comptime stage_timing_enabled) {
-                std.debug.print("    [STAGE-TIMING] Stage 5: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            {
+                const s5_claims_ns = bench_timer.read();
+                const s5_total_ns = stage_timer.read();
+                if (comptime stage_timing_enabled) {
+                    std.debug.print("    [STAGE-TIMING] Stage 5: {d:.1} ms\n", .{@as(f64, @floatFromInt(s5_total_ns)) / 1_000_000.0});
+                }
+                if (bench) {
+                    const ms = 1_000_000.0;
+                    std.debug.print("[BENCH] stage=5 total={d:.1} init={d:.1} sumcheck={d:.1} claims={d:.1}\n", .{
+                        @as(f64, @floatFromInt(s5_total_ns)) / ms,
+                        @as(f64, @floatFromInt(s5_init_ns)) / ms,
+                        @as(f64, @floatFromInt(s5_sumcheck_ns)) / ms,
+                        @as(f64, @floatFromInt(s5_claims_ns)) / ms,
+                    });
+                }
             }
             stage_timer.reset();
+            bench_timer.reset();
 
             // Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction
             const bytecode_log_k = std.math.log2_int(usize, config.bytecode_K);
@@ -2566,6 +2668,9 @@ pub fn JoltProver(comptime F: type) type {
             // the same register address space.
             const r_register_5 = stage4_regs_r_address orelse &[_]F{};
 
+            const s6_init_ns = bench_timer.read();
+            bench_timer.reset();
+
             var stage6_prover_instance = Stage6BatchedProver(F).init(self.allocator);
             stage6_prover_instance.thread_pool = self.thread_pool;
             var stage6_result = try stage6_prover_instance.generateStage6Proof(
@@ -2609,6 +2714,8 @@ pub fn JoltProver(comptime F: type) type {
                 if (stage4_inc_poly_copy) |v| v else &[_]F{},
             );
             defer stage6_result.deinit();
+            const s6_sumcheck_ns = bench_timer.read();
+            bench_timer.reset();
 
             // Insert Stage 6 opening claims into accumulator
 
@@ -2685,14 +2792,30 @@ pub fn JoltProver(comptime F: type) type {
             // (stage6_prover.zig lines 4055-4083)
             // Do NOT re-append them here.
 
-            if (comptime stage_timing_enabled) {
-                std.debug.print("    [STAGE-TIMING] Stage 6: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            {
+                const s6_claims_ns = bench_timer.read();
+                const s6_total_ns = stage_timer.read();
+                if (comptime stage_timing_enabled) {
+                    std.debug.print("    [STAGE-TIMING] Stage 6: {d:.1} ms\n", .{@as(f64, @floatFromInt(s6_total_ns)) / 1_000_000.0});
+                }
+                if (bench) {
+                    const ms = 1_000_000.0;
+                    std.debug.print("[BENCH] stage=6 total={d:.1} init={d:.1} sumcheck={d:.1} claims={d:.1}\n", .{
+                        @as(f64, @floatFromInt(s6_total_ns)) / ms,
+                        @as(f64, @floatFromInt(s6_init_ns)) / ms,
+                        @as(f64, @floatFromInt(s6_sumcheck_ns)) / ms,
+                        @as(f64, @floatFromInt(s6_claims_ns)) / ms,
+                    });
+                }
             }
             stage_timer.reset();
+            bench_timer.reset();
 
             // ====================================================================
             // Stage 7: HammingWeightClaimReduction sumcheck
             // ====================================================================
+            var s7_init_ns: u64 = 0;
+            var s7_sumcheck_ns: u64 = 0;
             {
                 const s6_challenges = stage6_result.challenges;
                 const s6_bytecode_log_k = stage6_result.bytecode_log_k;
@@ -3019,6 +3142,9 @@ pub fn JoltProver(comptime F: type) type {
                 // Track current polynomial size (halves each round)
                 var poly_size: usize = k_chunk;
 
+                s7_init_ns = bench_timer.read();
+                bench_timer.reset();
+
                 for (0..num_rounds) |round| {
                     const half = poly_size / 2;
 
@@ -3125,6 +3251,9 @@ pub fn JoltProver(comptime F: type) type {
                     }
                 }
 
+                s7_sumcheck_ns = bench_timer.read();
+                bench_timer.reset();
+
                 // Cache opening claims: G_i(ρ) for each ra_i
                 // G_i[0] is the final value after all bindings
                 // Order: InstructionRa(0..inst_d), BytecodeRa(0..bc_d), RamRa(0..ram_d)
@@ -3193,8 +3322,21 @@ pub fn JoltProver(comptime F: type) type {
 
             }
 
-            if (comptime stage_timing_enabled) {
-                std.debug.print("    [STAGE-TIMING] Stage 7: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            {
+                const s7_claims_ns = bench_timer.read();
+                const s7_total_ns = stage_timer.read();
+                if (comptime stage_timing_enabled) {
+                    std.debug.print("    [STAGE-TIMING] Stage 7: {d:.1} ms\n", .{@as(f64, @floatFromInt(s7_total_ns)) / 1_000_000.0});
+                }
+                if (bench) {
+                    const ms = 1_000_000.0;
+                    std.debug.print("[BENCH] stage=7 total={d:.1} init={d:.1} sumcheck={d:.1} claims={d:.1}\n", .{
+                        @as(f64, @floatFromInt(s7_total_ns)) / ms,
+                        @as(f64, @floatFromInt(s7_init_ns)) / ms,
+                        @as(f64, @floatFromInt(s7_sumcheck_ns)) / ms,
+                        @as(f64, @floatFromInt(s7_claims_ns)) / ms,
+                    });
+                }
             }
 
             return jolt_proof;
@@ -3410,6 +3552,7 @@ pub fn JoltProver(comptime F: type) type {
                     ) catch null;
 
                     if (rwc_prover != null) {
+                        rwc_prover.?.thread_pool = self.thread_pool;
                     } else {
                         params.deinit();
                     }
@@ -3429,6 +3572,7 @@ pub fn JoltProver(comptime F: type) type {
                     cycle_witnesses,
                 ) catch null;
             }
+            if (product_prover != null) product_prover.?.thread_pool = self.thread_pool;
             defer if (product_prover) |*p| p.deinit();
 
             // Instance 2: InstructionLookupsClaimReduction - initialized lazily at start_round
@@ -3458,7 +3602,8 @@ pub fn JoltProver(comptime F: type) type {
                     config.program_outputs,
                     config.is_panicking,
                 ) catch null;
-                if (output_prover) |_| {
+                if (output_prover != null) {
+                    output_prover.?.thread_pool = self.thread_pool;
                 }
             }
             defer if (output_prover) |*p| p.deinit();
@@ -3580,6 +3725,7 @@ pub fn JoltProver(comptime F: type) type {
                                     };
 
                                     if (instr_prover != null) {
+                                        instr_prover.?.thread_pool = self.thread_pool;
                                     }
                                 }
                             }
@@ -3615,6 +3761,7 @@ pub fn JoltProver(comptime F: type) type {
                                     raf_params.deinit();
                                     break :blk null;
                                 };
+                                if (raf_prover != null) raf_prover.?.thread_pool = self.thread_pool;
                             }
 
                             if (raf_prover) |*rp| {
@@ -4550,6 +4697,9 @@ fn extractProductFactors(
 const tracer = @import("../tracer/mod.zig");
 
 pub const JoltProverConfig = struct {
+    /// Enable [BENCH] output lines for fine-grained stage timing
+    /// Set via ZOLT_BENCH=1 environment variable
+    bench_output: bool = false,
     /// Bytecode address space size (K) - must match Jolt's BytecodePreprocessing.code_size
     /// Use computeBytecodeCodeSize() in mod.zig to compute from raw program bytes
     bytecode_K: usize = 2048,

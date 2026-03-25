@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 const TraceStep = @import("../../tracer/mod.zig").TraceStep;
 const ExecutionTrace = @import("../../tracer/mod.zig").ExecutionTrace;
 const gruen_eq = @import("gruen_eq.zig");
@@ -72,6 +73,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
         const Self = @This();
 
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         /// Trace length (power of 2)
         T: usize,
@@ -386,10 +388,10 @@ pub fn Stage4GruenProver(comptime F: type) type {
             const inc = self.inc_poly[0..self.current_T];
 
             if (self.sparse_lookup) |*sl| {
-                const coeffs = sl.computeMessage(inc, gruen, previous_claim);
+                const coeffs = sl.computeMessage(inc, gruen, previous_claim, self.thread_pool);
                 return RoundPoly(F){ .coeffs = coeffs };
             } else if (self.sparse_field) |*sf| {
-                const coeffs = sf.computeMessage(inc, gruen, previous_claim);
+                const coeffs = sf.computeMessage(inc, gruen, previous_claim, self.thread_pool);
                 return RoundPoly(F){ .coeffs = coeffs };
             } else unreachable;
         }
@@ -401,7 +403,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
             const am = &self.address_major.?;
 
             // Compute [eval_0, eval_2] from sparse address-major entries
-            const evals_02 = am.computeRoundEvals(inc, merged_eq[0..self.current_T]);
+            const evals_02 = am.computeRoundEvals(inc, merged_eq[0..self.current_T], self.thread_pool);
 
             const eval_0 = evals_02[0];
             const eval_2 = evals_02[1];

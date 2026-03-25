@@ -19,6 +19,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 const MemoryTrace = @import("mod.zig").MemoryTrace;
 const MemoryAccess = @import("mod.zig").MemoryAccess;
 const MemoryOp = @import("mod.zig").MemoryOp;
@@ -200,6 +201,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         trace: *const MemoryTrace,
         /// Allocator
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(
             allocator: Allocator,
@@ -459,154 +461,127 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         }
 
         fn computePhase1Polynomial(self: *Self, gamma: F) [4]F {
-            // Phase 1: Using Gruen's optimization matching Jolt exactly
-            //
-            // The polynomial has the form s(X) = l(X) * q(X) where:
-            // - l(X) is the linear eq factor for the current variable
-            // - q(X) is quadratic: q(X) = c + d*X + e*X²
-            //
-            // Jolt's formula for each (even, odd) entry pair at column k:
-            //   ra_evals = [ra_even, ra_odd - ra_even]  // [ra_0, ra_infty]
-            //   val_evals = [val_even, val_odd - val_even]  // [val_0, val_infty]
-            //   inc_evals = [inc_even, inc_odd - inc_even]  // [inc_0, inc_infty]
-            //
-            //   q_constant += E_prefix * ra_0 * (val_0 + gamma * (inc_0 + val_0))
-            //   q_quadratic += E_prefix * ra_infty * (val_infty + gamma * (inc_infty + val_infty))
-
             var gruen_eq = &self.gruen_eq.?;
-
-            // Get E_out and E_in tables for the current window
             const tables = gruen_eq.getWindowEqTables(gruen_eq.current_index, 1);
             const E_out = tables.E_out;
             const E_in = tables.E_in;
             const head_in_bits = tables.head_in_bits;
 
-            var q_constant: F = F.zero();
-            var q_quadratic: F = F.zero();
-
-            // Group entries by row pair (rows 2j and 2j+1 for each j)
-            // Entries are sorted by (cycle, address).
-            // Within each row pair, we split into even-row and odd-row sub-lists
-            // and merge by column (address), matching Jolt's seq_prover_message_contribution.
-            var entry_idx: usize = 0;
-            while (entry_idx < self.entries.items.len) {
-                const first_entry = self.entries.items[entry_idx];
-                const row_pair_idx = first_entry.cycle / 2;
-
-                // Find the extent of all entries in this row pair
-                var pair_end = entry_idx;
-                while (pair_end < self.entries.items.len and
-                    self.entries.items[pair_end].cycle / 2 == row_pair_idx)
-                {
-                    pair_end += 1;
-                }
-
-                // Compute E_prefix = E_out[x_out] * E_in[x_in]
-                const x_out = row_pair_idx >> @intCast(head_in_bits);
-                const x_in_mask = (@as(usize, 1) << @intCast(head_in_bits)) - 1;
-                const x_in = row_pair_idx & x_in_mask;
-                const E_out_val = if (x_out < E_out.len) E_out[x_out] else F.one();
-                const E_in_val = if (x_in < E_in.len) E_in[x_in] else F.one();
-                const E_prefix = E_out_val.mul(E_in_val);
-
-                // Get inc values for this row pair
-                const j_prime = row_pair_idx * 2; // even row index
-                const inc_0 = if (j_prime < self.inc.len) self.inc[j_prime] else F.zero();
-                const inc_1 = if (j_prime + 1 < self.inc.len) self.inc[j_prime + 1] else F.zero();
-                const inc_infty = inc_1.sub(inc_0);
-                const inc_evals = [2]F{ inc_0, inc_infty };
-
-                // Split entries in this row pair into even-row and odd-row sub-lists.
-                // Since entries are sorted by (cycle, address), all even-row entries
-                // come before all odd-row entries within this pair.
-                const pair_entries = self.entries.items[entry_idx..pair_end];
-                var odd_row_start: usize = 0;
-                while (odd_row_start < pair_entries.len and pair_entries[odd_row_start].cycle % 2 == 0) {
-                    odd_row_start += 1;
-                }
-                const even_row = pair_entries[0..odd_row_start];
-                const odd_row = pair_entries[odd_row_start..];
-
-                // Merge even and odd rows by column (address),
-                // matching Jolt's seq_prover_message_contribution for cycle-major.
-                var ei: usize = 0;
-                var oi: usize = 0;
-                while (ei < even_row.len and oi < odd_row.len) {
-                    var ra_0: F = undefined;
-                    var ra_infty: F = undefined;
-                    var val_0: F = undefined;
-                    var val_infty: F = undefined;
-
-                    if (even_row[ei].address == odd_row[oi].address) {
-                        // Both even and odd entries exist at same column
-                        ra_0 = even_row[ei].ra_coeff;
-                        ra_infty = odd_row[oi].ra_coeff.sub(even_row[ei].ra_coeff);
-                        val_0 = even_row[ei].val_coeff;
-                        val_infty = odd_row[oi].val_coeff.sub(even_row[ei].val_coeff);
-                        ei += 1;
-                        oi += 1;
-                    } else if (even_row[ei].address < odd_row[oi].address) {
-                        // Only even entry - implicit odd has ra=0, val=next_val
-                        const odd_val_coeff = even_row[ei].next_val;
-                        ra_0 = even_row[ei].ra_coeff;
-                        ra_infty = F.zero().sub(even_row[ei].ra_coeff);
-                        val_0 = even_row[ei].val_coeff;
-                        val_infty = odd_val_coeff.sub(even_row[ei].val_coeff);
-                        ei += 1;
-                    } else {
-                        // Only odd entry - implicit even has ra=0, val=prev_val
-                        const even_val_coeff = odd_row[oi].prev_val;
-                        ra_0 = F.zero();
-                        ra_infty = odd_row[oi].ra_coeff;
-                        val_0 = even_val_coeff;
-                        val_infty = odd_row[oi].val_coeff.sub(even_val_coeff);
-                        oi += 1;
-                    }
-
-                    const inner_0 = val_0.add(gamma.mul(inc_evals[0].add(val_0)));
-                    const inner_infty = val_infty.add(gamma.mul(inc_evals[1].add(val_infty)));
-                    q_constant = q_constant.add(E_prefix.mul(ra_0).mul(inner_0));
-                    q_quadratic = q_quadratic.add(E_prefix.mul(ra_infty).mul(inner_infty));
-                }
-
-                // Remaining even entries (no odd counterpart)
-                while (ei < even_row.len) {
-                    const odd_val_coeff = even_row[ei].next_val;
-                    const ra_0 = even_row[ei].ra_coeff;
-                    const ra_infty = F.zero().sub(even_row[ei].ra_coeff);
-                    const val_0 = even_row[ei].val_coeff;
-                    const val_infty = odd_val_coeff.sub(even_row[ei].val_coeff);
-
-                    const inner_0 = val_0.add(gamma.mul(inc_evals[0].add(val_0)));
-                    const inner_infty = val_infty.add(gamma.mul(inc_evals[1].add(val_infty)));
-                    q_constant = q_constant.add(E_prefix.mul(ra_0).mul(inner_0));
-                    q_quadratic = q_quadratic.add(E_prefix.mul(ra_infty).mul(inner_infty));
-                    ei += 1;
-                }
-
-                // Remaining odd entries (no even counterpart)
-                while (oi < odd_row.len) {
-                    const even_val_coeff = odd_row[oi].prev_val;
-                    const ra_0 = F.zero();
-                    const ra_infty = odd_row[oi].ra_coeff;
-                    const val_0 = even_val_coeff;
-                    const val_infty = odd_row[oi].val_coeff.sub(even_val_coeff);
-
-                    const inner_0 = val_0.add(gamma.mul(inc_evals[0].add(val_0)));
-                    const inner_infty = val_infty.add(gamma.mul(inc_evals[1].add(val_infty)));
-                    q_constant = q_constant.add(E_prefix.mul(ra_0).mul(inner_0));
-                    q_quadratic = q_quadratic.add(E_prefix.mul(ra_infty).mul(inner_infty));
-                    oi += 1;
-                }
-
-                entry_idx = pair_end;
+            if (self.entries.items.len == 0) {
+                return gruen_eq.computeCubicRoundPoly(F.zero(), F.zero(), self.current_claim);
             }
 
-            // Use Gruen's formula to compute s(X) = l(X) * q(X)
-            const result = gruen_eq.computeCubicRoundPoly(q_constant, q_quadratic, self.current_claim);
+            const RWCCMCtx = struct {
+                entries: []const CycleMajorEntry(F),
+                inc: []const F,
+                E_out: []const F,
+                E_in: []const F,
+                head_in_bits: usize,
+                gamma: F,
+            };
+            const ctx = RWCCMCtx{
+                .entries = self.entries.items,
+                .inc = self.inc,
+                .E_out = E_out,
+                .E_in = E_in,
+                .head_in_bits = head_in_bits,
+                .gamma = gamma,
+            };
 
-            dbg("[RWC PHASE1] round={}, q_constant={any}\n", .{ self.round, q_constant.toBytesBE()[0..8] });
-            dbg("[RWC PHASE1] q_quadratic={any}, current_claim={any}\n", .{ q_quadratic.toBytesBE()[0..8], self.current_claim.toBytesBE()[0..8] });
+            // Split by entry range (not group index) to avoid O(N) skip-to-start scan
+            const mapFn = struct {
+                fn f(c: RWCCMCtx, entry_start: usize, entry_end: usize) [2]F {
+                    var local_qc = F.zero();
+                    var local_qq = F.zero();
+
+                    // Align start to group boundary
+                    var scan = entry_start;
+                    if (scan > 0 and scan < c.entries.len) {
+                        const prev_pid = c.entries[scan - 1].cycle / 2;
+                        const cur_pid = c.entries[scan].cycle / 2;
+                        if (cur_pid == prev_pid) {
+                            while (scan < entry_end and c.entries[scan].cycle / 2 == cur_pid) scan += 1;
+                        }
+                    }
+
+                    while (scan < entry_end) {
+                        const row_pair_idx = c.entries[scan].cycle / 2;
+                        const group_start = scan;
+                        while (scan < c.entries.len and c.entries[scan].cycle / 2 == row_pair_idx) scan += 1;
+
+                        const x_out = row_pair_idx >> @intCast(c.head_in_bits);
+                        const x_in_mask = (@as(usize, 1) << @intCast(c.head_in_bits)) - 1;
+                        const x_in = row_pair_idx & x_in_mask;
+                        const E_prefix = (if (x_out < c.E_out.len) c.E_out[x_out] else F.one())
+                            .mul(if (x_in < c.E_in.len) c.E_in[x_in] else F.one());
+
+                        const j_prime = row_pair_idx * 2;
+                        const inc_0 = if (j_prime < c.inc.len) c.inc[j_prime] else F.zero();
+                        const inc_1 = if (j_prime + 1 < c.inc.len) c.inc[j_prime + 1] else F.zero();
+                        const inc_inf = inc_1.sub(inc_0);
+
+                        const pair_entries = c.entries[group_start..scan];
+                        var odd_start: usize = 0;
+                        while (odd_start < pair_entries.len and pair_entries[odd_start].cycle % 2 == 0) odd_start += 1;
+                        const even_row = pair_entries[0..odd_start];
+                        const odd_row = pair_entries[odd_start..];
+
+                        var ei: usize = 0;
+                        var oi: usize = 0;
+                        while (ei < even_row.len and oi < odd_row.len) {
+                            var ra_0: F = undefined;
+                            var ra_i: F = undefined;
+                            var val_0: F = undefined;
+                            var val_i: F = undefined;
+                            if (even_row[ei].address == odd_row[oi].address) {
+                                ra_0 = even_row[ei].ra_coeff; ra_i = odd_row[oi].ra_coeff.sub(even_row[ei].ra_coeff);
+                                val_0 = even_row[ei].val_coeff; val_i = odd_row[oi].val_coeff.sub(even_row[ei].val_coeff);
+                                ei += 1; oi += 1;
+                            } else if (even_row[ei].address < odd_row[oi].address) {
+                                ra_0 = even_row[ei].ra_coeff; ra_i = F.zero().sub(even_row[ei].ra_coeff);
+                                val_0 = even_row[ei].val_coeff; val_i = even_row[ei].next_val.sub(even_row[ei].val_coeff);
+                                ei += 1;
+                            } else {
+                                ra_0 = F.zero(); ra_i = odd_row[oi].ra_coeff;
+                                val_0 = odd_row[oi].prev_val; val_i = odd_row[oi].val_coeff.sub(odd_row[oi].prev_val);
+                                oi += 1;
+                            }
+                            local_qc = local_qc.add(E_prefix.mul(ra_0).mul(val_0.add(c.gamma.mul(inc_0.add(val_0)))));
+                            local_qq = local_qq.add(E_prefix.mul(ra_i).mul(val_i.add(c.gamma.mul(inc_inf.add(val_i)))));
+                        }
+                        while (ei < even_row.len) : (ei += 1) {
+                            const r0 = even_row[ei].ra_coeff;
+                            const v0 = even_row[ei].val_coeff;
+                            const vi = even_row[ei].next_val.sub(v0);
+                            local_qc = local_qc.add(E_prefix.mul(r0).mul(v0.add(c.gamma.mul(inc_0.add(v0)))));
+                            local_qq = local_qq.add(E_prefix.mul(F.zero().sub(r0)).mul(vi.add(c.gamma.mul(inc_inf.add(vi)))));
+                        }
+                        while (oi < odd_row.len) : (oi += 1) {
+                            const ri = odd_row[oi].ra_coeff;
+                            const v0 = odd_row[oi].prev_val;
+                            const vi = odd_row[oi].val_coeff.sub(v0);
+                            local_qc = local_qc.add(E_prefix.mul(F.zero()).mul(v0.add(c.gamma.mul(inc_0.add(v0)))));
+                            local_qq = local_qq.add(E_prefix.mul(ri).mul(vi.add(c.gamma.mul(inc_inf.add(vi)))));
+                        }
+                    }
+                    return .{ local_qc, local_qq };
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: [2]F, b: [2]F) [2]F { return .{ a[0].add(b[0]), a[1].add(b[1]) }; }
+            }.f;
+
+            const identity = [2]F{ F.zero(), F.zero() };
+            const sums = if (self.thread_pool) |tp|
+                tp.parallelReduce([2]F, self.entries.items.len, identity, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, self.entries.items.len);
+
+            const result = gruen_eq.computeCubicRoundPoly(sums[0], sums[1], self.current_claim);
+
+            dbg("[RWC PHASE1] round={}, q_constant={any}\n", .{ self.round, sums[0].toBytesBE()[0..8] });
+            dbg("[RWC PHASE1] q_quadratic={any}, current_claim={any}\n", .{ sums[1].toBytesBE()[0..8], self.current_claim.toBytesBE()[0..8] });
             dbg("[RWC PHASE1] result: s0={any}, s1={any}\n", .{ result[0].toBytesBE()[0..8], result[1].toBytesBE()[0..8] });
 
             return result;
@@ -672,181 +647,112 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const eq_cycle_scalar = self.eq_evals[0];
             const inc_scalar = self.inc[0];
 
-            // Compute [s(0), s(2)] using Jolt's AddressMajor approach
-            // Then derive s(1) = current_claim - s(0)
-            var s0: F = F.zero();
-            var s2: F = F.zero();
-
-            // Get val_init checkpoint at the current bound point
             const K = @as(usize, 1) << @intCast(self.params.log_k);
             const val_init_current_size = K >> @intCast(addr_round);
 
-            // Process entries grouped by column pairs
-            // Entries are sorted by (address, cycle), so we iterate in column order
-            var entry_idx: usize = 0;
-            while (entry_idx < self.entries.items.len) {
-                const entry = self.entries.items[entry_idx];
+            const s0s2 = blk: {
+                if (self.entries.items.len == 0) break :blk [2]F{ F.zero(), F.zero() };
 
-                // Determine column pair for this entry
-                // CRITICAL FIX: entry.address has ALREADY been divided by 2 at each previous round
-                // (in bindAddressMajorOddOnly/EvenOnly/Pair). So entry.address IS the current
-                // column index in the bound space. Do NOT shift by addr_round again!
-                const col = entry.address;
-                const col_pair = col / 2;
-                const even_col_idx = col_pair * 2;
-                const odd_col_idx = even_col_idx + 1;
+                const RWCP2Ctx = struct {
+                    entries: []const CycleMajorEntry(F),
+                    val_init: []const F,
+                    vi_size: usize,
+                    inc_scalar: F,
+                    eq_scalar: F,
+                    gamma: F,
+                    addr_round: usize,
+                    phase1_end: usize,
+                    challenges: []const F,
+                };
+                const p2ctx = RWCP2Ctx{
+                    .entries = self.entries.items,
+                    .val_init = self.val_init,
+                    .vi_size = val_init_current_size,
+                    .inc_scalar = inc_scalar,
+                    .eq_scalar = eq_cycle_scalar,
+                    .gamma = gamma,
+                    .addr_round = addr_round,
+                    .phase1_end = phase1_end,
+                    .challenges = self.challenges.items,
+                };
 
-                // Get checkpoints from bound val_init
-                var even_checkpoint = if (even_col_idx < val_init_current_size)
-                    self.val_init[even_col_idx]
-                else
-                    F.zero();
-                var odd_checkpoint = if (odd_col_idx < val_init_current_size)
-                    self.val_init[odd_col_idx]
-                else
-                    F.zero();
+                // Split by entry range, align to group boundaries
+                const p2MapFn = struct {
+                    fn f(c: RWCP2Ctx, entry_start: usize, entry_end: usize) [2]F {
+                        var ls0 = F.zero();
+                        var ls2 = F.zero();
 
-                // Collect all entries in this column pair
-                // Process them in row (cycle) order, tracking checkpoints
-                const pair_start = entry_idx;
-                var pair_end = entry_idx;
-                while (pair_end < self.entries.items.len) {
-                    const e = self.entries.items[pair_end];
-                    const e_col = e.address;
-                    const e_pair = e_col / 2;
-                    if (e_pair != col_pair) break;
-                    pair_end += 1;
-                }
+                        var scan = entry_start;
+                        if (scan > 0 and scan < c.entries.len) {
+                            const prev_pid = c.entries[scan - 1].address / 2;
+                            const cur_pid = c.entries[scan].address / 2;
+                            if (cur_pid == prev_pid) {
+                                while (scan < entry_end and c.entries[scan].address / 2 == cur_pid) scan += 1;
+                            }
+                        }
 
-                // Split entries in this pair into even_col and odd_col by column
-                // Then merge by row (cycle) with checkpoint tracking
+                        while (scan < entry_end) {
+                            const col_pair = c.entries[scan].address / 2;
+                            const pair_start = scan;
+                            while (scan < c.entries.len and c.entries[scan].address / 2 == col_pair) scan += 1;
 
-                // Find start of odd column within this pair
-                var odd_start_idx = pair_start;
-                while (odd_start_idx < pair_end) {
-                    const e = self.entries.items[odd_start_idx];
-                    const e_col = e.address;
-                    if (e_col % 2 == 1) break;
-                    odd_start_idx += 1;
-                }
+                            const even_col_idx = col_pair * 2;
+                            const odd_col_idx = even_col_idx + 1;
+                            var even_cp = if (even_col_idx < c.vi_size) c.val_init[even_col_idx] else F.zero();
+                            var odd_cp = if (odd_col_idx < c.vi_size) c.val_init[odd_col_idx] else F.zero();
 
-                // Now entries[pair_start..odd_start_idx] are even column, entries[odd_start_idx..pair_end] are odd column
-                const even_start = pair_start;
-                const even_end = odd_start_idx;
-                const odd_start = odd_start_idx;
-                const odd_end = pair_end;
+                            var odd_start: usize = pair_start;
+                            while (odd_start < scan and c.entries[odd_start].address % 2 == 0) odd_start += 1;
 
-                var even_idx = even_start;
-                var odd_idx = odd_start;
-
-                // Merge by row (cycle) - matching Jolt's seq_prover_message_contribution
-                while (even_idx < even_end and odd_idx < odd_end) {
-                    const even_entry = &self.entries.items[even_idx];
-                    const odd_entry = &self.entries.items[odd_idx];
-
-                    if (even_entry.cycle == odd_entry.cycle) {
-                        // Both entries at same row
-                        const evals = computePhase2Evals(
-                            even_entry,
-                            odd_entry,
-                            even_checkpoint,
-                            odd_checkpoint,
-                            inc_scalar,
-                            eq_cycle_scalar,
-                            gamma,
-                            addr_round,
-                            phase1_end,
-                            self.challenges.items,
-                        );
-                        s0 = s0.add(evals[0]);
-                        s2 = s2.add(evals[1]);
-                        even_checkpoint = even_entry.next_val;
-                        odd_checkpoint = odd_entry.next_val;
-                        even_idx += 1;
-                        odd_idx += 1;
-                    } else if (even_entry.cycle < odd_entry.cycle) {
-                        // Only even entry at this row
-                        const evals = computePhase2EvalsEvenOnly(
-                            even_entry,
-                            even_checkpoint,
-                            odd_checkpoint,
-                            inc_scalar,
-                            eq_cycle_scalar,
-                            gamma,
-                            addr_round,
-                            phase1_end,
-                            self.challenges.items,
-                        );
-                        s0 = s0.add(evals[0]);
-                        s2 = s2.add(evals[1]);
-                        even_checkpoint = even_entry.next_val;
-                        even_idx += 1;
-                    } else {
-                        // Only odd entry at this row
-                        const evals = computePhase2EvalsOddOnly(
-                            odd_entry,
-                            even_checkpoint,
-                            odd_checkpoint,
-                            inc_scalar,
-                            eq_cycle_scalar,
-                            gamma,
-                            addr_round,
-                            phase1_end,
-                            self.challenges.items,
-                        );
-                        s0 = s0.add(evals[0]);
-                        s2 = s2.add(evals[1]);
-                        odd_checkpoint = odd_entry.next_val;
-                        odd_idx += 1;
+                            var ei = pair_start;
+                            var oi = odd_start;
+                            while (ei < odd_start and oi < scan) {
+                                const ee = &c.entries[ei];
+                                const oe = &c.entries[oi];
+                                if (ee.cycle == oe.cycle) {
+                                    const ev = computePhase2Evals(ee, oe, even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
+                                    ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
+                                    even_cp = ee.next_val; odd_cp = oe.next_val;
+                                    ei += 1; oi += 1;
+                                } else if (ee.cycle < oe.cycle) {
+                                    const ev = computePhase2EvalsEvenOnly(ee, even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
+                                    ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
+                                    even_cp = ee.next_val; ei += 1;
+                                } else {
+                                    const ev = computePhase2EvalsOddOnly(oe, even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
+                                    ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
+                                    odd_cp = oe.next_val; oi += 1;
+                                }
+                            }
+                            while (ei < odd_start) : (ei += 1) {
+                                const ev = computePhase2EvalsEvenOnly(&c.entries[ei], even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
+                                ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
+                                even_cp = c.entries[ei].next_val;
+                            }
+                            while (oi < scan) : (oi += 1) {
+                                const ev = computePhase2EvalsOddOnly(&c.entries[oi], even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
+                                ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
+                                odd_cp = c.entries[oi].next_val;
+                            }
+                        }
+                        return .{ ls0, ls2 };
                     }
-                }
+                }.f;
 
-                // Process remaining even entries
-                while (even_idx < even_end) {
-                    const even_entry = &self.entries.items[even_idx];
-                    const evals = computePhase2EvalsEvenOnly(
-                        even_entry,
-                        even_checkpoint,
-                        odd_checkpoint,
-                        inc_scalar,
-                        eq_cycle_scalar,
-                        gamma,
-                        addr_round,
-                        phase1_end,
-                        self.challenges.items,
-                    );
-                    s0 = s0.add(evals[0]);
-                    s2 = s2.add(evals[1]);
-                    even_checkpoint = even_entry.next_val;
-                    even_idx += 1;
-                }
+                const p2ReduceFn = struct {
+                    fn f(a: [2]F, b: [2]F) [2]F { return .{ a[0].add(b[0]), a[1].add(b[1]) }; }
+                }.f;
 
-                // Process remaining odd entries
-                while (odd_idx < odd_end) {
-                    const odd_entry = &self.entries.items[odd_idx];
-                    const evals = computePhase2EvalsOddOnly(
-                        odd_entry,
-                        even_checkpoint,
-                        odd_checkpoint,
-                        inc_scalar,
-                        eq_cycle_scalar,
-                        gamma,
-                        addr_round,
-                        phase1_end,
-                        self.challenges.items,
-                    );
-                    s0 = s0.add(evals[0]);
-                    s2 = s2.add(evals[1]);
-                    odd_checkpoint = odd_entry.next_val;
-                    odd_idx += 1;
-                }
+                const p2id = [2]F{ F.zero(), F.zero() };
+                break :blk if (self.thread_pool) |tp|
+                    tp.parallelReduce([2]F, self.entries.items.len, p2id, p2ctx, p2MapFn, p2ReduceFn)
+                else
+                    p2MapFn(p2ctx, 0, self.entries.items.len);
+            };
 
-                entry_idx = pair_end;
-            }
-
-            // Derive s(1) from current_claim using Jolt's from_evals_and_hint approach:
-            // s(0) + s(1) = current_claim => s(1) = current_claim - s(0)
+            const s0 = s0s2[0];
             const s1 = self.current_claim.sub(s0);
+            const s2 = s0s2[1];
 
             // Extrapolate s(3) for degree-2 polynomial
             const s3 = s2.mul(F.fromU64(3)).sub(s1.mul(F.fromU64(3))).add(s0);
@@ -984,22 +890,25 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             if (in_cycle_phase and self.eq_size > 1) {
                 const half = self.eq_size / 2;
 
-                // Fold eq_evals using LowToHigh binding to match inc and entries:
-                // bound[i] = (1-r)*coeff[2*i] + r*coeff[2*i+1]
-                // This matches Jolt's merged_eq.bind_parallel(r_j, BindingOrder::LowToHigh)
-                for (0..half) |i| {
-                    const lo = self.eq_evals[2 * i];
-                    const hi = self.eq_evals[2 * i + 1];
-                    self.eq_evals[i] = lo.add(challenge.mul(hi.sub(lo)));
-                }
-
-                // Fold inc using LowToHigh binding to match Jolt:
-                // bound[i] = (1-r)*coeff[2*i] + r*coeff[2*i+1]
-                // This matches Jolt's inc.bind_parallel(r_j, BindingOrder::LowToHigh)
-                for (0..half) |i| {
-                    const lo = self.inc[2 * i];
-                    const hi = self.inc[2 * i + 1];
-                    self.inc[i] = lo.add(challenge.mul(hi.sub(lo)));
+                // Fold eq_evals and inc in parallel (independent arrays)
+                const RWCBindCtx = struct { slices: [2][]F, r: F, n: usize };
+                const rwc_bctx = RWCBindCtx{
+                    .slices = .{ self.eq_evals, self.inc },
+                    .r = challenge,
+                    .n = half,
+                };
+                const rwcBindFn = struct {
+                    fn f(c: RWCBindCtx, idx: usize) void {
+                        const arr = c.slices[idx];
+                        for (0..c.n) |i| {
+                            arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                        }
+                    }
+                }.f;
+                if (self.thread_pool) |tp| {
+                    tp.parallelForForce(2, rwc_bctx, rwcBindFn);
+                } else {
+                    for (0..2) |idx| rwcBindFn(rwc_bctx, idx);
                 }
 
                 self.eq_size = half;

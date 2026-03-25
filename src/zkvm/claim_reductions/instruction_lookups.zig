@@ -17,6 +17,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 /// Parameters for instruction lookups claim reduction
 pub fn InstructionLookupsParams(comptime F: type) type {
@@ -96,6 +97,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         challenges: std.ArrayListUnmanaged(F),
         /// Allocator
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
         /// Original allocation size (for proper deallocation after slicing)
         original_size: usize,
 
@@ -194,54 +196,64 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         /// Note: This is actually degree-2, but we pad to degree-3 for batching
         /// Uses LowToHigh binding order: pairs (2j, 2j+1) to bind LSB first
         pub fn computeRoundPolynomialCubic(self: *Self) [4]F {
-            const gamma = self.params.gamma;
-            const gamma_sqr = self.params.gamma_sqr;
-            const gamma_cub = self.params.gamma_cub;
-            const gamma_quart = self.params.gamma_quart;
-
-            var s0: F = F.zero();
-            var s2: F = F.zero();
-
             const current_len = self.eq_evals.len;
             const half = current_len / 2;
 
-            // Sum over pairs (2j, 2j+1) - LowToHigh binding order
-            for (0..half) |idx| {
-                const lo_idx = 2 * idx;
-                const hi_idx = 2 * idx + 1;
+            const ILCtx = struct {
+                eq: []const F, lo: []const F, left: []const F, right: []const F,
+                li: []const F, ri: []const F,
+                gamma: F, gamma_sqr: F, gamma_cub: F, gamma_quart: F,
+            };
+            const ctx = ILCtx{
+                .eq = self.eq_evals, .lo = self.lookup_outputs,
+                .left = self.left_operands, .right = self.right_operands,
+                .li = self.left_instr_inputs, .ri = self.right_instr_inputs,
+                .gamma = self.params.gamma, .gamma_sqr = self.params.gamma_sqr,
+                .gamma_cub = self.params.gamma_cub, .gamma_quart = self.params.gamma_quart,
+            };
 
-                const eq_lo = self.eq_evals[lo_idx];
-                const eq_hi = self.eq_evals[hi_idx];
+            const mapFn = struct {
+                fn f(c: ILCtx, start: usize, end: usize) [2]F {
+                    var local_s0 = F.zero();
+                    var local_s2 = F.zero();
+                    for (start..end) |idx| {
+                        const lo_idx = 2 * idx;
+                        const hi_idx = 2 * idx + 1;
+                        const eq_lo = c.eq[lo_idx];
+                        const eq_hi = c.eq[hi_idx];
+                        const combined_lo = c.lo[lo_idx]
+                            .add(c.gamma.mul(c.left[lo_idx]))
+                            .add(c.gamma_sqr.mul(c.right[lo_idx]))
+                            .add(c.gamma_cub.mul(c.li[lo_idx]))
+                            .add(c.gamma_quart.mul(c.ri[lo_idx]));
+                        const combined_hi = c.lo[hi_idx]
+                            .add(c.gamma.mul(c.left[hi_idx]))
+                            .add(c.gamma_sqr.mul(c.right[hi_idx]))
+                            .add(c.gamma_cub.mul(c.li[hi_idx]))
+                            .add(c.gamma_quart.mul(c.ri[hi_idx]));
+                        local_s0 = local_s0.add(eq_lo.mul(combined_lo));
+                        const eq_2 = eq_hi.add(eq_hi).sub(eq_lo);
+                        const combined_2 = combined_hi.add(combined_hi).sub(combined_lo);
+                        local_s2 = local_s2.add(eq_2.mul(combined_2));
+                    }
+                    return .{ local_s0, local_s2 };
+                }
+            }.f;
 
-                // combined(j) = lookup_out(j) + γ*left_op(j) + γ²*right_op(j) + γ³*left_instr(j) + γ⁴*right_instr(j)
-                const combined_lo = self.lookup_outputs[lo_idx]
-                    .add(gamma.mul(self.left_operands[lo_idx]))
-                    .add(gamma_sqr.mul(self.right_operands[lo_idx]))
-                    .add(gamma_cub.mul(self.left_instr_inputs[lo_idx]))
-                    .add(gamma_quart.mul(self.right_instr_inputs[lo_idx]));
-                const combined_hi = self.lookup_outputs[hi_idx]
-                    .add(gamma.mul(self.left_operands[hi_idx]))
-                    .add(gamma_sqr.mul(self.right_operands[hi_idx]))
-                    .add(gamma_cub.mul(self.left_instr_inputs[hi_idx]))
-                    .add(gamma_quart.mul(self.right_instr_inputs[hi_idx]));
+            const reduceFn = struct {
+                fn f(a: [2]F, b: [2]F) [2]F { return .{ a[0].add(b[0]), a[1].add(b[1]) }; }
+            }.f;
 
-                const prod_0 = eq_lo.mul(combined_lo);
-                const eq_2 = eq_hi.add(eq_hi).sub(eq_lo);
-                const combined_2 = combined_hi.add(combined_hi).sub(combined_lo);
-                const prod_2 = eq_2.mul(combined_2);
+            const identity = [2]F{ F.zero(), F.zero() };
+            const sums = if (self.thread_pool) |tp|
+                tp.parallelReduce([2]F, half, identity, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
 
-                s0 = s0.add(prod_0);
-                s2 = s2.add(prod_2);
-            }
-
-            // Compute s(1) from constraint: s(0) + s(1) = current_claim
+            const s0 = sums[0];
             const s1 = self.current_claim.sub(s0);
-
-            // For degree-2 polynomial extrapolated to degree-3:
-            // s(3) = s(0) - 3*s(1) + 3*s(2)
-            const s3 = s0.sub(s1.mul(F.fromU64(3))).add(s2.mul(F.fromU64(3)));
-
-            return [4]F{ s0, s1, s2, s3 };
+            const s3 = s0.sub(s1.mul(F.fromU64(3))).add(sums[1].mul(F.fromU64(3)));
+            return [4]F{ s0, s1, sums[1], s3 };
         }
 
         /// Bind a challenge after round polynomial computation
@@ -249,42 +261,38 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         pub fn bindChallenge(self: *Self, challenge: F) !void {
             try self.challenges.append(self.allocator, challenge);
 
-            // Fold all polynomials using the challenge - LowToHigh order
             const current_len = self.eq_evals.len;
             const half = current_len / 2;
 
-            for (0..half) |i| {
-                // LowToHigh: fold pairs (2i, 2i+1) into position i
-                const lo_idx = 2 * i;
-                const hi_idx = 2 * i + 1;
+            // Bind 6 independent arrays in parallel
+            const ILBindCtx = struct {
+                slices: [6][]F,
+                r: F,
+                n: usize,
+            };
+            const bctx = ILBindCtx{
+                .slices = .{
+                    self.eq_evals, self.lookup_outputs, self.left_operands,
+                    self.right_operands, self.left_instr_inputs, self.right_instr_inputs,
+                },
+                .r = challenge,
+                .n = half,
+            };
+            const bindOneFn = struct {
+                fn f(c: ILBindCtx, idx: usize) void {
+                    const arr = c.slices[idx];
+                    for (0..c.n) |i| {
+                        arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                    }
+                }
+            }.f;
 
-                // Linear interpolation: new[i] = (1-r)*lo + r*hi = lo + r*(hi - lo)
-                const eq_lo = self.eq_evals[lo_idx];
-                const eq_hi = self.eq_evals[hi_idx];
-                self.eq_evals[i] = eq_lo.add(challenge.mul(eq_hi.sub(eq_lo)));
-
-                const lo_lo = self.lookup_outputs[lo_idx];
-                const lo_hi = self.lookup_outputs[hi_idx];
-                self.lookup_outputs[i] = lo_lo.add(challenge.mul(lo_hi.sub(lo_lo)));
-
-                const left_lo = self.left_operands[lo_idx];
-                const left_hi = self.left_operands[hi_idx];
-                self.left_operands[i] = left_lo.add(challenge.mul(left_hi.sub(left_lo)));
-
-                const right_lo = self.right_operands[lo_idx];
-                const right_hi = self.right_operands[hi_idx];
-                self.right_operands[i] = right_lo.add(challenge.mul(right_hi.sub(right_lo)));
-
-                const lii_lo = self.left_instr_inputs[lo_idx];
-                const lii_hi = self.left_instr_inputs[hi_idx];
-                self.left_instr_inputs[i] = lii_lo.add(challenge.mul(lii_hi.sub(lii_lo)));
-
-                const rii_lo = self.right_instr_inputs[lo_idx];
-                const rii_hi = self.right_instr_inputs[hi_idx];
-                self.right_instr_inputs[i] = rii_lo.add(challenge.mul(rii_hi.sub(rii_lo)));
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(6, bctx, bindOneFn);
+            } else {
+                for (0..6) |idx| bindOneFn(bctx, idx);
             }
 
-            // Reduce the effective length of all arrays to half
             self.eq_evals = self.eq_evals[0..half];
             self.lookup_outputs = self.lookup_outputs[0..half];
             self.left_operands = self.left_operands[0..half];

@@ -320,8 +320,12 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
     defer jolt_bundle.deinit();
 
     const prove_time = timer.read();
+    const prove_time_ms = @as(f64, @floatFromInt(prove_time)) / 1_000_000.0;
     std.debug.print("  Proof generated successfully!\n", .{});
-    std.debug.print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(prove_time)) / 1_000_000.0});
+    std.debug.print("  Time: {d:.2} ms\n", .{prove_time_ms});
+    if (std.posix.getenv("ZOLT_BENCH") != null) {
+        std.debug.print("[BENCH] Total time: {d:.1}\n", .{prove_time_ms});
+    }
 
     // Serialize using the bundled Dory commitments
     const jolt_bytes = prover_inst.serializeJoltProofWithDory(&jolt_bundle) catch |err| {

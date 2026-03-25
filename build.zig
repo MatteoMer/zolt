@@ -99,6 +99,23 @@ pub fn build(b: *std.Build) void {
     const proof_example_step = b.step("example-proof", "Run simple proof example");
     proof_example_step.dependOn(&run_proof_example.step);
 
+    // Benchmark: ThreadPool vs Rayon
+    const bench_tp = b.addExecutable(.{
+        .name = "bench-tp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/threadpool_vs_rayon/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    b.installArtifact(bench_tp);
+    const run_bench_tp = b.addRunArtifact(bench_tp);
+    const bench_tp_step = b.step("bench-tp", "Run ThreadPool micro-benchmark");
+    bench_tp_step.dependOn(&run_bench_tp.step);
+
     // Example: RISC-V Emulation
     const riscv_example = b.addExecutable(.{
         .name = "example-riscv",

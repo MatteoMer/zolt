@@ -1,0 +1,13 @@
+[package]
+name = "rayon-bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rayon-bench"
+path = "bench_rayon.rs"
+
+[dependencies]
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+rayon = "1.11"

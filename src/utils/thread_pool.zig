@@ -270,6 +270,7 @@ const ReduceJobPayload = struct {
     end: usize,
     latch: *CompletionLatch,
     partial_ptr: *anyopaque,
+    split_threshold: usize,
 };
 
 comptime {
@@ -679,37 +680,73 @@ pub const ThreadPool = struct {
         identity: R,
         context: anytype,
         comptime map: fn (@TypeOf(context), usize, usize) R,
-        comptime reduce: fn (R, R) R,
+        comptime reduce_fn: fn (R, R) R,
         actual_threads: usize,
     ) R {
-        const chunk_size = (len + actual_threads - 1) / actual_threads;
-        const num_chunks = (len + chunk_size - 1) / chunk_size;
-
         const Ctx = @TypeOf(context);
 
-        // Padded partial to prevent false sharing
-        const padded_size = if (@sizeOf(R) <= cache_line) cache_line else ((@sizeOf(R) + cache_line - 1) / cache_line) * cache_line;
-        const PaddedPartial = struct {
-            value: R,
-            _padding: [padded_size - @sizeOf(R)]u8 = undefined,
-        };
+        // Adaptive binary-split reduce executor (captures R, map, reduce at comptime)
+        const Executor = struct {
+            fn execute(job: *Job, worker: *WorkerData) void {
+                const p = job.getPayload(ReduceJobPayload);
+                const range_len = p.end - p.start;
+                const ctx_ptr: *const Ctx = @ptrCast(@alignCast(p.context_ptr));
+                const result_ptr: *R = @ptrCast(@alignCast(p.partial_ptr));
+                const pool: *ThreadPool = worker.pool_ptr;
 
-        var partials: [MAX_THREADS + 1]PaddedPartial = undefined;
-        for (0..num_chunks) |i| {
-            partials[i].value = identity;
-        }
+                if (range_len > p.split_threshold) {
+                    const mid = p.start + range_len / 2;
 
-        const ReduceCtx = struct {
-            ctx: Ctx,
-            partials_ptr: [*]PaddedPartial,
-            chunk_size: usize,
-            total_items: usize,
-        };
-        var reduce_ctx = ReduceCtx{
-            .ctx = context,
-            .partials_ptr = &partials,
-            .chunk_size = chunk_size,
-            .total_items = len,
+                    // Stack-allocate left result
+                    var left_result: R = undefined;
+                    var left_latch = CompletionLatch.init(1);
+
+                    const left_payload = ReduceJobPayload{
+                        .user_fn = p.user_fn,
+                        .context_ptr = p.context_ptr,
+                        .start = p.start,
+                        .end = mid,
+                        .latch = &left_latch,
+                        .partial_ptr = @ptrCast(&left_result),
+                        .split_threshold = p.split_threshold,
+                    };
+
+                    const left_job = Job.initFrom(ReduceJobPayload, left_payload, &execute);
+
+                    if (!worker.deque.push(left_job)) {
+                        // Deque full: compute left inline
+                        left_result = map(ctx_ptr.*, p.start, mid);
+                        left_latch.completeOne();
+                    }
+
+                    // Compute right half via recursive call (tail-recurse on this thread)
+                    var right_result: R = undefined;
+                    var right_latch = CompletionLatch.init(1);
+
+                    const right_payload = ReduceJobPayload{
+                        .user_fn = p.user_fn,
+                        .context_ptr = p.context_ptr,
+                        .start = mid,
+                        .end = p.end,
+                        .latch = &right_latch,
+                        .partial_ptr = @ptrCast(&right_result),
+                        .split_threshold = p.split_threshold,
+                    };
+
+                    var right_job = Job.initFrom(ReduceJobPayload, right_payload, &execute);
+                    execute(&right_job, worker);
+
+                    // Wait for left child (stay productive by popping/stealing)
+                    left_latch.waitWhileWorking(worker, pool);
+
+                    // Tree-shaped reduction: combine left + right
+                    result_ptr.* = reduce_fn(left_result, right_result);
+                } else {
+                    // Leaf: compute directly
+                    result_ptr.* = map(ctx_ptr.*, p.start, p.end);
+                }
+                p.latch.completeOne();
+            }
         };
 
         const worker = self.getCurrentWorker() orelse {
@@ -717,45 +754,35 @@ pub const ThreadPool = struct {
         };
         defer if (worker.index == self.thread_count) releaseWorkerClaim(worker);
 
-        var latch = CompletionLatch.init(@intCast(num_chunks));
+        // Use actual_threads * 2 (not * 4) because reduce has higher per-split
+        // overhead than for_each (latch creation + waitWhileWorking per level).
+        // This targets ~2x more leaves than threads → ~1 level of splitting.
+        const split_threshold = @max(MIN_ITEMS_PER_THREAD, len / (actual_threads * 2));
 
-        // Push one job per chunk
-        for (0..num_chunks) |chunk_idx| {
-            const item_start = chunk_idx * chunk_size;
-            const item_end = @min(item_start + chunk_size, len);
+        var result: R = identity;
+        var ctx_copy = context;
+        var latch = CompletionLatch.init(1);
 
-            const payload = ReduceJobPayload{
-                .user_fn = @ptrCast(&struct {
-                    fn call(ctx: *const ReduceCtx, start: usize, end: usize, partial: *PaddedPartial) void {
-                        partial.value = map(ctx.ctx, start, end);
-                    }
-                }.call),
-                .context_ptr = @ptrCast(&reduce_ctx),
-                .start = item_start,
-                .end = item_end,
-                .latch = &latch,
-                .partial_ptr = @ptrCast(&partials[chunk_idx]),
-            };
+        const payload = ReduceJobPayload{
+            .user_fn = @ptrCast(&struct {
+                fn unused(_: *const anyopaque, _: usize, _: usize, _: *anyopaque) void {}
+            }.unused),
+            .context_ptr = @ptrCast(&ctx_copy),
+            .start = 0,
+            .end = len,
+            .latch = &latch,
+            .partial_ptr = @ptrCast(&result),
+            .split_threshold = split_threshold,
+        };
 
-            const job = Job.initFrom(ReduceJobPayload, payload, &reduceJobExecute);
-            if (!worker.deque.push(job)) {
-                // Deque full: execute this chunk inline
-                partials[chunk_idx].value = map(context, item_start, item_end);
-                latch.completeOne();
-            }
+        const root_job = Job.initFrom(ReduceJobPayload, payload, &Executor.execute);
+        if (!worker.deque.push(root_job)) {
+            return map(context, 0, len);
         }
 
-        // Wake workers
-        self.wakeWorkers(@min(num_chunks - 1, self.thread_count));
-
-        // Caller participates
+        self.wakeWorkers(@min(actual_threads - 1, self.thread_count));
         latch.waitWhileWorking(worker, self);
 
-        // Sequential combine
-        var result = partials[0].value;
-        for (1..num_chunks) |i| {
-            result = reduce(result, partials[i].value);
-        }
         return result;
     }
 
@@ -802,13 +829,8 @@ pub const ThreadPool = struct {
         }
     }
 
-    fn reduceJobExecute(job: *Job, _: *WorkerData) void {
-        const p = job.getPayload(ReduceJobPayload);
-        const TypeErasedFn = *const fn (*const anyopaque, usize, usize, *anyopaque) void;
-        const call_fn: TypeErasedFn = @ptrCast(@alignCast(p.user_fn));
-        call_fn(p.context_ptr, p.start, p.end, p.partial_ptr);
-        p.latch.completeOne();
-    }
+    // reduceJobExecute is now generated at comptime inside reduceImpl
+    // (each instantiation captures R, map, reduce via Zig's monomorphization)
 
     fn closureJobExecute(job: *Job, _: *WorkerData) void {
         const p = job.getPayload(ClosureJobPayload);

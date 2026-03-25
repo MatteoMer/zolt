@@ -2515,7 +2515,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                 const az_src = self.az_poly.?.evaluations;
                 const bz_src = self.bz_poly.?.evaluations;
-                const new_size = az_src.len / 2;
+                // Use boundLen() to process only the valid portion of the array,
+                // not the full allocated length. Without this, later rounds waste
+                // time binding ~524k zero entries.
+                const current_bound = self.az_poly.?.boundLen();
+                const new_size = current_bound / 2;
                 const total_pairs = E_out.len * E_in.len;
 
                 // Each pair reads 2 consecutive bound values: bound[2*pair], bound[2*pair+1]

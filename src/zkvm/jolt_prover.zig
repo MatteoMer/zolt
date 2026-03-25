@@ -179,6 +179,7 @@ pub fn JoltProver(comptime F: type) type {
             };
             // Set pre-built compact witnesses (not owned — don't free on deinit)
             outer_prover.compact_witnesses = compact_witnesses;
+            outer_prover.thread_pool = self.thread_pool;
             defer {
                 outer_prover.compact_witnesses = null; // prevent double-free
                 outer_prover.deinit();
@@ -1008,12 +1009,13 @@ pub fn JoltProver(comptime F: type) type {
             _: F, // r_stream (unused after debug removal)
             r0: F,
         ) !void {
-            // Compute MLE evaluations at r_cycle
+            // Compute MLE evaluations at r_cycle (parallel factored-eq, matching Jolt)
             const R1CSInputEvaluator = r1cs.R1CSInputEvaluator(F);
-            const input_evals = try R1CSInputEvaluator.computeClaimedInputs(
+            const input_evals = try R1CSInputEvaluator.computeClaimedInputsParallel(
                 self.allocator,
                 cycle_witnesses,
                 r_cycle,
+                self.thread_pool,
             );
 
 

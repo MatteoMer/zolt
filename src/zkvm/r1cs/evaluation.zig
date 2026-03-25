@@ -41,6 +41,8 @@ const R1CSCycleInputs = constraints.R1CSCycleInputs;
 
 const poly = @import("../../poly/mod.zig");
 const EqPolynomial = poly.EqPolynomial;
+const field_mod = @import("../../field/mod.zig");
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 /// Number of R1CS inputs per cycle
 pub const NUM_R1CS_INPUTS = R1CSInputIndex.NUM_INPUTS;
@@ -64,101 +66,129 @@ pub fn R1CSInputEvaluator(comptime F: type) type {
             cycle_witnesses: []const R1CSCycleInputs(F),
             r_cycle: []const F,
         ) ![NUM_R1CS_INPUTS]F {
+            return computeClaimedInputsParallel(allocator, cycle_witnesses, r_cycle, null);
+        }
+
+        /// Parallel version using factored eq (split into eq_one × eq_two) matching
+        /// Jolt's compute_claimed_inputs in evaluation.rs:819-948.
+        /// Outer parallel loop over x1, inner sequential over x2,
+        /// with UnreducedProductAccum for deferred reduction.
+        pub fn computeClaimedInputsParallel(
+            allocator: Allocator,
+            cycle_witnesses: []const R1CSCycleInputs(F),
+            r_cycle: []const F,
+            thread_pool: ?*ThreadPool,
+        ) ![NUM_R1CS_INPUTS]F {
             const num_cycles = cycle_witnesses.len;
 
-            // Handle edge cases
-            if (num_cycles == 0) {
+            if (num_cycles == 0 or r_cycle.len == 0) {
                 var result: [NUM_R1CS_INPUTS]F = undefined;
                 @memset(&result, F.zero());
-                return result;
-            }
-
-            // CRITICAL: Use r_cycle.len as the number of variables, NOT log2(num_cycles).
-            // r_cycle comes from the sumcheck protocol and has length = num_cycle_vars,
-            // which is log2(trace_length) where trace_length is the padded power-of-2.
-            // For example, with 55 actual cycles and trace_length=64:
-            //   r_cycle.len = 6, padded_len = 64
-            // Previously we used log2_int(55) = 5, padded_len = 32, which was WRONG
-            // because it only evaluated 32 out of 55 cycles.
-            const num_vars = r_cycle.len;
-            const padded_len = if (num_vars > 0) @as(usize, 1) << @intCast(num_vars) else 1;
-
-            if (num_vars == 0) {
-                // No cycle variables - just return the first witness (or zero)
-                if (cycle_witnesses.len > 0) {
+                if (r_cycle.len == 0 and cycle_witnesses.len > 0) {
                     return cycle_witnesses[0].values;
                 }
-                var result: [NUM_R1CS_INPUTS]F = undefined;
-                @memset(&result, F.zero());
                 return result;
             }
 
-            // Compute eq polynomial evaluations at all points on the boolean hypercube
-            // This gives padded_len evaluations (one per cycle slot in the padded trace)
-            var eq_poly = try EqPolynomial(F).init(allocator, r_cycle);
-            defer eq_poly.deinit();
+            const num_vars = r_cycle.len;
+            const padded_len = @as(usize, 1) << @intCast(num_vars);
 
-            const eq_evals = try eq_poly.evals(allocator);
-            defer allocator.free(eq_evals);
+            // Factored eq: split r_cycle in half → eq_one(sqrt(T)) × eq_two(sqrt(T))
+            // This matches Jolt's rayon::join(|| EqPolynomial::evals(r2), || EqPolynomial::evals(r1))
+            const m = num_vars / 2;
+            const r_out = r_cycle[0..m]; // first half → E_out (x1 dimension)
+            const r_in = r_cycle[m..]; // second half → E_in (x2 dimension)
 
-            // DEBUG: Print eq_evals for first few cycles
-            dbg("[ZOLT MLE] num_vars = {}, eq_evals.len = {}, num_cycles = {}, padded_len = {}\n", .{ num_vars, eq_evals.len, num_cycles, padded_len });
-            if (eq_evals.len > 0) {
-                dbg("[ZOLT MLE] eq_evals[0] = {any}\n", .{eq_evals[0].toBytesBE()});
-            }
-            if (eq_evals.len > 1) {
-                dbg("[ZOLT MLE] eq_evals[1] = {any}\n", .{eq_evals[1].toBytesBE()});
-            }
-            if (eq_evals.len > 2) {
-                dbg("[ZOLT MLE] eq_evals[2] = {any}\n", .{eq_evals[2].toBytesBE()});
-            }
-            // Print r_cycle values used
-            for (0..num_vars) |i| {
-                dbg("[ZOLT MLE] r_cycle[{}] = {any}\n", .{ i, r_cycle[i].toBytesBE() });
-            }
+            const eq_one = try EqPolynomial(F).evalsSliceWithScaling(F, allocator, r_out, null);
+            defer allocator.free(eq_one);
+            const eq_two = try EqPolynomial(F).evalsSliceWithScaling(F, allocator, r_in, null);
+            defer allocator.free(eq_two);
 
-            // Accumulate: result_i = Sum_t eq_evals[t] * witness[t].values[i]
-            var result: [NUM_R1CS_INPUTS]F = [_]F{F.zero()} ** NUM_R1CS_INPUTS;
+            const eq_two_len = eq_two.len;
 
-            // Phase 1: Process actual witness cycles (0..num_cycles)
-            for (0..@min(num_cycles, padded_len)) |t| {
-                const eq_val = eq_evals[t];
+            const Accum = field_mod.UnreducedProductAccum;
+            const AccumArray = [NUM_R1CS_INPUTS]Accum;
+            const accum_zero: AccumArray = [_]Accum{Accum.zero()} ** NUM_R1CS_INPUTS;
 
-                // Skip if eq_val is zero (optimization)
-                if (eq_val.eql(F.zero())) continue;
+            const MapCtx = struct {
+                eq_one: []const F,
+                eq_two: []const F,
+                eq_two_len: usize,
+                cycle_witnesses: []const R1CSCycleInputs(F),
+                num_cycles: usize,
+                padded_len: usize,
+            };
 
-                // Accumulate contribution from this cycle
-                for (0..NUM_R1CS_INPUTS) |i| {
-                    const input_val = cycle_witnesses[t].values[i];
-                    result[i] = result[i].add(eq_val.mul(input_val));
+            const ctx = MapCtx{
+                .eq_one = eq_one,
+                .eq_two = eq_two,
+                .eq_two_len = eq_two_len,
+                .cycle_witnesses = cycle_witnesses,
+                .num_cycles = num_cycles,
+                .padded_len = padded_len,
+            };
+
+            const mapReduceFns = struct {
+                const zero_accum: AccumArray = [_]Accum{Accum.zero()} ** NUM_R1CS_INPUTS;
+
+                fn mapFn(c: MapCtx, start: usize, end: usize) AccumArray {
+                    var outer_accum: AccumArray = zero_accum;
+
+                    for (start..end) |x1| {
+                        const eq1_val = c.eq_one[x1];
+
+                        // Inner accumulators: accumulate eq_two[x2] * witness over all x2
+                        // Using UPA defers Montgomery reductions until x1 boundary.
+                        var inner_accum: AccumArray = zero_accum;
+
+                        for (0..c.eq_two_len) |x2| {
+                            const idx = x1 * c.eq_two_len + x2;
+                            const e_in = c.eq_two[x2];
+
+                            if (idx < c.num_cycles) {
+                                const w = &c.cycle_witnesses[idx];
+                                for (0..NUM_R1CS_INPUTS) |i| {
+                                    inner_accum[i].addAssign(Accum.fromMul(e_in, w.values[i]));
+                                }
+                            } else if (idx < c.padded_len) {
+                                // NoOp padding: FlagIsNoop=1, FlagDoNotUpdateUnexpandedPC=1
+                                inner_accum[R1CSInputIndex.FlagIsNoop.toIndex()].addAssign(
+                                    Accum.fromMul(e_in, F.one()),
+                                );
+                                inner_accum[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()].addAssign(
+                                    Accum.fromMul(e_in, F.one()),
+                                );
+                            }
+                        }
+
+                        // Reduce inner accumulators and weight by eq_one[x1]
+                        for (0..NUM_R1CS_INPUTS) |i| {
+                            const inner_reduced = inner_accum[i].reduce();
+                            outer_accum[i].addAssign(Accum.fromMul(eq1_val, inner_reduced));
+                        }
+                    }
+                    return outer_accum;
                 }
-            }
 
-            // Phase 2: Process padded NoOp cycles (num_cycles..padded_len)
-            // In Jolt, padded cycles are Cycle::NoOp which has:
-            //   - FlagIsNoop = 1 (true)
-            //   - FlagDoNotUpdateUnexpandedPC = 1 (true)
-            //   - All other R1CS inputs = 0
-            // We must include these non-zero contributions for MLE correctness.
-            if (num_cycles < padded_len) {
-                // Sum eq_evals for all padded cycles
-                var eq_sum_padded = F.zero();
-                for (num_cycles..padded_len) |t| {
-                    eq_sum_padded = eq_sum_padded.add(eq_evals[t]);
+                fn reduceFn(a: AccumArray, b: AccumArray) AccumArray {
+                    var result: AccumArray = undefined;
+                    for (0..NUM_R1CS_INPUTS) |i| {
+                        result[i] = a[i];
+                        result[i].addAssign(b[i]);
+                    }
+                    return result;
                 }
+            };
 
-                // Only add if the padded contribution is non-zero
-                if (!eq_sum_padded.eql(F.zero())) {
-                    // FlagIsNoop (index 38) = 1 for all padded cycles
-                    result[R1CSInputIndex.FlagIsNoop.toIndex()] = result[R1CSInputIndex.FlagIsNoop.toIndex()].add(eq_sum_padded);
+            const accum_result = if (thread_pool) |tp|
+                tp.parallelReduce(AccumArray, eq_one.len, accum_zero, ctx, mapReduceFns.mapFn, mapReduceFns.reduceFn)
+            else
+                mapReduceFns.mapFn(ctx, 0, eq_one.len);
 
-                    // FlagDoNotUpdateUnexpandedPC (index 32) = 1 for all padded cycles
-                    result[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = result[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()].add(eq_sum_padded);
-
-                    dbg("[ZOLT MLE] Padded NoOp contribution: {} cycles ({}..{}), eq_sum = {any}\n", .{ padded_len - num_cycles, num_cycles, padded_len, eq_sum_padded.toBytesBE() });
-                }
+            var result: [NUM_R1CS_INPUTS]F = undefined;
+            for (0..NUM_R1CS_INPUTS) |i| {
+                result[i] = accum_result[i].reduce();
             }
-
             return result;
         }
 

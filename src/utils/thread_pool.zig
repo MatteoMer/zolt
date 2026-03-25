@@ -119,6 +119,52 @@ const CompletionLatch = struct {
 };
 
 // ============================================================================
+// SpinLatch: lightweight atomic flag for internal reduce synchronization
+// ============================================================================
+
+/// Lightweight spin latch — single atomic flag, no futex.
+/// Used for internal reduce tree nodes where the waiting thread is always
+/// a worker that can stay productive by stealing work.
+const SpinLatch = struct {
+    state: atomic.Value(u32) = atomic.Value(u32).init(0),
+
+    fn probe(self: *const SpinLatch) bool {
+        return self.state.load(.acquire) == 1;
+    }
+
+    fn set(self: *SpinLatch) void {
+        self.state.store(1, .release);
+    }
+
+    /// Spin + steal while waiting. Purely userspace — no futex syscall.
+    fn waitWhileWorking(self: *const SpinLatch, worker: *WorkerData, pool: *ThreadPool) void {
+        if (self.probe()) return;
+        while (true) {
+            // Try own deque (LIFO, cache friendly)
+            if (worker.deque.pop()) |*j| {
+                var job = j.*;
+                job.execute_fn(&job, worker);
+                if (self.probe()) return;
+                continue;
+            }
+            // Try stealing
+            if (worker.tryStealing(pool)) |*j| {
+                var job = j.*;
+                job.execute_fn(&job, worker);
+                if (self.probe()) return;
+                continue;
+            }
+            // Brief spin then yield (no futex)
+            for (0..32) |_| {
+                if (self.probe()) return;
+                atomic.spinLoopHint();
+            }
+            std.Thread.yield() catch {};
+        }
+    }
+};
+
+// ============================================================================
 // Chase-Lev Deque: lock-free SPMC work-stealing deque
 // ============================================================================
 
@@ -264,11 +310,11 @@ comptime {
 }
 
 const ReduceJobPayload = struct {
-    user_fn: *const anyopaque,
+    signal_fn: *const anyopaque, // type-erased: signals parent (CompletionLatch or SpinLatch)
     context_ptr: *const anyopaque,
     start: usize,
     end: usize,
-    latch: *CompletionLatch,
+    latch: *anyopaque, // *CompletionLatch (root) or *SpinLatch (internal)
     partial_ptr: *anyopaque,
     split_threshold: usize,
 };
@@ -692,67 +738,82 @@ pub const ThreadPool = struct {
     ) R {
         const Ctx = @TypeOf(context);
 
-        // Adaptive binary-split reduce executor (captures R, map, reduce at comptime)
+        // Signal helpers (type-erased for ReduceJobPayload)
+        const Signals = struct {
+            fn signalCompletion(latch_ptr: *anyopaque) void {
+                const latch: *CompletionLatch = @ptrCast(@alignCast(latch_ptr));
+                latch.completeOne();
+            }
+            fn signalSpin(latch_ptr: *anyopaque) void {
+                const spin: *SpinLatch = @ptrCast(@alignCast(latch_ptr));
+                spin.set();
+            }
+        };
+
+        // Adaptive binary-split reduce executor with SpinLatch for internal nodes
         const Executor = struct {
+            /// Called when a pushed job executes on a worker thread.
             fn execute(job: *Job, worker: *WorkerData) void {
                 const p = job.getPayload(ReduceJobPayload);
-                const range_len = p.end - p.start;
                 const ctx_ptr: *const Ctx = @ptrCast(@alignCast(p.context_ptr));
                 const result_ptr: *R = @ptrCast(@alignCast(p.partial_ptr));
                 const pool: *ThreadPool = worker.pool_ptr;
 
-                if (range_len > p.split_threshold) {
-                    const mid = p.start + range_len / 2;
+                // Compute via direct recursion (no Job round-trip for right half)
+                result_ptr.* = computeRange(ctx_ptr, p.start, p.end, p.split_threshold, worker, pool);
 
-                    // Stack-allocate left result
-                    var left_result: R = undefined;
-                    var left_latch = CompletionLatch.init(1);
+                // Signal parent: CompletionLatch (root) or SpinLatch (internal)
+                const signal: *const fn (*anyopaque) void = @ptrCast(@alignCast(p.signal_fn));
+                signal(p.latch);
+            }
 
-                    const left_payload = ReduceJobPayload{
-                        .user_fn = p.user_fn,
-                        .context_ptr = p.context_ptr,
-                        .start = p.start,
-                        .end = mid,
-                        .latch = &left_latch,
-                        .partial_ptr = @ptrCast(&left_result),
-                        .split_threshold = p.split_threshold,
-                    };
+            /// Direct recursion — no Job/payload overhead for the right half.
+            /// Left halves are pushed to the deque (stealable by other workers).
+            fn computeRange(
+                ctx_ptr: *const Ctx,
+                start: usize,
+                end: usize,
+                split_threshold: usize,
+                worker: *WorkerData,
+                pool: *ThreadPool,
+            ) R {
+                const range_len = end - start;
 
-                    const left_job = Job.initFrom(ReduceJobPayload, left_payload, &execute);
-
-                    if (!worker.deque.push(left_job)) {
-                        // Deque full: compute left inline
-                        left_result = map(ctx_ptr.*, p.start, mid);
-                        left_latch.completeOne();
-                    }
-
-                    // Compute right half via recursive call (tail-recurse on this thread)
-                    var right_result: R = undefined;
-                    var right_latch = CompletionLatch.init(1);
-
-                    const right_payload = ReduceJobPayload{
-                        .user_fn = p.user_fn,
-                        .context_ptr = p.context_ptr,
-                        .start = mid,
-                        .end = p.end,
-                        .latch = &right_latch,
-                        .partial_ptr = @ptrCast(&right_result),
-                        .split_threshold = p.split_threshold,
-                    };
-
-                    var right_job = Job.initFrom(ReduceJobPayload, right_payload, &execute);
-                    execute(&right_job, worker);
-
-                    // Wait for left child (stay productive by popping/stealing)
-                    left_latch.waitWhileWorking(worker, pool);
-
-                    // Tree-shaped reduction: combine left + right
-                    result_ptr.* = reduce_fn(left_result, right_result);
-                } else {
-                    // Leaf: compute directly
-                    result_ptr.* = map(ctx_ptr.*, p.start, p.end);
+                if (range_len <= split_threshold) {
+                    return map(ctx_ptr.*, start, end);
                 }
-                p.latch.completeOne();
+
+                const mid = start + range_len / 2;
+
+                // Stack-allocate SpinLatch (4 bytes) for left child
+                var left_result: R = undefined;
+                var left_spin = SpinLatch{};
+
+                const left_payload = ReduceJobPayload{
+                    .signal_fn = @ptrCast(&Signals.signalSpin),
+                    .context_ptr = @ptrCast(ctx_ptr),
+                    .start = start,
+                    .end = mid,
+                    .latch = @ptrCast(&left_spin),
+                    .partial_ptr = @ptrCast(&left_result),
+                    .split_threshold = split_threshold,
+                };
+
+                const left_job = Job.initFrom(ReduceJobPayload, left_payload, &execute);
+
+                if (!worker.deque.push(left_job)) {
+                    // Deque full: compute left inline
+                    left_result = map(ctx_ptr.*, start, mid);
+                    left_spin.set();
+                }
+
+                // Tail-recurse right (no Job, no latch, no overhead)
+                const right_result = computeRange(ctx_ptr, mid, end, split_threshold, worker, pool);
+
+                // Wait for left (spin + steal, no futex)
+                left_spin.waitWhileWorking(worker, pool);
+
+                return reduce_fn(left_result, right_result);
             }
         };
 
@@ -765,16 +826,14 @@ pub const ThreadPool = struct {
 
         var result: R = identity;
         var ctx_copy = context;
-        var latch = CompletionLatch.init(1);
+        var latch = CompletionLatch.init(1); // Root uses CompletionLatch (futex for main thread)
 
         const payload = ReduceJobPayload{
-            .user_fn = @ptrCast(&struct {
-                fn unused(_: *const anyopaque, _: usize, _: usize, _: *anyopaque) void {}
-            }.unused),
+            .signal_fn = @ptrCast(&Signals.signalCompletion),
             .context_ptr = @ptrCast(&ctx_copy),
             .start = 0,
             .end = len,
-            .latch = &latch,
+            .latch = @ptrCast(&latch),
             .partial_ptr = @ptrCast(&result),
             .split_threshold = split_threshold,
         };

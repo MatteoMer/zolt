@@ -117,6 +117,32 @@ fn benchField(comptime F: type, comptime name: []const u8) void {
         const sub_ns = @as(f64, @floatFromInt(elapsed)) / @as(f64, iters);
         std.debug.print("{s} sub chain latency: {d:.1}ns\n", .{ name, sub_ns });
     }
+
+    // Bench add throughput (independent ops)
+    {
+        var timer = std.time.Timer.start() catch unreachable;
+        var r: F = undefined;
+        for (0..iters) |i| {
+            r = a[i % n_elems].add(b[i % n_elems]);
+        }
+        const elapsed = timer.read();
+        std.mem.doNotOptimizeAway(&r);
+        const ns = @as(f64, @floatFromInt(elapsed)) / @as(f64, iters);
+        std.debug.print("{s} add throughput: {d:.1}ns\n", .{ name, ns });
+    }
+
+    // Bench sub throughput (independent ops)
+    {
+        var timer = std.time.Timer.start() catch unreachable;
+        var r: F = undefined;
+        for (0..iters) |i| {
+            r = a[i % n_elems].sub(b[i % n_elems]);
+        }
+        const elapsed = timer.read();
+        std.mem.doNotOptimizeAway(&r);
+        const ns = @as(f64, @floatFromInt(elapsed)) / @as(f64, iters);
+        std.debug.print("{s} sub throughput: {d:.1}ns\n", .{ name, ns });
+    }
 }
 
 fn benchS192() void {

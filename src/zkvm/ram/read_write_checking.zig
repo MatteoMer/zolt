@@ -996,6 +996,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const val_init_current_size = K >> @intCast(addr_round);
 
             var new_entries = std.ArrayListUnmanaged(Entry){};
+            try new_entries.ensureTotalCapacity(self.allocator, self.entries.items.len);
 
             var entry_idx: usize = 0;
             while (entry_idx < self.entries.items.len) {
@@ -1052,25 +1053,22 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     const odd_entry = &self.entries.items[odd_idx];
 
                     if (even_entry.cycle == odd_entry.cycle) {
-                        // Both entries at same row - bind them together
                         if (bindAddressMajorPair(even_entry, odd_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
-                            try new_entries.append(self.allocator, bound);
+                            new_entries.appendAssumeCapacity(bound);
                         }
                         even_checkpoint = even_entry.next_val;
                         odd_checkpoint = odd_entry.next_val;
                         even_idx += 1;
                         odd_idx += 1;
                     } else if (even_entry.cycle < odd_entry.cycle) {
-                        // Only even entry at this row
                         if (bindAddressMajorEvenOnly(even_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
-                            try new_entries.append(self.allocator, bound);
+                            new_entries.appendAssumeCapacity(bound);
                         }
                         even_checkpoint = even_entry.next_val;
                         even_idx += 1;
                     } else {
-                        // Only odd entry at this row
                         if (bindAddressMajorOddOnly(odd_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
-                            try new_entries.append(self.allocator, bound);
+                            new_entries.appendAssumeCapacity(bound);
                         }
                         odd_checkpoint = odd_entry.next_val;
                         odd_idx += 1;
@@ -1081,7 +1079,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 while (even_idx < even_end) {
                     const even_entry = &self.entries.items[even_idx];
                     if (bindAddressMajorEvenOnly(even_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
-                        try new_entries.append(self.allocator, bound);
+                        new_entries.appendAssumeCapacity(bound);
                     }
                     even_checkpoint = even_entry.next_val;
                     even_idx += 1;
@@ -1091,7 +1089,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 while (odd_idx < odd_end) {
                     const odd_entry = &self.entries.items[odd_idx];
                     if (bindAddressMajorOddOnly(odd_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
-                        try new_entries.append(self.allocator, bound);
+                        new_entries.appendAssumeCapacity(bound);
                     }
                     odd_checkpoint = odd_entry.next_val;
                     odd_idx += 1;
@@ -1166,80 +1164,144 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         /// This matches Jolt's ReadWriteMatrixCycleMajor::bind which merges
         /// even_row and odd_row slices sorted by column.
         fn bindEntries(self: *Self, r: F) !void {
-            var new_entries = std.ArrayListUnmanaged(Entry){};
-
-            // Entries are sorted by (cycle, address).
-            // Group by row pair (cycle/2), split even/odd, merge by address.
-            var idx: usize = 0;
-            while (idx < self.entries.items.len) {
-                const row_pair = self.entries.items[idx].cycle / 2;
-
-                // Find extent of this row pair
-                var pair_end = idx;
-                while (pair_end < self.entries.items.len and
-                    self.entries.items[pair_end].cycle / 2 == row_pair)
-                {
-                    pair_end += 1;
-                }
-
-                // Split into even-row and odd-row sub-lists
-                const pair_entries = self.entries.items[idx..pair_end];
-                var odd_start: usize = 0;
-                while (odd_start < pair_entries.len and pair_entries[odd_start].cycle % 2 == 0) {
-                    odd_start += 1;
-                }
-                const even_row = pair_entries[0..odd_start];
-                const odd_row = pair_entries[odd_start..];
-
-                // Merge by column (address) — matching Jolt's seq_bind_rows
-                var ei: usize = 0;
-                var oi: usize = 0;
-                while (ei < even_row.len and oi < odd_row.len) {
-                    if (even_row[ei].address == odd_row[oi].address) {
-                        if (Entry.bindEntries(&even_row[ei], &odd_row[oi], r)) |bound| {
-                            try new_entries.append(self.allocator, bound);
-                        }
-                        ei += 1;
-                        oi += 1;
-                    } else if (even_row[ei].address < odd_row[oi].address) {
-                        if (Entry.bindEntries(&even_row[ei], null, r)) |bound| {
-                            try new_entries.append(self.allocator, bound);
-                        }
-                        ei += 1;
-                    } else {
-                        if (Entry.bindEntries(null, &odd_row[oi], r)) |bound| {
-                            try new_entries.append(self.allocator, bound);
-                        }
-                        oi += 1;
-                    }
-                }
-                // Remaining even entries
-                while (ei < even_row.len) {
-                    if (Entry.bindEntries(&even_row[ei], null, r)) |bound| {
-                        try new_entries.append(self.allocator, bound);
-                    }
-                    ei += 1;
-                }
-                // Remaining odd entries
-                while (oi < odd_row.len) {
-                    if (Entry.bindEntries(null, &odd_row[oi], r)) |bound| {
-                        try new_entries.append(self.allocator, bound);
-                    }
-                    oi += 1;
-                }
-
-                idx = pair_end;
+            const entries = self.entries.items;
+            if (entries.len == 0) {
+                return;
             }
 
-            // Replace old entries with bound entries
+            // Pass 1: Find row-pair group boundaries (sequential O(N) scan)
+            var group_starts = std.ArrayListUnmanaged(usize){};
+            defer group_starts.deinit(self.allocator);
+            try group_starts.append(self.allocator, 0);
+            for (1..entries.len) |i| {
+                if (entries[i].cycle / 2 != entries[i - 1].cycle / 2) {
+                    try group_starts.append(self.allocator, i);
+                }
+            }
+            const num_groups = group_starts.items.len;
+
+            // Compute output offsets: each group's upper bound = its input size
+            const offsets = try self.allocator.alloc(usize, num_groups + 1);
+            defer self.allocator.free(offsets);
+            const actual_counts = try self.allocator.alloc(usize, num_groups);
+            defer self.allocator.free(actual_counts);
+            offsets[0] = 0;
+            for (0..num_groups) |g| {
+                const g_start = group_starts.items[g];
+                const g_end = if (g + 1 < num_groups) group_starts.items[g + 1] else entries.len;
+                offsets[g + 1] = offsets[g] + (g_end - g_start);
+            }
+
+            // Pre-allocate output buffer
+            const output = try self.allocator.alloc(Entry, entries.len);
+
+            // Pass 2: Parallel merge-join per group
+            const BindGroupCtx = struct {
+                entries_buf: []const Entry,
+                output_buf: []Entry,
+                group_starts_buf: []const usize,
+                offsets_buf: []const usize,
+                actual_counts_buf: []usize,
+                num_entries: usize,
+                num_groups_total: usize,
+                challenge: F,
+            };
+            const bgctx = BindGroupCtx{
+                .entries_buf = entries,
+                .output_buf = output,
+                .group_starts_buf = group_starts.items,
+                .offsets_buf = offsets,
+                .actual_counts_buf = actual_counts,
+                .num_entries = entries.len,
+                .num_groups_total = num_groups,
+                .challenge = r,
+            };
+
+            const bindGroupFn = struct {
+                fn f(c: BindGroupCtx, g: usize) void {
+                    const g_start = c.group_starts_buf[g];
+                    const g_end = if (g + 1 < c.num_groups_total) c.group_starts_buf[g + 1] else c.num_entries;
+                    const pair_entries = c.entries_buf[g_start..g_end];
+                    const out_start = c.offsets_buf[g];
+                    const out_slice = c.output_buf[out_start .. out_start + pair_entries.len];
+
+                    // Split into even-row and odd-row
+                    var odd_start: usize = 0;
+                    while (odd_start < pair_entries.len and pair_entries[odd_start].cycle % 2 == 0) {
+                        odd_start += 1;
+                    }
+                    const even_row = pair_entries[0..odd_start];
+                    const odd_row = pair_entries[odd_start..];
+
+                    // Merge-join by address
+                    var ei: usize = 0;
+                    var oi: usize = 0;
+                    var out_idx: usize = 0;
+                    while (ei < even_row.len and oi < odd_row.len) {
+                        if (even_row[ei].address == odd_row[oi].address) {
+                            if (Entry.bindEntries(&even_row[ei], &odd_row[oi], c.challenge)) |bound| {
+                                out_slice[out_idx] = bound;
+                                out_idx += 1;
+                            }
+                            ei += 1;
+                            oi += 1;
+                        } else if (even_row[ei].address < odd_row[oi].address) {
+                            if (Entry.bindEntries(&even_row[ei], null, c.challenge)) |bound| {
+                                out_slice[out_idx] = bound;
+                                out_idx += 1;
+                            }
+                            ei += 1;
+                        } else {
+                            if (Entry.bindEntries(null, &odd_row[oi], c.challenge)) |bound| {
+                                out_slice[out_idx] = bound;
+                                out_idx += 1;
+                            }
+                            oi += 1;
+                        }
+                    }
+                    while (ei < even_row.len) : (ei += 1) {
+                        if (Entry.bindEntries(&even_row[ei], null, c.challenge)) |bound| {
+                            out_slice[out_idx] = bound;
+                            out_idx += 1;
+                        }
+                    }
+                    while (oi < odd_row.len) : (oi += 1) {
+                        if (Entry.bindEntries(null, &odd_row[oi], c.challenge)) |bound| {
+                            out_slice[out_idx] = bound;
+                            out_idx += 1;
+                        }
+                    }
+                    c.actual_counts_buf[g] = out_idx;
+                }
+            }.f;
+
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(num_groups, bgctx, bindGroupFn);
+            } else {
+                for (0..num_groups) |g| bindGroupFn(bgctx, g);
+            }
+
+            // Compact: move groups together (removing gaps from upper-bound slack)
+            var total_out: usize = 0;
+            for (0..num_groups) |g| {
+                const src_start = offsets[g];
+                const count = actual_counts[g];
+                if (src_start != total_out and count > 0) {
+                    std.mem.copyForwards(Entry, output[total_out .. total_out + count], output[src_start .. src_start + count]);
+                }
+                total_out += count;
+            }
+
+            // Replace old entries
             self.entries.deinit(self.allocator);
-            self.entries = new_entries;
+            self.entries = .{};
+            self.entries.items = output[0..total_out];
+            self.entries.capacity = output.len;
+
+            // Transfer allocator ownership manually — the output buffer is now owned by entries
+            // (ArrayList.deinit will free it)
 
             dbg("[RWC BIND] round={}, entries.len after bind={}\n", .{ self.round, self.entries.items.len });
-            if (self.entries.items.len > 0) {
-                const e = self.entries.items[0];
-                dbg("[RWC BIND]   entry[0]: cycle={}, addr={}, ra_coeff={any}, val_coeff={any}, prev_val={any}, next_val={any}\n", .{ e.cycle, e.address, e.ra_coeff.toBytesBE()[0..8], e.val_coeff.toBytesBE()[0..8], e.prev_val.toBytesBE()[0..8], e.next_val.toBytesBE()[0..8] });
-            }
         }
 
         /// Update claim after evaluating polynomial at challenge

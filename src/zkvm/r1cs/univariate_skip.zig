@@ -29,6 +29,9 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const field_mod = @import("../../field/mod.zig");
+const RawR1CSInputs = @import("evaluators.zig").RawR1CSInputs;
 
 /// Number of R1CS constraints
 pub const NUM_R1CS_CONSTRAINTS: usize = 19;
@@ -609,76 +612,88 @@ pub fn UniSkipFirstRoundProof(comptime F: type) type {
 ///   2: ShouldJump = JumpFlag * (1 - NextIsNoop)
 ///
 /// This matches upstream Jolt's ProductVirtualUniSkipProver::compute_univariate_skip_extended_evals.
+/// Compute extended evaluations using RawR1CSInputs integer arithmetic.
+/// Reads raw integers from trace (no Montgomery encoding for the fused products),
+/// uses flat eq table + parallelReduce over cycle indices.
 pub fn computeProductVirtualExtendedEvals(
     comptime F: type,
-    /// Product cycle inputs - array of per-cycle factor values
-    /// Each element has 8 factors (PRODUCT_UNIQUE_FACTOR_VIRTUALS):
-    ///   [0] LeftInstructionInput
-    ///   [1] RightInstructionInput
-    ///   [2] JumpFlag (OpFlags::Jump)
-    ///   [3] WriteLookupOutputToRDFlag (OpFlags::WriteLookupOutputToRD)
-    ///   [4] LookupOutput
-    ///   [5] BranchFlag (InstructionFlags::Branch)
-    ///   [6] NextIsNoop
-    ///   [7] VirtualInstructionFlag (OpFlags::VirtualInstruction)
-    cycle_factors: []const [8]F,
-    /// Full tau vector for computing eq polynomial
+    raw_inputs: []const RawR1CSInputs,
     tau: []const F,
     allocator: std.mem.Allocator,
+    thread_pool: ?*ThreadPool,
 ) ![PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE]F {
     const DEGREE = PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE;
     const DOMAIN_SIZE = PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE;
 
-    // Pad cycle length to power of 2 for eq_evals
-    const padded_len = nextPowerOfTwo(cycle_factors.len);
+    const padded_len = nextPowerOfTwo(raw_inputs.len);
 
-    // Compute eq evaluations at each cycle index
-    // eq(τ, x) where x is the binary representation of cycle index
+    // Build flat eq table (BIG_ENDIAN, same as before)
     const eq_evals = try computeEqEvals(F, tau, padded_len, allocator);
     defer allocator.free(eq_evals);
 
-    // Result: extended evaluations for 4 target points
-    var extended_evals: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+    const Ctx = struct {
+        eq_evals: []const F,
+        raw: []const RawR1CSInputs,
+    };
+    const ctx = Ctx{
+        .eq_evals = eq_evals,
+        .raw = raw_inputs,
+    };
 
-    // For each extended target j ∈ {0, 1, 2, 3} corresponding to {-3, 3, -4, 4}
-    for (0..DEGREE) |j| {
-        const coeffs: *const [DOMAIN_SIZE]i32 = &PRODUCT_VIRTUAL_COEFFS_PER_J[j];
+    // Parallel over flat cycle indices. Per-cycle: integer fused products + 2 F.mulI128 + 1 F.mul
+    const mapFn = struct {
+        fn f(c: Ctx, start: usize, end: usize) [DEGREE]F {
+            var sums: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+            for (start..end) |x| {
+                const raw = &c.raw[x];
+                const eq_x = c.eq_evals[x];
+                const next_noop: bool = if (x + 1 < c.raw.len)
+                    c.raw[x + 1].bool_flags[20]
+                else
+                    true;
+                const not_next_noop: u64 = @intFromBool(!next_noop);
 
-        // Accumulate over all cycles
-        var sum = F.zero();
-        for (0..cycle_factors.len) |x| {
-            const factors: *const [8]F = &cycle_factors[x];
-            const eq_x = eq_evals[x];
+                inline for (0..DEGREE) |j| {
+                    const coeffs: *const [DOMAIN_SIZE]i32 = &PRODUCT_VIRTUAL_COEFFS_PER_J[j];
 
-            // Compute fused_left(x, z) = Σ_i c[i] * left_i(x)
-            // 3 products: left factors are [0] LeftInstructionInput, [4] LookupOutput, [2] JumpFlag
-            var fused_left = F.zero();
-            fused_left = fused_left.add(mulByI32(F, factors[0], coeffs[0])); // LeftInstructionInput
-            fused_left = fused_left.add(mulByI32(F, factors[4], coeffs[1])); // LookupOutput
-            fused_left = fused_left.add(mulByI32(F, factors[2], coeffs[2])); // JumpFlag
+                    // Integer fused products — 0 Montgomery mults
+                    const left_int: i128 = @as(i128, coeffs[0]) * @as(i128, raw.u64_values[0]) +
+                        @as(i128, coeffs[1]) * @as(i128, raw.u64_values[12]) +
+                        @as(i128, coeffs[2]) * @as(i128, @intFromBool(raw.bool_flags[9]));
+                    const fused_left = F.one().mulI128(left_int);
 
-            // Compute fused_right(x, z) = Σ_i c[i] * right_i(x)
-            // 3 products: right factors are [1] RightInstructionInput, [5] BranchFlag, (1-[6]) not_next_noop
-            const one_minus_next_noop = F.one().sub(factors[6]);
-            var fused_right = F.zero();
-            fused_right = fused_right.add(mulByI32(F, factors[1], coeffs[0])); // RightInstructionInput
-            fused_right = fused_right.add(mulByI32(F, factors[5], coeffs[1])); // BranchFlag
-            fused_right = fused_right.add(mulByI32(F, one_minus_next_noop, coeffs[2])); // (1 - NextIsNoop)
+                    const right_int: i128 = @as(i128, coeffs[0]) * raw.signed_values[0] +
+                        @as(i128, coeffs[1]) * @as(i128, @intFromBool(raw.bool_flags[19])) +
+                        @as(i128, coeffs[2]) * @as(i128, not_next_noop);
+                    const fused_right = F.one().mulI128(right_int);
 
-            // Accumulate: eq(τ, x) * fused_left * fused_right
-            sum = sum.add(eq_x.mul(fused_left).mul(fused_right));
+                    // 1 F.mul per cycle per j-target + eq weighting
+                    sums[j] = sums[j].add(eq_x.mul(fused_left).mul(fused_right));
+                }
+            }
+            return sums;
         }
+    }.f;
 
-        // Pad contributions (padded cycles have zero factors, so eq*0*0 = 0)
-        // No explicit handling needed
+    const reduceFn = struct {
+        fn f(a: [DEGREE]F, b: [DEGREE]F) [DEGREE]F {
+            var result: [DEGREE]F = undefined;
+            inline for (0..DEGREE) |j| {
+                result[j] = a[j].add(b[j]);
+            }
+            return result;
+        }
+    }.f;
 
-        // No R^2 scaling needed. Zolt's field arithmetic already produces the
-        // correct mathematical result. See streaming_outer.zig for explanation.
-        extended_evals[j] = sum;
-    }
+    const identity: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+    const result = if (thread_pool) |tp|
+        tp.parallelReduce([DEGREE]F, raw_inputs.len, identity, ctx, mapFn, reduceFn)
+    else
+        mapFn(ctx, 0, raw_inputs.len);
 
-    return extended_evals;
+    return result;
 }
+
 
 /// Helper: multiply field element by i32 coefficient
 fn mulByI32(comptime F: type, a: F, c: i32) F {

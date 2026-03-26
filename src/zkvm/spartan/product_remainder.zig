@@ -43,6 +43,8 @@ const field_mod = @import("../../field/mod.zig");
 const UnreducedProductAccum = field_mod.UnreducedProductAccum;
 
 const constraints = @import("../r1cs/constraints.zig");
+const r1cs_evaluators = @import("../r1cs/evaluators.zig");
+const RawR1CSInputs = r1cs_evaluators.RawR1CSInputs;
 const univariate_skip = @import("../r1cs/univariate_skip.zig");
 const poly_mod = @import("../../poly/mod.zig");
 const GruenSplitEqPolynomial = poly_mod.GruenSplitEqPolynomial;
@@ -169,14 +171,15 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
             r0: F,
             tau: []const F,
             uni_skip_claim: F,
-            cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+            raw_inputs: []const RawR1CSInputs,
+            thread_pool: ?*ThreadPool,
         ) !Self {
-            if (cycle_witnesses.len == 0) {
+            if (raw_inputs.len == 0) {
                 return error.EmptyTrace;
             }
 
             // Pad to power of 2
-            const padded_len = nextPowerOfTwo(cycle_witnesses.len);
+            const padded_len = nextPowerOfTwo(raw_inputs.len);
             const num_cycle_vars = std.math.log2_int(usize, padded_len);
 
             // Compute Lagrange weights at r0 over the 3-point domain {-1, 0, 1}
@@ -201,35 +204,67 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 lagrange_kernel,
             );
 
-            // Materialize fused left/right polynomials
-            var left_evals = try allocator.alloc(F, padded_len);
+            // Materialize fused left/right polynomials using integer arithmetic
+            const left_evals = try allocator.alloc(F, padded_len);
             errdefer allocator.free(left_evals);
-            var right_evals = try allocator.alloc(F, padded_len);
+            const right_evals = try allocator.alloc(F, padded_len);
             errdefer allocator.free(right_evals);
 
-            // Compute fused left/right for each cycle
-            for (0..padded_len) |idx| {
-                if (idx < cycle_witnesses.len) {
-                    const witness = &cycle_witnesses[idx];
+            const MedAccumS = field_mod.MedAccumS;
+            const InitCtx = struct {
+                raw: []const RawR1CSInputs,
+                left: []F,
+                right: []F,
+                weights: [3]F,
+            };
+            const ictx = InitCtx{
+                .raw = raw_inputs,
+                .left = left_evals,
+                .right = right_evals,
+                .weights = lagrange_weights,
+            };
+            const initFn = struct {
+                fn f(c: InitCtx, idx: usize) void {
+                    if (idx < c.raw.len) {
+                        const raw = &c.raw[idx];
+                        var left_acc = MedAccumS.zero();
+                        left_acc.fmaddU64(c.weights[0], raw.u64_values[0]);
+                        left_acc.fmaddU64(c.weights[1], raw.u64_values[12]);
+                        left_acc.fmaddBool(c.weights[2], raw.bool_flags[9]);
+                        c.left[idx] = left_acc.barrettReduce();
 
-                    // Extract product factors
-                    const product_inputs = extractProductInputs(F, witness, cycle_witnesses, idx);
-
-                    // Compute fused values
-                    left_evals[idx] = product_inputs.fusedLeft(&lagrange_weights);
-                    right_evals[idx] = product_inputs.fusedRight(&lagrange_weights);
-                } else {
-                    // Pad with zeros
-                    left_evals[idx] = F.zero();
-                    right_evals[idx] = F.zero();
+                        var right_acc = MedAccumS.zero();
+                        right_acc.fmaddI128(c.weights[0], raw.signed_values[0]);
+                        right_acc.fmaddBool(c.weights[1], raw.bool_flags[19]);
+                        const not_next_noop: u64 = if (idx + 1 < c.raw.len)
+                            @intFromBool(!c.raw[idx + 1].bool_flags[20])
+                        else
+                            0;
+                        right_acc.fmaddU64(c.weights[2], not_next_noop);
+                        c.right[idx] = right_acc.barrettReduce();
+                    } else {
+                        c.left[idx] = F.zero();
+                        c.right[idx] = F.zero();
+                    }
                 }
+            }.f;
+
+            if (thread_pool) |tp| {
+                tp.parallelForForce(padded_len, ictx, initFn);
+            } else {
+                for (0..padded_len) |idx| initFn(ictx, idx);
             }
 
-            const left_poly = try DensePolynomial(F).init(allocator, left_evals);
+            var left_poly = try DensePolynomial(F).init(allocator, left_evals);
             allocator.free(left_evals);
 
-            const right_poly = try DensePolynomial(F).init(allocator, right_evals);
+            var right_poly = try DensePolynomial(F).init(allocator, right_evals);
             allocator.free(right_evals);
+
+            if (thread_pool != null) {
+                left_poly.scratch = try allocator.alloc(F, padded_len);
+                right_poly.scratch = try allocator.alloc(F, padded_len);
+            }
 
             return Self{
                 .lagrange_weights = lagrange_weights,
@@ -412,13 +447,18 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
 
         /// Bind the challenge for this round and update state
         pub fn bindChallenge(self: *Self, challenge: F) !void {
-            // Bind left and right polynomials concurrently
+            // Bind left and right polynomials concurrently using full threadpool
             if (self.thread_pool) |tp| {
-                const BindCtx = struct { left: *DensePolynomial(F), right: *DensePolynomial(F), c: F };
-                const bctx = BindCtx{ .left = &self.left_poly, .right = &self.right_poly, .c = challenge };
+                const BindCtx = struct {
+                    left: *DensePolynomial(F),
+                    right: *DensePolynomial(F),
+                    c: F,
+                    tp: *ThreadPool,
+                };
+                const bctx = BindCtx{ .left = &self.left_poly, .right = &self.right_poly, .c = challenge, .tp = tp };
                 tp.parallelForForce(2, bctx, struct {
                     fn f(bc: BindCtx, idx: usize) void {
-                        if (idx == 0) bc.left.bindLow(bc.c) else bc.right.bindLow(bc.c);
+                        if (idx == 0) bc.left.bindLowParallel(bc.c, bc.tp) else bc.right.bindLowParallel(bc.c, bc.tp);
                     }
                 }.f);
             } else {

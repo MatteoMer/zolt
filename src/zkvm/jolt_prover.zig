@@ -1492,6 +1492,7 @@ pub fn JoltProver(comptime F: type) type {
                 &base_evals_stage2,
                 tau_high_stage2,
                 padded_witnesses,
+                raw_r1cs_inputs.?,
                 tau_stage2_early,
             );
 
@@ -1611,6 +1612,7 @@ pub fn JoltProver(comptime F: type) type {
                 tau_stage2,
                 r_spartan_original,
                 padded_witnesses,
+                raw_r1cs_inputs.?,
                 n_cycle_vars,
                 log_ram_k,
                 &jolt_proof.opening_claims,
@@ -3437,6 +3439,7 @@ pub fn JoltProver(comptime F: type) type {
             tau: []const F,
             r_spartan_for_instr: []const F,
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
             n_cycle_vars: usize,
             log_ram_k: usize,
             opening_claims: *OpeningClaims(F),
@@ -3547,6 +3550,7 @@ pub fn JoltProver(comptime F: type) type {
             // Initialize provers for each instance (upstream ordering):
             // [0] RamReadWriteChecking, [1] ProductVirtualRemainder,
             // [2] InstructionLookupsClaimReduction, [3] RamRafEvaluation, [4] OutputSumcheck
+            const s2_fn_t0 = if (config.bench_output) std.time.nanoTimestamp() else 0;
 
             // Instance 0: RamReadWriteChecking - starts at round 0 (max rounds)
             const RWCProver = ram.RamReadWriteCheckingProver(F);
@@ -3588,13 +3592,14 @@ pub fn JoltProver(comptime F: type) type {
             // Instance 1: ProductVirtualRemainder
             const ProductRemainderProver = product_remainder.ProductVirtualRemainderProver(F);
             var product_prover: ?ProductRemainderProver = null;
-            if (cycle_witnesses.len > 0 and tau.len > 0) {
+            if (raw_r1cs_inputs.len > 0 and tau.len > 0) {
                 product_prover = ProductRemainderProver.init(
                     self.allocator,
                     r0_stage2,
                     tau,
                     uni_skip_claim_stage2,
-                    cycle_witnesses,
+                    raw_r1cs_inputs,
+                    self.thread_pool,
                 ) catch null;
             }
             if (product_prover != null) product_prover.?.thread_pool = self.thread_pool;
@@ -3648,6 +3653,14 @@ pub fn JoltProver(comptime F: type) type {
             var challenges: std.ArrayListUnmanaged(F) = .{};
             defer challenges.deinit(self.allocator);
 
+            // Per-instance timing accumulators (bench only)
+            const bench_s2 = config.bench_output;
+            var inst_compute_ns: [5]u64 = .{ 0, 0, 0, 0, 0 };
+            var inst_bind_ns: [5]u64 = .{ 0, 0, 0, 0, 0 };
+            var inst_active_rounds: [5]u64 = .{ 0, 0, 0, 0, 0 };
+
+            const s2_init_done_t = if (config.bench_output) std.time.nanoTimestamp() else 0;
+
             // Step 4: Run batched sumcheck rounds
             for (0..max_num_rounds) |round_idx| {
                 // Compute combined polynomial from all instances
@@ -3659,6 +3672,7 @@ pub fn JoltProver(comptime F: type) type {
 
                 for (0..5) |i| {
                     const start_round = max_num_rounds - rounds_per_instance[i];
+                    const inst_t0 = if (bench_s2) std.time.nanoTimestamp() else 0;
 
                     if (round_idx >= start_round) {
                         // Instance is active
@@ -3715,43 +3729,16 @@ pub fn JoltProver(comptime F: type) type {
                                 ) catch null;
 
                                 if (instr_params) |*params| {
-                                    const R1CSInputIndex = @import("r1cs/constraints.zig").R1CSInputIndex;
-                                    const lookup_outputs_arr = try self.allocator.alloc(F, cycle_witnesses.len);
-                                    defer self.allocator.free(lookup_outputs_arr);
-                                    const left_operands_arr = try self.allocator.alloc(F, cycle_witnesses.len);
-                                    defer self.allocator.free(left_operands_arr);
-                                    const right_operands_arr = try self.allocator.alloc(F, cycle_witnesses.len);
-                                    defer self.allocator.free(right_operands_arr);
-                                    const left_instr_arr = try self.allocator.alloc(F, cycle_witnesses.len);
-                                    defer self.allocator.free(left_instr_arr);
-                                    const right_instr_arr = try self.allocator.alloc(F, cycle_witnesses.len);
-                                    defer self.allocator.free(right_instr_arr);
-
-                                    for (cycle_witnesses, 0..) |w, wi| {
-                                        lookup_outputs_arr[wi] = w.values[R1CSInputIndex.LookupOutput.toIndex()];
-                                        left_operands_arr[wi] = w.values[R1CSInputIndex.LeftLookupOperand.toIndex()];
-                                        right_operands_arr[wi] = w.values[R1CSInputIndex.RightLookupOperand.toIndex()];
-                                        left_instr_arr[wi] = w.values[R1CSInputIndex.LeftInstructionInput.toIndex()];
-                                        right_instr_arr[wi] = w.values[R1CSInputIndex.RightInstructionInput.toIndex()];
-                                    }
-
                                     instr_prover = InstrLookupsProver.init(
                                         self.allocator,
                                         params.*,
                                         input_claims[2],
-                                        lookup_outputs_arr,
-                                        left_operands_arr,
-                                        right_operands_arr,
-                                        left_instr_arr,
-                                        right_instr_arr,
+                                        cycle_witnesses,
+                                        self.thread_pool,
                                     ) catch blk: {
                                         params.deinit();
                                         break :blk null;
                                     };
-
-                                    if (instr_prover != null) {
-                                        instr_prover.?.thread_pool = self.thread_pool;
-                                    }
                                 }
                             }
 
@@ -3839,6 +3826,12 @@ pub fn JoltProver(comptime F: type) type {
                         const weighted = scaled.mul(batching_coeffs[i]);
                         for (0..4) |j| combined_evals[j] = combined_evals[j].add(weighted);
                     }
+
+                    if (bench_s2) {
+                        const inst_t1 = std.time.nanoTimestamp();
+                        inst_compute_ns[i] += @intCast(@as(i128, inst_t1 - inst_t0));
+                        if (round_idx >= start_round) inst_active_rounds[i] += 1;
+                    }
                 }
 
                 // Convert to compressed coefficients [c0, c2, c3]
@@ -3901,32 +3894,42 @@ pub fn JoltProver(comptime F: type) type {
                 // Bind challenge in all active instances and update their claims
                 // Instance 0: RWC (starts at round 0)
                 if (rwc_prover) |*rwcp| {
+                    const bt0 = if (bench_s2) std.time.nanoTimestamp() else 0;
                     if (rwc_evals_this_round) |evals| rwcp.updateClaim(evals, challenge);
                     rwcp.bindChallenge(challenge) catch {};
+                    if (bench_s2) inst_bind_ns[0] += @intCast(@as(i128, std.time.nanoTimestamp() - bt0));
                 }
 
                 // Instance 1: ProductVirtualRemainder (starts at max_rounds - n_cycle_vars)
                 if (product_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
+                    const bt1 = if (bench_s2) std.time.nanoTimestamp() else 0;
                     if (product_evals_this_round) |evals| product_prover.?.updateClaim(evals, challenge);
                     product_prover.?.bindChallenge(challenge) catch {};
+                    if (bench_s2) inst_bind_ns[1] += @intCast(@as(i128, std.time.nanoTimestamp() - bt1));
                 }
 
                 // Instance 2: InstructionLookups (starts at max_rounds - n_cycle_vars)
                 if (instr_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
+                    const bt2 = if (bench_s2) std.time.nanoTimestamp() else 0;
                     if (instr_evals_this_round) |evals| instr_prover.?.updateClaim(evals, challenge);
                     instr_prover.?.bindChallenge(challenge) catch {};
+                    if (bench_s2) inst_bind_ns[2] += @intCast(@as(i128, std.time.nanoTimestamp() - bt2));
                 }
 
                 // Instance 3: RAF (starts at max_rounds - log_ram_k)
                 if (raf_prover != null and round_idx >= (max_num_rounds - log_ram_k)) {
+                    const bt3 = if (bench_s2) std.time.nanoTimestamp() else 0;
                     if (raf_evals_this_round) |evals| raf_prover.?.updateClaim(evals, challenge);
                     raf_prover.?.bindChallenge(challenge) catch {};
+                    if (bench_s2) inst_bind_ns[3] += @intCast(@as(i128, std.time.nanoTimestamp() - bt3));
                 }
 
                 // Instance 4: OutputSumcheck (starts at max_rounds - log_ram_k)
                 if (output_prover != null and round_idx >= (max_num_rounds - log_ram_k)) {
+                    const bt4 = if (bench_s2) std.time.nanoTimestamp() else 0;
                     if (output_evals_this_round) |evals| output_prover.?.updateClaim(evals, challenge);
                     output_prover.?.bindChallenge(challenge);
+                    if (bench_s2) inst_bind_ns[4] += @intCast(@as(i128, std.time.nanoTimestamp() - bt4));
                 }
 
                 // Reset per-round evals
@@ -3991,6 +3994,23 @@ pub fn JoltProver(comptime F: type) type {
                 }
             }
 
+            const s2_loop_done_t = if (config.bench_output) std.time.nanoTimestamp() else 0;
+
+            // Print per-instance timing breakdown
+            if (bench_s2) {
+                const names = [5][]const u8{ "RWC", "Product", "InstrLookups", "RAF", "Output" };
+                const ms = 1_000_000.0;
+                for (0..5) |bi| {
+                    std.debug.print("[BENCH] stage=2 instance={d}({s}) compute={d:.1}ms bind={d:.1}ms rounds={d}\n", .{
+                        bi,
+                        names[bi],
+                        @as(f64, @floatFromInt(inst_compute_ns[bi])) / ms,
+                        @as(f64, @floatFromInt(inst_bind_ns[bi])) / ms,
+                        inst_active_rounds[bi],
+                    });
+                }
+            }
+
             // Print prover's per-instance final claims for comparison with verifier
             var expected_batched = F.zero();
             // Instance 0: RWC
@@ -4036,7 +4056,7 @@ pub fn JoltProver(comptime F: type) type {
             // ProductVirtualRemainder starts at round log_ram_k, so its r_cycle
             // is challenges[log_ram_k..max_num_rounds]
             const factor_evals = try self.computeProductFactorEvaluations(
-                cycle_witnesses,
+                raw_r1cs_inputs,
                 challenges.items,
                 n_cycle_vars,
                 log_ram_k,
@@ -4268,6 +4288,16 @@ pub fn JoltProver(comptime F: type) type {
                 }
             }
 
+            if (config.bench_output) {
+                const ms2 = 1_000_000.0;
+                const t_now = std.time.nanoTimestamp();
+                std.debug.print("[BENCH] stage=2 breakdown: prover_init={d:.1}ms round_loop={d:.1}ms post_loop={d:.1}ms\n", .{
+                    @as(f64, @floatFromInt(@as(i128, s2_init_done_t - s2_fn_t0))) / ms2,
+                    @as(f64, @floatFromInt(@as(i128, s2_loop_done_t - s2_init_done_t))) / ms2,
+                    @as(f64, @floatFromInt(@as(i128, t_now - s2_loop_done_t))) / ms2,
+                });
+            }
+
             return Stage2Result{
                 .factor_evals = factor_evals,
                 .challenges = challenges_copy,
@@ -4308,7 +4338,7 @@ pub fn JoltProver(comptime F: type) type {
         /// Returns MLE(factor_i, r_cycle) = Σ_t eq(r_cycle, t) * factor_value[t]
         fn computeProductFactorEvaluations(
             self: *Self,
-            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
             all_challenges: []const F,
             n_cycle_vars: usize,
             log_ram_k: usize,
@@ -4339,82 +4369,90 @@ pub fn JoltProver(comptime F: type) type {
                 r_cycle[i] = r_cycle_original[n_cycle_vars - 1 - i];
             }
 
-            if (r_cycle.len > 0) {
-            }
-            if (r_cycle.len > 7) {
-            }
-
             // Compute eq polynomial evaluations at r_cycle (using BIG_ENDIAN indexing like Jolt)
             const EqPoly = poly_mod.EqPolynomial(F);
-            var eq_poly = try EqPoly.init(self.allocator, r_cycle);
-            defer eq_poly.deinit();
-
-            const eq_evals = try eq_poly.evals(self.allocator);
+            const eq_evals = try EqPoly.evalsSliceWithScaling(F, self.allocator, r_cycle, null);
             defer self.allocator.free(eq_evals);
 
-            // Print sum of eq_evals (should be 1 for partition of unity)
-            var eq_sum = F.zero();
-            for (eq_evals) |ev| {
-                eq_sum = eq_sum.add(ev);
-            }
-
-            // Initialize factor accumulators
-            var factor_evals = [8]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
-
             // Compute MLE evaluation: Σ_t eq(r_cycle, t) * factor_value[t]
-            // Uses UnreducedProductAccum to defer Montgomery reduction across all cycles.
-            const num_cycles = @min(eq_evals.len, cycle_witnesses.len);
-            const UPA = UnreducedProductAccum;
+            // Parallelized with UnreducedProductAccum for deferred Montgomery reduction.
+            const num_cycles = @min(eq_evals.len, raw_r1cs_inputs.len);
 
-            // Factor indices into R1CSCycleInputs.values
-            const factor_indices = [8]usize{
-                r1cs.R1CSInputIndex.LeftInstructionInput.toIndex(),
-                r1cs.R1CSInputIndex.RightInstructionInput.toIndex(),
-                r1cs.R1CSInputIndex.FlagJump.toIndex(),
-                r1cs.R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex(),
-                r1cs.R1CSInputIndex.LookupOutput.toIndex(),
-                r1cs.R1CSInputIndex.FlagBranch.toIndex(),
-                0, // placeholder for NextIsNoop (computed separately)
-                r1cs.R1CSInputIndex.FlagVirtualInstruction.toIndex(),
+            const FactorCtx = struct {
+                eq: []const F,
+                raw: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
+            };
+            const fctx = FactorCtx{
+                .eq = eq_evals,
+                .raw = raw_r1cs_inputs,
             };
 
-            var accum: [8]UPA = .{UPA.zero()} ** 8;
-            for (0..num_cycles) |t| {
-                const eq_val = eq_evals[t];
-                const witness = &cycle_witnesses[t];
+            // Use typed integer accumulators matching Jolt's compute_claimed_factors:
+            // u64 factors → fmaddU64 (4 integer muls), bool factors → fmaddBool (0 muls),
+            // i128 factors → fmaddI128 (8 integer muls). ~4x fewer ops than field×field.
+            const MedAccumS = field_mod.MedAccumS;
+            const factorMapFn = struct {
+                fn f(c: FactorCtx, start: usize, end: usize) [8]MedAccumS {
+                    @setEvalBranchQuota(10000);
+                    var acc: [8]MedAccumS = .{MedAccumS.zero()} ** 8;
+                    for (start..end) |t| {
+                        const eq_val = c.eq[t];
+                        const raw = &c.raw[t];
 
-                // Factors 0-5, 7: direct witness lookup
-                inline for ([_]usize{ 0, 1, 2, 3, 4, 5, 7 }) |fi| {
-                    accum[fi].addAssign(eq_val.mulToProductAccum(witness.values[factor_indices[fi]]));
+                        // Factor 0: LeftInstructionInput (u64)
+                        acc[0].fmaddU64(eq_val, raw.u64_values[0]);
+                        // Factor 1: RightInstructionInput (i128)
+                        acc[1].fmaddI128(eq_val, raw.signed_values[0]);
+                        // Factor 2: FlagJump (bool)
+                        acc[2].fmaddBool(eq_val, raw.bool_flags[9]);
+                        // Factor 3: FlagWriteLookupOutputToRD (bool)
+                        acc[3].fmaddBool(eq_val, raw.bool_flags[10]);
+                        // Factor 4: LookupOutput (u64)
+                        acc[4].fmaddU64(eq_val, raw.u64_values[12]);
+                        // Factor 5: FlagBranch (bool)
+                        acc[5].fmaddBool(eq_val, raw.bool_flags[19]);
+                        // Factor 6: NextIsNoop (bool from next cycle)
+                        const next_is_noop: bool = if (t + 1 < c.raw.len)
+                            c.raw[t + 1].bool_flags[20]
+                        else
+                            true; // Last cycle: NextIsNoop = true
+                        acc[6].fmaddBool(eq_val, next_is_noop);
+                        // Factor 7: FlagVirtualInstruction (bool)
+                        acc[7].fmaddBool(eq_val, raw.bool_flags[11]);
+                    }
+                    return acc;
                 }
+            }.f;
 
-                // Factor 6: NextIsNoop
-                const next_is_noop = if (t + 1 < cycle_witnesses.len)
-                    cycle_witnesses[t + 1].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()]
-                else
-                    F.one();
-                accum[6].addAssign(eq_val.mulToProductAccum(next_is_noop));
-            }
+            const factorReduceFn = struct {
+                fn f(a: [8]MedAccumS, b: [8]MedAccumS) [8]MedAccumS {
+                    var result: [8]MedAccumS = undefined;
+                    inline for (0..8) |fi| {
+                        result[fi] = a[fi];
+                        result[fi].pos.addAssign(b[fi].pos);
+                        result[fi].neg.addAssign(b[fi].neg);
+                    }
+                    return result;
+                }
+            }.f;
+
+            const identity: [8]MedAccumS = .{MedAccumS.zero()} ** 8;
+            const accum = if (self.thread_pool) |tp|
+                tp.parallelReduce([8]MedAccumS, num_cycles, identity, fctx, factorMapFn, factorReduceFn)
+            else
+                factorMapFn(fctx, 0, num_cycles);
+
+            var factor_evals = [8]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
             inline for (0..8) |fi| {
-                factor_evals[fi] = accum[fi].reduce();
+                factor_evals[fi] = accum[fi].barrettReduce();
             }
 
-            // Debug: Print counts
-
-            // Handle padding cycles (indices from cycle_witnesses.len to eq_evals.len)
-            // Note: If cycle_witnesses already includes NoOp padding (from R1CS witness generator),
-            // this loop may not execute. Only run if witnesses are shorter than eq domain.
-            //
-            // Padding cycles are NoOp cycles. For NoOp:
-            // - Factors 0-5, 7: all zero (no instruction input, no flags set, no output)
-            // - Factor 6 (NextIsNoop): 1 (next cycle is also a NoOp)
-            if (cycle_witnesses.len < eq_evals.len) {
-                for (cycle_witnesses.len..eq_evals.len) |t| {
-                    const eq_val = eq_evals[t];
-                    factor_evals[6] = factor_evals[6].add(eq_val);
+            // Handle padding cycles (only NextIsNoop=1 for NoOp padding)
+            if (raw_r1cs_inputs.len < eq_evals.len) {
+                for (raw_r1cs_inputs.len..eq_evals.len) |t| {
+                    factor_evals[6] = factor_evals[6].add(eq_evals[t]);
                 }
             }
-
 
             return factor_evals;
         }
@@ -4591,7 +4629,8 @@ pub fn JoltProver(comptime F: type) type {
             self: *Self,
             base_evals: *const [3]F,
             tau_high: F,
-            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            _: []const r1cs.R1CSCycleInputs(F),
+            raw_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
             tau_stage2: []const F,
         ) !?UniSkipFirstRoundProof(F) {
             const univariate_skip = r1cs.univariate_skip;
@@ -4604,25 +4643,17 @@ pub fn JoltProver(comptime F: type) type {
             // Compute extended evaluations from cycle witnesses using the 5 product constraints
             // Extended points {-3, 3, -4, 4} require the fused products computed from witness data
             const extended_evals: [DEGREE]F = blk: {
-                if (cycle_witnesses.len == 0) {
-                    // No witnesses - use zeros
+                if (raw_inputs.len == 0) {
                     break :blk [_]F{F.zero()} ** DEGREE;
                 }
 
-                // Extract the 8 product factors from each cycle witness
-                const cycle_factors = try self.allocator.alloc([8]F, cycle_witnesses.len);
-                defer self.allocator.free(cycle_factors);
-
-                for (cycle_witnesses, 0..) |witness, idx| {
-                    cycle_factors[idx] = extractProductFactors(F, &witness, cycle_witnesses, idx);
-                }
-
-                // Compute extended evaluations using the precomputed Lagrange coefficients
+                // Compute extended evaluations using GruenSplitEq + RawR1CSInputs integer arithmetic
                 break :blk try univariate_skip.computeProductVirtualExtendedEvals(
                     F,
-                    cycle_factors,
+                    raw_inputs,
                     tau_stage2,
                     self.allocator,
+                    self.thread_pool,
                 );
             };
 

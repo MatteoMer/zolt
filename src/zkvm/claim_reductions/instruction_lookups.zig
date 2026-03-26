@@ -6,7 +6,9 @@
 //! The sumcheck proves:
 //! Σ_j eq(r_spartan, j) * (LookupOutput(j) + γ*LeftOp(j) + γ²*RightOp(j) + γ³*LeftInstr(j) + γ⁴*RightInstr(j)) = input_claim
 //!
-//! This is a degree-2 sumcheck with log_T rounds.
+//! Uses the prefix-suffix P/Q trick from ePrint 2025/611 Appendix A:
+//! Split cycle index j = (j_lo, j_hi), work with sqrt(T)-sized buffers in Phase 1,
+//! then materialize suffix-sized arrays in Phase 2.
 
 const std = @import("std");
 
@@ -18,6 +20,8 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const EqPolynomial = @import("../../poly/mod.zig").EqPolynomial;
+const R1CSInputIndex = @import("../r1cs/constraints.zig").R1CSInputIndex;
 
 /// Parameters for instruction lookups claim reduction
 pub fn InstructionLookupsParams(comptime F: type) type {
@@ -32,7 +36,7 @@ pub fn InstructionLookupsParams(comptime F: type) type {
         gamma_cub: F,
         /// Gamma to the fourth (γ⁴)
         gamma_quart: F,
-        /// Challenges from SpartanOuter (r_spartan)
+        /// Challenges from SpartanOuter (r_spartan), BIG ENDIAN
         r_spartan: []const F,
         /// Number of cycle variables (log_T)
         n_cycle_vars: usize,
@@ -70,7 +74,32 @@ pub fn InstructionLookupsParams(comptime F: type) type {
     };
 }
 
-/// Instruction Lookups Claim Reduction Prover
+/// Witness field indices for the 5 lookup signals
+const WitnessField = enum(usize) {
+    LookupOutput = 0,
+    LeftLookupOperand = 1,
+    RightLookupOperand = 2,
+    LeftInstructionInput = 3,
+    RightInstructionInput = 4,
+
+    fn r1csIndex(self: WitnessField) usize {
+        return switch (self) {
+            .LookupOutput => R1CSInputIndex.LookupOutput.toIndex(),
+            .LeftLookupOperand => R1CSInputIndex.LeftLookupOperand.toIndex(),
+            .RightLookupOperand => R1CSInputIndex.RightLookupOperand.toIndex(),
+            .LeftInstructionInput => R1CSInputIndex.LeftInstructionInput.toIndex(),
+            .RightInstructionInput => R1CSInputIndex.RightInstructionInput.toIndex(),
+        };
+    }
+};
+const NUM_WITNESS_FIELDS = 5;
+
+/// R1CS cycle inputs type (generic over field)
+fn R1CSCycleInputs(comptime F: type) type {
+    return @import("../r1cs/constraints.zig").R1CSCycleInputs(F);
+}
+
+/// Instruction Lookups Claim Reduction Prover with P/Q prefix-suffix optimization
 pub fn InstructionLookupsProver(comptime F: type) type {
     return struct {
         const Self = @This();
@@ -81,139 +110,254 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         current_claim: F,
         /// Current round
         round: usize,
-        /// Eq polynomial evaluations (eq(r_spartan, j) for each j)
-        eq_evals: []F,
-        /// Lookup output values per cycle
-        lookup_outputs: []F,
-        /// Left operand values per cycle
-        left_operands: []F,
-        /// Right operand values per cycle
-        right_operands: []F,
-        /// Left instruction input values per cycle
-        left_instr_inputs: []F,
-        /// Right instruction input values per cycle
-        right_instr_inputs: []F,
-        /// Bound challenges
+        /// Phase state
+        phase: Phase,
+        /// Bound challenges (collected for Phase 2 transition)
         challenges: std.ArrayListUnmanaged(F),
         /// Allocator
         allocator: Allocator,
+        /// Thread pool for parallelism
         thread_pool: ?*ThreadPool = null,
-        /// Original allocation size (for proper deallocation after slicing)
-        original_size: usize,
+
+        const Phase = union(enum) {
+            phase1: Phase1State,
+            phase2: Phase2State,
+        };
+
+        const Phase1State = struct {
+            /// P[j_lo] = eq(r_lo, j_lo) — prefix eq evals, shrinks each round
+            P: []F,
+            /// Q[j_lo] = Σ_{j_hi} eq_hi[j_hi] * combined(j_lo + j_hi * prefix_size)
+            Q: []F,
+            /// Number of prefix variables (low bits of cycle index)
+            prefix_n_vars: usize,
+            /// Number of suffix variables (high bits of cycle index)
+            suffix_n_vars: usize,
+            /// Original prefix size (2^prefix_n_vars) for phase2 materialization
+            original_prefix_size: usize,
+            /// Reference to trace data for Phase 2 materialization
+            cycle_witnesses: []const R1CSCycleInputs(F),
+            /// Original P allocation size for dealloc
+            original_P_size: usize,
+            /// Original Q allocation size for dealloc
+            original_Q_size: usize,
+        };
+
+        const Phase2State = struct {
+            /// eq(suffix) evals
+            eq_evals: []F,
+            /// 5 witness polynomial arrays
+            lookup_outputs: []F,
+            left_operands: []F,
+            right_operands: []F,
+            left_instr_inputs: []F,
+            right_instr_inputs: []F,
+            /// Original allocation size for dealloc
+            original_size: usize,
+        };
 
         pub fn init(
             allocator: Allocator,
             params: InstructionLookupsParams(F),
             initial_claim: F,
-            lookup_outputs: []const F,
-            left_operands: []const F,
-            right_operands: []const F,
-            left_instr_inputs: []const F,
-            right_instr_inputs: []const F,
+            cycle_witnesses: []const R1CSCycleInputs(F),
+            thread_pool: ?*ThreadPool,
         ) !Self {
-            const T = @as(usize, 1) << @intCast(params.n_cycle_vars);
+            const n = params.n_cycle_vars;
+            const prefix_n_vars = n / 2;
+            const suffix_n_vars = n - prefix_n_vars;
+            const prefix_size = @as(usize, 1) << @intCast(prefix_n_vars);
+            const suffix_size = @as(usize, 1) << @intCast(suffix_n_vars);
 
-            // Copy witness data (padded if necessary)
-            const lo = try allocator.alloc(F, T);
-            const left = try allocator.alloc(F, T);
-            const right = try allocator.alloc(F, T);
-            const left_ii = try allocator.alloc(F, T);
-            const right_ii = try allocator.alloc(F, T);
+            // r_spartan is BIG ENDIAN: first suffix_n_vars elements are high bits,
+            // remaining prefix_n_vars elements are low bits
+            const r_hi = params.r_spartan[0..suffix_n_vars]; // suffix (high bits)
+            const r_lo = params.r_spartan[suffix_n_vars..]; // prefix (low bits)
 
-            @memset(lo, F.zero());
-            @memset(left, F.zero());
-            @memset(right, F.zero());
-            @memset(left_ii, F.zero());
-            @memset(right_ii, F.zero());
+            // Build P = eq(r_lo, ·) — size prefix_size, O(prefix_size) work
+            const P = try allocator.alloc(F, prefix_size);
+            EqPolynomial(F).buildEqTableInPlace(r_lo, P, null);
 
-            const copy_len = @min(lookup_outputs.len, T);
-            if (copy_len > 0) {
-                @memcpy(lo[0..copy_len], lookup_outputs[0..copy_len]);
-                @memcpy(left[0..copy_len], left_operands[0..copy_len]);
-                @memcpy(right[0..copy_len], right_operands[0..copy_len]);
-                @memcpy(left_ii[0..copy_len], left_instr_inputs[0..@min(left_instr_inputs.len, T)]);
-                @memcpy(right_ii[0..copy_len], right_instr_inputs[0..@min(right_instr_inputs.len, T)]);
+            // Build eq_hi = eq(r_hi, ·) — size suffix_size, O(suffix_size) work
+            const eq_hi = try allocator.alloc(F, suffix_size);
+            defer allocator.free(eq_hi);
+            EqPolynomial(F).buildEqTableInPlace(r_hi, eq_hi, null);
+
+            // Build Q via blocked accumulation
+            // Q[x_lo] = Σ_{x_hi} eq_hi[x_hi] * combined(x_lo + x_hi * prefix_size)
+            const Q = try allocator.alloc(F, prefix_size);
+            const trace_len = cycle_witnesses.len;
+            const padded_T = @as(usize, 1) << @intCast(n);
+
+            const QCtx = struct {
+                Q_buf: []F,
+                eq_hi_buf: []const F,
+                witnesses: []const R1CSCycleInputs(F),
+                gamma: F,
+                gamma_sqr: F,
+                gamma_cub: F,
+                gamma_quart: F,
+                p_size: usize,
+                s_size: usize,
+                t_len: usize,
+                padded: usize,
+            };
+            const qctx = QCtx{
+                .Q_buf = Q,
+                .eq_hi_buf = eq_hi,
+                .witnesses = cycle_witnesses,
+                .gamma = params.gamma,
+                .gamma_sqr = params.gamma_sqr,
+                .gamma_cub = params.gamma_cub,
+                .gamma_quart = params.gamma_quart,
+                .p_size = prefix_size,
+                .s_size = suffix_size,
+                .t_len = trace_len,
+                .padded = padded_T,
+            };
+
+            const buildQFn = struct {
+                fn f(c: QCtx, block_idx: usize) void {
+                    // Each block handles one x_lo position
+                    const x_lo = block_idx;
+                    var acc_lo = F.zero();
+                    var acc_left = F.zero();
+                    var acc_right = F.zero();
+                    var acc_li = F.zero();
+                    var acc_ri = F.zero();
+
+                    for (0..c.s_size) |x_hi| {
+                        const j = x_lo + x_hi * c.p_size;
+                        if (j >= c.padded) break;
+                        const e = c.eq_hi_buf[x_hi];
+                        if (j < c.t_len) {
+                            const w = &c.witnesses[j].values;
+                            acc_lo = acc_lo.add(e.mul(w[R1CSInputIndex.LookupOutput.toIndex()]));
+                            acc_left = acc_left.add(e.mul(w[R1CSInputIndex.LeftLookupOperand.toIndex()]));
+                            acc_right = acc_right.add(e.mul(w[R1CSInputIndex.RightLookupOperand.toIndex()]));
+                            acc_li = acc_li.add(e.mul(w[R1CSInputIndex.LeftInstructionInput.toIndex()]));
+                            acc_ri = acc_ri.add(e.mul(w[R1CSInputIndex.RightInstructionInput.toIndex()]));
+                        }
+                        // else: padded cycle, all witness values are 0, contributes nothing
+                    }
+
+                    // Combine: LookupOutput + γ*Left + γ²*Right + γ³*LeftInstr + γ⁴*RightInstr
+                    c.Q_buf[x_lo] = acc_lo
+                        .add(c.gamma.mul(acc_left))
+                        .add(c.gamma_sqr.mul(acc_right))
+                        .add(c.gamma_cub.mul(acc_li))
+                        .add(c.gamma_quart.mul(acc_ri));
+                }
+            }.f;
+
+            if (thread_pool) |tp| {
+                tp.parallelForForce(prefix_size, qctx, buildQFn);
+            } else {
+                for (0..prefix_size) |x_lo| buildQFn(qctx, x_lo);
             }
-
-            // Compute eq(r_spartan, j) for each cycle j
-            const eq_evals = try allocator.alloc(F, T);
-            for (0..T) |j| {
-                eq_evals[j] = computeEq(F, params.r_spartan, j);
-            }
-
-            // Debug: print initial sums before any binding (this is MLE at r_spartan)
-            var init_left_sum = F.zero();
-            var init_right_sum = F.zero();
-            var init_output_sum = F.zero();
-            for (0..T) |j| {
-                init_left_sum = init_left_sum.add(eq_evals[j].mul(left[j]));
-                init_right_sum = init_right_sum.add(eq_evals[j].mul(right[j]));
-                init_output_sum = init_output_sum.add(eq_evals[j].mul(lo[j]));
-            }
-            dbg("[INSTR_LOOKUPS INIT] MLE at r_spartan (before sumcheck):\n", .{});
-            dbg("  init_output_sum = {x}\n", .{init_output_sum.toBytesBE()[16..32].*});
-            dbg("  init_left_sum = {x}\n", .{init_left_sum.toBytesBE()[16..32].*});
-            dbg("  init_right_sum = {x}\n", .{init_right_sum.toBytesBE()[16..32].*});
-            dbg("  r_spartan[0] = {x}\n", .{params.r_spartan[0].toBytesBE()[16..32].*});
-            dbg("  Stage2 eq_evals[0..3]: {x}, {x}, {x}\n", .{
-                eq_evals[0].toBytesBE()[16..32].*,
-                eq_evals[1].toBytesBE()[16..32].*,
-                eq_evals[2].toBytesBE()[16..32].*,
-            });
-
-            const challenges_list = std.ArrayListUnmanaged(F){};
 
             return Self{
                 .params = params,
                 .current_claim = initial_claim,
                 .round = 0,
-                .eq_evals = eq_evals,
-                .lookup_outputs = lo,
-                .left_operands = left,
-                .right_operands = right,
-                .left_instr_inputs = left_ii,
-                .right_instr_inputs = right_ii,
-                .challenges = challenges_list,
+                .phase = .{ .phase1 = .{
+                    .P = P,
+                    .Q = Q,
+                    .prefix_n_vars = prefix_n_vars,
+                    .suffix_n_vars = suffix_n_vars,
+                    .original_prefix_size = prefix_size,
+                    .cycle_witnesses = cycle_witnesses,
+                    .original_P_size = prefix_size,
+                    .original_Q_size = prefix_size,
+                } },
+                .challenges = std.ArrayListUnmanaged(F){},
                 .allocator = allocator,
-                .original_size = T,
+                .thread_pool = thread_pool,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            // Restore original slice lengths for proper deallocation
-            // (bindChallenge may have shrunk them)
-            self.allocator.free(self.eq_evals.ptr[0..self.original_size]);
-            self.allocator.free(self.lookup_outputs.ptr[0..self.original_size]);
-            self.allocator.free(self.left_operands.ptr[0..self.original_size]);
-            self.allocator.free(self.right_operands.ptr[0..self.original_size]);
-            self.allocator.free(self.left_instr_inputs.ptr[0..self.original_size]);
-            self.allocator.free(self.right_instr_inputs.ptr[0..self.original_size]);
+            switch (self.phase) {
+                .phase1 => |s| {
+                    self.allocator.free(s.P.ptr[0..s.original_P_size]);
+                    self.allocator.free(s.Q.ptr[0..s.original_Q_size]);
+                },
+                .phase2 => |s| {
+                    self.allocator.free(s.eq_evals.ptr[0..s.original_size]);
+                    self.allocator.free(s.lookup_outputs.ptr[0..s.original_size]);
+                    self.allocator.free(s.left_operands.ptr[0..s.original_size]);
+                    self.allocator.free(s.right_operands.ptr[0..s.original_size]);
+                    self.allocator.free(s.left_instr_inputs.ptr[0..s.original_size]);
+                    self.allocator.free(s.right_instr_inputs.ptr[0..s.original_size]);
+                },
+            }
             self.challenges.deinit(self.allocator);
             self.params.deinit();
         }
 
         /// Compute round polynomial [s(0), s(1), s(2), s(3)] for batched cubic sumcheck
-        /// Note: This is actually degree-2, but we pad to degree-3 for batching
-        /// Uses LowToHigh binding order: pairs (2j, 2j+1) to bind LSB first
+        /// Degree-2 sumcheck padded to degree-3 for batching compatibility
         pub fn computeRoundPolynomialCubic(self: *Self) [4]F {
-            const current_len = self.eq_evals.len;
-            const half = current_len / 2;
-
-            const ILCtx = struct {
-                eq: []const F, lo: []const F, left: []const F, right: []const F,
-                li: []const F, ri: []const F,
-                gamma: F, gamma_sqr: F, gamma_cub: F, gamma_quart: F,
+            return switch (self.phase) {
+                .phase1 => |s| self.computePhase1(s),
+                .phase2 => |s| self.computePhase2(s),
             };
-            const ctx = ILCtx{
-                .eq = self.eq_evals, .lo = self.lookup_outputs,
-                .left = self.left_operands, .right = self.right_operands,
-                .li = self.left_instr_inputs, .ri = self.right_instr_inputs,
-                .gamma = self.params.gamma, .gamma_sqr = self.params.gamma_sqr,
-                .gamma_cub = self.params.gamma_cub, .gamma_quart = self.params.gamma_quart,
+        }
+
+        fn computePhase1(self: *Self, s: Phase1State) [4]F {
+            // Inner product of P and Q — only prefix_size/2 pairs (tiny: ~256 for n=19)
+            const half = s.P.len / 2;
+            var s0 = F.zero();
+            var s2 = F.zero();
+
+            for (0..half) |idx| {
+                const p_lo = s.P[2 * idx];
+                const p_hi = s.P[2 * idx + 1];
+                const q_lo = s.Q[2 * idx];
+                const q_hi = s.Q[2 * idx + 1];
+
+                s0 = s0.add(p_lo.mul(q_lo));
+
+                const p_2 = p_hi.add(p_hi).sub(p_lo);
+                const q_2 = q_hi.add(q_hi).sub(q_lo);
+                s2 = s2.add(p_2.mul(q_2));
+            }
+
+            const s1 = self.current_claim.sub(s0);
+            const s3 = s0.sub(s1.mul(F.fromU64(3))).add(s2.mul(F.fromU64(3)));
+            return [4]F{ s0, s1, s2, s3 };
+        }
+
+        fn computePhase2(self: *Self, s: Phase2State) [4]F {
+            const half = s.eq_evals.len / 2;
+
+            const P2Ctx = struct {
+                eq: []const F,
+                lo: []const F,
+                left: []const F,
+                right: []const F,
+                li: []const F,
+                ri: []const F,
+                gamma: F,
+                gamma_sqr: F,
+                gamma_cub: F,
+                gamma_quart: F,
+            };
+            const ctx = P2Ctx{
+                .eq = s.eq_evals,
+                .lo = s.lookup_outputs,
+                .left = s.left_operands,
+                .right = s.right_operands,
+                .li = s.left_instr_inputs,
+                .ri = s.right_instr_inputs,
+                .gamma = self.params.gamma,
+                .gamma_sqr = self.params.gamma_sqr,
+                .gamma_cub = self.params.gamma_cub,
+                .gamma_quart = self.params.gamma_quart,
             };
 
             const mapFn = struct {
-                fn f(c: ILCtx, start: usize, end: usize) [2]F {
+                fn f(c: P2Ctx, start: usize, end: usize) [2]F {
                     var local_s0 = F.zero();
                     var local_s2 = F.zero();
                     for (start..end) |idx| {
@@ -257,48 +401,188 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         }
 
         /// Bind a challenge after round polynomial computation
-        /// Uses LowToHigh binding order: fold pairs (2i, 2i+1) into position i
         pub fn bindChallenge(self: *Self, challenge: F) !void {
             try self.challenges.append(self.allocator, challenge);
 
-            const current_len = self.eq_evals.len;
-            const half = current_len / 2;
-
-            // Bind 6 independent arrays in parallel
-            const ILBindCtx = struct {
-                slices: [6][]F,
-                r: F,
-                n: usize,
-            };
-            const bctx = ILBindCtx{
-                .slices = .{
-                    self.eq_evals, self.lookup_outputs, self.left_operands,
-                    self.right_operands, self.left_instr_inputs, self.right_instr_inputs,
-                },
-                .r = challenge,
-                .n = half,
-            };
-            const bindOneFn = struct {
-                fn f(c: ILBindCtx, idx: usize) void {
-                    const arr = c.slices[idx];
-                    for (0..c.n) |i| {
-                        arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+            switch (self.phase) {
+                .phase1 => |*s| {
+                    // Check if we should transition to Phase 2
+                    // Transition when P.len == 2 (one round left in prefix)
+                    if (s.P.len == 2) {
+                        try self.transitionToPhase2(challenge, s.*);
+                        return;
                     }
+                    // Bind P and Q (tiny arrays)
+                    const half = s.P.len / 2;
+                    bindLow(F, s.P, challenge);
+                    bindLow(F, s.Q, challenge);
+                    s.P = s.P[0..half];
+                    s.Q = s.Q[0..half];
+                },
+                .phase2 => |*s| {
+                    const half = s.eq_evals.len / 2;
+                    // Bind 6 arrays
+                    const ILBindCtx = struct {
+                        slices: [6][]F,
+                        r: F,
+                        n: usize,
+                    };
+                    const bctx = ILBindCtx{
+                        .slices = .{
+                            s.eq_evals, s.lookup_outputs, s.left_operands,
+                            s.right_operands, s.left_instr_inputs, s.right_instr_inputs,
+                        },
+                        .r = challenge,
+                        .n = half,
+                    };
+                    const bindOneFn = struct {
+                        fn f(c: ILBindCtx, idx: usize) void {
+                            const arr = c.slices[idx];
+                            for (0..c.n) |i| {
+                                arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                            }
+                        }
+                    }.f;
+
+                    if (self.thread_pool) |tp| {
+                        tp.parallelForForce(6, bctx, bindOneFn);
+                    } else {
+                        for (0..6) |idx| bindOneFn(bctx, idx);
+                    }
+
+                    s.eq_evals = s.eq_evals[0..half];
+                    s.lookup_outputs = s.lookup_outputs[0..half];
+                    s.left_operands = s.left_operands[0..half];
+                    s.right_operands = s.right_operands[0..half];
+                    s.left_instr_inputs = s.left_instr_inputs[0..half];
+                    s.right_instr_inputs = s.right_instr_inputs[0..half];
+                },
+            }
+
+            self.round += 1;
+        }
+
+        /// Transition from Phase 1 to Phase 2
+        /// Called when P.len == 2 with the final prefix challenge
+        fn transitionToPhase2(self: *Self, _: F, s1: Phase1State) !void {
+            const prefix_n_vars = s1.prefix_n_vars;
+            const suffix_n_vars = s1.suffix_n_vars;
+            const prefix_size = s1.original_prefix_size;
+            const suffix_size = @as(usize, 1) << @intCast(suffix_n_vars);
+
+            // Build eq_prefix from collected challenges (LE order from sumcheck)
+            // Convert to BE by reversing, then build eq table
+            const n_phase1_challenges = self.challenges.items.len; // includes final_challenge just appended
+            const eq_prefix_challenges = try self.allocator.alloc(F, n_phase1_challenges);
+            defer self.allocator.free(eq_prefix_challenges);
+            // Reverse for LE→BE conversion
+            for (0..n_phase1_challenges) |i| {
+                eq_prefix_challenges[i] = self.challenges.items[n_phase1_challenges - 1 - i];
+            }
+
+            // Build eq_prefix table
+            const eq_prefix = try self.allocator.alloc(F, prefix_size);
+            defer self.allocator.free(eq_prefix);
+            EqPolynomial(F).buildEqTableInPlace(eq_prefix_challenges, eq_prefix, null);
+
+            // Compute eq_prefix_at_r_lo = eq(collected_challenges_BE, r_lo)
+            // where r_lo = r_spartan[suffix_n_vars..]
+            const r_lo = self.params.r_spartan[suffix_n_vars..];
+            var eq_prefix_at_r_lo = F.one();
+            for (0..prefix_n_vars) |i| {
+                const xi = eq_prefix_challenges[i];
+                const ri = r_lo[i];
+                const xi_ri = xi.mul(ri);
+                const one_minus_xi = F.one().sub(xi);
+                const one_minus_ri = F.one().sub(ri);
+                eq_prefix_at_r_lo = eq_prefix_at_r_lo.mul(xi_ri.add(one_minus_xi.mul(one_minus_ri)));
+            }
+
+            // Build eq_suffix = eq(r_hi, ·) scaled by eq_prefix_at_r_lo
+            const r_hi = self.params.r_spartan[0..suffix_n_vars];
+            const eq_suffix = try self.allocator.alloc(F, suffix_size);
+            EqPolynomial(F).buildEqTableInPlace(r_hi, eq_suffix, eq_prefix_at_r_lo);
+
+            // Materialize 5 witness polynomials of size suffix_size
+            // w[j_hi] = Σ_{j_lo} eq_prefix[j_lo] * witness_field(j_lo + j_hi * prefix_size)
+            const lo_poly = try self.allocator.alloc(F, suffix_size);
+            const left_poly = try self.allocator.alloc(F, suffix_size);
+            const right_poly = try self.allocator.alloc(F, suffix_size);
+            const li_poly = try self.allocator.alloc(F, suffix_size);
+            const ri_poly = try self.allocator.alloc(F, suffix_size);
+
+            const MatCtx = struct {
+                eq_pref: []const F,
+                witnesses: []const R1CSCycleInputs(F),
+                p_size: usize,
+                t_len: usize,
+                lo_buf: []F,
+                left_buf: []F,
+                right_buf: []F,
+                li_buf: []F,
+                ri_buf: []F,
+            };
+            const mctx = MatCtx{
+                .eq_pref = eq_prefix,
+                .witnesses = s1.cycle_witnesses,
+                .p_size = prefix_size,
+                .t_len = s1.cycle_witnesses.len,
+                .lo_buf = lo_poly,
+                .left_buf = left_poly,
+                .right_buf = right_poly,
+                .li_buf = li_poly,
+                .ri_buf = ri_poly,
+            };
+
+            const materializeFn = struct {
+                fn f(c: MatCtx, j_hi: usize) void {
+                    var sum_lo = F.zero();
+                    var sum_left = F.zero();
+                    var sum_right = F.zero();
+                    var sum_li = F.zero();
+                    var sum_ri = F.zero();
+
+                    for (0..c.p_size) |j_lo| {
+                        const j = j_lo + j_hi * c.p_size;
+                        const eq_val = c.eq_pref[j_lo];
+                        if (j < c.t_len) {
+                            const w = &c.witnesses[j].values;
+                            sum_lo = sum_lo.add(eq_val.mul(w[R1CSInputIndex.LookupOutput.toIndex()]));
+                            sum_left = sum_left.add(eq_val.mul(w[R1CSInputIndex.LeftLookupOperand.toIndex()]));
+                            sum_right = sum_right.add(eq_val.mul(w[R1CSInputIndex.RightLookupOperand.toIndex()]));
+                            sum_li = sum_li.add(eq_val.mul(w[R1CSInputIndex.LeftInstructionInput.toIndex()]));
+                            sum_ri = sum_ri.add(eq_val.mul(w[R1CSInputIndex.RightInstructionInput.toIndex()]));
+                        }
+                    }
+
+                    c.lo_buf[j_hi] = sum_lo;
+                    c.left_buf[j_hi] = sum_left;
+                    c.right_buf[j_hi] = sum_right;
+                    c.li_buf[j_hi] = sum_li;
+                    c.ri_buf[j_hi] = sum_ri;
                 }
             }.f;
 
             if (self.thread_pool) |tp| {
-                tp.parallelForForce(6, bctx, bindOneFn);
+                tp.parallelForForce(suffix_size, mctx, materializeFn);
             } else {
-                for (0..6) |idx| bindOneFn(bctx, idx);
+                for (0..suffix_size) |j_hi| materializeFn(mctx, j_hi);
             }
 
-            self.eq_evals = self.eq_evals[0..half];
-            self.lookup_outputs = self.lookup_outputs[0..half];
-            self.left_operands = self.left_operands[0..half];
-            self.right_operands = self.right_operands[0..half];
-            self.left_instr_inputs = self.left_instr_inputs[0..half];
-            self.right_instr_inputs = self.right_instr_inputs[0..half];
+            // Free Phase 1 state
+            self.allocator.free(s1.P.ptr[0..s1.original_P_size]);
+            self.allocator.free(s1.Q.ptr[0..s1.original_Q_size]);
+
+            // Set Phase 2
+            self.phase = .{ .phase2 = .{
+                .eq_evals = eq_suffix,
+                .lookup_outputs = lo_poly,
+                .left_operands = left_poly,
+                .right_operands = right_poly,
+                .left_instr_inputs = li_poly,
+                .right_instr_inputs = ri_poly,
+                .original_size = suffix_size,
+            } };
 
             self.round += 1;
         }
@@ -334,12 +618,16 @@ pub fn InstructionLookupsProver(comptime F: type) type {
 
         /// Get the individual opening claims after all rounds are complete
         pub fn getOpeningClaims(self: *const Self) struct { lookup_output: F, left_operand: F, right_operand: F, left_instr_input: F, right_instr_input: F } {
-            // After all rounds, the arrays have been folded down to length 1
-            const lookup_output = if (self.lookup_outputs.len > 0) self.lookup_outputs[0] else F.zero();
-            const left_operand = if (self.left_operands.len > 0) self.left_operands[0] else F.zero();
-            const right_operand = if (self.right_operands.len > 0) self.right_operands[0] else F.zero();
-            const left_instr_input = if (self.left_instr_inputs.len > 0) self.left_instr_inputs[0] else F.zero();
-            const right_instr_input = if (self.right_instr_inputs.len > 0) self.right_instr_inputs[0] else F.zero();
+            const s = switch (self.phase) {
+                .phase2 => |s| s,
+                .phase1 => unreachable, // should always finish in phase2
+            };
+
+            const lookup_output = if (s.lookup_outputs.len > 0) s.lookup_outputs[0] else F.zero();
+            const left_operand = if (s.left_operands.len > 0) s.left_operands[0] else F.zero();
+            const right_operand = if (s.right_operands.len > 0) s.right_operands[0] else F.zero();
+            const left_instr_input = if (s.left_instr_inputs.len > 0) s.left_instr_inputs[0] else F.zero();
+            const right_instr_input = if (s.right_instr_inputs.len > 0) s.right_instr_inputs[0] else F.zero();
 
             dbg("[INSTR_LOOKUPS FINAL] After {} rounds of binding:\n", .{self.challenges.items.len});
             dbg("  lookup_output = {x}\n", .{lookup_output.toBytesBE()[16..32].*});
@@ -359,53 +647,45 @@ pub fn InstructionLookupsProver(comptime F: type) type {
     };
 }
 
-/// Compute eq(r, x) for a binary index x using BIG ENDIAN indexing
-/// r[0] corresponds to MSB of x, r[n-1] corresponds to LSB
-fn computeEq(comptime F: type, r: []const F, x: usize) F {
-    var result = F.one();
-    const n = r.len;
-    for (r, 0..) |ri, i| {
-        // BIG ENDIAN: r[0] is MSB, r[n-1] is LSB
-        const xi: u1 = @truncate(x >> @intCast(n - 1 - i));
-        if (xi == 1) {
-            result = result.mul(ri);
-        } else {
-            result = result.mul(F.one().sub(ri));
-        }
+/// Bind low (LowToHigh): fold pairs (2i, 2i+1) into position i
+fn bindLow(comptime F: type, arr: []F, r: F) void {
+    const half = arr.len / 2;
+    for (0..half) |i| {
+        arr[i] = arr[2 * i].add(r.mul(arr[2 * i + 1].sub(arr[2 * i])));
     }
-    return result;
 }
 
 test "instruction lookups prover initialization" {
     const allocator = std.testing.allocator;
     const field = @import("../../field/mod.zig");
     const F = field.BN254Scalar;
+    const constraints = @import("../r1cs/constraints.zig");
+    const CycleInputs = constraints.R1CSCycleInputs(F);
 
-    const r_spartan = [_]F{ F.fromU64(1), F.fromU64(2), F.fromU64(3) };
-    var params = try InstructionLookupsParams(F).init(
+    const r_spartan = [_]F{ F.fromU64(1), F.fromU64(2), F.fromU64(3), F.fromU64(4) };
+    const params = try InstructionLookupsParams(F).init(
         allocator,
         F.fromU64(12345), // gamma
         &r_spartan,
-        3, // n_cycle_vars (8 cycles)
+        4, // n_cycle_vars (16 cycles)
     );
-    defer params.deinit();
 
-    const lookup_outputs = [_]F{ F.fromU64(1), F.fromU64(2), F.fromU64(3), F.fromU64(4) };
-    const left_operands = [_]F{ F.fromU64(10), F.fromU64(20), F.fromU64(30), F.fromU64(40) };
-    const right_operands = [_]F{ F.fromU64(100), F.fromU64(200), F.fromU64(300), F.fromU64(400) };
-
-    const left_instr = [_]F{ F.fromU64(5), F.fromU64(15), F.fromU64(25), F.fromU64(35) };
-    const right_instr = [_]F{ F.fromU64(50), F.fromU64(150), F.fromU64(250), F.fromU64(350) };
+    // Create cycle witnesses
+    var witnesses: [4]CycleInputs = undefined;
+    for (&witnesses) |*w| {
+        w.* = CycleInputs.init();
+    }
+    witnesses[0].setInput(.LookupOutput, F.fromU64(1));
+    witnesses[1].setInput(.LookupOutput, F.fromU64(2));
+    witnesses[2].setInput(.LookupOutput, F.fromU64(3));
+    witnesses[3].setInput(.LookupOutput, F.fromU64(4));
 
     var prover = try InstructionLookupsProver(F).init(
         allocator,
         params,
         F.fromU64(1000), // initial_claim
-        &lookup_outputs,
-        &left_operands,
-        &right_operands,
-        &left_instr,
-        &right_instr,
+        &witnesses,
+        null, // no thread pool
     );
     defer prover.deinit();
 

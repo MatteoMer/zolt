@@ -721,7 +721,7 @@ pub fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
 }
 
 /// Decode J-type immediate (for JAL)
-fn decodeJTypeImmediate(instr: u32) i64 {
+pub fn decodeJTypeImmediate(instr: u32) i64 {
     // J-type immediate: imm[20|10:1|11|19:12] - bits 31, 30:21, 20, 19:12
     const imm20: u32 = (instr >> 31) & 0x1;
     const imm10_1: u32 = (instr >> 21) & 0x3FF;
@@ -736,7 +736,7 @@ fn decodeJTypeImmediate(instr: u32) i64 {
 }
 
 /// Decode I-type immediate (for JALR)
-fn decodeITypeImmediate(instr: u32) i64 {
+pub fn decodeITypeImmediate(instr: u32) i64 {
     // I-type immediate: imm[11:0] in bits 31:20
     const unsigned_imm: u32 = instr >> 20;
     // Sign extend from bit 11

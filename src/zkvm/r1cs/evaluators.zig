@@ -513,6 +513,18 @@ pub const CompactWitness = struct {
     bz_first: [FIRST_GROUP_SIZE]i128,
     /// Second-group Bz as S192 (signed 192-bit integer, exact arithmetic without wrapping)
     bz_second: [SECOND_GROUP_SIZE]field_mod.S192,
+
+    /// NoOp padding witness: Az reflects constraint conditions on zero flags
+    /// (not_load_store=1, not_add_sub_mul=1, etc.), Bz all zero.
+    pub fn noop() CompactWitness {
+        return .{
+            .az_first = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0 },
+            .az_second = .{ 0, 0, 0, 0, 1, 0, 0, 0, 1 },
+            ._pad = .{0} ** 5,
+            .bz_first = .{0} ** FIRST_GROUP_SIZE,
+            .bz_second = .{field_mod.S192.zero()} ** SECOND_GROUP_SIZE,
+        };
+    }
 };
 
 /// Raw integer R1CS inputs for typed-accumulator claims computation.
@@ -667,6 +679,9 @@ pub fn buildCompactAndRawWitnesses(
 }
 
 /// Convert a single cycle's field witness to compact integer form.
+pub fn compactFromFieldWitnessPublic(comptime F: type, witness: []const F) CompactWitness {
+    return compactFromFieldWitness(F, witness);
+}
 fn compactFromFieldWitness(comptime F: type, witness: []const F) CompactWitness {
     var cw: CompactWitness = undefined;
     cw._pad = .{0} ** 5;
@@ -814,8 +829,11 @@ fn compactFromFieldWitness(comptime F: type, witness: []const F) CompactWitness 
     return cw;
 }
 
+/// Extract raw integer R1CS inputs from field-form witness (public wrapper).
+pub fn rawFromFieldWitnessPublic(comptime F: type, witness: []const F) RawR1CSInputs {
+    return rawFromFieldWitness(F, witness);
+}
 /// Extract raw integer R1CS inputs from field-form witness.
-/// Reuses the same Montgomery de-encoding as compactFromFieldWitness.
 fn rawFromFieldWitness(comptime F: type, witness: []const F) RawR1CSInputs {
     const I = R1CSInputIndex;
     var raw: RawR1CSInputs = undefined;

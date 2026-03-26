@@ -43,6 +43,9 @@ pub const jolt_r1cs = @import("jolt_r1cs.zig");
 pub const JoltR1CS = jolt_r1cs.JoltR1CS;
 pub const JoltSpartanInterface = jolt_r1cs.JoltSpartanInterface;
 
+// Export direct trace → witness builder (bypasses Montgomery encoding)
+pub const trace_witness = @import("trace_witness.zig");
+
 // Export univariate skip optimization (Jolt compatibility)
 pub const univariate_skip = @import("univariate_skip.zig");
 pub const UniPoly = univariate_skip.UniPoly;

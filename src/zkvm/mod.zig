@@ -694,20 +694,20 @@ pub fn JoltProver(comptime F: type) type {
                 var register_values: [K_INC]u64 = [_]u64{0} ** K_INC;
                 const steps = emulator.trace.steps.items;
 
-                // Row buffers for i128 values (reused across rows, tiny vs eliminated full-size arrays)
-                const rd_buf = try self.allocator.alloc(i128, dense_num_cols);
-                defer self.allocator.free(rd_buf);
-                const ram_buf = try self.allocator.alloc(i128, dense_num_cols);
-                defer self.allocator.free(ram_buf);
+                // Pre-allocate ALL row buffers upfront so MSMs can be dispatched in parallel.
+                // Memory: active_rows * dense_num_cols * 16 bytes * 2 polys (e.g. 128*4096*16*2 = 16MB)
+                const all_rd_bufs = try self.allocator.alloc(i128, active_rows * dense_num_cols);
+                defer self.allocator.free(all_rd_bufs);
+                const all_ram_bufs = try self.allocator.alloc(i128, active_rows * dense_num_cols);
+                defer self.allocator.free(all_ram_bufs);
+                @memset(all_rd_bufs, 0);
+                @memset(all_ram_bufs, 0);
 
+                // Phase 1: Sequential buffer building (RdInc requires register_values tracking)
                 for (0..active_rows) |row| {
                     const row_start = row * dense_num_cols;
                     const row_end = @min(row_start + dense_num_cols, trace_length);
-                    const row_len = row_end - row_start;
-
-                    // Fill i128 buffers and F polys for this row
-                    @memset(rd_buf[0..row_len], 0);
-                    @memset(ram_buf[0..row_len], 0);
+                    const buf_off = row * dense_num_cols;
 
                     for (row_start..row_end) |i| {
                         const col = i - row_start;
@@ -719,7 +719,7 @@ pub fn JoltProver(comptime F: type) type {
                                 const pre_value = register_values[rd];
                                 const post_value = step.rd_value;
                                 const inc: i128 = @as(i128, post_value) - @as(i128, pre_value);
-                                rd_buf[col] = inc;
+                                all_rd_bufs[buf_off + col] = inc;
                                 rd_inc_poly[i] = if (inc >= 0)
                                     F.fromU64(@intCast(inc))
                                 else
@@ -731,7 +731,7 @@ pub fn JoltProver(comptime F: type) type {
                                 const pre_value: i128 = @intCast(step.memory_pre_value orelse 0);
                                 const post_value: i128 = @intCast(step.memory_value orelse 0);
                                 const inc = post_value - pre_value;
-                                ram_buf[col] = inc;
+                                all_ram_bufs[buf_off + col] = inc;
                                 ram_inc_poly[i] = if (inc >= 0)
                                     F.fromU64(@intCast(inc))
                                 else
@@ -739,17 +739,57 @@ pub fn JoltProver(comptime F: type) type {
                             }
                         }
                     }
+                }
 
-                    // Zero-pad if row is partial (row_len < dense_num_cols)
-                    if (row_len < dense_num_cols) {
-                        @memset(rd_buf[row_len..dense_num_cols], 0);
-                        @memset(ram_buf[row_len..dense_num_cols], 0);
+                // Phase 2: Dispatch all row MSMs in parallel
+                const g1_slice = dory_srs.g1_vec[0..dense_num_cols];
+                if (self.thread_pool) |tp| {
+                    const MsmRowCtx = struct {
+                        g1_bases: []const G1Point,
+                        rd_data: []const i128,
+                        ram_data: []const i128,
+                        rd_commits: []G1Point,
+                        ram_commits: []G1Point,
+                        cols: usize,
+                    };
+                    const msm_ctx = MsmRowCtx{
+                        .g1_bases = g1_slice,
+                        .rd_data = all_rd_bufs,
+                        .ram_data = all_ram_bufs,
+                        .rd_commits = rd_row_commits,
+                        .ram_commits = ram_row_commits,
+                        .cols = dense_num_cols,
+                    };
+                    tp.parallelForForce(active_rows, msm_ctx, struct {
+                        fn f(ctx: MsmRowCtx, row: usize) void {
+                            const off = row * ctx.cols;
+                            ctx.rd_commits[row] = msm.MSM(Fr, Fp).computeI128(
+                                ctx.g1_bases,
+                                ctx.rd_data[off .. off + ctx.cols],
+                                null,
+                            );
+                            ctx.ram_commits[row] = msm.MSM(Fr, Fp).computeI128(
+                                ctx.g1_bases,
+                                ctx.ram_data[off .. off + ctx.cols],
+                                null,
+                            );
+                        }
+                    }.f);
+                } else {
+                    // Sequential fallback (no thread pool)
+                    for (0..active_rows) |row| {
+                        const off = row * dense_num_cols;
+                        rd_row_commits[row] = msm.MSM(Fr, Fp).computeI128(
+                            g1_slice,
+                            all_rd_bufs[off .. off + dense_num_cols],
+                            null,
+                        );
+                        ram_row_commits[row] = msm.MSM(Fr, Fp).computeI128(
+                            g1_slice,
+                            all_ram_bufs[off .. off + dense_num_cols],
+                            null,
+                        );
                     }
-
-                    // MSM for this row
-                    const g1_slice = dory_srs.g1_vec[0..dense_num_cols];
-                    rd_row_commits[row] = msm.MSM(Fr, Fp).computeI128(g1_slice, rd_buf[0..dense_num_cols], null);
-                    ram_row_commits[row] = msm.MSM(Fr, Fp).computeI128(g1_slice, ram_buf[0..dense_num_cols], null);
                 }
 
                 // Zero-padded rows (beyond active data)

@@ -812,100 +812,66 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             return final_result.toAffine();
         }
 
-        /// Pippenger's bucket method with parallel window processing
+        /// Chunk-based parallel MSM: split input into num_threads chunks,
+        /// each chunk runs sequential Pippenger independently, results summed.
+        /// Better cache locality than per-window parallelism (chunk fits L2).
         fn pippengerMSMParallel(
             bases: []const Affine,
             scalars: []const F,
             tp: *ThreadPool,
         ) Affine {
-            const c = optimalWindowSize(bases.len);
-            const num_scalar_windows = (SCALAR_BITS + c - 1) / c;
-            const num_windows = num_scalar_windows + 1; // +1 for wNAF carry digit
-            const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2;
+            const n = bases.len;
+            const num_threads = tp.thread_count + 1; // workers + caller
 
-            // Pre-convert all scalars and compute wNAF digits
-            const heap_digits = std.heap.page_allocator.alloc([MAX_DIGITS]i32, scalars.len) catch
+            // For small inputs, chunks would be too small for Pippenger
+            if (n < num_threads * 256) {
                 return pippengerMSM(bases, scalars);
-            defer std.heap.page_allocator.free(heap_digits);
-
-            for (scalars, 0..) |s, i| {
-                heap_digits[i] = makeDigits(s.fromMontgomery().limbs, c, num_scalar_windows);
             }
 
-            // Allocate per-window buckets and window sums
-            const all_buckets = std.heap.page_allocator.alloc(Bucket, num_windows * num_buckets) catch
-                return pippengerMSM(bases, scalars);
-            defer std.heap.page_allocator.free(all_buckets);
+            const num_chunks = num_threads;
+            const chunk_size = (n + num_chunks - 1) / num_chunks;
 
-            const window_sums = std.heap.page_allocator.alloc(Projective, num_windows) catch
+            const chunk_results = std.heap.page_allocator.alloc(Affine, num_chunks) catch
                 return pippengerMSM(bases, scalars);
-            defer std.heap.page_allocator.free(window_sums);
+            defer std.heap.page_allocator.free(chunk_results);
 
-            // Phase 1: Process all windows in parallel
-            const ParCtx = struct {
-                all_digits: [][MAX_DIGITS]i32,
-                all_buckets: []Bucket,
-                window_sums: []Projective,
+            const ChunkCtx = struct {
                 bases: []const Affine,
-                num_buckets: usize,
+                scalars: []const F,
+                results: []Affine,
+                chunk_sz: usize,
+                total_n: usize,
             };
-            const ctx = ParCtx{
-                .all_digits = heap_digits,
-                .all_buckets = all_buckets,
-                .window_sums = window_sums,
+            const ctx = ChunkCtx{
                 .bases = bases,
-                .num_buckets = num_buckets,
+                .scalars = scalars,
+                .results = chunk_results,
+                .chunk_sz = chunk_size,
+                .total_n = n,
             };
 
-            tp.parallelForForce(num_windows, ctx, struct {
-                fn f(cx: ParCtx, win_idx: usize) void {
-                    const bucket_offset = win_idx * cx.num_buckets;
-                    const buckets = cx.all_buckets[bucket_offset .. bucket_offset + cx.num_buckets];
-
-                    // Init buckets
-                    for (0..cx.num_buckets) |j| {
-                        buckets[j] = Bucket.identity();
+            tp.parallelForForce(num_chunks, ctx, struct {
+                fn f(c: ChunkCtx, chunk_idx: usize) void {
+                    const start = chunk_idx * c.chunk_sz;
+                    const end = @min(start + c.chunk_sz, c.total_n);
+                    if (start >= c.total_n) {
+                        c.results[chunk_idx] = Affine.identity();
+                        return;
                     }
-
-                    // Accumulate bases into buckets
-                    for (cx.bases, 0..) |base, idx| {
-                        if (base.isIdentity()) continue;
-                        const digit = cx.all_digits[idx][win_idx];
-                        if (digit > 0) {
-                            const bidx: usize = @intCast(digit - 1);
-                            buckets[bidx] = buckets[bidx].addAffine(base);
-                        } else if (digit < 0) {
-                            const bidx: usize = @intCast(-digit - 1);
-                            buckets[bidx] = buckets[bidx].subAffine(base);
-                        }
-                    }
-
-                    // Running sum reduction
-                    var running_sum = Bucket.identity();
-                    var window_sum = Bucket.identity();
-                    var bucket_idx: usize = cx.num_buckets;
-                    while (bucket_idx > 0) {
-                        bucket_idx -= 1;
-                        running_sum = running_sum.add(buckets[bucket_idx]);
-                        window_sum = window_sum.add(running_sum);
-                    }
-
-                    cx.window_sums[win_idx] = window_sum.toProjective();
+                    c.results[chunk_idx] = pippengerMSM(
+                        c.bases[start..end],
+                        c.scalars[start..end],
+                    );
                 }
             }.f);
 
-            // Phase 2: Combine window sums sequentially (high to low)
-            var final_result = window_sums[num_windows - 1];
-            var window_idx: usize = num_windows - 1;
-            while (window_idx > 0) {
-                window_idx -= 1;
-                var k: usize = 0;
-                while (k < c) : (k += 1) {
-                    final_result = final_result.double();
+            // Sum chunk results (only num_threads point additions)
+            var final_result = Projective.identity();
+            for (chunk_results) |cr| {
+                if (!cr.isIdentity()) {
+                    final_result = final_result.addAffine(cr);
                 }
-                final_result = final_result.add(window_sums[window_idx]);
             }
-
             return final_result.toAffine();
         }
 
@@ -947,15 +913,14 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             return @as(usize, @intCast(value & mask));
         }
 
-        /// Choose optimal window size based on input size
-        /// Uses ln(n) + 2 heuristic (matching Jolt/arkworks)
+        /// Choose optimal window size based on input size.
+        /// Uses ln(n) + 2 heuristic (matching arkworks' formula).
+        /// Larger c = fewer windows (fewer passes over points) but more buckets (more memory).
         fn optimalWindowSize(n: usize) usize {
             if (n < 32) return 3;
-            if (n < 256) return 5;
-            if (n < 2048) return 6;
-            if (n < 16384) return 7;
-            if (n < 131072) return 8;
-            return 9;
+            const log2_n = @as(usize, std.math.log2_int(usize, n));
+            const c = (log2_n * 69 / 100) + 2;
+            return @max(3, @min(c, 20));
         }
 
         /// Naive O(n * 256) MSM (fallback for small inputs)
@@ -1100,13 +1065,22 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             return pippengerMsmI128(bases, scalars);
         }
 
-        /// Pippenger's bucket method MSM for i128 scalars
+        /// Pippenger's bucket method MSM for i128 scalars.
+        /// Detects actual scalar bit-width to reduce window count when scalars are small.
         fn pippengerMsmI128(
             bases: []const Affine,
             scalars: []const i128,
         ) Affine {
             const c = optimalWindowSize(bases.len);
-            const num_scalar_windows = (SCALAR_BITS_I128 + c - 1) / c;
+
+            // Detect effective scalar bit-width (O(n) scan, trivial vs MSM cost)
+            var max_abs: u128 = 0;
+            for (scalars) |s| {
+                const abs_val: u128 = if (s < 0) @intCast(-s) else @intCast(s);
+                max_abs |= abs_val;
+            }
+            const effective_bits: usize = if (max_abs == 0) 1 else @as(usize, std.math.log2_int(u128, max_abs)) + 1;
+            const num_scalar_windows = @min((effective_bits + c - 1) / c, (SCALAR_BITS_I128 + c - 1) / c);
             const num_windows = num_scalar_windows + 1;
             const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2;
 
@@ -1269,118 +1243,63 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             return final_result.toAffine();
         }
 
-        /// Parallel Pippenger's bucket method for i128 scalars
+        /// Chunk-based parallel MSM for i128 scalars: split input into
+        /// num_threads chunks, each runs sequential Pippenger, results summed.
         fn pippengerMsmI128Parallel(
             bases: []const Affine,
             scalars: []const i128,
             tp: *ThreadPool,
         ) Affine {
-            const c = optimalWindowSize(bases.len);
-            const num_scalar_windows = (SCALAR_BITS_I128 + c - 1) / c;
-            const num_windows = num_scalar_windows + 1;
-            const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2;
+            const n = bases.len;
+            const num_threads = tp.thread_count + 1;
 
-            // Pre-compute wNAF digits and sign flags
-            const heap_digits = std.heap.page_allocator.alloc([MAX_DIGITS_I128]i32, scalars.len) catch
+            if (n < num_threads * 256) {
                 return pippengerMsmI128(bases, scalars);
-            defer std.heap.page_allocator.free(heap_digits);
-
-            const heap_signs = std.heap.page_allocator.alloc(bool, scalars.len) catch
-                return pippengerMsmI128(bases, scalars);
-            defer std.heap.page_allocator.free(heap_signs);
-
-            for (scalars, 0..) |s, i| {
-                const is_neg = s < 0;
-                heap_signs[i] = is_neg;
-                const abs_val: u128 = if (is_neg) @intCast(-s) else @intCast(s);
-                const limbs: [2]u64 = .{
-                    @truncate(abs_val),
-                    @truncate(abs_val >> 64),
-                };
-                heap_digits[i] = makeDigitsI128(limbs, c, num_scalar_windows);
             }
 
-            // Allocate per-window buckets and window sums
-            const all_buckets = std.heap.page_allocator.alloc(Bucket, num_windows * num_buckets) catch
-                return pippengerMsmI128(bases, scalars);
-            defer std.heap.page_allocator.free(all_buckets);
+            const num_chunks = num_threads;
+            const chunk_size = (n + num_chunks - 1) / num_chunks;
 
-            const window_sums = std.heap.page_allocator.alloc(Projective, num_windows) catch
+            const chunk_results = std.heap.page_allocator.alloc(Affine, num_chunks) catch
                 return pippengerMsmI128(bases, scalars);
-            defer std.heap.page_allocator.free(window_sums);
+            defer std.heap.page_allocator.free(chunk_results);
 
-            // Phase 1: Process all windows in parallel
-            const ParCtx = struct {
-                all_digits: [][MAX_DIGITS_I128]i32,
-                all_negative: []bool,
-                all_buckets: []Bucket,
-                window_sums: []Projective,
+            const ChunkCtx = struct {
                 bases: []const Affine,
-                num_buckets: usize,
+                scalars: []const i128,
+                results: []Affine,
+                chunk_sz: usize,
+                total_n: usize,
             };
-            const ctx = ParCtx{
-                .all_digits = heap_digits,
-                .all_negative = heap_signs,
-                .all_buckets = all_buckets,
-                .window_sums = window_sums,
+            const ctx = ChunkCtx{
                 .bases = bases,
-                .num_buckets = num_buckets,
+                .scalars = scalars,
+                .results = chunk_results,
+                .chunk_sz = chunk_size,
+                .total_n = n,
             };
 
-            tp.parallelForForce(num_windows, ctx, struct {
-                fn f(cx: ParCtx, win_idx: usize) void {
-                    const bucket_offset = win_idx * cx.num_buckets;
-                    const buckets = cx.all_buckets[bucket_offset .. bucket_offset + cx.num_buckets];
-
-                    for (0..cx.num_buckets) |j| {
-                        buckets[j] = Bucket.identity();
+            tp.parallelForForce(num_chunks, ctx, struct {
+                fn f(c: ChunkCtx, chunk_idx: usize) void {
+                    const start = chunk_idx * c.chunk_sz;
+                    const end = @min(start + c.chunk_sz, c.total_n);
+                    if (start >= c.total_n) {
+                        c.results[chunk_idx] = Affine.identity();
+                        return;
                     }
-
-                    for (cx.bases, 0..) |base, idx| {
-                        if (base.isIdentity()) continue;
-                        const digit = cx.all_digits[idx][win_idx];
-                        if (digit > 0) {
-                            const bidx: usize = @intCast(digit - 1);
-                            if (cx.all_negative[idx]) {
-                                buckets[bidx] = buckets[bidx].subAffine(base);
-                            } else {
-                                buckets[bidx] = buckets[bidx].addAffine(base);
-                            }
-                        } else if (digit < 0) {
-                            const bidx: usize = @intCast(-digit - 1);
-                            if (cx.all_negative[idx]) {
-                                buckets[bidx] = buckets[bidx].addAffine(base);
-                            } else {
-                                buckets[bidx] = buckets[bidx].subAffine(base);
-                            }
-                        }
-                    }
-
-                    var running_sum = Bucket.identity();
-                    var window_sum = Bucket.identity();
-                    var bucket_idx: usize = cx.num_buckets;
-                    while (bucket_idx > 0) {
-                        bucket_idx -= 1;
-                        running_sum = running_sum.add(buckets[bucket_idx]);
-                        window_sum = window_sum.add(running_sum);
-                    }
-
-                    cx.window_sums[win_idx] = window_sum.toProjective();
+                    c.results[chunk_idx] = pippengerMsmI128(
+                        c.bases[start..end],
+                        c.scalars[start..end],
+                    );
                 }
             }.f);
 
-            // Phase 2: Combine window sums sequentially
-            var final_result = window_sums[num_windows - 1];
-            var window_idx: usize = num_windows - 1;
-            while (window_idx > 0) {
-                window_idx -= 1;
-                var k: usize = 0;
-                while (k < c) : (k += 1) {
-                    final_result = final_result.double();
+            var final_result = Projective.identity();
+            for (chunk_results) |cr| {
+                if (!cr.isIdentity()) {
+                    final_result = final_result.addAffine(cr);
                 }
-                final_result = final_result.add(window_sums[window_idx]);
             }
-
             return final_result.toAffine();
         }
     };
@@ -1673,12 +1592,13 @@ test "pippenger optimal window size" {
     const F = @import("../field/mod.zig").BN254Scalar;
     const SingleMSM = MSM(F, F);
 
-    // Window size should grow with input size
+    // Window size follows ln(n) + 2 formula (matching arkworks)
     try std.testing.expectEqual(@as(usize, 3), SingleMSM.optimalWindowSize(4));
     try std.testing.expectEqual(@as(usize, 3), SingleMSM.optimalWindowSize(16));
-    try std.testing.expectEqual(@as(usize, 5), SingleMSM.optimalWindowSize(128));
-    try std.testing.expectEqual(@as(usize, 7), SingleMSM.optimalWindowSize(4096));
-    try std.testing.expectEqual(@as(usize, 8), SingleMSM.optimalWindowSize(100000));
+    try std.testing.expectEqual(@as(usize, 6), SingleMSM.optimalWindowSize(128)); // log2(128)=7, 7*69/100+2=6
+    try std.testing.expectEqual(@as(usize, 10), SingleMSM.optimalWindowSize(4096)); // log2(4096)=12, 12*69/100+2=10
+    try std.testing.expectEqual(@as(usize, 13), SingleMSM.optimalWindowSize(100000)); // log2(100000)=16, 16*69/100+2=13
+    try std.testing.expectEqual(@as(usize, 15), SingleMSM.optimalWindowSize(524288)); // log2(524288)=19, 19*69/100+2=15
 }
 
 test "getWindow extracts correct bits" {

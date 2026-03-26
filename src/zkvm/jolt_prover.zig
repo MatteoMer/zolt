@@ -1003,20 +1003,24 @@ pub fn JoltProver(comptime F: type) type {
             self: *Self,
             claims: *OpeningClaims(F),
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            raw_r1cs_inputs: ?[]const @import("r1cs/evaluators.zig").RawR1CSInputs,
+            padded_trace_len: usize,
             r_cycle: []const F,
             uni_skip_claim: F,
             transcript: *Blake2bTranscript(F),
             _: F, // r_stream (unused after debug removal)
             r0: F,
         ) !void {
-            // Compute MLE evaluations at r_cycle (parallel factored-eq, matching Jolt)
+            // Compute MLE evaluations at r_cycle using typed accumulators when available
             const R1CSInputEvaluator = r1cs.R1CSInputEvaluator(F);
-            const input_evals = try R1CSInputEvaluator.computeClaimedInputsParallel(
-                self.allocator,
-                cycle_witnesses,
-                r_cycle,
-                self.thread_pool,
-            );
+            const input_evals = if (raw_r1cs_inputs) |raw|
+                try R1CSInputEvaluator.computeClaimedInputsTyped(
+                    self.allocator, raw, padded_trace_len, r_cycle, self.thread_pool,
+                )
+            else
+                try R1CSInputEvaluator.computeClaimedInputsParallel(
+                    self.allocator, cycle_witnesses, r_cycle, self.thread_pool,
+                );
 
 
             // Compute Lagrange weights at r0
@@ -1316,10 +1320,13 @@ pub fn JoltProver(comptime F: type) type {
             var bench_timer = std.time.Timer.start() catch unreachable;
             const bench = config.bench_output;
 
-            // Build compact integer witnesses for fast evaluation
+            // Build compact integer witnesses + raw R1CS inputs in one parallel pass
             const r1cs_evaluators = @import("r1cs/evaluators.zig");
-            const compact_witnesses = try r1cs_evaluators.buildCompactWitnesses(F, padded_witnesses, self.allocator, self.thread_pool);
+            const witness_data = try r1cs_evaluators.buildCompactAndRawWitnesses(F, padded_witnesses, self.allocator, self.thread_pool);
+            const compact_witnesses = witness_data.compact;
             defer self.allocator.free(compact_witnesses);
+            const raw_r1cs_inputs = witness_data.raw;
+            defer self.allocator.free(raw_r1cs_inputs);
 
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
                 padded_witnesses,
@@ -1383,6 +1390,8 @@ pub fn JoltProver(comptime F: type) type {
                 try self.addSpartanOuterOpeningClaimsWithEvaluations(
                     &jolt_proof.opening_claims,
                     padded_witnesses,
+                    raw_r1cs_inputs, // typed accumulators
+                    trace_length,
                     r_cycle_big_endian,
                     result.uni_skip_claim,
                     transcript,

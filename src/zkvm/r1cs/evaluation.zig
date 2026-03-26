@@ -43,6 +43,7 @@ const poly = @import("../../poly/mod.zig");
 const EqPolynomial = poly.EqPolynomial;
 const field_mod = @import("../../field/mod.zig");
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const evaluators = @import("evaluators.zig");
 
 /// Number of R1CS inputs per cycle
 pub const NUM_R1CS_INPUTS = R1CSInputIndex.NUM_INPUTS;
@@ -184,6 +185,153 @@ pub fn R1CSInputEvaluator(comptime F: type) type {
                 tp.parallelReduce(AccumArray, eq_one.len, accum_zero, ctx, mapReduceFns.mapFn, mapReduceFns.reduceFn)
             else
                 mapReduceFns.mapFn(ctx, 0, eq_one.len);
+
+            var result: [NUM_R1CS_INPUTS]F = undefined;
+            for (0..NUM_R1CS_INPUTS) |i| {
+                result[i] = accum_result[i].reduce();
+            }
+            return result;
+        }
+
+        /// Compute MLE evaluations using pre-extracted raw integer inputs with typed accumulators.
+        /// Matches Jolt's compute_claimed_inputs (evaluation.rs:819-948):
+        /// - SmallAccumU for bool flags (conditional add, 0 mulq per input)
+        /// - MedAccumS for u64/i128 values (4-8 mulq per input)
+        /// - WideAccumS for wide i128 values (8 mulq per input)
+        /// This is ~8x cheaper per cycle than the field-multiply version.
+        pub fn computeClaimedInputsTyped(
+            allocator: Allocator,
+            raw_inputs: []const evaluators.RawR1CSInputs,
+            padded_len: usize,
+            r_cycle: []const F,
+            thread_pool: ?*ThreadPool,
+        ) ![NUM_R1CS_INPUTS]F {
+            const num_cycles = raw_inputs.len;
+            if (num_cycles == 0 or r_cycle.len == 0) {
+                var result: [NUM_R1CS_INPUTS]F = undefined;
+                @memset(&result, F.zero());
+                return result;
+            }
+
+            const num_vars = r_cycle.len;
+            const m = num_vars / 2;
+            const r_out = r_cycle[0..m];
+            const r_in = r_cycle[m..];
+
+            const eq_one = try EqPolynomial(F).evalsSliceWithScaling(F, allocator, r_out, null);
+            defer allocator.free(eq_one);
+            const eq_two = try EqPolynomial(F).evalsSliceWithScaling(F, allocator, r_in, null);
+            defer allocator.free(eq_two);
+
+            const eq_two_len = eq_two.len;
+            const Accum = field_mod.UnreducedProductAccum;
+            const SmallAccumU = field_mod.SmallAccumU;
+            const MedAccumS = field_mod.MedAccumS;
+            const WideAccumS = field_mod.WideAccumS;
+            const Raw = evaluators.RawR1CSInputs;
+
+            const AccumArray = [NUM_R1CS_INPUTS]Accum;
+            const accum_zero: AccumArray = [_]Accum{Accum.zero()} ** NUM_R1CS_INPUTS;
+
+            const TypedMapCtx = struct {
+                eq_one: []const F,
+                eq_two: []const F,
+                eq_two_len: usize,
+                raw_inputs: []const Raw,
+                num_cycles: usize,
+                padded_len: usize,
+            };
+
+            const ctx = TypedMapCtx{
+                .eq_one = eq_one,
+                .eq_two = eq_two,
+                .eq_two_len = eq_two_len,
+                .raw_inputs = raw_inputs,
+                .num_cycles = num_cycles,
+                .padded_len = padded_len,
+            };
+
+            const typedMapReduce = struct {
+                const zero_out: AccumArray = [_]Accum{Accum.zero()} ** NUM_R1CS_INPUTS;
+                const noop_raw: Raw = Raw.noop();
+
+                fn mapFn(c: TypedMapCtx, start: usize, end: usize) AccumArray {
+                    var outer_accum: AccumArray = zero_out;
+
+                    for (start..end) |x1| {
+                        const eq1_val = c.eq_one[x1];
+
+                        // Typed inner accumulators — one per R1CS input category
+                        var acc_u64s: [Raw.NUM_U64_INPUTS]MedAccumS = .{MedAccumS.zero()} ** Raw.NUM_U64_INPUTS;
+                        var acc_signed: [Raw.NUM_SIGNED_INPUTS]MedAccumS = .{MedAccumS.zero()} ** Raw.NUM_SIGNED_INPUTS;
+                        var acc_wide: [Raw.NUM_WIDE_INPUTS]WideAccumS = .{WideAccumS.zero()} ** Raw.NUM_WIDE_INPUTS;
+                        var acc_bools: [Raw.NUM_BOOL_INPUTS]SmallAccumU = .{SmallAccumU.zero()} ** Raw.NUM_BOOL_INPUTS;
+
+                        for (0..c.eq_two_len) |x2| {
+                            const idx = x1 * c.eq_two_len + x2;
+                            const e_in = c.eq_two[x2];
+
+                            const raw = if (idx < c.num_cycles)
+                                &c.raw_inputs[idx]
+                            else if (idx < c.padded_len)
+                                &noop_raw
+                            else
+                                continue;
+
+                            // u64 inputs: MedAccumS.fmaddU64 (4×1 schoolbook, 4 mulq)
+                            for (0..Raw.NUM_U64_INPUTS) |ui| {
+                                acc_u64s[ui].fmaddU64(e_in, raw.u64_values[ui]);
+                            }
+                            // Signed i128 inputs: MedAccumS.fmaddI128 (4×2 schoolbook, 8 mulq)
+                            for (0..Raw.NUM_SIGNED_INPUTS) |si| {
+                                acc_signed[si].fmaddI128(e_in, raw.signed_values[si]);
+                            }
+                            // Wide S192 values: WideAccumS.fmaddS192 (4×3 schoolbook, 12 mulq)
+                            for (0..Raw.NUM_WIDE_INPUTS) |wi| {
+                                acc_wide[wi].fmaddS192(e_in, raw.wide_values[wi]);
+                            }
+                            // Bool flags: SmallAccumU.fmaddBool (conditional add, 0 mulq)
+                            for (0..Raw.NUM_BOOL_INPUTS) |bi| {
+                                acc_bools[bi].fmaddBool(e_in, raw.bool_flags[bi]);
+                            }
+                        }
+
+                        // Reduce inner accumulators and weight by eq_one[x1]
+                        // Map results back to R1CS input indices using inline for for comptime index resolution
+                        inline for (0..Raw.NUM_U64_INPUTS) |ui| {
+                            outer_accum[Raw.U64_INDICES[ui].toIndex()].addAssign(
+                                Accum.fromMul(eq1_val, acc_u64s[ui].barrettReduce()));
+                        }
+                        inline for (0..Raw.NUM_SIGNED_INPUTS) |si| {
+                            outer_accum[Raw.SIGNED_INDICES[si].toIndex()].addAssign(
+                                Accum.fromMul(eq1_val, acc_signed[si].barrettReduce()));
+                        }
+                        inline for (0..Raw.NUM_WIDE_INPUTS) |wi| {
+                            outer_accum[Raw.WIDE_INDICES[wi].toIndex()].addAssign(
+                                Accum.fromMul(eq1_val, acc_wide[wi].barrettReduce()));
+                        }
+                        inline for (0..Raw.NUM_BOOL_INPUTS) |bi| {
+                            outer_accum[Raw.BOOL_INDICES[bi].toIndex()].addAssign(
+                                Accum.fromMul(eq1_val, acc_bools[bi].barrettReduce()));
+                        }
+                    }
+                    return outer_accum;
+                }
+
+                fn reduceFn(a: AccumArray, b: AccumArray) AccumArray {
+                    var result: AccumArray = undefined;
+                    for (0..NUM_R1CS_INPUTS) |i| {
+                        result[i] = a[i];
+                        result[i].addAssign(b[i]);
+                    }
+                    return result;
+                }
+            };
+
+            const accum_result = if (thread_pool) |tp|
+                tp.parallelReduce(AccumArray, eq_one.len, accum_zero, ctx, typedMapReduce.mapFn, typedMapReduce.reduceFn)
+            else
+                typedMapReduce.mapFn(ctx, 0, eq_one.len);
 
             var result: [NUM_R1CS_INPUTS]F = undefined;
             for (0..NUM_R1CS_INPUTS) |i| {

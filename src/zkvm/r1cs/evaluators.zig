@@ -515,6 +515,69 @@ pub const CompactWitness = struct {
     bz_second: [SECOND_GROUP_SIZE]field_mod.S192,
 };
 
+/// Raw integer R1CS inputs for typed-accumulator claims computation.
+/// Stores each of the 42 R1CS inputs in its natural integer type, avoiding
+/// Montgomery encode/decode in the MLE evaluation inner loop.
+/// Matches Jolt's R1CSCycleInputs (raw u64/S64/S128/bool).
+pub const RawR1CSInputs = struct {
+    /// u64-typed inputs (indices: 0,4,5,7,8,9,10,11,12,13,15,16,19)
+    /// Order: LeftInput, PC, UnexpPC, RamAddr, Rs1, Rs2, Rd, RamRead, RamWrite, LeftLookup, NextUnexpPC, NextPC, LookupOutput
+    u64_values: [NUM_U64_INPUTS]u64,
+    /// Signed i128 inputs (indices: 1,6)
+    /// Order: RightInput, Imm
+    signed_values: [NUM_SIGNED_INPUTS]i128,
+    /// Wide values needing >128-bit support (indices: 2,14)
+    /// Product (u64*u64 can reach 2^128) and RightLookupOperand (u128)
+    /// Stored as S192 for full range. Order: Product, RightLookupOperand
+    wide_values: [NUM_WIDE_INPUTS]field_mod.S192,
+    /// Bool inputs (indices: 3,17,18,20, 21-41)
+    /// Order: ShouldBranch, NextIsVirtual, NextIsFirstInSequence, ShouldJump, then 21 flags (21-41)
+    bool_flags: [NUM_BOOL_INPUTS]bool,
+
+    pub const NUM_U64_INPUTS = 13;
+    pub const NUM_SIGNED_INPUTS = 2; // RightInput, Imm
+    pub const NUM_WIDE_INPUTS = 2; // Product, RightLookupOperand
+    pub const NUM_BOOL_INPUTS = 25;
+
+    /// Map from u64_values index to R1CSInputIndex
+    pub const U64_INDICES = [NUM_U64_INPUTS]R1CSInputIndex{
+        .LeftInstructionInput, .PC, .UnexpandedPC, .RamAddress,
+        .Rs1Value, .Rs2Value, .RdWriteValue, .RamReadValue, .RamWriteValue,
+        .LeftLookupOperand, .NextUnexpandedPC, .NextPC, .LookupOutput,
+    };
+    /// Map from signed_values index to R1CSInputIndex
+    pub const SIGNED_INDICES = [NUM_SIGNED_INPUTS]R1CSInputIndex{
+        .RightInstructionInput, .Imm,
+    };
+    /// Map from wide_values index to R1CSInputIndex
+    pub const WIDE_INDICES = [NUM_WIDE_INPUTS]R1CSInputIndex{
+        .Product, .RightLookupOperand,
+    };
+    /// Map from bool_flags index to R1CSInputIndex
+    pub const BOOL_INDICES = [NUM_BOOL_INPUTS]R1CSInputIndex{
+        .ShouldBranch, .NextIsVirtual, .NextIsFirstInSequence, .ShouldJump,
+        .FlagAddOperands, .FlagSubtractOperands, .FlagMultiplyOperands,
+        .FlagLoad, .FlagStore, .FlagJump, .FlagWriteLookupOutputToRD,
+        .FlagVirtualInstruction, .FlagAssert, .FlagDoNotUpdateUnexpandedPC,
+        .FlagAdvice, .FlagIsCompressed, .FlagIsFirstInSequence, .FlagIsLastInSequence,
+        .FlagIsRdNotZero, .FlagBranch, .FlagIsNoop,
+        .FlagLeftOperandIsRs1, .FlagLeftOperandIsPC, .FlagRightOperandIsRs2, .FlagRightOperandIsImm,
+    };
+
+    /// NoOp witness: FlagIsNoop=true, FlagDoNotUpdateUnexpandedPC=true, all else zero
+    pub fn noop() RawR1CSInputs {
+        var raw: RawR1CSInputs = undefined;
+        raw.u64_values = .{0} ** NUM_U64_INPUTS;
+        raw.signed_values = .{0} ** NUM_SIGNED_INPUTS;
+        raw.wide_values = .{field_mod.S192.zero()} ** NUM_WIDE_INPUTS;
+        raw.bool_flags = .{false} ** NUM_BOOL_INPUTS;
+        // FlagIsNoop is at bool index 20, FlagDoNotUpdateUnexpandedPC at bool index 13
+        raw.bool_flags[20] = true; // FlagIsNoop
+        raw.bool_flags[13] = true; // FlagDoNotUpdateUnexpandedPC
+        return raw;
+    }
+};
+
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 /// Build compact witness array from field-form cycle witnesses.
@@ -555,6 +618,52 @@ pub fn buildCompactWitnesses(
     }
 
     return result;
+}
+
+/// Build both CompactWitness AND RawR1CSInputs in one parallel pass.
+/// Extracts all raw integers from field witnesses once, producing both
+/// outputs. This avoids redundant Montgomery de-encoding.
+pub fn buildCompactAndRawWitnesses(
+    comptime F: type,
+    cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+    allocator: Allocator,
+    thread_pool: ?*ThreadPool,
+) !struct { compact: []CompactWitness, raw: []RawR1CSInputs } {
+    const n = cycle_witnesses.len;
+    const compact = try allocator.alloc(CompactWitness, n);
+    errdefer allocator.free(compact);
+    const raw = try allocator.alloc(RawR1CSInputs, n);
+    errdefer allocator.free(raw);
+
+    const Ctx = struct {
+        cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+        compact: []CompactWitness,
+        raw: []RawR1CSInputs,
+    };
+
+    const ctx = Ctx{
+        .cycle_witnesses = cycle_witnesses,
+        .compact = compact,
+        .raw = raw,
+    };
+
+    const mapFn = struct {
+        fn f(c: Ctx, i: usize) void {
+            const ws = c.cycle_witnesses[i].asSlice();
+            c.compact[i] = compactFromFieldWitness(F, ws);
+            c.raw[i] = rawFromFieldWitness(F, ws);
+        }
+    }.f;
+
+    if (thread_pool) |tp| {
+        tp.parallelFor(n, ctx, mapFn);
+    } else {
+        for (0..n) |i| {
+            mapFn(ctx, i);
+        }
+    }
+
+    return .{ .compact = compact, .raw = raw };
 }
 
 /// Convert a single cycle's field witness to compact integer form.
@@ -703,6 +812,83 @@ fn compactFromFieldWitness(comptime F: type, witness: []const F) CompactWitness 
     };
 
     return cw;
+}
+
+/// Extract raw integer R1CS inputs from field-form witness.
+/// Reuses the same Montgomery de-encoding as compactFromFieldWitness.
+fn rawFromFieldWitness(comptime F: type, witness: []const F) RawR1CSInputs {
+    const I = R1CSInputIndex;
+    var raw: RawR1CSInputs = undefined;
+
+    // u64 values: direct .toU64() extraction
+    raw.u64_values = .{
+        witness[comptime I.LeftInstructionInput.toIndex()].toU64(),
+        witness[comptime I.PC.toIndex()].toU64(),
+        witness[comptime I.UnexpandedPC.toIndex()].toU64(),
+        witness[comptime I.RamAddress.toIndex()].toU64(),
+        witness[comptime I.Rs1Value.toIndex()].toU64(),
+        witness[comptime I.Rs2Value.toIndex()].toU64(),
+        witness[comptime I.RdWriteValue.toIndex()].toU64(),
+        witness[comptime I.RamReadValue.toIndex()].toU64(),
+        witness[comptime I.RamWriteValue.toIndex()].toU64(),
+        witness[comptime I.LeftLookupOperand.toIndex()].toU64(),
+        witness[comptime I.NextUnexpandedPC.toIndex()].toU64(),
+        witness[comptime I.NextPC.toIndex()].toU64(),
+        witness[comptime I.LookupOutput.toIndex()].toU64(),
+    };
+
+    // Signed i128 values: sign-detection extraction
+    raw.signed_values[0] = extractI128(F, witness[comptime I.RightInstructionInput.toIndex()]);
+    raw.signed_values[1] = extractI128(F, witness[comptime I.Imm.toIndex()]);
+
+    // Wide values as S192: Product (u64*u64 can reach 2^128) and RightLookupOperand
+    raw.wide_values[0] = extractS192(F, witness[comptime I.Product.toIndex()]);
+    raw.wide_values[1] = extractS192(F, witness[comptime I.RightLookupOperand.toIndex()]);
+
+    // Bool flags: check if field value equals zero
+    inline for (RawR1CSInputs.BOOL_INDICES, 0..) |idx, i| {
+        raw.bool_flags[i] = !witness[comptime idx.toIndex()].eql(F.zero());
+    }
+
+    return raw;
+}
+
+/// Extract a potentially-signed i128 from a field element.
+/// Handles both positive (small standard form) and negative (p - k) representations.
+pub fn extractI128(comptime F: type, val: F) i128 {
+    const std_form = val.fromMontgomery();
+    // Check if positive: fits in lower 128 bits
+    if (std_form.limbs[2] == 0 and std_form.limbs[3] == 0) {
+        return @as(i128, std_form.limbs[0]) | (@as(i128, std_form.limbs[1]) << 64);
+    }
+    // Check if negative: p - k where k fits in 128 bits
+    const neg = F.zero().sub(val);
+    const neg_std = neg.fromMontgomery();
+    if (neg_std.limbs[2] == 0 and neg_std.limbs[3] == 0) {
+        const mag = @as(i128, neg_std.limbs[0]) | (@as(i128, neg_std.limbs[1]) << 64);
+        return -mag;
+    }
+    // Fallback: use lower 128 bits
+    return @as(i128, std_form.limbs[0]) | (@as(i128, std_form.limbs[1]) << 64);
+}
+
+/// Extract a potentially-signed value as S192 from a field element.
+/// Handles values up to 192 bits (including u64*u64 products that can reach 2^128).
+fn extractS192(comptime F: type, val: F) field_mod.S192 {
+    const S192 = field_mod.S192;
+    const std_form = val.fromMontgomery();
+    // Check if positive: fits in lower 192 bits (limbs[3] == 0)
+    if (std_form.limbs[3] == 0) {
+        return S192{ .magnitude = .{ std_form.limbs[0], std_form.limbs[1], std_form.limbs[2] }, .is_positive = true };
+    }
+    // Check if negative: p - k where k fits in 192 bits
+    const neg = F.zero().sub(val);
+    const neg_std = neg.fromMontgomery();
+    if (neg_std.limbs[3] == 0) {
+        return S192{ .magnitude = .{ neg_std.limbs[0], neg_std.limbs[1], neg_std.limbs[2] }, .is_positive = false };
+    }
+    // Fallback: use lower 192 bits
+    return S192{ .magnitude = .{ std_form.limbs[0], std_form.limbs[1], std_form.limbs[2] }, .is_positive = true };
 }
 
 /// Integer-based Az*Bz interpolation for the first group.

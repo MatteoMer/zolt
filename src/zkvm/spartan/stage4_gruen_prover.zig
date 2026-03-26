@@ -446,7 +446,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
 
             // Bind inc_poly (dense) — GPU-accelerated for large polynomials
             if (self.gpu_ops) |gpu| {
-                if (half_T >= 4096) {
+                if (half_T >= 16384) {
                     gpu.polyBindLow(self.inc_poly[0..self.current_T], challenge, self.inc_poly[0..half_T]) catch {
                         // CPU fallback on GPU error
                         for (0..half_T) |i| {

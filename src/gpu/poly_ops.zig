@@ -86,6 +86,10 @@ pub const GpuPolyOps = struct {
     scratch_pt0: GpuBuffer(u32),   // partial t0 sums (1024 threadgroups)
     scratch_ptinf: GpuBuffer(u32), // partial tinf sums (1024 threadgroups)
     scratch_eq: GpuBuffer(u32),    // eq tables (max 262K elements × 8 u32)
+    /// Pre-allocated bind buffers: input (524K elements × 8 u32) and output (262K × 8 u32).
+    /// Reused by polyBindLow to avoid per-call Metal buffer allocation.
+    scratch_bind_in: GpuBuffer(u32),
+    scratch_bind_out: GpuBuffer(u32),
 
     pub const Error = GpuAccelerator.Error || GpuBuffer(u32).Error;
 
@@ -112,6 +116,9 @@ pub const GpuPolyOps = struct {
         const spt0 = try GpuBuffer(u32).init(gpu.device, 1024 * 8);
         const sptinf = try GpuBuffer(u32).init(gpu.device, 1024 * 8);
         const seq = try GpuBuffer(u32).init(gpu.device, 262144 * 8);
+        // Pre-alloc bind buffers: max 524K input elements, 262K output
+        const sbi = try GpuBuffer(u32).init(gpu.device, 524288 * 8);
+        const sbo = try GpuBuffer(u32).init(gpu.device, 262144 * 8);
 
         return .{
             .gpu = gpu,
@@ -127,10 +134,14 @@ pub const GpuPolyOps = struct {
             .scratch_pt0 = spt0,
             .scratch_ptinf = sptinf,
             .scratch_eq = seq,
+            .scratch_bind_in = sbi,
+            .scratch_bind_out = sbo,
         };
     }
 
     pub fn deinit(self: *GpuPolyOps) void {
+        self.scratch_bind_out.deinit();
+        self.scratch_bind_in.deinit();
         self.scratch_eq.deinit();
         self.scratch_ptinf.deinit();
         self.scratch_pt0.deinit();
@@ -146,35 +157,53 @@ pub const GpuPolyOps = struct {
     }
 
     /// GPU bindLow: out[i] = evals[2i] + r * (evals[2i+1] - evals[2i])
+    /// Uses pre-allocated scratch buffers when the polynomial fits (≤524K elements).
     pub fn polyBindLow(self: *GpuPolyOps, evals: []const BN254Scalar, r: BN254Scalar, out: []BN254Scalar) Error!void {
         const n = evals.len;
         const half = n / 2;
         std.debug.assert(out.len == half);
         if (half == 0) return;
 
-        var buf_in = try GpuBuffer(u32).init(self.gpu.device, n * 8);
-        defer buf_in.deinit();
-        var buf_out = try GpuBuffer(u32).init(self.gpu.device, half * 8);
-        defer buf_out.deinit();
+        const in_u32 = n * 8;
+        const out_u32 = half * 8;
 
-        writeFieldElements(buf_in.slice(), evals);
+        // Use pre-allocated buffers if they fit, otherwise allocate fresh
+        const use_scratch = in_u32 <= self.scratch_bind_in.len and out_u32 <= self.scratch_bind_out.len;
 
-        // r is passed as inline constant bytes (32 bytes = 8 × u32)
+        var heap_in: ?GpuBuffer(u32) = null;
+        var heap_out: ?GpuBuffer(u32) = null;
+        defer if (heap_in) |*b| b.deinit();
+        defer if (heap_out) |*b| b.deinit();
+
+        const buf_in_metal: id = if (use_scratch) self.scratch_bind_in.metal_buffer else blk: {
+            heap_in = try GpuBuffer(u32).init(self.gpu.device, in_u32);
+            break :blk heap_in.?.metal_buffer;
+        };
+        const buf_out_metal: id = if (use_scratch) self.scratch_bind_out.metal_buffer else blk: {
+            heap_out = try GpuBuffer(u32).init(self.gpu.device, out_u32);
+            break :blk heap_out.?.metal_buffer;
+        };
+
+        const in_slice = if (use_scratch) self.scratch_bind_in.slice() else heap_in.?.slice();
+        const out_slice = if (use_scratch) self.scratch_bind_out.slice() else heap_out.?.slice();
+
+        writeFieldElements(in_slice[0..in_u32], evals);
+
         var r_gpu: [8]u32 = undefined;
         scalarToGpu(&r_gpu, r);
 
         try self.gpu.dispatchKernel(
             self.bind_low_pipeline,
             &.{
-                .{ .buffer = buf_in.metal_buffer },
-                .{ .buffer = buf_out.metal_buffer },
+                .{ .buffer = buf_in_metal },
+                .{ .buffer = buf_out_metal },
                 .{ .bytes = .{ .ptr = &r_gpu, .len = 32 } },
             },
             half,
-            0, // auto threadgroup size
+            0,
         );
 
-        readFieldElements(buf_out.slice(), out);
+        readFieldElements(out_slice[0..out_u32], out);
     }
 
     /// GPU bindFirst: out[i] = (1-r) * evals[i] + r * evals[i + half]

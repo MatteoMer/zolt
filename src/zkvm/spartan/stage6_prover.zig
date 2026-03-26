@@ -3874,7 +3874,7 @@ fn IncClaimReductionProver(comptime F: type) type {
                     self.num_challenges += 1;
 
                     if (self.gpu) |gpu| {
-                        if (half >= 4096) {
+                        if (half >= 16384) {
                             inline for (0..4) |i| {
                                 gpu.polyBindLow(self.P[i][0 .. half * 2], r, self.P[i][0..half]) catch bindOne(self.P[i], half, r);
                                 gpu.polyBindLow(self.Q[i][0 .. half * 2], r, self.Q[i][0..half]) catch bindOne(self.Q[i], half, r);
@@ -3905,7 +3905,7 @@ fn IncClaimReductionProver(comptime F: type) type {
                 .phase2 => {
                     const half = self.p2_current_len / 2;
                     if (self.gpu) |gpu| {
-                        if (half >= 4096) {
+                        if (half >= 16384) {
                             gpu.polyBindLow(self.ram_inc[0 .. half * 2], r, self.ram_inc[0..half]) catch bindOne(self.ram_inc, half, r);
                             gpu.polyBindLow(self.rd_inc[0 .. half * 2], r, self.rd_inc[0..half]) catch bindOne(self.rd_inc, half, r);
                             gpu.polyBindLow(self.eq_ram[0 .. half * 2], r, self.eq_ram[0..half]) catch bindOne(self.eq_ram, half, r);
@@ -4204,7 +4204,7 @@ fn HammingBooleanityProver(comptime F: type) type {
                     // eq_lo is tiny (sqrt(T)), bind inline. H is large — use GPU if available.
                     bindOne(self.eq_lo, half_lo, r);
                     if (self.gpu) |gpu| {
-                        if (half >= 4096) {
+                        if (half >= 16384) {
                             gpu.polyBindLow(self.H[0 .. half * 2], r, self.H[0..half]) catch bindOne(self.H, half, r);
                         } else {
                             bindOne(self.H, half, r);
@@ -4241,7 +4241,7 @@ fn HammingBooleanityProver(comptime F: type) type {
                 .phase2 => {
                     const half = self.current_len / 2;
                     if (self.gpu) |gpu| {
-                        if (half >= 4096) {
+                        if (half >= 16384) {
                             gpu.polyBindLow(self.H[0 .. half * 2], r, self.H[0..half]) catch bindOne(self.H, half, r);
                             gpu.polyBindLow(self.eq[0 .. half * 2], r, self.eq[0..half]) catch bindOne(self.eq, half, r);
                         } else {
@@ -4527,7 +4527,7 @@ fn RamRaVirtualProver(comptime F: type) type {
                 for (self.ra_polys) |rp| std.debug.assert(rp == .dense);
             }
 
-            if (all_dense and self.gpu != null and half >= 4096) {
+            if (all_dense and self.gpu != null and half >= 16384) {
                 // GPU bind: d ra_poly dense arrays + e_out
                 const gpu = self.gpu.?;
                 for (self.ra_polys) |*rp| {
@@ -4557,7 +4557,7 @@ fn RamRaVirtualProver(comptime F: type) type {
             // Flat eq bind
             const out_half = self.e_out_len / 2;
             if (self.gpu) |gpu| {
-                if (out_half >= 4096) {
+                if (out_half >= 16384) {
                     gpu.polyBindLow(self.e_out[0 .. out_half * 2], r, self.e_out[0..out_half]) catch bindSlice(self.e_out, out_half, r);
                 } else {
                     bindSlice(self.e_out, out_half, r);
@@ -5259,7 +5259,7 @@ fn BooleanityProver(comptime F: type) type {
                 } else if (self.H) |ht| {
                     // Dense state: bind H arrays and eq_cycle
                     if (self.gpu) |gpu| {
-                        if (half >= 4096) {
+                        if (half >= 16384) {
                             for (0..self.N) |i| {
                                 gpu.polyBindLow(ht[i][0 .. half * 2], r, ht[i][0..half]) catch bindOne(ht[i], half, r);
                             }
@@ -5814,7 +5814,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
 
             // Bind RA polynomials — O(K) for compressed states, O(T/2^round) for dense
             const all_dense = self.ra_polys[0].isDense();
-            if (all_dense and self.gpu != null and half >= 4096) {
+            if (all_dense and self.gpu != null and half >= 16384) {
                 // GPU bind: total_committed ra_poly dense arrays
                 const gpu = self.gpu.?;
                 for (self.ra_polys) |*rp| {
@@ -5851,7 +5851,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             // Flat eq bind
             const out_half = self.e_out_len / 2;
             if (self.gpu) |gpu| {
-                if (out_half >= 4096) {
+                if (out_half >= 16384) {
                     gpu.polyBindLow(self.e_out[0 .. out_half * 2], r, self.e_out[0..out_half]) catch bindSlice(self.e_out, out_half, r);
                 } else {
                     bindSlice(self.e_out, out_half, r);
@@ -6294,7 +6294,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
             }.f;
 
             if (self.gpu) |gpu| {
-                if (half >= 4096) {
+                if (half >= 16384) {
                     // GPU bind: 5 stages x 2 arrays each, then update claims on CPU
                     for (0..5) |s| {
                         gpu.polyBindLow(self.F_s_arrs[s][0 .. half * 2], r, self.F_s_arrs[s][0..half]) catch bindOneArr(self.F_s_arrs[s], half, r);
@@ -6784,7 +6784,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
             }.f;
 
             if (self.gpu) |gpu| {
-                if (half >= 4096) {
+                if (half >= 16384) {
                     // GPU bind: bytecode_d ra_chunks + 1 combined
                     for (0..self.bytecode_d) |i| {
                         gpu.polyBindLow(ra_chunks[i][0 .. half * 2], r, ra_chunks[i][0..half]) catch bindOne(ra_chunks[i], half, r);
@@ -6849,7 +6849,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
         /// Falls back to CPU when GPU unavailable or array too small.
         fn gpuBindLow(arr: []F, half: usize, r: F, gpu_ops: ?*GpuPolyOps) void {
             if (gpu_ops) |gpu| {
-                if (half >= 4096) {
+                if (half >= 16384) {
                     gpu.polyBindLow(arr[0 .. half * 2], r, arr[0..half]) catch {
                         cpuBindLow(arr, half, r);
                         return;

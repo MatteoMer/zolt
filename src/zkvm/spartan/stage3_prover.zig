@@ -1890,7 +1890,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }.f;
 
             if (self.gpu_ops) |gpu| {
-                if (new_prefix_size >= 4096) {
+                if (new_prefix_size >= 16384) {
                     for (bctx.slices) |arr| {
                         gpu.polyBindLow(arr[0 .. new_prefix_size * 2], r_j, arr[0..new_prefix_size]) catch {
                             for (0..new_prefix_size) |i| {
@@ -2255,7 +2255,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }.f;
 
             if (self.gpu_ops) |gpu| {
-                if (new_size >= 4096) {
+                if (new_size >= 16384) {
                     for (bctx.slices) |maybe_arr| {
                         const arr = maybe_arr orelse continue;
                         gpu.polyBindLow(arr[0 .. new_size * 2], r_j, arr[0..new_size]) catch {
@@ -2619,7 +2619,7 @@ fn InstructionInputProver(comptime F: type) type {
             const new_size = self.current_size / 2;
 
             if (self.gpu_ops) |gpu| {
-                if (new_size >= 4096) {
+                if (new_size >= 16384) {
                     const slices = [9][]F{
                         self.left_is_rs1, self.rs1_value,
                         self.left_is_pc, self.unexpanded_pc,
@@ -3020,9 +3020,9 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
             if (self.gpu_ops) |gpu| {
                 const max_size = @max(new_prefix_size, witness_new_size);
-                if (max_size >= 4096) {
+                if (max_size >= 16384) {
                     for (bctx.slices, bctx.sizes) |arr, n| {
-                        if (n >= 4096) {
+                        if (n >= 16384) {
                             gpu.polyBindLow(arr[0 .. n * 2], r_j, arr[0..n]) catch {
                                 for (0..n) |i| {
                                     arr[i] = arr[2 * i].add(r_j.montgomeryMul(arr[2 * i + 1].sub(arr[2 * i])));
@@ -3118,7 +3118,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             }.f;
 
             if (self.gpu_ops) |gpu| {
-                if (new_size >= 4096) {
+                if (new_size >= 16384) {
                     for (bctx.slices) |maybe_arr| {
                         const arr = maybe_arr orelse continue;
                         gpu.polyBindLow(arr[0 .. new_size * 2], r_j, arr[0..new_size]) catch {

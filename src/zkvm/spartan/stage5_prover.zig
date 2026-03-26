@@ -3729,7 +3729,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                                 // Parallelize across the 6 independent arrays
                                 if (self.gpu_ops) |gpu| {
-                                    if (half_len >= 4096) {
+                                    if (half_len >= 16384) {
                                         const pq_arrays = [_][]F{ P_raf, P_rw, P_val, Q_raf, Q_rw, Q_val };
                                         for (pq_arrays) |arr| {
                                             gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
@@ -3815,7 +3815,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                                 // Parallelize across the 4 independent arrays
                                 if (self.gpu_ops) |gpu| {
-                                    if (half_len >= 4096) {
+                                    if (half_len >= 16384) {
                                         const heq_arrays = [_][]F{ H_prime, eq_raf_hi, eq_rw_hi, eq_val_hi };
                                         for (heq_arrays) |arr| {
                                             gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
@@ -6014,7 +6014,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 // Bind P and Q arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
                                 // Parallelize across the 6 independent arrays
                                 if (self.gpu_ops) |gpu| {
-                                    if (half_len >= 4096) {
+                                    if (half_len >= 16384) {
                                         const pq_arrays = [_][]F{ P_raf, P_rw, P_val, Q_raf, Q_rw, Q_val };
                                         for (pq_arrays) |arr| {
                                             gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
@@ -6088,7 +6088,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 // Bind H_prime and eq_hi arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
                                 // Parallelize across the 4 independent arrays
                                 if (self.gpu_ops) |gpu| {
-                                    if (half_len >= 4096) {
+                                    if (half_len >= 16384) {
                                         const heq_arrays = [_][]F{ H_prime, eq_raf_hi, eq_rw_hi, eq_val_hi };
                                         for (heq_arrays) |arr| {
                                             gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
@@ -6181,7 +6181,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // GPU path: bind each polynomial via GPU
                         const lk_n = lookups_combined_vals.len >> @intCast(lookups_round);
                         const lk_half = lk_n / 2;
-                        if (lk_half >= 4096) {
+                        if (lk_half >= 16384) {
                             gpu.polyBindLow(lookups_combined_vals[0 .. lk_half * 2], challenge, lookups_combined_vals[0..lk_half]) catch {
                                 for (0..lk_half) |i| {
                                     lookups_combined_vals[i] = lookups_combined_vals[2 * i].add(challenge.mul(lookups_combined_vals[2 * i + 1].sub(lookups_combined_vals[2 * i])));
@@ -6197,7 +6197,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const ra_poly = ra_chunk_weights[chunk_idx];
                             const ra_n = ra_poly.len >> @intCast(lookups_round);
                             const ra_half = ra_n / 2;
-                            if (ra_half >= 4096) {
+                            if (ra_half >= 16384) {
                                 gpu.polyBindLow(ra_poly[0 .. ra_half * 2], challenge, ra_poly[0..ra_half]) catch {
                                     for (0..ra_half) |i| {
                                         ra_poly[i] = ra_poly[2 * i].add(challenge.mul(ra_poly[2 * i + 1].sub(ra_poly[2 * i])));
@@ -7906,7 +7906,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // NOTE: In-place binding has data dependencies (write[i] overlaps read[2*j] where j=i/2),
             // so we parallelize across the 3 independent arrays instead of across indices.
             if (gpu) |g| {
-                if (half >= 4096) {
+                if (half >= 16384) {
                     for (arrays) |arr| {
                         g.polyBindLow(arr[0 .. half * 2], r, arr[0..half]) catch {
                             for (0..half) |i| {
@@ -8021,7 +8021,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const arrays = [_][]F{ eq_evals, combined };
 
             if (gpu) |g| {
-                if (half >= 4096) {
+                if (half >= 16384) {
                     for (arrays) |arr| {
                         g.polyBindLow(arr[0 .. half * 2], r, arr[0..half]) catch {
                             for (0..half) |i| {
@@ -8128,7 +8128,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const arrays = [_][]F{ eq_evals, ra_weights, combined };
 
             if (gpu) |g| {
-                if (half >= 4096) {
+                if (half >= 16384) {
                     for (arrays) |arr| {
                         g.polyBindLow(arr[0 .. half * 2], r, arr[0..half]) catch {
                             for (0..half) |i| {
@@ -8191,7 +8191,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             if (half == 0) return;
 
             if (gpu) |g| {
-                if (half >= 4096) {
+                if (half >= 16384) {
                     g.polyBindLow(poly[0 .. half * 2], r, poly[0..half]) catch {
                         for (0..half) |i| {
                             poly[i] = poly[2 * i].add(r.mul(poly[2 * i + 1].sub(poly[2 * i])));

@@ -259,14 +259,12 @@ fn makeDigits(limbs: [4]u64, c: usize, num_scalar_windows: usize) [MAX_DIGITS]i8
 }
 
 /// Choose optimal window size based on input size.
-/// Matches the heuristic in MSM(F,G).optimalWindowSize.
+/// Uses ln(n) + 2 heuristic matching upstream MSM(F,G).optimalWindowSize.
 fn optimalWindowSize(n: usize) usize {
     if (n < 32) return 3;
-    if (n < 256) return 5;
-    if (n < 2048) return 6;
-    if (n < 16384) return 7;
-    if (n < 131072) return 8;
-    return 9;
+    const log2_n = @as(usize, std.math.log2_int(usize, n));
+    const c = (log2_n * 69 / 100) + 2;
+    return @max(3, @min(c, 20));
 }
 
 // ── Format conversion: BN254BaseField ↔ GPU 8×u32 ──────────────────────────

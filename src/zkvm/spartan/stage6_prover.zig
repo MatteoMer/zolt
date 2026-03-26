@@ -27,6 +27,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
 
 const poly_mod = @import("../../poly/mod.zig");
 const UniPoly = poly_mod.UniPoly;
@@ -3413,6 +3414,7 @@ fn IncClaimReductionProver(comptime F: type) type {
         points_be: [4][]const F,
         allocator: Allocator,
         pool: ?*ThreadPool = null,
+        gpu: ?*GpuPolyOps = null,
 
         /// Compute scalar MLE: eq(a, b) = Π_i (a_i·b_i + (1-a_i)·(1-b_i))
         fn computeMle(a: []const F, b: []const F) F {
@@ -3871,7 +3873,19 @@ fn IncClaimReductionProver(comptime F: type) type {
                     self.challenges[self.num_challenges] = r;
                     self.num_challenges += 1;
 
-                    if (self.pool) |pool| {
+                    if (self.gpu) |gpu| {
+                        if (half >= 4096) {
+                            inline for (0..4) |i| {
+                                gpu.polyBindLow(self.P[i][0 .. half * 2], r, self.P[i][0..half]) catch bindOne(self.P[i], half, r);
+                                gpu.polyBindLow(self.Q[i][0 .. half * 2], r, self.Q[i][0..half]) catch bindOne(self.Q[i], half, r);
+                            }
+                        } else {
+                            inline for (0..4) |i| {
+                                bindOne(self.P[i], half, r);
+                                bindOne(self.Q[i], half, r);
+                            }
+                        }
+                    } else if (self.pool) |pool| {
                         const arrays = [8][]F{ self.P[0], self.P[1], self.P[2], self.P[3], self.Q[0], self.Q[1], self.Q[2], self.Q[3] };
                         const Ctx = struct { arrs: [8][]F, half: usize, r: F };
                         const ctx = Ctx{ .arrs = arrays, .half = half, .r = r };
@@ -3890,7 +3904,19 @@ fn IncClaimReductionProver(comptime F: type) type {
                 },
                 .phase2 => {
                     const half = self.p2_current_len / 2;
-                    if (self.pool) |pool| {
+                    if (self.gpu) |gpu| {
+                        if (half >= 4096) {
+                            gpu.polyBindLow(self.ram_inc[0 .. half * 2], r, self.ram_inc[0..half]) catch bindOne(self.ram_inc, half, r);
+                            gpu.polyBindLow(self.rd_inc[0 .. half * 2], r, self.rd_inc[0..half]) catch bindOne(self.rd_inc, half, r);
+                            gpu.polyBindLow(self.eq_ram[0 .. half * 2], r, self.eq_ram[0..half]) catch bindOne(self.eq_ram, half, r);
+                            gpu.polyBindLow(self.eq_rd[0 .. half * 2], r, self.eq_rd[0..half]) catch bindOne(self.eq_rd, half, r);
+                        } else {
+                            bindOne(self.ram_inc, half, r);
+                            bindOne(self.rd_inc, half, r);
+                            bindOne(self.eq_ram, half, r);
+                            bindOne(self.eq_rd, half, r);
+                        }
+                    } else if (self.pool) |pool| {
                         const arrays = [4][]F{ self.ram_inc, self.rd_inc, self.eq_ram, self.eq_rd };
                         const Ctx = struct { arrs: [4][]F, half: usize, r: F };
                         const ctx = Ctx{ .arrs = arrays, .half = half, .r = r };
@@ -3946,6 +3972,7 @@ fn HammingBooleanityProver(comptime F: type) type {
         suffix_len: usize,
         allocator: Allocator,
         pool: ?*ThreadPool = null,
+        gpu: ?*GpuPolyOps = null,
 
         pub fn init(
             allocator: Allocator,
@@ -4174,12 +4201,17 @@ fn HammingBooleanityProver(comptime F: type) type {
                     const half = self.current_len / 2;
                     const half_lo = self.prefix_current_len / 2;
 
-                    // eq_lo is tiny (sqrt(T)), bind inline. H is large but in-place MLE
-                    // bind has data dependencies (write[j] aliases future read[2j]),
-                    // so it cannot be parallelized within one array. Phase 2 parallelizes
-                    // by running H and eq concurrently as separate arrays.
+                    // eq_lo is tiny (sqrt(T)), bind inline. H is large — use GPU if available.
                     bindOne(self.eq_lo, half_lo, r);
-                    bindOne(self.H, half, r);
+                    if (self.gpu) |gpu| {
+                        if (half >= 4096) {
+                            gpu.polyBindLow(self.H[0 .. half * 2], r, self.H[0..half]) catch bindOne(self.H, half, r);
+                        } else {
+                            bindOne(self.H, half, r);
+                        }
+                    } else {
+                        bindOne(self.H, half, r);
+                    }
                     self.current_len = half;
                     self.prefix_current_len = half_lo;
 
@@ -4208,7 +4240,15 @@ fn HammingBooleanityProver(comptime F: type) type {
                 },
                 .phase2 => {
                     const half = self.current_len / 2;
-                    if (self.pool) |pool| {
+                    if (self.gpu) |gpu| {
+                        if (half >= 4096) {
+                            gpu.polyBindLow(self.H[0 .. half * 2], r, self.H[0..half]) catch bindOne(self.H, half, r);
+                            gpu.polyBindLow(self.eq[0 .. half * 2], r, self.eq[0..half]) catch bindOne(self.eq, half, r);
+                        } else {
+                            bindOne(self.H, half, r);
+                            bindOne(self.eq, half, r);
+                        }
+                    } else if (self.pool) |pool| {
                         const arrays = [2][]F{ self.H, self.eq };
                         const Ctx = struct { arrs: [2][]F, half: usize, r: F };
                         const ctx = Ctx{ .arrs = arrays, .half = half, .r = r };
@@ -4261,6 +4301,7 @@ fn RamRaVirtualProver(comptime F: type) type {
         current_len: usize,
         allocator: Allocator,
         pool: ?*ThreadPool = null,
+        gpu: ?*GpuPolyOps = null,
 
         pub fn init(
             allocator: Allocator,
@@ -4486,7 +4527,16 @@ fn RamRaVirtualProver(comptime F: type) type {
                 for (self.ra_polys) |rp| std.debug.assert(rp == .dense);
             }
 
-            if (all_dense and self.pool != null) {
+            if (all_dense and self.gpu != null and half >= 4096) {
+                // GPU bind: d ra_poly dense arrays + e_out
+                const gpu = self.gpu.?;
+                for (self.ra_polys) |*rp| {
+                    const dense = &rp.dense;
+                    const h = dense.current_len / 2;
+                    gpu.polyBindLow(dense.coeffs[0 .. h * 2], r, dense.coeffs[0..h]) catch bindSlice(dense.coeffs[0 .. h * 2], h, r);
+                    dense.current_len = h;
+                }
+            } else if (all_dense and self.pool != null) {
                 // Parallel bind: d ra_poly dense arrays (eq is O(√T), done separately below)
                 const RaBindCtx = struct { ra: []RaPoly, d: usize, half: usize, r: F };
                 const ctx = RaBindCtx{ .ra = self.ra_polys, .d = self.d, .half = half, .r = r };
@@ -4506,7 +4556,15 @@ fn RamRaVirtualProver(comptime F: type) type {
 
             // Flat eq bind
             const out_half = self.e_out_len / 2;
-            bindSlice(self.e_out, out_half, r);
+            if (self.gpu) |gpu| {
+                if (out_half >= 4096) {
+                    gpu.polyBindLow(self.e_out[0 .. out_half * 2], r, self.e_out[0..out_half]) catch bindSlice(self.e_out, out_half, r);
+                } else {
+                    bindSlice(self.e_out, out_half, r);
+                }
+            } else {
+                bindSlice(self.e_out, out_half, r);
+            }
             self.e_out_len = out_half;
 
             self.current_len = half;
@@ -4596,6 +4654,7 @@ fn BooleanityProver(comptime F: type) type {
         pc_map: *const BytecodePCMapper,
         allocator: std.mem.Allocator,
         pool: ?*ThreadPool = null,
+        gpu: ?*GpuPolyOps = null,
 
         pub fn init(
             allocator: std.mem.Allocator,
@@ -5198,8 +5257,20 @@ fn BooleanityProver(comptime F: type) type {
                     // Bind eq_cycle only (no H arrays to bind in lazy state)
                     bindOne(self.eq_cycle, half, r);
                 } else if (self.H) |ht| {
-                    // Dense state: bind H arrays and eq_cycle in parallel
-                    if (self.pool) |pool| {
+                    // Dense state: bind H arrays and eq_cycle
+                    if (self.gpu) |gpu| {
+                        if (half >= 4096) {
+                            for (0..self.N) |i| {
+                                gpu.polyBindLow(ht[i][0 .. half * 2], r, ht[i][0..half]) catch bindOne(ht[i], half, r);
+                            }
+                            gpu.polyBindLow(self.eq_cycle[0 .. half * 2], r, self.eq_cycle[0..half]) catch bindOne(self.eq_cycle, half, r);
+                        } else {
+                            for (0..self.N) |i| {
+                                bindOne(ht[i], half, r);
+                            }
+                            bindOne(self.eq_cycle, half, r);
+                        }
+                    } else if (self.pool) |pool| {
                         const total = self.N + 1;
                         const Ctx2 = struct { ht: [][]F, eq_cycle: []F, n: usize, half: usize, challenge: F };
                         const ctx2 = Ctx2{ .ht = ht, .eq_cycle = self.eq_cycle, .n = self.N, .half = half, .challenge = r };
@@ -5544,6 +5615,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
         current_len: usize,
         allocator: Allocator,
         pool: ?*ThreadPool = null,
+        gpu: ?*GpuPolyOps = null,
 
         pub fn init(
             allocator: Allocator,
@@ -5742,7 +5814,20 @@ fn LookupsRaVirtualProver(comptime F: type) type {
 
             // Bind RA polynomials — O(K) for compressed states, O(T/2^round) for dense
             const all_dense = self.ra_polys[0].isDense();
-            if (all_dense) {
+            if (all_dense and self.gpu != null and half >= 4096) {
+                // GPU bind: total_committed ra_poly dense arrays
+                const gpu = self.gpu.?;
+                for (self.ra_polys) |*rp| {
+                    const dense = &rp.dense;
+                    const h = dense.current_len / 2;
+                    gpu.polyBindLow(dense.coeffs[0 .. h * 2], r, dense.coeffs[0..h]) catch {
+                        for (0..h) |jj| {
+                            dense.coeffs[jj] = dense.coeffs[2 * jj].add(r.mul(dense.coeffs[2 * jj + 1].sub(dense.coeffs[2 * jj])));
+                        }
+                    };
+                    dense.current_len = h;
+                }
+            } else if (all_dense) {
                 if (self.pool) |pool| {
                     const BindCtx = struct { ra: []RaPoly, tc: usize, half: usize, r: F };
                     const ctx = BindCtx{ .ra = self.ra_polys, .tc = self.total_committed, .half = half, .r = r };
@@ -5765,7 +5850,15 @@ fn LookupsRaVirtualProver(comptime F: type) type {
 
             // Flat eq bind
             const out_half = self.e_out_len / 2;
-            bindSlice(self.e_out, out_half, r);
+            if (self.gpu) |gpu| {
+                if (out_half >= 4096) {
+                    gpu.polyBindLow(self.e_out[0 .. out_half * 2], r, self.e_out[0..out_half]) catch bindSlice(self.e_out, out_half, r);
+                } else {
+                    bindSlice(self.e_out, out_half, r);
+                }
+            } else {
+                bindSlice(self.e_out, out_half, r);
+            }
             self.e_out_len = out_half;
 
             self.current_len = half;
@@ -5853,6 +5946,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
 
         allocator: Allocator,
         pool: ?*ThreadPool = null,
+        gpu: ?*GpuPolyOps = null,
 
         pub fn init(
             allocator: Allocator,
@@ -6179,7 +6273,48 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.pool) |pool| {
+            const bindOneArr = struct {
+                fn f(arr: []F, h: usize, challenge: F) void {
+                    for (0..h) |k| {
+                        arr[k] = arr[2 * k].add(challenge.mul(arr[2 * k + 1].sub(arr[2 * k])));
+                    }
+                }
+            }.f;
+
+            const updateClaim = struct {
+                fn f(stage_claim: *F, pse: [2]F, challenge: F, t_inv: F) void {
+                    const p0 = pse[0];
+                    const p2 = pse[1];
+                    const p1 = stage_claim.*.sub(p0);
+                    const a0 = p0;
+                    const a2 = p2.sub(p1.add(p1)).add(p0).mul(t_inv);
+                    const a1 = p1.sub(p0).sub(a2);
+                    stage_claim.* = a0.add(challenge.mul(a1.add(challenge.mul(a2))));
+                }
+            }.f;
+
+            if (self.gpu) |gpu| {
+                if (half >= 4096) {
+                    // GPU bind: 5 stages x 2 arrays each, then update claims on CPU
+                    for (0..5) |s| {
+                        gpu.polyBindLow(self.F_s_arrs[s][0 .. half * 2], r, self.F_s_arrs[s][0..half]) catch bindOneArr(self.F_s_arrs[s], half, r);
+                        gpu.polyBindLow(self.val_with_raf[s][0 .. half * 2], r, self.val_with_raf[s][0..half]) catch bindOneArr(self.val_with_raf[s], half, r);
+                        updateClaim(&self.stage_claims[s], per_stage_evals[s], r, two_inv);
+                    }
+                } else {
+                    for (0..5) |s| {
+                        bindStage(
+                            self.F_s_arrs[s],
+                            self.val_with_raf[s],
+                            &self.stage_claims[s],
+                            half,
+                            r,
+                            per_stage_evals[s],
+                            two_inv,
+                        );
+                    }
+                }
+            } else if (self.pool) |pool| {
                 const Ctx = struct {
                     F_s_arrs: *[5][]F,
                     val_with_raf: *[5][]F,
@@ -6648,7 +6783,20 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.pool) |pool| {
+            if (self.gpu) |gpu| {
+                if (half >= 4096) {
+                    // GPU bind: bytecode_d ra_chunks + 1 combined
+                    for (0..self.bytecode_d) |i| {
+                        gpu.polyBindLow(ra_chunks[i][0 .. half * 2], r, ra_chunks[i][0..half]) catch bindOne(ra_chunks[i], half, r);
+                    }
+                    gpu.polyBindLow(combined[0 .. half * 2], r, combined[0..half]) catch bindOne(combined, half, r);
+                } else {
+                    bindOne(combined, half, r);
+                    for (0..self.bytecode_d) |i| {
+                        bindOne(ra_chunks[i], half, r);
+                    }
+                }
+            } else if (self.pool) |pool| {
                 // bytecode_d+1 independent arrays: bytecode_d ra_chunks + 1 combined
                 const total = self.bytecode_d + 1;
                 const Ctx = struct { ra: [][]F, combined: []F, d: usize, half: usize, r: F };
@@ -6691,9 +6839,31 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
+        gpu_ops: ?*GpuPolyOps = null,
 
         pub fn init(allocator: Allocator) Self {
             return .{ .allocator = allocator };
+        }
+
+        /// GPU-accelerated bindLow: arr[j] = arr[2j] + r*(arr[2j+1] - arr[2j])
+        /// Falls back to CPU when GPU unavailable or array too small.
+        fn gpuBindLow(arr: []F, half: usize, r: F, gpu_ops: ?*GpuPolyOps) void {
+            if (gpu_ops) |gpu| {
+                if (half >= 4096) {
+                    gpu.polyBindLow(arr[0 .. half * 2], r, arr[0..half]) catch {
+                        cpuBindLow(arr, half, r);
+                        return;
+                    };
+                    return;
+                }
+            }
+            cpuBindLow(arr, half, r);
+        }
+
+        fn cpuBindLow(arr: []F, half: usize, r: F) void {
+            for (0..half) |j| {
+                arr[j] = arr[2 * j].add(r.montgomeryMul(arr[2 * j + 1].sub(arr[2 * j])));
+            }
         }
 
         /// Generate Stage 6 batched sumcheck proof with real polynomial evaluation
@@ -7073,6 +7243,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 r_cycle_bc4_regs_rwc, r_cycle_bc5_regs_val,
                 self.thread_pool,
             );
+            inc_prover.gpu = self.gpu_ops;
             defer inc_prover.deinit();
 
             // Direct comparison: Stage 6 rd_inc vs Stage 4 inc_poly
@@ -7176,6 +7347,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 self.allocator, trace, r_cycle_bc1_spartan_outer,
                 self.thread_pool,
             );
+            hamming_prover.gpu = self.gpu_ops;
             defer hamming_prover.deinit();
 
             // Instance 3: RamRaVirtual (degree ram_d+1)
@@ -7184,6 +7356,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 ram_ra_addr_chunks, ram_d, memory_layout, log_k_chunk,
                 self.thread_pool,
             );
+            ram_ra_prover.gpu = self.gpu_ops;
             defer ram_ra_prover.deinit();
 
             // Instance 4: LookupsRaVirtual (degree n_committed_per_virtual+1)
@@ -7194,6 +7367,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 log_k_chunk, instruction_d,
                 self.thread_pool,
             );
+            lookups_ra_prover.gpu = self.gpu_ops;
             defer lookups_ra_prover.deinit();
 
             // Verify: eq table partition of unity (Σ eq[j] = 1)
@@ -7458,6 +7632,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 );
             };
             booleanity_prover.pool = self.thread_pool;
+            booleanity_prover.gpu = self.gpu_ops;
             defer booleanity_prover.deinit();
 
             // Instance 0: BytecodeReadRaf (degree bytecode_d+1)
@@ -8387,6 +8562,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 entry_bytecode_index,
                 self.thread_pool,
             );
+            bytecode_prover.gpu = self.gpu_ops;
             defer bytecode_prover.deinit();
 
             // pc_maps now consistent — no override needed

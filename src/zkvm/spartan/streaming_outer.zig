@@ -43,6 +43,7 @@ const field_mod = @import("../../field/mod.zig");
 const GruenSplitEqPolynomial = poly_mod.GruenSplitEqPolynomial;
 const MultiquadraticPolynomial = poly_mod.MultiquadraticPolynomial;
 const utils = @import("../../utils/mod.zig");
+const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
 const ExpandingTable = utils.ExpandingTable;
 
 /// Streaming outer sumcheck prover for Jolt compatibility
@@ -128,6 +129,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
         /// Thread pool for parallel operations
         thread_pool: ?*@import("../../utils/thread_pool.zig").ThreadPool = null,
+        /// GPU accelerator for Metal compute (Apple Silicon)
+        gpu_ops: ?*GpuPolyOps = null,
 
         /// Initialize the streaming outer prover (without scaling)
         ///
@@ -2644,6 +2647,29 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 }
                 self.t_prime_poly = try MultiquadraticPolynomial(F).init(self.allocator, window_size, ans);
                 self.allocator.free(ans);
+            } else if (self.gpu_ops != null and self.az_poly != null and self.az_poly.?.boundLen() >= 32768) {
+                const gpu = self.gpu_ops.?;
+                if (self.az_poly) |*az| {
+                    const evals = az.evaluations;
+                    const h = evals.len / 2;
+                    gpu.polyBindLow(evals, r, evals[0..h]) catch {
+                        az.bindLow(r);
+                        if (self.bz_poly) |*bz| bz.bindLow(r);
+                        self.current_round += 1;
+                        return;
+                    };
+                    az.num_vars -= 1;
+                }
+                if (self.bz_poly) |*bz| {
+                    const evals = bz.evaluations;
+                    const h = evals.len / 2;
+                    gpu.polyBindLow(evals, r, evals[0..h]) catch {
+                        bz.bindLow(r);
+                        self.current_round += 1;
+                        return;
+                    };
+                    bz.num_vars -= 1;
+                }
             } else {
                 if (self.az_poly) |*az| az.bindLow(r);
                 if (self.bz_poly) |*bz| bz.bindLow(r);

@@ -1,8 +1,19 @@
 const std = @import("std");
 
+/// Link Metal frameworks on a module (Apple Silicon only).
+fn linkMetalFrameworks(module: *std.Build.Module) void {
+    const opts: std.Build.Module.LinkFrameworkOptions = .{};
+    module.linkFramework("Metal", opts);
+    module.linkFramework("CoreGraphics", opts);
+    module.linkFramework("Foundation", opts);
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const is_apple_silicon = target.result.os.tag == .macos and
+        target.result.cpu.arch == .aarch64;
 
     // Main library
     const lib = b.addLibrary(.{
@@ -13,6 +24,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (is_apple_silicon) linkMetalFrameworks(lib.root_module);
     b.installArtifact(lib);
 
     // Export zolt module for dependency consumption
@@ -31,6 +43,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (is_apple_silicon) linkMetalFrameworks(exe.root_module);
     b.installArtifact(exe);
 
     // Run command
@@ -50,6 +63,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (is_apple_silicon) linkMetalFrameworks(lib_unit_tests.root_module);
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
     // Unit tests for the executable
@@ -60,6 +74,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (is_apple_silicon) linkMetalFrameworks(exe_unit_tests.root_module);
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
     // Test step
@@ -211,4 +226,67 @@ pub fn build(b: *std.Build) void {
     const run_arm64_verify = b.addRunArtifact(arm64_verify);
     const arm64_verify_step = b.step("bench-arm64", "Run ARM64 field verification benchmark");
     arm64_verify_step.dependOn(&run_arm64_verify.step);
+
+    // Benchmark: GPU vs CPU
+    const gpu_bench = b.addExecutable(.{
+        .name = "gpu-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/gpu_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_gpu_bench = b.addRunArtifact(gpu_bench);
+    const gpu_bench_step = b.step("bench-gpu", "Run GPU vs CPU benchmark");
+    gpu_bench_step.dependOn(&run_gpu_bench.step);
+
+    // Optional: rebuild Metal shaders from .metal sources
+    // Usage: zig build metal-shaders
+    const metal_step = b.step("metal-shaders", "Rebuild Metal shader library from .metal sources");
+    if (is_apple_silicon) {
+        const dev_dir = "/Applications/Xcode.app/Contents/Developer";
+        const shader_dir = "src/gpu/shaders";
+        const include_flag = b.pathFromRoot(shader_dir);
+
+        const compile_smoke = b.addSystemCommand(&.{ "xcrun", "metal", "-c", "-I" });
+        compile_smoke.setEnvironmentVariable("DEVELOPER_DIR", dev_dir);
+        compile_smoke.addArg(include_flag);
+        compile_smoke.addFileArg(b.path(shader_dir ++ "/smoke.metal"));
+        compile_smoke.addArg("-o");
+        const smoke_air = compile_smoke.addOutputFileArg("smoke.air");
+
+        const compile_field = b.addSystemCommand(&.{ "xcrun", "metal", "-c", "-I" });
+        compile_field.setEnvironmentVariable("DEVELOPER_DIR", dev_dir);
+        compile_field.addArg(include_flag);
+        compile_field.addFileArg(b.path(shader_dir ++ "/field.metal"));
+        compile_field.addArg("-o");
+        const field_air = compile_field.addOutputFileArg("field.air");
+
+        const compile_poly = b.addSystemCommand(&.{ "xcrun", "metal", "-c", "-I" });
+        compile_poly.setEnvironmentVariable("DEVELOPER_DIR", dev_dir);
+        compile_poly.addArg(include_flag);
+        compile_poly.addFileArg(b.path(shader_dir ++ "/poly.metal"));
+        compile_poly.addArg("-o");
+        const poly_air = compile_poly.addOutputFileArg("poly.air");
+
+        const compile_msm = b.addSystemCommand(&.{ "xcrun", "metal", "-c", "-I" });
+        compile_msm.setEnvironmentVariable("DEVELOPER_DIR", dev_dir);
+        compile_msm.addArg(include_flag);
+        compile_msm.addFileArg(b.path(shader_dir ++ "/msm.metal"));
+        compile_msm.addArg("-o");
+        const msm_air = compile_msm.addOutputFileArg("msm.air");
+
+        const metal_link = b.addSystemCommand(&.{ "xcrun", "metallib" });
+        metal_link.setEnvironmentVariable("DEVELOPER_DIR", dev_dir);
+        metal_link.addFileArg(smoke_air);
+        metal_link.addFileArg(field_air);
+        metal_link.addFileArg(poly_air);
+        metal_link.addFileArg(msm_air);
+        metal_link.addArgs(&.{ "-o", b.pathFromRoot(shader_dir ++ "/shaders.metallib") });
+
+        metal_step.dependOn(&metal_link.step);
+    }
 }

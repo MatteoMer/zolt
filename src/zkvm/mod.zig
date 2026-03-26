@@ -1391,6 +1391,7 @@ pub fn JoltProver(comptime F: type) type {
                     &transcript,
                     self.allocator,
                     self.thread_pool,
+                    converter.gpu_msm,
                 );
                 dbg("[STAGE8] Dory opening proof generated.\n", .{});
                 result.dory_opening_proof = dory_proof;

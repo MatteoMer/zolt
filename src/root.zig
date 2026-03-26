@@ -22,6 +22,9 @@ pub const guest = @import("guest/mod.zig");
 // Tracer module
 pub const tracer = @import("tracer/mod.zig");
 
+// GPU acceleration (Metal on Apple Silicon, stubs elsewhere)
+pub const gpu = @import("gpu/mod.zig");
+
 // Re-export commonly used types
 pub const JoltField = field.JoltField;
 pub const BN254Scalar = field.BN254Scalar;

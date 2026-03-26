@@ -37,6 +37,8 @@ const msm = @import("../../msm/mod.zig");
 const glv = msm.glv;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
+const gpu_mod = @import("../../gpu/mod.zig");
+const GpuMsmOps = gpu_mod.GpuMsmOps;
 const Fp = field.BN254BaseField;
 const Fr = field.BN254Scalar;
 const Fp2 = pairing.Fp2;
@@ -1911,12 +1913,24 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         /// Like commitWithPool, but also returns the intermediate row commitments (G1 points).
         /// These can later be combined homomorphically to avoid recomputing row commitments
         /// when opening a joint polynomial (Stage 8).
+        const CommitWithHintsResult = struct { commitment: Commitment, row_commitments: []G1Point };
+
         pub fn commitWithPoolAndHints(
             params: *const SetupParams,
             evals: []const F,
             allocator: Allocator,
             tp: ?*ThreadPool,
-        ) !struct { commitment: Commitment, row_commitments: []G1Point } {
+        ) !CommitWithHintsResult {
+            return commitWithPoolAndHintsGpu(params, evals, allocator, tp, null);
+        }
+
+        pub fn commitWithPoolAndHintsGpu(
+            params: *const SetupParams,
+            evals: []const F,
+            allocator: Allocator,
+            tp: ?*ThreadPool,
+            gpu_msm: ?*GpuMsmOps,
+        ) !CommitWithHintsResult {
             if (evals.len == 0) {
                 return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
             }
@@ -1931,7 +1945,35 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const num_rows = @as(usize, 1) << @intCast(nu);
 
             // Phase 1: Compute row commitments (G1 points via MSM)
-            const row_commitments = if (tp) |pool|
+            const row_commitments = if (gpu_msm) |gpu| blk: {
+                // GPU path: batch all row MSMs in a single Metal dispatch
+                const rc = try allocator.alloc(G1Point, num_rows);
+                errdefer allocator.free(rc);
+                const Proj = msm.ProjectivePoint(Fp);
+                const proj_results = try allocator.alloc(Proj, num_rows);
+                defer allocator.free(proj_results);
+
+                gpu.computeRowCommitments(
+                    params.g1_vec[0..num_cols],
+                    evals,
+                    num_cols,
+                    allocator,
+                    proj_results,
+                ) catch {
+                    // GPU failed — fall back to CPU
+                    allocator.free(rc);
+                    break :blk if (tp) |pool|
+                        try computeRowCommitmentsWithColsParallel(F, params, evals, num_cols, allocator, pool)
+                    else
+                        try computeRowCommitmentsWithCols(F, params, evals, num_cols, allocator);
+                };
+
+                // Convert projective → affine
+                for (0..num_rows) |i| {
+                    rc[i] = proj_results[i].toAffine();
+                }
+                break :blk rc;
+            } else if (tp) |pool|
                 try computeRowCommitmentsWithColsParallel(F, params, evals, num_cols, allocator, pool)
             else
                 try computeRowCommitmentsWithCols(F, params, evals, num_cols, allocator);
@@ -2860,6 +2902,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             transcript: anytype,
             allocator: Allocator,
             tp: ?*ThreadPool,
+            gpu_msm: ?*GpuMsmOps,
         ) !Proof {
             var open_bench_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
 
@@ -2910,7 +2953,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             // Compute VMV message using v1_affine directly
             // C = e(MSM(v1_affine, v_vec), Γ₂₀)
             const g2_fin = params.g2_vec[0];
-            const t_vec_v = msm.MSM(F, Fp).computeWithPool(v1_affine, v_vec, tp);
+            const t_vec_v = if (gpu_msm) |gpu| blk: {
+                if (v1_affine.len >= 64) {
+                    break :blk gpu.computeSingleMsm(v1_affine, v_vec, allocator) catch
+                        msm.MSM(F, Fp).computeWithPool(v1_affine, v_vec, tp);
+                }
+                break :blk msm.MSM(F, Fp).computeWithPool(v1_affine, v_vec, tp);
+            } else msm.MSM(F, Fp).computeWithPool(v1_affine, v_vec, tp);
             const t_vec_v_fp = G1PointFp{
                 .x = t_vec_v.x,
                 .y = t_vec_v.y,
@@ -2936,6 +2985,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     e1b: []const G1Point,
                     lv: []const F,
                     nc: usize,
+                    gpu: ?*GpuMsmOps,
+                    alloc: Allocator,
                 };
                 const vmv_ctx = VmvCtx{
                     .g1 = params.g1_vec,
@@ -2943,6 +2994,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     .e1b = e1_bases,
                     .lv = left_vec,
                     .nc = num_cols,
+                    .gpu = gpu_msm,
+                    .alloc = allocator,
                 };
                 break :blk pool.join(
                     G1Point,
@@ -2950,19 +3003,43 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     vmv_ctx,
                     struct {
                         fn f(cx: VmvCtx) G1Point {
+                            if (cx.gpu) |gpu| {
+                                if (cx.nc >= 64) {
+                                    return gpu.computeSingleMsm(cx.g1[0..cx.nc], cx.v[0..cx.nc], cx.alloc) catch
+                                        msm.MSM(F, Fp).computeWithPool(cx.g1[0..cx.nc], cx.v[0..cx.nc], ThreadPool.getPool());
+                                }
+                            }
                             return msm.MSM(F, Fp).computeWithPool(cx.g1[0..cx.nc], cx.v[0..cx.nc], ThreadPool.getPool());
                         }
                     }.f,
                     vmv_ctx,
                     struct {
                         fn f(cx: VmvCtx) G1Point {
+                            if (cx.gpu) |gpu| {
+                                if (cx.e1b.len >= 64) {
+                                    return gpu.computeSingleMsm(cx.e1b, cx.lv, cx.alloc) catch
+                                        msm.MSM(F, Fp).computeWithPool(cx.e1b, cx.lv, ThreadPool.getPool());
+                                }
+                            }
                             return msm.MSM(F, Fp).computeWithPool(cx.e1b, cx.lv, ThreadPool.getPool());
                         }
                     }.f,
                 );
             } else .{
-                msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], null),
-                msm.MSM(F, Fp).computeWithPool(e1_bases, left_vec, null),
+                if (gpu_msm) |gpu| blk2: {
+                    if (num_cols >= 64) {
+                        break :blk2 gpu.computeSingleMsm(params.g1_vec[0..num_cols], v_vec[0..num_cols], allocator) catch
+                            msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], null);
+                    }
+                    break :blk2 msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], null);
+                } else msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], null),
+                if (gpu_msm) |gpu| blk2: {
+                    if (e1_bases.len >= 64) {
+                        break :blk2 gpu.computeSingleMsm(e1_bases, left_vec, allocator) catch
+                            msm.MSM(F, Fp).computeWithPool(e1_bases, left_vec, null);
+                    }
+                    break :blk2 msm.MSM(F, Fp).computeWithPool(e1_bases, left_vec, null);
+                } else msm.MSM(F, Fp).computeWithPool(e1_bases, left_vec, null),
             };
 
             // D₂ = e(gamma1_v, Γ₂₀)
@@ -3127,22 +3204,45 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         d1_right = multiPairG1G2WithPool(v1_affine[n2..current_len], params.g2_vec[0..n2], tp);
                     }
                     std.debug.assert(v_vec.len >= current_len);
-                    const MsmJoinCtx = struct { g1: []const G1Point, v: []const F };
+                    const MsmJoinCtx = struct {
+                        g1: []const G1Point,
+                        v: []const F,
+                        gpu: ?*GpuMsmOps,
+                        alloc: Allocator,
+                    };
                     const msmJoinFn = struct {
                         fn f(cx: MsmJoinCtx) G1Point {
+                            if (cx.gpu) |gpu| {
+                                if (cx.g1.len >= 64) {
+                                    return gpu.computeSingleMsm(cx.g1, cx.v, cx.alloc) catch
+                                        msm.MSM(F, Fp).computeWithPool(cx.g1, cx.v, ThreadPool.getPool());
+                                }
+                            }
                             return msm.MSM(F, Fp).computeWithPool(cx.g1, cx.v, ThreadPool.getPool());
                         }
                     }.f;
                     const sum_left, const sum_right = if (tp) |pool| pool.join(
                         G1Point,
                         G1Point,
-                        MsmJoinCtx{ .g1 = params.g1_vec[0..n2], .v = v_vec[0..n2] },
+                        MsmJoinCtx{ .g1 = params.g1_vec[0..n2], .v = v_vec[0..n2], .gpu = gpu_msm, .alloc = allocator },
                         msmJoinFn,
-                        MsmJoinCtx{ .g1 = params.g1_vec[0..n2], .v = v_vec[n2..current_len] },
+                        MsmJoinCtx{ .g1 = params.g1_vec[0..n2], .v = v_vec[n2..current_len], .gpu = gpu_msm, .alloc = allocator },
                         msmJoinFn,
                     ) else .{
-                        msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], null),
-                        msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], null),
+                        if (gpu_msm) |gpu| blk: {
+                            if (n2 >= 64) {
+                                break :blk gpu.computeSingleMsm(params.g1_vec[0..n2], v_vec[0..n2], allocator) catch
+                                    msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], null);
+                            }
+                            break :blk msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], null);
+                        } else msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], null),
+                        if (gpu_msm) |gpu| blk: {
+                            if (n2 >= 64) {
+                                break :blk gpu.computeSingleMsm(params.g1_vec[0..n2], v_vec[n2..current_len], allocator) catch
+                                    msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], null);
+                            }
+                            break :blk msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], null);
+                        } else msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], null),
                     };
                     const sum_left_fp = G1PointFp{ .x = sum_left.x, .y = sum_left.y, .infinity = sum_left.infinity };
                     const sum_right_fp = G1PointFp{ .x = sum_right.x, .y = sum_right.y, .infinity = sum_right.infinity };
@@ -3245,6 +3345,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         s1: []const F,
                         s2: []const F,
                         len: usize,
+                        gpu: ?*GpuMsmOps,
+                        alloc: Allocator,
                     };
                     const eb_ctx = EBetaCtx{
                         .g1 = params.g1_vec,
@@ -3252,6 +3354,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         .s1 = s1_work,
                         .s2 = s2_work,
                         .len = current_len,
+                        .gpu = gpu_msm,
+                        .alloc = allocator,
                     };
                     break :blk pool.join(
                         G1Point,
@@ -3259,6 +3363,12 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         eb_ctx,
                         struct {
                             fn f(cx: EBetaCtx) G1Point {
+                                if (cx.gpu) |gpu| {
+                                    if (cx.len >= 64) {
+                                        return gpu.computeSingleMsm(cx.g1[0..cx.len], cx.s2[0..cx.len], cx.alloc) catch
+                                            msm.MSM(F, Fp).computeWithPool(cx.g1[0..cx.len], cx.s2[0..cx.len], ThreadPool.getPool());
+                                    }
+                                }
                                 return msm.MSM(F, Fp).computeWithPool(cx.g1[0..cx.len], cx.s2[0..cx.len], ThreadPool.getPool());
                             }
                         }.f,
@@ -3270,7 +3380,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         }.f,
                     );
                 } else .{
-                    msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..current_len], s2_work[0..current_len], ThreadPool.getPool()),
+                    if (gpu_msm) |gpu| blk2: {
+                        if (current_len >= 64) {
+                            break :blk2 gpu.computeSingleMsm(params.g1_vec[0..current_len], s2_work[0..current_len], allocator) catch
+                                msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..current_len], s2_work[0..current_len], ThreadPool.getPool());
+                        }
+                        break :blk2 msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..current_len], s2_work[0..current_len], ThreadPool.getPool());
+                    } else msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..current_len], s2_work[0..current_len], ThreadPool.getPool()),
                     msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len], ThreadPool.getPool()),
                 };
 
@@ -3387,27 +3503,53 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         s2: []const F,
                         n2: usize,
                         current_len: usize,
+                        gpu: ?*GpuMsmOps,
+                        alloc: Allocator,
                     };
-                    const e1_ctx = E1Ctx{ .v1a = v1_affine, .s2 = s2_work, .n2 = n2, .current_len = current_len };
+                    const e1_ctx = E1Ctx{ .v1a = v1_affine, .s2 = s2_work, .n2 = n2, .current_len = current_len, .gpu = gpu_msm, .alloc = allocator };
                     break :blk pool.join(
                         G1Point,
                         G1Point,
                         e1_ctx,
                         struct {
                             fn f(cx: E1Ctx) G1Point {
+                                if (cx.gpu) |gpu| {
+                                    if (cx.n2 >= 64) {
+                                        return gpu.computeSingleMsm(cx.v1a[0..cx.n2], cx.s2[cx.n2..cx.current_len], cx.alloc) catch
+                                            msm.MSM(F, Fp).computeWithPool(cx.v1a[0..cx.n2], cx.s2[cx.n2..cx.current_len], ThreadPool.getPool());
+                                    }
+                                }
                                 return msm.MSM(F, Fp).computeWithPool(cx.v1a[0..cx.n2], cx.s2[cx.n2..cx.current_len], ThreadPool.getPool());
                             }
                         }.f,
                         e1_ctx,
                         struct {
                             fn f(cx: E1Ctx) G1Point {
+                                if (cx.gpu) |gpu| {
+                                    if (cx.n2 >= 64) {
+                                        return gpu.computeSingleMsm(cx.v1a[cx.n2..cx.current_len], cx.s2[0..cx.n2], cx.alloc) catch
+                                            msm.MSM(F, Fp).computeWithPool(cx.v1a[cx.n2..cx.current_len], cx.s2[0..cx.n2], ThreadPool.getPool());
+                                    }
+                                }
                                 return msm.MSM(F, Fp).computeWithPool(cx.v1a[cx.n2..cx.current_len], cx.s2[0..cx.n2], ThreadPool.getPool());
                             }
                         }.f,
                     );
                 } else .{
-                    msm.MSM(F, Fp).computeWithPool(v1_affine[0..n2], s2_work[n2..current_len], ThreadPool.getPool()),
-                    msm.MSM(F, Fp).computeWithPool(v1_affine[n2..current_len], s2_work[0..n2], ThreadPool.getPool()),
+                    if (gpu_msm) |gpu| blk2: {
+                        if (n2 >= 64) {
+                            break :blk2 gpu.computeSingleMsm(v1_affine[0..n2], s2_work[n2..current_len], allocator) catch
+                                msm.MSM(F, Fp).computeWithPool(v1_affine[0..n2], s2_work[n2..current_len], ThreadPool.getPool());
+                        }
+                        break :blk2 msm.MSM(F, Fp).computeWithPool(v1_affine[0..n2], s2_work[n2..current_len], ThreadPool.getPool());
+                    } else msm.MSM(F, Fp).computeWithPool(v1_affine[0..n2], s2_work[n2..current_len], ThreadPool.getPool()),
+                    if (gpu_msm) |gpu| blk2: {
+                        if (n2 >= 64) {
+                            break :blk2 gpu.computeSingleMsm(v1_affine[n2..current_len], s2_work[0..n2], allocator) catch
+                                msm.MSM(F, Fp).computeWithPool(v1_affine[n2..current_len], s2_work[0..n2], ThreadPool.getPool());
+                        }
+                        break :blk2 msm.MSM(F, Fp).computeWithPool(v1_affine[n2..current_len], s2_work[0..n2], ThreadPool.getPool());
+                    } else msm.MSM(F, Fp).computeWithPool(v1_affine[n2..current_len], s2_work[0..n2], ThreadPool.getPool()),
                 };
                 const e2_plus, const e2_minus = if (tp) |pool| blk: {
                     const E2Ctx = struct {

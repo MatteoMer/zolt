@@ -23,9 +23,12 @@ const id = objc.id;
 
 /// Scalar bit width for BN254
 const SCALAR_BITS: usize = 256;
+const SCALAR_BITS_I128: usize = 128;
 
 /// Max wNAF digits: ceil(256/3) + 1 = 87
 const MAX_DIGITS: usize = 87;
+/// Max wNAF digits for i128: ceil(128/3) + 1 = 44
+const MAX_DIGITS_I128: usize = 44;
 
 /// MsmParams layout — must match the MSL struct exactly.
 const MsmParams = extern struct {
@@ -216,6 +219,136 @@ pub const GpuMsmOps = struct {
         if (bases.len == 0) return AffinePoint(BN254BaseField).identity();
         return error.DispatchFailed;
     }
+
+    /// Batched MSM with i128 scalars: one MSM per row, all dispatched in one GPU call.
+    /// Matches the CPU's computeI128 but batches all rows for GPU parallelism.
+    pub fn computeRowCommitmentsI128(
+        self: *GpuMsmOps,
+        bases: []const AffinePoint(BN254BaseField),
+        scalars_i128: []const i128,
+        num_cols: usize,
+        num_rows: usize,
+        out: []AffinePoint(BN254BaseField),
+    ) Error!void {
+        std.debug.assert(num_cols > 0);
+        std.debug.assert(out.len >= num_rows);
+        if (num_rows == 0) return;
+
+        const c = optimalWindowSize(num_cols);
+
+        // Detect effective scalar bit-width to reduce window count
+        var max_abs: u128 = 0;
+        for (scalars_i128) |s| {
+            const abs_val: u128 = if (s < 0) @intCast(-s) else @intCast(s);
+            max_abs |= abs_val;
+        }
+        const effective_bits: usize = if (max_abs == 0) 1 else @as(usize, std.math.log2_int(u128, max_abs)) + 1;
+        const num_scalar_windows = @min((effective_bits + c - 1) / c, (SCALAR_BITS_I128 + c - 1) / c);
+        const num_windows = num_scalar_windows + 1;
+        const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2;
+
+        // Convert affine points to GPU format (shared across all rows)
+        const points_u32_count = num_cols * 2 * 8;
+        var buf_points = try GpuBuffer(u32).init(self.gpu.device, points_u32_count);
+        defer buf_points.deinit();
+        writeAffinePoints(buf_points.slice(), bases[0..num_cols]);
+
+        // wNAF decompose all i128 scalars
+        // For negative scalars, negate all digits (same as flipping add/sub in kernel)
+        const digits_count = num_rows * num_windows * num_cols;
+        var buf_digits = try GpuBuffer(i16).init(self.gpu.device, digits_count);
+        defer buf_digits.deinit();
+
+        const digits_slice = buf_digits.slice();
+        for (0..num_rows) |row| {
+            for (0..num_cols) |col| {
+                const s = scalars_i128[row * num_cols + col];
+                const is_neg = s < 0;
+                const abs_val: u128 = if (is_neg) @intCast(-s) else @intCast(s);
+                const limbs: [2]u64 = .{
+                    @truncate(abs_val),
+                    @truncate(abs_val >> 64),
+                };
+                const ds = makeDigitsI128(limbs, c, num_scalar_windows);
+                for (0..num_windows) |wi| {
+                    // Negate digits for negative scalars
+                    const d = ds[wi];
+                    digits_slice[(row * num_windows + wi) * num_cols + col] = if (is_neg) -d else d;
+                }
+            }
+        }
+
+        // GPU dispatch (same kernel as Fr MSM — digits are already signed)
+        const num_threads = num_rows * num_windows;
+        const scratch_count = num_threads * num_buckets * 4 * 8;
+        var buf_scratch = try GpuBuffer(u32).init(self.gpu.device, scratch_count);
+        defer buf_scratch.deinit();
+        const result_count = num_threads * 4 * 8;
+        var buf_results = try GpuBuffer(u32).init(self.gpu.device, result_count);
+        defer buf_results.deinit();
+
+        const params = MsmParams{
+            .num_points = @intCast(num_cols),
+            .num_windows = @intCast(num_windows),
+            .num_buckets = @intCast(num_buckets),
+            .num_rows = @intCast(num_rows),
+        };
+
+        try self.gpu.dispatchKernel(
+            self.accumulate_reduce_pipeline,
+            &.{
+                KernelParam{ .buffer = buf_points.metal_buffer },
+                KernelParam{ .buffer = buf_digits.metal_buffer },
+                KernelParam{ .buffer = buf_scratch.metal_buffer },
+                KernelParam{ .buffer = buf_results.metal_buffer },
+                KernelParam{ .bytes = .{ .ptr = &params, .len = @sizeOf(MsmParams) } },
+            },
+            num_threads,
+            0,
+        );
+
+        // Read back and window combination per row
+        const results_u32 = buf_results.slice();
+        var window_xyzz: [MAX_DIGITS_I128]BucketPoint(BN254BaseField) = undefined;
+        var window_affine: [MAX_DIGITS_I128]AffinePoint(BN254BaseField) = undefined;
+
+        for (0..num_rows) |row| {
+            for (0..num_windows) |wi| {
+                const thread_id = row * num_windows + wi;
+                const base_offset = thread_id * 4 * 8;
+                const x = readBaseFieldElement(results_u32[base_offset..][0..8]);
+                const y = readBaseFieldElement(results_u32[base_offset + 8 ..][0..8]);
+                const zz = readBaseFieldElement(results_u32[base_offset + 16 ..][0..8]);
+                const zzz = readBaseFieldElement(results_u32[base_offset + 24 ..][0..8]);
+                window_xyzz[wi] = .{ .x = x, .y = y, .zz = zz, .zzz = zzz, .empty = zz.isZero() };
+            }
+
+            for (0..num_windows) |wi| {
+                window_affine[wi] = window_xyzz[wi].toAffine();
+            }
+
+            var result = ProjectivePoint(BN254BaseField).identity();
+            var window_idx: usize = num_windows;
+            while (window_idx > 0) {
+                window_idx -= 1;
+                if (!result.isIdentity()) {
+                    var k: usize = 0;
+                    while (k < c) : (k += 1) {
+                        result = result.double();
+                    }
+                }
+                if (!window_affine[window_idx].isIdentity()) {
+                    if (result.isIdentity()) {
+                        result = ProjectivePoint(BN254BaseField).fromAffine(window_affine[window_idx]);
+                    } else {
+                        result = result.addAffine(window_affine[window_idx]);
+                    }
+                }
+            }
+
+            out[row] = result.toAffine();
+        }
+    }
 };
 
 // ── wNAF digit decomposition ────────────────────────────────────────────────
@@ -254,6 +387,41 @@ fn makeDigits(limbs: [4]u64, c: usize, num_scalar_windows: usize) [MAX_DIGITS]i1
     }
     // Zero remaining entries
     for (num_digits + 1..MAX_DIGITS) |i| {
+        digits[i] = 0;
+    }
+    return digits;
+}
+
+/// wNAF decomposition for i128 scalars (2×u64 limbs, unsigned absolute value).
+fn makeDigitsI128(limbs: [2]u64, c: usize, num_scalar_windows: usize) [MAX_DIGITS_I128]i16 {
+    var digits: [MAX_DIGITS_I128]i16 = undefined;
+    const radix: u64 = @as(u64, 1) << @as(u6, @intCast(c));
+    const window_mask: u64 = radix - 1;
+    const half_radix: u64 = radix >> 1;
+    var carry: u64 = 0;
+
+    const num_digits = num_scalar_windows;
+    for (0..num_digits) |i| {
+        const bit_offset = i * c;
+        const u64_idx = bit_offset / 64;
+        const bit_idx = @as(u6, @intCast(bit_offset % 64));
+
+        var bit_buf: u64 = if (u64_idx < 2) limbs[u64_idx] >> bit_idx else 0;
+        const bit_idx_usize: usize = @as(usize, bit_idx);
+        if (bit_idx_usize + c > 64 and u64_idx + 1 < 2) {
+            bit_buf |= limbs[u64_idx + 1] << @as(u6, @intCast(64 - bit_idx_usize));
+        }
+
+        const coef = carry + (bit_buf & window_mask);
+        carry = if (coef >= half_radix) 1 else 0;
+        const digit: i32 = @as(i32, @intCast(coef)) - @as(i32, @intCast(carry)) * @as(i32, @intCast(radix));
+
+        digits[i] = @as(i16, @intCast(digit));
+    }
+    if (num_digits < MAX_DIGITS_I128) {
+        digits[num_digits] = @intCast(carry);
+    }
+    for (num_digits + 1..MAX_DIGITS_I128) |i| {
         digits[i] = 0;
     }
     return digits;
@@ -533,6 +701,59 @@ test "GPU MSM: 256-4096 points correctness" {
         if (!cpu_affine.eql(gpu_affine)) {
             std.debug.print("GPU MSM {}-point MISMATCH!\n", .{num_cols});
             return error.TestExpectedEqual;
+        }
+    }
+}
+
+test "GPU MSM i128: correctness" {
+    const gpu_mod_test = @import("mod.zig");
+    if (comptime !gpu_mod_test.is_metal_available) return;
+
+    var gpu = device_mod.GpuAccelerator.init(testing.allocator) catch |err| {
+        if (err == error.MetalNotAvailable) return;
+        return err;
+    };
+    defer gpu.deinit();
+
+    var ops = GpuMsmOps.init(&gpu) catch |err| {
+        if (err == error.FunctionNotFound) return;
+        return err;
+    };
+    defer ops.deinit();
+
+    const Fp = BN254BaseField;
+    const G1Affine = AffinePoint(Fp);
+    const CpuMSM = msm_mod.MSM(BN254Scalar, Fp);
+
+    for ([_]usize{ 64, 256, 1024 }) |num_cols| {
+        const num_rows: usize = 4;
+
+        const bases = try testing.allocator.alloc(G1Affine, num_cols);
+        defer testing.allocator.free(bases);
+        bases[0] = G1Affine.generator();
+        for (1..num_cols) |i| bases[i] = bases[i - 1].double();
+
+        // i128 scalars with mixed signs
+        const scalars = try testing.allocator.alloc(i128, num_rows * num_cols);
+        defer testing.allocator.free(scalars);
+        for (0..num_rows * num_cols) |i| {
+            const v: i128 = @as(i128, @intCast(i)) * 12345 - 6000;
+            scalars[i] = v;
+        }
+
+        const gpu_results = try testing.allocator.alloc(G1Affine, num_rows);
+        defer testing.allocator.free(gpu_results);
+
+        try ops.computeRowCommitmentsI128(bases, scalars, num_cols, num_rows, gpu_results);
+
+        // CPU reference
+        for (0..num_rows) |row| {
+            const row_scalars = scalars[row * num_cols ..][0..num_cols];
+            const cpu_affine = CpuMSM.computeI128(bases, row_scalars, null);
+            if (!cpu_affine.eql(gpu_results[row])) {
+                std.debug.print("GPU MSM i128 MISMATCH row={} n={}\n", .{ row, num_cols });
+                return error.TestExpectedEqual;
+            }
         }
     }
 }

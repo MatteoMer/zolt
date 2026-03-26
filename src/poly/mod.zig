@@ -149,7 +149,7 @@ pub fn DensePolynomial(comptime F: type) type {
         pub fn bindFirst(self: *const Self, value: F) !Self {
             std.debug.assert(self.num_vars > 0);
 
-            const new_size = self.evaluations.len / 2;
+            const new_size = self.boundLen() / 2;
             const evals = try self.allocator.alloc(F, new_size);
 
             const one_minus_value = F.one().sub(value);
@@ -181,7 +181,9 @@ pub fn DensePolynomial(comptime F: type) type {
         pub fn bindLow(self: *Self, value: F) void {
             std.debug.assert(self.num_vars > 0);
 
-            const new_size = self.evaluations.len / 2;
+            // Use boundLen() not evaluations.len — after prior binds, evaluations.len
+            // stays at the original allocated size while the valid data shrinks.
+            const new_size = self.boundLen() / 2;
 
             for (0..new_size) |i| {
                 // f(x_0, x_1, ..., x_{n-1}) evaluated at x_0 = value (bottom variable)
@@ -199,7 +201,7 @@ pub fn DensePolynomial(comptime F: type) type {
         /// Uses scratch buffer to avoid data races: reads from evaluations, writes to scratch,
         /// then swaps pointers. Requires scratch buffer to be pre-allocated.
         pub fn bindLowParallel(self: *Self, value: F, tp: *@import("../utils/thread_pool.zig").ThreadPool) void {
-            const new_size = self.evaluations.len / 2;
+            const new_size = self.boundLen() / 2;
             const scratch = self.scratch orelse {
                 self.bindLow(value); // fallback to sequential
                 return;

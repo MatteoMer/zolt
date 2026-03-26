@@ -240,4 +240,60 @@ pub fn main() !void {
         const speedup_zc = cpu_us / gpu_zc_us;
         std.debug.print("dotprod n={d:>7}: GPU(copy) {d:>7.0}us  GPU(zc) {d:>7.0}us  CPU {d:>7.0}us  copy {d:.1}x  zc {d:.1}x\n", .{ n, gpu_us, gpu_zc_us, cpu_us, speedup_dp, speedup_zc });
     }
+
+    std.debug.print("\n", .{});
+
+    // ── MSM: GPU vs CPU ─────────────────────────────────────────────────
+    {
+        const msm_mod = @import("zolt").msm;
+        const field_m = @import("zolt").field;
+        const Fp = field_m.BN254BaseField;
+        const G1Affine = msm_mod.AffinePoint(Fp);
+        const CpuMSM = msm_mod.MSM(BN254Scalar, Fp);
+
+        var gpu_msm = gpu_mod.GpuMsmOps.init(&gpu_accel) catch {
+            std.debug.print("GPU MSM init failed\n", .{});
+            return;
+        };
+        defer gpu_msm.deinit();
+
+        for ([_]usize{ 64, 128, 256, 512, 1024, 2048, 4096, 8192 }) |n| {
+            const bases_alloc = try allocator.alloc(G1Affine, n);
+            defer allocator.free(bases_alloc);
+            bases_alloc[0] = G1Affine.generator();
+            for (1..n) |i| bases_alloc[i] = bases_alloc[i - 1].double();
+
+            const scalars_alloc = try allocator.alloc(BN254Scalar, n);
+            defer allocator.free(scalars_alloc);
+            for (0..n) |i| {
+                var s = BN254Scalar.fromU64(@as(u64, @intCast(i)) *% 0xDEADBEEF +% 1);
+                s = s.mul(s);
+                scalars_alloc[i] = s;
+            }
+
+            const iters_msm: usize = if (n <= 512) 20 else if (n <= 2048) 10 else 5;
+
+            // GPU MSM
+            _ = gpu_msm.computeSingleMsm(bases_alloc, scalars_alloc, allocator) catch {
+                std.debug.print("MSM n={d:>6}: GPU failed\n", .{n});
+                continue;
+            };
+            var gpu_t = try std.time.Timer.start();
+            for (0..iters_msm) |_| {
+                _ = gpu_msm.computeSingleMsm(bases_alloc, scalars_alloc, allocator) catch unreachable;
+            }
+            const gpu_us_msm = @as(f64, @floatFromInt(gpu_t.read())) / @as(f64, @floatFromInt(iters_msm)) / 1000.0;
+
+            // CPU MSM
+            var cpu_t = try std.time.Timer.start();
+            for (0..iters_msm) |_| {
+                const r = CpuMSM.compute(bases_alloc, scalars_alloc);
+                std.mem.doNotOptimizeAway(&r);
+            }
+            const cpu_us_msm = @as(f64, @floatFromInt(cpu_t.read())) / @as(f64, @floatFromInt(iters_msm)) / 1000.0;
+
+            const sp = cpu_us_msm / gpu_us_msm;
+            std.debug.print("MSM    n={d:>6}: GPU {d:>9.0}us  CPU {d:>9.0}us  {d:.2}x\n", .{ n, gpu_us_msm, cpu_us_msm, sp });
+        }
+    }
 }

@@ -1391,7 +1391,7 @@ pub fn JoltProver(comptime F: type) type {
                     &transcript,
                     self.allocator,
                     self.thread_pool,
-                    converter.gpu_msm,
+                    null, // GPU MSM slower than CPU for IPA's moderate-size MSMs (~2K points)
                 );
                 dbg("[STAGE8] Dory opening proof generated.\n", .{});
                 result.dory_opening_proof = dory_proof;

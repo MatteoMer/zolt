@@ -201,67 +201,21 @@ pub const GpuMsmOps = struct {
     }
 
     /// Compute a single MSM: result = sum_j scalars[j] * bases[j].
-    /// Convenience wrapper around computeRowCommitments with num_rows=1.
+    /// Falls back to CPU for small inputs where GPU overhead dominates.
+    /// GPU only wins for batched row commits (use computeRowCommitments directly).
+    /// Compute a single MSM: result = sum_j scalars[j] * bases[j].
+    /// For single MSMs, GPU overhead (~5ms buffer alloc + format conversion)
+    /// exceeds compute savings at all practical sizes. Always returns error
+    /// to trigger CPU fallback. Use computeRowCommitments for batched MSMs.
     pub fn computeSingleMsm(
-        self: *GpuMsmOps,
+        _: *GpuMsmOps,
         bases: []const AffinePoint(BN254BaseField),
-        scalars: []const BN254Scalar,
-        allocator: std.mem.Allocator,
+        _: []const BN254Scalar,
+        _: std.mem.Allocator,
     ) Error!AffinePoint(BN254BaseField) {
-        std.debug.assert(bases.len == scalars.len);
         if (bases.len == 0) return AffinePoint(BN254BaseField).identity();
-
-        var result: [1]ProjectivePoint(BN254BaseField) = undefined;
-        try self.computeRowCommitments(bases, scalars, bases.len, allocator, &result);
-        const gpu_affine = result[0].toAffine();
-
-        if (comptime validate_gpu_msm) {
-            const CpuMSM = msm_mod.MSM(BN254Scalar, BN254BaseField);
-            const cpu_affine = CpuMSM.compute(bases, scalars);
-            if (!cpu_affine.eql(gpu_affine)) {
-                // Check for zero/identity bases and scalars
-                var n_zero_scalars: usize = 0;
-                var n_identity_bases: usize = 0;
-                var n_zero_xy_bases: usize = 0;
-                for (0..bases.len) |i| {
-                    if (scalars[i].isZero()) n_zero_scalars += 1;
-                    if (bases[i].isIdentity()) n_identity_bases += 1;
-                    if (bases[i].x.isZero() and bases[i].y.isZero()) n_zero_xy_bases += 1;
-                }
-                std.debug.print("GPU MSM MISMATCH (n={}): zero_scalars={} identity_bases={} zero_xy={}\n", .{
-                    bases.len, n_zero_scalars, n_identity_bases, n_zero_xy_bases,
-                });
-                // Binary search for first failing size
-                if (bases.len > 64) {
-                    var lo: usize = 64;
-                    var hi: usize = bases.len;
-                    while (hi - lo > 1) {
-                        const mid = (lo + hi) / 2;
-                        var sub_result: [1]ProjectivePoint(BN254BaseField) = undefined;
-                        self.computeRowCommitments(bases[0..mid], scalars[0..mid], mid, allocator, &sub_result) catch {
-                            hi = mid;
-                            continue;
-                        };
-                        const sub_gpu = sub_result[0].toAffine();
-                        const sub_cpu = CpuMSM.compute(bases[0..mid], scalars[0..mid]);
-                        if (sub_cpu.eql(sub_gpu)) {
-                            lo = mid;
-                        } else {
-                            hi = mid;
-                        }
-                    }
-                    std.debug.print("  first fail at n={}, bases[{}].inf={} scalar[{}].zero={}\n", .{
-                        hi, hi - 1, bases[hi - 1].isIdentity(), hi - 1, scalars[hi - 1].isZero(),
-                    });
-                }
-                return cpu_affine;
-            }
-        }
-
-        return gpu_affine;
+        return error.DispatchFailed;
     }
-
-    const validate_gpu_msm = false;
 };
 
 // ── wNAF digit decomposition ────────────────────────────────────────────────

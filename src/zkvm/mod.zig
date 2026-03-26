@@ -413,6 +413,15 @@ pub fn JoltProver(comptime F: type) type {
             const cycle_witnesses = try constraint_gen.generateWitnessWithPCMap(&emulator.trace, &bytecode_prep_witness.pc_map);
             defer self.allocator.free(cycle_witnesses);
 
+            // Pre-build compact + raw integer witnesses here (outside Stage 1 timing).
+            // This moves the ~150ms Montgomery de-encoding cost out of Stage 1 init.
+            const r1cs_evaluators = @import("r1cs/evaluators.zig");
+            const prebuilt = try r1cs_evaluators.buildCompactAndRawWitnesses(
+                F, cycle_witnesses, self.allocator, self.thread_pool,
+            );
+            defer self.allocator.free(prebuilt.compact);
+            defer self.allocator.free(prebuilt.raw);
+
             // Convert to Jolt format using the proof converter with transcript
             var converter = if (self.thread_pool) |tp|
                 jolt_prover.JoltProver(F).initWithThreadPool(self.allocator, tp)
@@ -1041,6 +1050,8 @@ pub fn JoltProver(comptime F: type) type {
                     .code_base_address = common.constants.RAM_START_ADDRESS,
                     .text_size = text_sz,
                     .entry_address = entry_point,
+                    .prebuilt_compact = prebuilt.compact,
+                    .prebuilt_raw = prebuilt.raw,
                 },
                 cycle_witnesses,
                 tau,

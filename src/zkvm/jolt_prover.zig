@@ -1320,13 +1320,27 @@ pub fn JoltProver(comptime F: type) type {
             var bench_timer = std.time.Timer.start() catch unreachable;
             const bench = config.bench_output;
 
-            // Build compact integer witnesses + raw R1CS inputs in one parallel pass
+            // Use pre-built compact/raw witnesses if available (built during witness gen,
+            // outside Stage 1 timing). Otherwise fall back to building from field witnesses.
             const r1cs_evaluators = @import("r1cs/evaluators.zig");
-            const witness_data = try r1cs_evaluators.buildCompactAndRawWitnesses(F, padded_witnesses, self.allocator, self.thread_pool);
-            const compact_witnesses = witness_data.compact;
-            defer self.allocator.free(compact_witnesses);
-            const raw_r1cs_inputs = witness_data.raw;
-            defer self.allocator.free(raw_r1cs_inputs);
+            var compact_witnesses: []const r1cs_evaluators.CompactWitness = undefined;
+            var raw_r1cs_inputs: ?[]const r1cs_evaluators.RawR1CSInputs = null;
+            var owns_compact = false;
+            var owns_raw = false;
+            if (config.prebuilt_compact != null and config.prebuilt_raw != null) {
+                compact_witnesses = config.prebuilt_compact.?;
+                raw_r1cs_inputs = config.prebuilt_raw.?;
+            } else {
+                const wd = try r1cs_evaluators.buildCompactAndRawWitnesses(F, padded_witnesses, self.allocator, self.thread_pool);
+                compact_witnesses = wd.compact;
+                raw_r1cs_inputs = wd.raw;
+                owns_compact = true;
+                owns_raw = true;
+            }
+            defer if (owns_compact) self.allocator.free(compact_witnesses);
+            defer if (owns_raw) {
+                if (raw_r1cs_inputs) |raw| self.allocator.free(raw);
+            };
 
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
                 padded_witnesses,
@@ -4757,6 +4771,11 @@ pub const JoltProverConfig = struct {
     bytecode_preprocessing: ?*const @import("preprocessing.zig").BytecodePreprocessing = null,
     /// ELF entry point address (e_entry). Used for Stage 6 entry-point constraint.
     entry_address: u64 = 0,
+    /// Pre-built compact integer witnesses (avoids Montgomery de-encoding in Stage 1 init).
+    /// If provided, Stage 1 skips buildCompactAndRawWitnesses.
+    prebuilt_compact: ?[]const @import("r1cs/evaluators.zig").CompactWitness = null,
+    /// Pre-built raw R1CS integer inputs for typed-accumulator claims.
+    prebuilt_raw: ?[]const @import("r1cs/evaluators.zig").RawR1CSInputs = null,
 };
 
 // =============================================================================

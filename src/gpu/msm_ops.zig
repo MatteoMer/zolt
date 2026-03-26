@@ -144,11 +144,7 @@ pub const GpuMsmOps = struct {
         const results_u32 = buf_results.slice();
 
         // Temporary storage for per-window XYZZ results for one row.
-        // We need at most MAX_DIGITS windows.
         var window_xyzz: [MAX_DIGITS]BucketPoint(BN254BaseField) = undefined;
-
-        // Also need storage for batch affine conversion
-        var window_affine: [MAX_DIGITS]AffinePoint(BN254BaseField) = undefined;
         _ = allocator; // allocator reserved for future use if needed
 
         for (0..num_rows) |row| {
@@ -161,24 +157,18 @@ pub const GpuMsmOps = struct {
                 const zz = readBaseFieldElement(results_u32[base_offset + 16 ..][0..8]);
                 const zzz = readBaseFieldElement(results_u32[base_offset + 24 ..][0..8]);
 
-                // Reconstruct BucketPoint — empty when zz == 0
-                const is_empty = zz.isZero();
                 window_xyzz[wi] = .{
                     .x = x,
                     .y = y,
                     .zz = zz,
                     .zzz = zzz,
-                    .empty = is_empty,
+                    .empty = zz.isZero(),
                 };
             }
 
-            // Convert window sums to affine (batch inversion)
-            for (0..num_windows) |wi| {
-                window_affine[wi] = window_xyzz[wi].toAffine();
-            }
-
-            // Window combination: MSB → LSB, c doublings between windows
-            var result = ProjectivePoint(BN254BaseField).identity();
+            // Window combination in XYZZ: MSB → LSB, c doublings between windows.
+            // Stays in XYZZ throughout — no per-window field inversions.
+            var result = BucketPoint(BN254BaseField).identity();
             var window_idx: usize = num_windows;
             while (window_idx > 0) {
                 window_idx -= 1;
@@ -186,20 +176,21 @@ pub const GpuMsmOps = struct {
                 if (!result.isIdentity()) {
                     var k: usize = 0;
                     while (k < c) : (k += 1) {
-                        result = result.double();
+                        result = result.doubleXYZZ();
                     }
                 }
 
-                if (!window_affine[window_idx].isIdentity()) {
+                if (!window_xyzz[window_idx].isIdentity()) {
                     if (result.isIdentity()) {
-                        result = ProjectivePoint(BN254BaseField).fromAffine(window_affine[window_idx]);
+                        result = window_xyzz[window_idx];
                     } else {
-                        result = result.addAffine(window_affine[window_idx]);
+                        result = result.add(window_xyzz[window_idx]);
                     }
                 }
             }
 
-            out[row] = result;
+            // Single conversion per row (1 field inversion instead of 27)
+            out[row] = result.toProjective();
         }
     }
 
@@ -310,7 +301,6 @@ pub const GpuMsmOps = struct {
         // Read back and window combination per row
         const results_u32 = buf_results.slice();
         var window_xyzz: [MAX_DIGITS_I128]BucketPoint(BN254BaseField) = undefined;
-        var window_affine: [MAX_DIGITS_I128]AffinePoint(BN254BaseField) = undefined;
 
         for (0..num_rows) |row| {
             for (0..num_windows) |wi| {
@@ -323,29 +313,27 @@ pub const GpuMsmOps = struct {
                 window_xyzz[wi] = .{ .x = x, .y = y, .zz = zz, .zzz = zzz, .empty = zz.isZero() };
             }
 
-            for (0..num_windows) |wi| {
-                window_affine[wi] = window_xyzz[wi].toAffine();
-            }
-
-            var result = ProjectivePoint(BN254BaseField).identity();
+            // Window combination in XYZZ — no per-window inversions
+            var result = BucketPoint(BN254BaseField).identity();
             var window_idx: usize = num_windows;
             while (window_idx > 0) {
                 window_idx -= 1;
                 if (!result.isIdentity()) {
                     var k: usize = 0;
                     while (k < c) : (k += 1) {
-                        result = result.double();
+                        result = result.doubleXYZZ();
                     }
                 }
-                if (!window_affine[window_idx].isIdentity()) {
+                if (!window_xyzz[window_idx].isIdentity()) {
                     if (result.isIdentity()) {
-                        result = ProjectivePoint(BN254BaseField).fromAffine(window_affine[window_idx]);
+                        result = window_xyzz[window_idx];
                     } else {
-                        result = result.addAffine(window_affine[window_idx]);
+                        result = result.add(window_xyzz[window_idx]);
                     }
                 }
             }
 
+            // Single toAffine per row (1 inversion instead of ~27)
             out[row] = result.toAffine();
         }
     }

@@ -90,7 +90,7 @@ pub const GpuMsmOps = struct {
         // ── CPU: wNAF decompose all scalars ────────────────────────────
         // Layout: [num_rows][num_windows][num_cols] as i8
         const digits_count = num_rows * num_windows * num_cols;
-        var buf_digits = try GpuBuffer(i8).init(self.gpu.device, digits_count);
+        var buf_digits = try GpuBuffer(i16).init(self.gpu.device, digits_count);
         defer buf_digits.deinit();
 
         const digits_slice = buf_digits.slice();
@@ -213,8 +213,55 @@ pub const GpuMsmOps = struct {
 
         var result: [1]ProjectivePoint(BN254BaseField) = undefined;
         try self.computeRowCommitments(bases, scalars, bases.len, allocator, &result);
-        return result[0].toAffine();
+        const gpu_affine = result[0].toAffine();
+
+        if (comptime validate_gpu_msm) {
+            const CpuMSM = msm_mod.MSM(BN254Scalar, BN254BaseField);
+            const cpu_affine = CpuMSM.compute(bases, scalars);
+            if (!cpu_affine.eql(gpu_affine)) {
+                // Check for zero/identity bases and scalars
+                var n_zero_scalars: usize = 0;
+                var n_identity_bases: usize = 0;
+                var n_zero_xy_bases: usize = 0;
+                for (0..bases.len) |i| {
+                    if (scalars[i].isZero()) n_zero_scalars += 1;
+                    if (bases[i].isIdentity()) n_identity_bases += 1;
+                    if (bases[i].x.isZero() and bases[i].y.isZero()) n_zero_xy_bases += 1;
+                }
+                std.debug.print("GPU MSM MISMATCH (n={}): zero_scalars={} identity_bases={} zero_xy={}\n", .{
+                    bases.len, n_zero_scalars, n_identity_bases, n_zero_xy_bases,
+                });
+                // Binary search for first failing size
+                if (bases.len > 64) {
+                    var lo: usize = 64;
+                    var hi: usize = bases.len;
+                    while (hi - lo > 1) {
+                        const mid = (lo + hi) / 2;
+                        var sub_result: [1]ProjectivePoint(BN254BaseField) = undefined;
+                        self.computeRowCommitments(bases[0..mid], scalars[0..mid], mid, allocator, &sub_result) catch {
+                            hi = mid;
+                            continue;
+                        };
+                        const sub_gpu = sub_result[0].toAffine();
+                        const sub_cpu = CpuMSM.compute(bases[0..mid], scalars[0..mid]);
+                        if (sub_cpu.eql(sub_gpu)) {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    std.debug.print("  first fail at n={}, bases[{}].inf={} scalar[{}].zero={}\n", .{
+                        hi, hi - 1, bases[hi - 1].isIdentity(), hi - 1, scalars[hi - 1].isZero(),
+                    });
+                }
+                return cpu_affine;
+            }
+        }
+
+        return gpu_affine;
     }
+
+    const validate_gpu_msm = false;
 };
 
 // ── wNAF digit decomposition ────────────────────────────────────────────────
@@ -222,8 +269,8 @@ pub const GpuMsmOps = struct {
 // Reimplemented here because MSM(F,G).makeDigits is private and generic.
 // Identical algorithm: signed-digit decomposition with radix 2^c.
 
-fn makeDigits(limbs: [4]u64, c: usize, num_scalar_windows: usize) [MAX_DIGITS]i8 {
-    var digits: [MAX_DIGITS]i8 = undefined;
+fn makeDigits(limbs: [4]u64, c: usize, num_scalar_windows: usize) [MAX_DIGITS]i16 {
+    var digits: [MAX_DIGITS]i16 = undefined;
     const radix: u64 = @as(u64, 1) << @as(u6, @intCast(c));
     const window_mask: u64 = radix - 1;
     const half_radix: u64 = radix >> 1;
@@ -245,7 +292,7 @@ fn makeDigits(limbs: [4]u64, c: usize, num_scalar_windows: usize) [MAX_DIGITS]i8
         carry = if (coef >= half_radix) 1 else 0;
         const digit: i32 = @as(i32, @intCast(coef)) - @as(i32, @intCast(carry)) * @as(i32, @intCast(radix));
 
-        digits[i] = @as(i8, @intCast(digit));
+        digits[i] = @as(i16, @intCast(digit));
     }
     // Final carry becomes an extra digit (0 or 1)
     if (num_digits < MAX_DIGITS) {
@@ -505,7 +552,7 @@ test "GPU MSM: 256-4096 points correctness" {
     const G1Affine = AffinePoint(Fp);
     const CpuMSM = msm_mod.MSM(BN254Scalar, Fp);
 
-    for ([_]usize{ 256, 512, 1024, 4096 }) |num_cols| {
+    for ([_]usize{ 256, 512, 1024, 2048, 4096 }) |num_cols| {
         // Generate test points via repeated doubling
         const bases = try testing.allocator.alloc(G1Affine, num_cols);
         defer testing.allocator.free(bases);

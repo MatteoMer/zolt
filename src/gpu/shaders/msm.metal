@@ -135,7 +135,7 @@ struct MsmParams {
 
 kernel void msm_accumulate_reduce(
     device const FpBase*  points    [[buffer(0)]],
-    device const int8_t*  digits    [[buffer(1)]],
+    device const int16_t* digits    [[buffer(1)]],
     device FpBase*        buckets   [[buffer(2)]],
     device FpBase*        results   [[buffer(3)]],
     constant MsmParams&   params    [[buffer(4)]],
@@ -164,7 +164,7 @@ kernel void msm_accumulate_reduce(
 
     // Phase 1: Bucket accumulation
     for (uint i = 0; i < num_points; i++) {
-        int8_t d = digits[digit_offset + i];
+        int16_t d = digits[digit_offset + i];
         if (d == 0) continue;
 
         FpBase px = points[i * 2];

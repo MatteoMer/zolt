@@ -464,7 +464,7 @@ pub fn BucketPoint(comptime F: type) type {
         }
 
         /// XYZZ doubling (a=0 short Weierstrass)
-        fn doubleXYZZ(self: Self) Self {
+        pub fn doubleXYZZ(self: Self) Self {
             if (self.empty) return self;
             // Using formulas adapted from Jacobian dbl-2009-l
             const A = self.x.square();

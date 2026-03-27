@@ -743,7 +743,29 @@ pub fn JoltProver(comptime F: type) type {
 
                 // Phase 2: Dispatch all row MSMs in parallel
                 const g1_slice = dory_srs.g1_vec[0..dense_num_cols];
-                if (self.thread_pool) |tp| {
+                const gpu_msm_mod = @import("../gpu/mod.zig");
+                if (converter.gpu_msm) |gpu_msm| gpu_blk: {
+                    // GPU batched MSM only worthwhile for 512+ rows (enough parallelism)
+                    if (active_rows < 512) break :gpu_blk;
+                    // GPU batched path: all rows in one Metal dispatch
+                    gpu_msm.computeRowCommitmentsI128(
+                        g1_slice,
+                        all_rd_bufs[0 .. active_rows * dense_num_cols],
+                        dense_num_cols,
+                        active_rows,
+                        rd_row_commits[0..active_rows],
+                    ) catch break :gpu_blk;
+                    gpu_msm.computeRowCommitmentsI128(
+                        g1_slice,
+                        all_ram_bufs[0 .. active_rows * dense_num_cols],
+                        dense_num_cols,
+                        active_rows,
+                        ram_row_commits[0..active_rows],
+                    ) catch break :gpu_blk;
+                    // GPU succeeded — skip CPU path
+                    _ = gpu_msm_mod; // suppress unused
+                } else if (self.thread_pool) |tp| {
+                    _ = gpu_msm_mod;
                     const MsmRowCtx = struct {
                         g1_bases: []const G1Point,
                         rd_data: []const i128,
@@ -1391,6 +1413,7 @@ pub fn JoltProver(comptime F: type) type {
                     &transcript,
                     self.allocator,
                     self.thread_pool,
+                    null, // GPU MSM slower than CPU for IPA's moderate-size MSMs (~2K points)
                 );
                 dbg("[STAGE8] Dory opening proof generated.\n", .{});
                 result.dory_opening_proof = dory_proof;

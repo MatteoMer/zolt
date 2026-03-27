@@ -56,13 +56,19 @@ pub fn JoltProver(comptime F: type) type {
         const OpeningId = jolt_types.OpeningId;
         const VirtualPolynomial = jolt_types.VirtualPolynomial;
 
+        const gpu_mod = @import("../gpu/mod.zig");
+
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
+        gpu_ops: ?*gpu_mod.GpuPolyOps = null,
+        gpu_msm: ?*gpu_mod.GpuMsmOps = null,
+        // Heap-allocated GPU resources (must not be inline — struct is returned by value)
+        _gpu_accel: ?*gpu_mod.GpuAccelerator = null,
+        _gpu_poly: ?*gpu_mod.GpuPolyOps = null,
+        _gpu_msm: ?*gpu_mod.GpuMsmOps = null,
 
         pub fn init(allocator: Allocator) Self {
-            return Self{
-                .allocator = allocator,
-            };
+            return Self{ .allocator = allocator };
         }
 
         pub fn initWithThreadPool(allocator: Allocator, tp: *ThreadPool) Self {
@@ -70,6 +76,57 @@ pub fn JoltProver(comptime F: type) type {
                 .allocator = allocator,
                 .thread_pool = tp,
             };
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self._gpu_msm) |m| {
+                m.deinit();
+                self.allocator.destroy(m);
+            }
+            if (self._gpu_poly) |p| {
+                p.deinit();
+                self.allocator.destroy(p);
+            }
+            if (self._gpu_accel) |a| {
+                a.deinit();
+                self.allocator.destroy(a);
+            }
+            self.gpu_ops = null;
+            self.gpu_msm = null;
+        }
+
+        /// Lazy GPU init — only called when trace size justifies GPU overhead.
+        /// Call from prove path after trace length is known.
+        pub fn enableGpu(self: *Self) void {
+            if (self.gpu_ops != null) return; // already initialized
+            const accel = self.allocator.create(gpu_mod.GpuAccelerator) catch return;
+            accel.* = gpu_mod.GpuAccelerator.init(self.allocator) catch {
+                self.allocator.destroy(accel);
+                return;
+            };
+            const poly = self.allocator.create(gpu_mod.GpuPolyOps) catch {
+                accel.deinit();
+                self.allocator.destroy(accel);
+                return;
+            };
+            poly.* = gpu_mod.GpuPolyOps.init(accel) catch {
+                accel.deinit();
+                self.allocator.destroy(accel);
+                self.allocator.destroy(poly);
+                return;
+            };
+            self._gpu_accel = accel;
+            self._gpu_poly = poly;
+            self.gpu_ops = poly;
+
+            // Also init GPU MSM ops (shares the same accelerator)
+            const msm_ops = self.allocator.create(gpu_mod.GpuMsmOps) catch return;
+            msm_ops.* = gpu_mod.GpuMsmOps.init(accel) catch {
+                self.allocator.destroy(msm_ops);
+                return;
+            };
+            self._gpu_msm = msm_ops;
+            self.gpu_msm = msm_ops;
         }
 
 
@@ -1184,6 +1241,7 @@ pub fn JoltProver(comptime F: type) type {
                 null, // No scaling for initial UniSkip - will be applied in interpolation
             );
             outer_prover.thread_pool = self.thread_pool;
+            outer_prover.gpu_ops = self.gpu_ops;
             // Set pre-built compact witnesses (not owned — don't free on deinit)
             outer_prover.compact_witnesses = compact_witnesses;
             defer {
@@ -1242,6 +1300,9 @@ pub fn JoltProver(comptime F: type) type {
 
             jolt_proof.trace_length = trace_length;
             jolt_proof.ram_K = ram_K;
+
+            // Enable GPU for large traces where persistent-buffer operations win.
+            if (trace_length >= 16384) self.enableGpu();
 
             jolt_proof.log_k_chunk = config.log_k_chunk;
             jolt_proof.lookups_ra_virtual_log_k_chunk = config.lookups_ra_virtual_log_k_chunk;
@@ -1816,6 +1877,7 @@ pub fn JoltProver(comptime F: type) type {
             // Generate Stage 3 proof using the proper sumcheck prover
             var stage3_prover_instance = Stage3Prover(F).init(self.allocator);
             stage3_prover_instance.thread_pool = self.thread_pool;
+            stage3_prover_instance.gpu_ops = self.gpu_ops;
             var stage3_result = try stage3_prover_instance.generateStage3Proof(
                 &jolt_proof.stage3_sumcheck_proof,
                 transcript,
@@ -2278,6 +2340,7 @@ pub fn JoltProver(comptime F: type) type {
                     break :stage4_block;
                 };
                 regs_prover.thread_pool = self.thread_pool;
+                regs_prover.gpu_ops = self.gpu_ops;
                 defer regs_prover.deinit();
 
 
@@ -2509,6 +2572,7 @@ pub fn JoltProver(comptime F: type) type {
             // Generate Stage 5 proof using the batched sumcheck prover
             var stage5_prover_instance = Stage5BatchedProver(F).init(self.allocator);
             stage5_prover_instance.thread_pool = self.thread_pool;
+            stage5_prover_instance.gpu_ops = self.gpu_ops;
             var stage5_result: spartan_mod.Stage5Result(F) = undefined;
 
             // Use trace-aware prover if we have trace data and Stage 4 opening point
@@ -2700,6 +2764,7 @@ pub fn JoltProver(comptime F: type) type {
 
             var stage6_prover_instance = Stage6BatchedProver(F).init(self.allocator);
             stage6_prover_instance.thread_pool = self.thread_pool;
+            stage6_prover_instance.gpu_ops = self.gpu_ops;
             var stage6_result = try stage6_prover_instance.generateStage6Proof(
                 &jolt_proof.stage6_sumcheck_proof,
                 transcript,
@@ -3602,7 +3667,11 @@ pub fn JoltProver(comptime F: type) type {
                     self.thread_pool,
                 ) catch null;
             }
-            if (product_prover != null) product_prover.?.thread_pool = self.thread_pool;
+            if (product_prover != null) {
+                product_prover.?.thread_pool = self.thread_pool;
+                product_prover.?.gpu_ops = self.gpu_ops;
+                product_prover.?.initGpuShadows();
+            }
             defer if (product_prover) |*p| p.deinit();
 
             // Instance 2: InstructionLookupsClaimReduction - initialized lazily at start_round

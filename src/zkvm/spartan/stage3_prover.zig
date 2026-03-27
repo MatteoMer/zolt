@@ -31,6 +31,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
 const poly_mod = @import("../../poly/mod.zig");
 const transcripts = @import("../../transcripts/mod.zig");
 const jolt_types = @import("../jolt_types.zig");
@@ -99,6 +100,7 @@ pub fn Stage3Prover(comptime F: type) type {
 
         allocator: Allocator,
         thread_pool: ?*@import("../../utils/thread_pool.zig").ThreadPool = null,
+        gpu_ops: ?*GpuPolyOps = null,
 
         pub fn init(allocator: Allocator) Self {
             return Self{
@@ -235,6 +237,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 shift_gamma_powers,
             );
             shift_prover.thread_pool = self.thread_pool;
+            shift_prover.gpu_ops = self.gpu_ops;
             defer shift_prover.deinit();
 
             // RegistersClaimReduction uses EqPolynomial prefix-suffix with 1 (P,Q) pair
@@ -247,6 +250,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 reg_gamma_sqr,
             );
             reg_prover.thread_pool = self.thread_pool;
+            reg_prover.gpu_ops = self.gpu_ops;
             defer reg_prover.deinit();
 
             // InstructionInputSumcheck uses direct computation (no prefix-suffix in Jolt)
@@ -259,6 +263,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 instr_gamma,
             );
             instr_prover.thread_pool = self.thread_pool;
+            instr_prover.gpu_ops = self.gpu_ops;
             defer instr_prover.deinit();
 
             if (comptime debug_verbose) {
@@ -1269,6 +1274,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
+        gpu_ops: ?*GpuPolyOps = null,
 
         pub fn init(
             allocator: Allocator,
@@ -1883,7 +1889,19 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.thread_pool) |tp| {
+            if (self.gpu_ops) |gpu| {
+                if (new_prefix_size >= 16384) {
+                    for (bctx.slices) |arr| {
+                        gpu.polyBindLow(arr[0 .. new_prefix_size * 2], r_j, arr[0..new_prefix_size]) catch {
+                            for (0..new_prefix_size) |i| {
+                                arr[i] = arr[2 * i].add(r_j.montgomeryMul(arr[2 * i + 1].sub(arr[2 * i])));
+                            }
+                        };
+                    }
+                } else {
+                    for (0..8) |idx| bindOneFn(bctx, idx);
+                }
+            } else if (self.thread_pool) |tp| {
                 tp.parallelForForce(8, bctx, bindOneFn);
             } else {
                 for (0..8) |idx| bindOneFn(bctx, idx);
@@ -2236,7 +2254,20 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.thread_pool) |tp| {
+            if (self.gpu_ops) |gpu| {
+                if (new_size >= 16384) {
+                    for (bctx.slices) |maybe_arr| {
+                        const arr = maybe_arr orelse continue;
+                        gpu.polyBindLow(arr[0 .. new_size * 2], r_j, arr[0..new_size]) catch {
+                            for (0..new_size) |i| {
+                                arr[i] = arr[2 * i].add(r_j.montgomeryMul(arr[2 * i + 1].sub(arr[2 * i])));
+                            }
+                        };
+                    }
+                } else {
+                    for (0..num_arrays) |idx| bindOneFn(bctx, idx);
+                }
+            } else if (self.thread_pool) |tp| {
                 tp.parallelForForce(num_arrays, bctx, bindOneFn);
             } else {
                 for (0..num_arrays) |idx| bindOneFn(bctx, idx);
@@ -2332,6 +2363,7 @@ fn InstructionInputProver(comptime F: type) type {
         current_size: usize,
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
+        gpu_ops: ?*GpuPolyOps = null,
 
         pub fn init(
             allocator: Allocator,
@@ -2586,6 +2618,27 @@ fn InstructionInputProver(comptime F: type) type {
         pub fn bind(self: *Self, r_j: F) void {
             const new_size = self.current_size / 2;
 
+            if (self.gpu_ops) |gpu| {
+                if (new_size >= 16384) {
+                    const slices = [9][]F{
+                        self.left_is_rs1, self.rs1_value,
+                        self.left_is_pc, self.unexpanded_pc,
+                        self.right_is_rs2, self.rs2_value,
+                        self.right_is_imm, self.imm,
+                        self.eq_stage2,
+                    };
+                    for (slices) |arr| {
+                        gpu.polyBindLow(arr[0 .. new_size * 2], r_j, arr[0..new_size]) catch {
+                            for (0..new_size) |i| {
+                                arr[i] = arr[2 * i].add(r_j.montgomeryMul(arr[2 * i + 1].sub(arr[2 * i])));
+                            }
+                        };
+                    }
+                    self.current_size = new_size;
+                    return;
+                }
+            }
+
             if (self.thread_pool) |tp| {
                 if (new_size >= 256) {
                     // Bind 9 arrays in parallel (each array's bind is independent)
@@ -2691,6 +2744,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
+        gpu_ops: ?*GpuPolyOps = null,
 
         pub fn init(
             allocator: Allocator,
@@ -2964,7 +3018,26 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.thread_pool) |tp| {
+            if (self.gpu_ops) |gpu| {
+                const max_size = @max(new_prefix_size, witness_new_size);
+                if (max_size >= 16384) {
+                    for (bctx.slices, bctx.sizes) |arr, n| {
+                        if (n >= 16384) {
+                            gpu.polyBindLow(arr[0 .. n * 2], r_j, arr[0..n]) catch {
+                                for (0..n) |i| {
+                                    arr[i] = arr[2 * i].add(r_j.montgomeryMul(arr[2 * i + 1].sub(arr[2 * i])));
+                                }
+                            };
+                        } else {
+                            for (0..n) |i| {
+                                arr[i] = arr[2 * i].add(r_j.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                            }
+                        }
+                    }
+                } else {
+                    for (0..5) |idx| bindOneFn(bctx, idx);
+                }
+            } else if (self.thread_pool) |tp| {
                 tp.parallelForForce(5, bctx, bindOneFn);
             } else {
                 for (0..5) |idx| bindOneFn(bctx, idx);
@@ -3044,7 +3117,20 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.thread_pool) |tp| {
+            if (self.gpu_ops) |gpu| {
+                if (new_size >= 16384) {
+                    for (bctx.slices) |maybe_arr| {
+                        const arr = maybe_arr orelse continue;
+                        gpu.polyBindLow(arr[0 .. new_size * 2], r_j, arr[0..new_size]) catch {
+                            for (0..new_size) |i| {
+                                arr[i] = arr[2 * i].add(r_j.montgomeryMul(arr[2 * i + 1].sub(arr[2 * i])));
+                            }
+                        };
+                    }
+                } else {
+                    for (0..num_arrays) |idx| bindOneFn(bctx, idx);
+                }
+            } else if (self.thread_pool) |tp| {
                 tp.parallelForForce(num_arrays, bctx, bindOneFn);
             } else {
                 for (0..num_arrays) |idx| bindOneFn(bctx, idx);

@@ -24,6 +24,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
 
 const poly_mod = @import("../../poly/mod.zig");
 const UniPoly = poly_mod.UniPoly;
@@ -91,6 +92,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
+        gpu_ops: ?*GpuPolyOps = null,
 
         pub fn init(allocator: Allocator) Self {
             return .{ .allocator = allocator };
@@ -3726,7 +3728,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 // Bind P and Q arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
                                 // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                                 // Parallelize across the 6 independent arrays
-                                if (self.thread_pool) |tp| {
+                                if (self.gpu_ops) |gpu| {
+                                    if (half_len >= 16384) {
+                                        const pq_arrays = [_][]F{ P_raf, P_rw, P_val, Q_raf, Q_rw, Q_val };
+                                        for (pq_arrays) |arr| {
+                                            gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
+                                                for (0..half_len) |j| {
+                                                    const lo = arr[2 * j];
+                                                    arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(challenge.limbs));
+                                                }
+                                            };
+                                        }
+                                    } else {
+                                        for (0..half_len) |j| {
+                                            P_raf[j] = P_raf[2 * j].add(P_raf[2 * j + 1].sub(P_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            P_rw[j] = P_rw[2 * j].add(P_rw[2 * j + 1].sub(P_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            P_val[j] = P_val[2 * j].add(P_val[2 * j + 1].sub(P_val[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        }
+                                        for (0..half_len) |j| {
+                                            Q_raf[j] = Q_raf[2 * j].add(Q_raf[2 * j + 1].sub(Q_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            Q_rw[j] = Q_rw[2 * j].add(Q_rw[2 * j + 1].sub(Q_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            Q_val[j] = Q_val[2 * j].add(Q_val[2 * j + 1].sub(Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        }
+                                    }
+                                } else if (self.thread_pool) |tp| {
                                     const BindCtx = struct {
                                         p_raf: []F, p_rw: []F, p_val: []F,
                                         q_raf: []F, q_rw: []F, q_val: []F,
@@ -3789,7 +3814,28 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 // Bind H_prime and eq_hi arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
                                 // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                                 // Parallelize across the 4 independent arrays
-                                if (self.thread_pool) |tp| {
+                                if (self.gpu_ops) |gpu| {
+                                    if (half_len >= 16384) {
+                                        const heq_arrays = [_][]F{ H_prime, eq_raf_hi, eq_rw_hi, eq_val_hi };
+                                        for (heq_arrays) |arr| {
+                                            gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
+                                                for (0..half_len) |j| {
+                                                    const lo = arr[2 * j];
+                                                    arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(challenge.limbs));
+                                                }
+                                            };
+                                        }
+                                    } else {
+                                        for (0..half_len) |j| {
+                                            H_prime[j] = H_prime[2 * j].add(H_prime[2 * j + 1].sub(H_prime[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        }
+                                        for (0..half_len) |j| {
+                                            eq_raf_hi[j] = eq_raf_hi[2 * j].add(eq_raf_hi[2 * j + 1].sub(eq_raf_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            eq_rw_hi[j] = eq_rw_hi[2 * j].add(eq_rw_hi[2 * j + 1].sub(eq_rw_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            eq_val_hi[j] = eq_val_hi[2 * j].add(eq_val_hi[2 * j + 1].sub(eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        }
+                                    }
+                                } else if (self.thread_pool) |tp| {
                                     const BindCtx2 = struct {
                                         h_prime: []F, eq_raf: []F, eq_rw: []F, eq_val: []F,
                                         chal_limbs: [4]u64, h: usize,
@@ -5876,7 +5922,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         p0_at_r = p0_at_r.mulHiBigIntU128(challenge.limbs).add(inst0_coeffs[0]); // c0
                         regs_val_current_claim = p0_at_r;
 
-                        bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge, self.thread_pool);
+                        bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge, self.thread_pool, self.gpu_ops);
                     }
 
                     // Bind the challenge for RamRaClaimReduction cycle rounds
@@ -5967,7 +6013,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                                 // Bind P and Q arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
                                 // Parallelize across the 6 independent arrays
-                                if (self.thread_pool) |tp| {
+                                if (self.gpu_ops) |gpu| {
+                                    if (half_len >= 16384) {
+                                        const pq_arrays = [_][]F{ P_raf, P_rw, P_val, Q_raf, Q_rw, Q_val };
+                                        for (pq_arrays) |arr| {
+                                            gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
+                                                for (0..half_len) |j| {
+                                                    const lo = arr[2 * j];
+                                                    arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(challenge.limbs));
+                                                }
+                                            };
+                                        }
+                                    } else {
+                                        for (0..half_len) |j| {
+                                            P_raf[j] = P_raf[2 * j].add(P_raf[2 * j + 1].sub(P_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            P_rw[j] = P_rw[2 * j].add(P_rw[2 * j + 1].sub(P_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            P_val[j] = P_val[2 * j].add(P_val[2 * j + 1].sub(P_val[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        }
+                                        for (0..half_len) |j| {
+                                            Q_raf[j] = Q_raf[2 * j].add(Q_raf[2 * j + 1].sub(Q_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            Q_rw[j] = Q_rw[2 * j].add(Q_rw[2 * j + 1].sub(Q_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            Q_val[j] = Q_val[2 * j].add(Q_val[2 * j + 1].sub(Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        }
+                                    }
+                                } else if (self.thread_pool) |tp| {
                                     const BindCtx = struct {
                                         p_raf: []F, p_rw: []F, p_val: []F,
                                         q_raf: []F, q_rw: []F, q_val: []F,
@@ -6018,7 +6087,28 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                                 // Bind H_prime and eq_hi arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
                                 // Parallelize across the 4 independent arrays
-                                if (self.thread_pool) |tp| {
+                                if (self.gpu_ops) |gpu| {
+                                    if (half_len >= 16384) {
+                                        const heq_arrays = [_][]F{ H_prime, eq_raf_hi, eq_rw_hi, eq_val_hi };
+                                        for (heq_arrays) |arr| {
+                                            gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
+                                                for (0..half_len) |j| {
+                                                    const lo = arr[2 * j];
+                                                    arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(challenge.limbs));
+                                                }
+                                            };
+                                        }
+                                    } else {
+                                        for (0..half_len) |j| {
+                                            H_prime[j] = H_prime[2 * j].add(H_prime[2 * j + 1].sub(H_prime[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        }
+                                        for (0..half_len) |j| {
+                                            eq_raf_hi[j] = eq_raf_hi[2 * j].add(eq_raf_hi[2 * j + 1].sub(eq_raf_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            eq_rw_hi[j] = eq_rw_hi[2 * j].add(eq_rw_hi[2 * j + 1].sub(eq_rw_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                            eq_val_hi[j] = eq_val_hi[2 * j].add(eq_val_hi[2 * j + 1].sub(eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
+                                        }
+                                    }
+                                } else if (self.thread_pool) |tp| {
                                     const BindCtx2 = struct {
                                         h_prime: []F, eq_raf: []F, eq_rw: []F, eq_val: []F,
                                         chal_limbs: [4]u64, h: usize,
@@ -6087,7 +6177,40 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Only bind combined_vals (standard MLE binding)
                     // This matches Jolt's GruenSplitEqPolynomial where E_in/E_out are not modified
                     // Bind combined_vals + all ra_chunk_weights in parallel across arrays
-                    if (self.thread_pool) |tp| {
+                    if (self.gpu_ops) |gpu| {
+                        // GPU path: bind each polynomial via GPU
+                        const lk_n = lookups_combined_vals.len >> @intCast(lookups_round);
+                        const lk_half = lk_n / 2;
+                        if (lk_half >= 16384) {
+                            gpu.polyBindLow(lookups_combined_vals[0 .. lk_half * 2], challenge, lookups_combined_vals[0..lk_half]) catch {
+                                for (0..lk_half) |i| {
+                                    lookups_combined_vals[i] = lookups_combined_vals[2 * i].add(challenge.mul(lookups_combined_vals[2 * i + 1].sub(lookups_combined_vals[2 * i])));
+                                }
+                            };
+                            for (lk_half..lk_n) |i| {
+                                lookups_combined_vals[i] = F.zero();
+                            }
+                        } else {
+                            bindSinglePolynomial(lookups_combined_vals, lookups_round, challenge, self.thread_pool, self.gpu_ops);
+                        }
+                        for (0..ra_num_chunks) |chunk_idx| {
+                            const ra_poly = ra_chunk_weights[chunk_idx];
+                            const ra_n = ra_poly.len >> @intCast(lookups_round);
+                            const ra_half = ra_n / 2;
+                            if (ra_half >= 16384) {
+                                gpu.polyBindLow(ra_poly[0 .. ra_half * 2], challenge, ra_poly[0..ra_half]) catch {
+                                    for (0..ra_half) |i| {
+                                        ra_poly[i] = ra_poly[2 * i].add(challenge.mul(ra_poly[2 * i + 1].sub(ra_poly[2 * i])));
+                                    }
+                                };
+                                for (ra_half..ra_n) |i| {
+                                    ra_poly[i] = F.zero();
+                                }
+                            } else {
+                                bindSinglePolynomial(ra_poly, lookups_round, challenge, self.thread_pool, self.gpu_ops);
+                            }
+                        }
+                    } else if (self.thread_pool) |tp| {
                         const BindArraysCtx = struct {
                             combined: []F,
                             chunks: *[MAX_RA_CHUNKS][]F,
@@ -6117,9 +6240,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }.f);
                     } else {
-                        bindSinglePolynomial(lookups_combined_vals, lookups_round, challenge, self.thread_pool);
+                        bindSinglePolynomial(lookups_combined_vals, lookups_round, challenge, self.thread_pool, self.gpu_ops);
                         for (0..ra_num_chunks) |chunk_idx| {
-                            bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge, self.thread_pool);
+                            bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge, self.thread_pool, self.gpu_ops);
                         }
                     }
 
@@ -7773,14 +7896,32 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Bind challenge for RegistersValEvaluation polynomials
-        fn bindRegsValChallenge(inc: []F, wa: []F, lt: []F, round: usize, r: F, tp: ?*ThreadPool) void {
+        fn bindRegsValChallenge(inc: []F, wa: []F, lt: []F, round: usize, r: F, tp: ?*ThreadPool, gpu: ?*GpuPolyOps) void {
             const n = inc.len >> @intCast(round);
             const half = n / 2;
             if (half == 0) return;
 
+            const arrays = [_][]F{ inc, wa, lt };
+
             // NOTE: In-place binding has data dependencies (write[i] overlaps read[2*j] where j=i/2),
             // so we parallelize across the 3 independent arrays instead of across indices.
-            if (tp) |pool| {
+            if (gpu) |g| {
+                if (half >= 16384) {
+                    for (arrays) |arr| {
+                        g.polyBindLow(arr[0 .. half * 2], r, arr[0..half]) catch {
+                            for (0..half) |i| {
+                                arr[i] = arr[2 * i].add(r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                            }
+                        };
+                    }
+                } else {
+                    for (0..half) |i| {
+                        inc[i] = inc[2 * i].add(r.mul(inc[2 * i + 1].sub(inc[2 * i])));
+                        wa[i] = wa[2 * i].add(r.mul(wa[2 * i + 1].sub(wa[2 * i])));
+                        lt[i] = lt[2 * i].add(r.mul(lt[2 * i + 1].sub(lt[2 * i])));
+                    }
+                }
+            } else if (tp) |pool| {
                 if (half >= 256) {
                     const BindCtx = struct { inc: []F, wa: []F, lt: []F, rv: F, h: usize };
                     const ctx = BindCtx{ .inc = inc, .wa = wa, .lt = lt, .rv = r, .h = half };
@@ -7872,13 +8013,29 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Bind challenge for LookupsReadRaf polynomials (cycle rounds) - legacy version
-        fn bindLookupsChallenge(eq_evals: []F, combined: []F, round: usize, r: F, tp: ?*ThreadPool) void {
+        fn bindLookupsChallenge(eq_evals: []F, combined: []F, round: usize, r: F, tp: ?*ThreadPool, gpu: ?*GpuPolyOps) void {
             const n = eq_evals.len >> @intCast(round);
             const half = n / 2;
             if (half == 0) return;
 
-            // Parallelize across arrays (not indices) due to in-place data dependencies
-            if (tp) |pool| {
+            const arrays = [_][]F{ eq_evals, combined };
+
+            if (gpu) |g| {
+                if (half >= 16384) {
+                    for (arrays) |arr| {
+                        g.polyBindLow(arr[0 .. half * 2], r, arr[0..half]) catch {
+                            for (0..half) |i| {
+                                arr[i] = arr[2 * i].add(r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                            }
+                        };
+                    }
+                } else {
+                    for (0..half) |i| {
+                        eq_evals[i] = eq_evals[2 * i].add(r.mul(eq_evals[2 * i + 1].sub(eq_evals[2 * i])));
+                        combined[i] = combined[2 * i].add(r.mul(combined[2 * i + 1].sub(combined[2 * i])));
+                    }
+                }
+            } else if (tp) |pool| {
                 if (half >= 256) {
                     const BindCtx = struct { eq: []F, comb: []F, rv: F, h: usize };
                     const ctx = BindCtx{ .eq = eq_evals, .comb = combined, .rv = r, .h = half };
@@ -7963,13 +8120,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Bind challenge for LookupsReadRaf polynomials with ra_weights (cycle rounds)
-        fn bindLookupsCycleChallengeWithRa(eq_evals: []F, ra_weights: []F, combined: []F, round: usize, r: F, tp: ?*ThreadPool) void {
+        fn bindLookupsCycleChallengeWithRa(eq_evals: []F, ra_weights: []F, combined: []F, round: usize, r: F, tp: ?*ThreadPool, gpu: ?*GpuPolyOps) void {
             const n = eq_evals.len >> @intCast(round);
             const half = n / 2;
             if (half == 0) return;
 
-            // Parallelize across arrays (not indices) due to in-place data dependencies
-            if (tp) |pool| {
+            const arrays = [_][]F{ eq_evals, ra_weights, combined };
+
+            if (gpu) |g| {
+                if (half >= 16384) {
+                    for (arrays) |arr| {
+                        g.polyBindLow(arr[0 .. half * 2], r, arr[0..half]) catch {
+                            for (0..half) |i| {
+                                arr[i] = arr[2 * i].add(r.mul(arr[2 * i + 1].sub(arr[2 * i])));
+                            }
+                        };
+                    }
+                } else {
+                    for (0..half) |i| {
+                        eq_evals[i] = eq_evals[2 * i].add(r.mul(eq_evals[2 * i + 1].sub(eq_evals[2 * i])));
+                        ra_weights[i] = ra_weights[2 * i].add(r.mul(ra_weights[2 * i + 1].sub(ra_weights[2 * i])));
+                        combined[i] = combined[2 * i].add(r.mul(combined[2 * i + 1].sub(combined[2 * i])));
+                    }
+                }
+            } else if (tp) |pool| {
                 if (half >= 256) {
                     const BindCtx = struct { eq: []F, ra: []F, comb: []F, rv: F, h: usize };
                     const ctx = BindCtx{ .eq = eq_evals, .ra = ra_weights, .comb = combined, .rv = r, .h = half };
@@ -8010,14 +8184,28 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Bind challenge for a single polynomial (used for per-chunk ra weights)
-        fn bindSinglePolynomial(poly: []F, round: usize, r: F, tp: ?*ThreadPool) void {
+        fn bindSinglePolynomial(poly: []F, round: usize, r: F, tp: ?*ThreadPool, gpu: ?*GpuPolyOps) void {
             _ = tp; // Single polynomial can't be parallelized across arrays
             const n = poly.len >> @intCast(round);
             const half = n / 2;
             if (half == 0) return;
 
-            for (0..half) |i| {
-                poly[i] = poly[2 * i].add(r.mul(poly[2 * i + 1].sub(poly[2 * i])));
+            if (gpu) |g| {
+                if (half >= 16384) {
+                    g.polyBindLow(poly[0 .. half * 2], r, poly[0..half]) catch {
+                        for (0..half) |i| {
+                            poly[i] = poly[2 * i].add(r.mul(poly[2 * i + 1].sub(poly[2 * i])));
+                        }
+                    };
+                } else {
+                    for (0..half) |i| {
+                        poly[i] = poly[2 * i].add(r.mul(poly[2 * i + 1].sub(poly[2 * i])));
+                    }
+                }
+            } else {
+                for (0..half) |i| {
+                    poly[i] = poly[2 * i].add(r.mul(poly[2 * i + 1].sub(poly[2 * i])));
+                }
             }
 
             // Zero out upper half

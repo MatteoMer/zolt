@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
 const TraceStep = @import("../../tracer/mod.zig").TraceStep;
 const ExecutionTrace = @import("../../tracer/mod.zig").ExecutionTrace;
 const gruen_eq = @import("gruen_eq.zig");
@@ -74,6 +75,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
 
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
+        gpu_ops: ?*GpuPolyOps = null,
 
         /// Trace length (power of 2)
         T: usize,
@@ -442,11 +444,30 @@ pub fn Stage4GruenProver(comptime F: type) type {
         fn phase1Bind(self: *Self, round: usize, challenge: F) void {
             const half_T = self.current_T / 2;
 
-            // Bind inc_poly (dense)
-            for (0..half_T) |i| {
-                const lo = self.inc_poly[2 * i];
-                const hi = self.inc_poly[2 * i + 1];
-                self.inc_poly[i] = lo.add(challenge.mul(hi.sub(lo)));
+            // Bind inc_poly (dense) — GPU-accelerated for large polynomials
+            if (self.gpu_ops) |gpu| {
+                if (half_T >= 16384) {
+                    gpu.polyBindLow(self.inc_poly[0..self.current_T], challenge, self.inc_poly[0..half_T]) catch {
+                        // CPU fallback on GPU error
+                        for (0..half_T) |i| {
+                            const lo = self.inc_poly[2 * i];
+                            const hi = self.inc_poly[2 * i + 1];
+                            self.inc_poly[i] = lo.add(challenge.mul(hi.sub(lo)));
+                        }
+                    };
+                } else {
+                    for (0..half_T) |i| {
+                        const lo = self.inc_poly[2 * i];
+                        const hi = self.inc_poly[2 * i + 1];
+                        self.inc_poly[i] = lo.add(challenge.mul(hi.sub(lo)));
+                    }
+                }
+            } else {
+                for (0..half_T) |i| {
+                    const lo = self.inc_poly[2 * i];
+                    const hi = self.inc_poly[2 * i + 1];
+                    self.inc_poly[i] = lo.add(challenge.mul(hi.sub(lo)));
+                }
             }
 
             // Bind sparse matrix entries

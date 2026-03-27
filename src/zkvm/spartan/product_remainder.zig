@@ -39,6 +39,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
 const field_mod = @import("../../field/mod.zig");
 const UnreducedProductAccum = field_mod.UnreducedProductAccum;
 
@@ -157,6 +158,11 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
         allocator: Allocator,
         /// Thread pool for parallel compute/bind
         thread_pool: ?*ThreadPool = null,
+        /// GPU accelerator for Metal compute (Apple Silicon)
+        gpu_ops: ?*GpuPolyOps = null,
+        /// GPU-resident shadow buffers for left/right polynomials (persistent)
+        left_gpu: ?@import("../../gpu/poly_ops.zig").GpuPolynomial = null,
+        right_gpu: ?@import("../../gpu/poly_ops.zig").GpuPolynomial = null,
 
         /// Initialize the prover after univariate skip
         ///
@@ -279,9 +285,24 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            if (self.left_gpu) |*g| g.deinit();
+            if (self.right_gpu) |*g| g.deinit();
             self.split_eq.deinit();
             self.left_poly.deinit();
             self.right_poly.deinit();
+        }
+
+        /// Create GPU-resident shadow buffers for the polynomials.
+        /// Call after gpu_ops is set. Safe to call if gpu_ops is null (no-op).
+        pub fn initGpuShadows(self: *Self) void {
+            const gpu = self.gpu_ops orelse return;
+            const GpuPoly = @import("../../gpu/poly_ops.zig").GpuPolynomial;
+            self.left_gpu = GpuPoly.initFromCpu(gpu.gpu.device, self.left_poly.evaluations) catch return;
+            self.right_gpu = GpuPoly.initFromCpu(gpu.gpu.device, self.right_poly.evaluations) catch {
+                self.left_gpu.?.deinit();
+                self.left_gpu = null;
+                return;
+            };
         }
 
         /// Number of rounds (= num_cycle_vars)
@@ -393,7 +414,17 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
             }.f;
 
             const identity = [2]F{ F.zero(), F.zero() };
-            const sums = if (self.thread_pool) |tp|
+            const sums = if (self.gpu_ops != null and self.left_gpu != null and num_groups >= 4096) blk: {
+                // GPU-resident path: polynomial data stays in Metal buffers
+                break :blk self.gpu_ops.?.productSumcheckRoundGpu(
+                    self.left_gpu.?.metalBuffer(),
+                    self.right_gpu.?.metalBuffer(),
+                    @intCast(num_groups),
+                    E_out,
+                    E_in,
+                    num_xin_bits,
+                ) catch identity;
+            } else if (self.thread_pool) |tp|
                 tp.parallelReduce([2]F, num_groups, identity, ctx, mapFn, reduceFn)
             else
                 mapFn(ctx, 0, num_groups);
@@ -447,8 +478,38 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
 
         /// Bind the challenge for this round and update state
         pub fn bindChallenge(self: *Self, challenge: F) !void {
-            // Bind left and right polynomials concurrently using full threadpool
-            if (self.thread_pool) |tp| {
+            // Bind left and right polynomials concurrently
+            if (self.gpu_ops != null and self.left_gpu != null and self.left_gpu.?.len / 2 >= 4096) {
+                // Threshold matches computeRoundPolynomial's GPU threshold (num_groups >= 4096)
+                // GPU in-place bind on persistent Metal buffers — no data copy
+                const gpu = self.gpu_ops.?;
+                gpu.bindLowInPlace(&self.left_gpu.?, challenge) catch {
+                    self.left_poly.bindLow(challenge);
+                    self.right_poly.bindLow(challenge);
+                    self.split_eq.bind(challenge);
+                    self.current_round += 1;
+                    return;
+                };
+                gpu.bindLowInPlace(&self.right_gpu.?, challenge) catch {};
+                self.left_poly.num_vars -= 1;
+                self.right_poly.num_vars -= 1;
+
+                // If next round will fall below GPU threshold, sync GPU → CPU
+                const next_groups = self.left_gpu.?.len / 2;
+                if (next_groups < 4096) {
+                    const GpuPoly = @import("../../gpu/poly_ops.zig").GpuPolynomial;
+                    const left_len = self.left_gpu.?.len;
+                    const right_len = self.right_gpu.?.len;
+                    self.left_gpu.?.readAll(self.left_poly.evaluations[0..left_len]);
+                    self.right_gpu.?.readAll(self.right_poly.evaluations[0..right_len]);
+                    // Free GPU shadows — not needed anymore
+                    self.left_gpu.?.deinit();
+                    self.right_gpu.?.deinit();
+                    self.left_gpu = null;
+                    self.right_gpu = null;
+                    _ = GpuPoly;
+                }
+            } else if (self.thread_pool) |tp| {
                 const BindCtx = struct {
                     left: *DensePolynomial(F),
                     right: *DensePolynomial(F),

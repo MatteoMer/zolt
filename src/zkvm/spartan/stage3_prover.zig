@@ -2809,26 +2809,7 @@ fn InstructionInputProver(comptime F: type) type {
         pub fn bind(self: *Self, r_j: F) void {
             const new_size = self.current_size / 2;
 
-            if (self.gpu_ops) |gpu| {
-                if (new_size >= 16384) {
-                    const slices = [9][]F{
-                        self.left_is_rs1, self.rs1_value,
-                        self.left_is_pc, self.unexpanded_pc,
-                        self.right_is_rs2, self.rs2_value,
-                        self.right_is_imm, self.imm,
-                        self.eq_stage2,
-                    };
-                    for (slices) |arr| {
-                        gpu.polyBindLow(arr[0 .. new_size * 2], r_j, arr[0..new_size]) catch {
-                            for (0..new_size) |i| {
-                                arr[i] = arr[2 * i].add(r_j.montgomeryMul(arr[2 * i + 1].sub(arr[2 * i])));
-                            }
-                        };
-                    }
-                    self.current_size = new_size;
-                    return;
-                }
-            }
+            // GPU bind path removed — InstructionInput uses GruenSplitEq for eq (no flat array)
 
             if (self.thread_pool) |tp| {
                 if (new_size >= 256) {
@@ -3178,58 +3159,11 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         fn bindPhase1(self: *Self, r_j: F) void {
             const new_prefix_size = self.current_prefix_size / 2;
 
-<<<<<<< HEAD
-            // Bind 5 independent arrays: P, Q, rd_write_value, rs1_value, rs2_value
-            const RegBindCtx = struct {
-                slices: [5][]F,
-                r: F,
-                sizes: [5]usize, // P/Q use prefix size, witnesses use witness size
-            };
-            const bctx = RegBindCtx{
-                .slices = .{ self.P, self.Q, self.rd_write_value, self.rs1_value, self.rs2_value },
-                .r = r_j,
-                .sizes = .{ new_prefix_size, new_prefix_size, witness_new_size, witness_new_size, witness_new_size },
-            };
-            const bindOneFn = struct {
-                fn f(c: RegBindCtx, idx: usize) void {
-                    const arr = c.slices[idx];
-                    const n = c.sizes[idx];
-                    for (0..n) |i| {
-                        arr[i] = arr[2 * i].add(c.r.mul(arr[2 * i + 1].sub(arr[2 * i])));
-                    }
-                }
-            }.f;
-
-            if (self.gpu_ops) |gpu| {
-                const max_size = @max(new_prefix_size, witness_new_size);
-                if (max_size >= 16384) {
-                    for (bctx.slices, bctx.sizes) |arr, n| {
-                        if (n >= 16384) {
-                            gpu.polyBindLow(arr[0 .. n * 2], r_j, arr[0..n]) catch {
-                                for (0..n) |i| {
-                                    arr[i] = arr[2 * i].add(r_j.montgomeryMul(arr[2 * i + 1].sub(arr[2 * i])));
-                                }
-                            };
-                        } else {
-                            for (0..n) |i| {
-                                arr[i] = arr[2 * i].add(r_j.mul(arr[2 * i + 1].sub(arr[2 * i])));
-                            }
-                        }
-                    }
-                } else {
-                    for (0..5) |idx| bindOneFn(bctx, idx);
-                }
-            } else if (self.thread_pool) |tp| {
-                tp.parallelForForce(5, bctx, bindOneFn);
-            } else {
-                for (0..5) |idx| bindOneFn(bctx, idx);
-=======
             // Only bind P and Q (prefix-sized arrays)
             // Witness MLEs are NOT bound during Phase 1 — they're reconstructed at transition
             for (0..new_prefix_size) |i| {
                 self.P[i] = self.P[2 * i].add(r_j.mul(self.P[2 * i + 1].sub(self.P[2 * i])));
                 self.Q[i] = self.Q[2 * i].add(r_j.mul(self.Q[2 * i + 1].sub(self.Q[2 * i])));
->>>>>>> fa769175 (perf: Stage 3 optimizations — pass raw R1CS inputs, use FoldedMulU64 for shift/register provers)
             }
 
             self.current_prefix_size = new_prefix_size;

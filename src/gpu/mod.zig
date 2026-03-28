@@ -33,7 +33,18 @@ else
 pub const GpuPolynomial = if (is_metal_available)
     @import("poly_ops.zig").GpuPolynomial
 else
-    struct {};
+    struct {
+        len: usize = 0,
+        pub fn initFromCpu(_: anytype, _: anytype) error{GpuUnavailable}!@This() {
+            return error.GpuUnavailable;
+        }
+        pub fn deinit(_: *@This()) void {}
+        pub fn metalBuffer(_: @This()) *anyopaque {
+            unreachable;
+        }
+        pub fn syncToCpu(_: *@This(), _: anytype) void {}
+        pub fn readAll(_: @This(), _: anytype) void {}
+    };
 
 pub const GpuMsmOps = if (is_metal_available)
     @import("msm_ops.zig").GpuMsmOps
@@ -61,10 +72,39 @@ fn NoGpuBuffer(comptime T: type) type {
 
 const NoGpuFieldOps = struct {
     pub const Error = error{GpuUnavailable};
+
+    // Stub device for gpu.device access paths (unreachable on non-Metal)
+    const StubDevice = struct { device: *anyopaque = undefined };
+    gpu: StubDevice = .{},
+
     pub fn init(_: anytype) Error!@This() {
         return error.GpuUnavailable;
     }
     pub fn deinit(_: *@This()) void {}
+
+    const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
+    const AffinePoint = @import("../msm/mod.zig").AffinePoint;
+    const BN254BaseField = @import("../field/mod.zig").BN254BaseField;
+
+    // Stubs for GpuPolyOps methods
+    pub fn polyBindLow(_: *@This(), _: []const BN254Scalar, _: BN254Scalar, _: []BN254Scalar) Error!void {
+        return error.GpuUnavailable;
+    }
+    pub fn productSumcheckRoundGpu(_: *@This(), _: *anyopaque, _: *anyopaque, _: u32, _: []const BN254Scalar, _: []const BN254Scalar, _: u32) Error![2]BN254Scalar {
+        return error.GpuUnavailable;
+    }
+
+    pub fn bindLowInPlace(_: *@This(), _: anytype, _: BN254Scalar) Error!void {
+        return error.GpuUnavailable;
+    }
+
+    // Stubs for GpuMsmOps methods
+    pub fn computeRowCommitmentsI128(_: *@This(), _: []const AffinePoint(BN254BaseField), _: []const i128, _: usize, _: usize, _: []AffinePoint(BN254BaseField)) Error!void {
+        return error.GpuUnavailable;
+    }
+    pub fn computeSingleMsm(_: *@This(), _: []const AffinePoint(BN254BaseField), _: []const BN254Scalar, _: std.mem.Allocator) Error!AffinePoint(BN254BaseField) {
+        return error.GpuUnavailable;
+    }
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -77,48 +117,5 @@ test {
     }
 }
 
-test "GPU smoke test: vector add" {
-    if (comptime !is_metal_available) return;
-
-    const device_mod = @import("device.zig");
-    const buffer_mod = @import("buffer.zig");
-    const objc = @import("objc.zig");
-
-    var gpu = device_mod.GpuAccelerator.init(std.testing.allocator) catch |err| {
-        if (err == error.MetalNotAvailable) return; // No GPU at runtime (e.g. VM)
-        return err;
-    };
-    defer gpu.deinit();
-
-    const n: usize = 1024;
-    const Buf = buffer_mod.GpuBuffer(u32);
-
-    var buf_a = try Buf.init(gpu.device, n);
-    defer buf_a.deinit();
-    var buf_b = try Buf.init(gpu.device, n);
-    defer buf_b.deinit();
-    var buf_c = try Buf.init(gpu.device, n);
-    defer buf_c.deinit();
-
-    // Fill inputs on CPU (writes directly to GPU-visible unified memory)
-    for (0..n) |i| {
-        buf_a.slice()[i] = @intCast(i);
-        buf_b.slice()[i] = @intCast(i * 2);
-    }
-
-    // Dispatch vector_add kernel on GPU
-    const pipeline = try gpu.createPipeline("vector_add");
-    defer objc.msgSendVoid(pipeline, "release");
-
-    try gpu.dispatchSimple(
-        pipeline,
-        &.{ buf_a.metal_buffer, buf_b.metal_buffer, buf_c.metal_buffer },
-        n,
-    );
-
-    // Verify results on CPU (reads directly from GPU-written unified memory)
-    for (0..n) |i| {
-        const expected: u32 = @intCast(i + i * 2);
-        try std.testing.expectEqual(expected, buf_c.slice()[i]);
-    }
-}
+// GPU smoke test: only available on Metal (macOS aarch64)
+// Moved to examples/gpu_bench.zig to avoid libc dependency on Linux builds.

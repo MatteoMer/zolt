@@ -161,8 +161,8 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
         /// GPU accelerator for Metal compute (Apple Silicon)
         gpu_ops: ?*GpuPolyOps = null,
         /// GPU-resident shadow buffers for left/right polynomials (persistent)
-        left_gpu: ?@import("../../gpu/poly_ops.zig").GpuPolynomial = null,
-        right_gpu: ?@import("../../gpu/poly_ops.zig").GpuPolynomial = null,
+        left_gpu: ?@import("../../gpu/mod.zig").GpuPolynomial = null,
+        right_gpu: ?@import("../../gpu/mod.zig").GpuPolynomial = null,
 
         /// Initialize the prover after univariate skip
         ///
@@ -296,7 +296,7 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
         /// Call after gpu_ops is set. Safe to call if gpu_ops is null (no-op).
         pub fn initGpuShadows(self: *Self) void {
             const gpu = self.gpu_ops orelse return;
-            const GpuPoly = @import("../../gpu/poly_ops.zig").GpuPolynomial;
+            const GpuPoly = @import("../../gpu/mod.zig").GpuPolynomial;
             self.left_gpu = GpuPoly.initFromCpu(gpu.gpu.device, self.left_poly.evaluations) catch return;
             self.right_gpu = GpuPoly.initFromCpu(gpu.gpu.device, self.right_poly.evaluations) catch {
                 self.left_gpu.?.deinit();
@@ -497,7 +497,7 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 // If next round will fall below GPU threshold, sync GPU → CPU
                 const next_groups = self.left_gpu.?.len / 2;
                 if (next_groups < 4096) {
-                    const GpuPoly = @import("../../gpu/poly_ops.zig").GpuPolynomial;
+                    const GpuPoly = @import("../../gpu/mod.zig").GpuPolynomial;
                     const left_len = self.left_gpu.?.len;
                     const right_len = self.right_gpu.?.len;
                     self.left_gpu.?.readAll(self.left_poly.evaluations[0..left_len]);

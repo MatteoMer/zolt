@@ -1883,6 +1883,7 @@ pub fn JoltProver(comptime F: type) type {
                 transcript,
                 &jolt_proof.opening_claims,
                 padded_witnesses,
+                raw_r1cs_inputs.?,
                 n_cycle_vars,
                 r_spartan_original, // r_outer in BIG_ENDIAN
                 r_product, // r_product in BIG_ENDIAN

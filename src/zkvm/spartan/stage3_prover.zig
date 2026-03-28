@@ -38,7 +38,10 @@ const jolt_types = @import("../jolt_types.zig");
 const r1cs = @import("../r1cs/mod.zig");
 const R1CSInputIndex = r1cs.R1CSInputIndex;
 const instruction_mod = @import("../instruction/mod.zig");
-const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
+const field_mod = @import("../../field/mod.zig");
+const UnreducedProductAccum = field_mod.UnreducedProductAccum;
+const FoldedMulU64 = field_mod.FoldedMulU64;
+const RawR1CSInputs = @import("../r1cs/evaluators.zig").RawR1CSInputs;
 
 /// Stage 3 prover result
 pub fn Stage3Result(comptime F: type) type {
@@ -128,6 +131,7 @@ pub fn Stage3Prover(comptime F: type) type {
             transcript: *Blake2bTranscript(F),
             opening_claims: *OpeningClaims(F),
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            raw_inputs: []const RawR1CSInputs,
             n_cycle_vars: usize,
             r_outer: []const F, // r_cycle from Stage 1 (BIG_ENDIAN)
             r_product: []const F, // r_cycle from Stage 2 product sumcheck (BIG_ENDIAN)
@@ -227,44 +231,71 @@ pub fn Stage3Prover(comptime F: type) type {
             // Initialize Prefix-Suffix Provers for Shift and Registers
             // =========================================================================
 
+            const bench_s3_init = (std.posix.getenv("ZOLT_BENCH") != null);
+            const t_init_start = if (bench_s3_init) std.time.nanoTimestamp() else 0;
+
             // ShiftSumcheck uses EqPlusOnePrefixSuffixPoly decomposition with 4 (P,Q) pairs
             var shift_prover = try ShiftPrefixSuffixProver(F).init(
                 self.allocator,
                 cycle_witnesses,
+                raw_inputs,
                 trace_len,
                 r_outer,
                 r_product,
                 shift_gamma_powers,
+                self.thread_pool,
             );
             shift_prover.thread_pool = self.thread_pool;
             shift_prover.gpu_ops = self.gpu_ops;
             defer shift_prover.deinit();
 
+            const t_after_shift = if (bench_s3_init) std.time.nanoTimestamp() else 0;
+
             // RegistersClaimReduction uses EqPolynomial prefix-suffix with 1 (P,Q) pair
             var reg_prover = try RegistersPrefixSuffixProver(F).init(
                 self.allocator,
-                cycle_witnesses,
+                raw_inputs,
                 trace_len,
                 r_outer, // r_spartan = r_outer
                 reg_gamma,
                 reg_gamma_sqr,
+                self.thread_pool,
             );
             reg_prover.thread_pool = self.thread_pool;
             reg_prover.gpu_ops = self.gpu_ops;
             defer reg_prover.deinit();
 
+            const t_after_reg = if (bench_s3_init) std.time.nanoTimestamp() else 0;
+
             // InstructionInputSumcheck uses direct computation (no prefix-suffix in Jolt)
             var instr_prover = try InstructionInputProver(F).init(
                 self.allocator,
                 cycle_witnesses,
+                raw_inputs,
                 trace_len,
                 r_outer,
                 r_product,
                 instr_gamma,
+                self.thread_pool,
             );
             instr_prover.thread_pool = self.thread_pool;
             instr_prover.gpu_ops = self.gpu_ops;
             defer instr_prover.deinit();
+
+            const t_after_instr = if (bench_s3_init) std.time.nanoTimestamp() else 0;
+
+            if (bench_s3_init) {
+                const to_ms_i = struct {
+                    fn f(ns: i128) f64 {
+                        return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+                    }
+                }.f;
+                std.debug.print("[BENCH] stage=3 init: shift={d:.1}ms reg={d:.1}ms instr={d:.1}ms\n", .{
+                    to_ms_i(t_after_shift - t_init_start),
+                    to_ms_i(t_after_reg - t_after_shift),
+                    to_ms_i(t_after_instr - t_after_reg),
+                });
+            }
 
             if (comptime debug_verbose) {
                 // DEBUG: Check initial witness values and compute initial sum
@@ -328,6 +359,17 @@ pub fn Stage3Prover(comptime F: type) type {
             var current_instr_claim = instr_input_claim;
             var current_reg_claim = reg_input_claim;
 
+            // Bench accumulators for stage 3 sub-timing
+            const bench_s3 = (std.posix.getenv("ZOLT_BENCH") != null);
+            var s3_shift_compute_ns: u64 = 0;
+            var s3_instr_compute_ns: u64 = 0;
+            var s3_reg_compute_ns: u64 = 0;
+            var s3_shift_bind_ns: u64 = 0;
+            var s3_instr_bind_ns: u64 = 0;
+            var s3_reg_bind_ns: u64 = 0;
+            var s3_overhead_ns: u64 = 0;
+            _ = &s3_overhead_ns;
+
             // Run sumcheck rounds
             for (0..num_rounds) |round| {
                 if (comptime debug_verbose) {
@@ -342,10 +384,14 @@ pub fn Stage3Prover(comptime F: type) type {
 
                 // Compute round polynomial for each instance
                 // ShiftSumcheck: degree 2
+                const t_shift_c = if (bench_s3) std.time.nanoTimestamp() else 0;
                 const shift_evals = shift_prover.computeRoundEvals(current_shift_claim);
+                if (bench_s3) s3_shift_compute_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_shift_c));
 
                 // InstructionInputSumcheck: degree 3
+                const t_instr_c = if (bench_s3) std.time.nanoTimestamp() else 0;
                 const instr_evals = instr_prover.computeRoundEvals(current_instr_claim);
+                if (bench_s3) s3_instr_compute_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_instr_c));
 
                 if (comptime debug_verbose) {
                     // DEBUG: Verify instr_evals at round 0
@@ -379,7 +425,9 @@ pub fn Stage3Prover(comptime F: type) type {
                 }
 
                 // RegistersClaimReduction: degree 2
+                const t_reg_c = if (bench_s3) std.time.nanoTimestamp() else 0;
                 const reg_evals = reg_prover.computeRoundEvals(current_reg_claim);
+                if (bench_s3) s3_reg_compute_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_reg_c));
 
                 // DEBUG: After last round, manually check the formula
                 if (comptime debug_verbose) {
@@ -541,9 +589,17 @@ pub fn Stage3Prover(comptime F: type) type {
                 }
 
                 // Bind all provers at r_j
+                const t_shift_b = if (bench_s3) std.time.nanoTimestamp() else 0;
                 shift_prover.bind(r_j);
+                if (bench_s3) s3_shift_bind_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_shift_b));
+
+                const t_instr_b = if (bench_s3) std.time.nanoTimestamp() else 0;
                 instr_prover.bind(r_j);
+                if (bench_s3) s3_instr_bind_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_instr_b));
+
+                const t_reg_b = if (bench_s3) std.time.nanoTimestamp() else 0;
                 reg_prover.bind(r_j);
+                if (bench_s3) s3_reg_bind_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_reg_b));
 
                 if (comptime debug_verbose) {
                     // DEBUG: Verify shift prover's accumulated claim after each Phase 2 bind
@@ -600,6 +656,18 @@ pub fn Stage3Prover(comptime F: type) type {
                         }
                     }
                 }
+            }
+
+            if (bench_s3) {
+                const to_ms = struct {
+                    fn f(ns: u64) f64 {
+                        return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+                    }
+                }.f;
+                std.debug.print("[BENCH] stage=3 shift_compute={d:.1}ms instr_compute={d:.1}ms reg_compute={d:.1}ms shift_bind={d:.1}ms instr_bind={d:.1}ms reg_bind={d:.1}ms\n", .{
+                    to_ms(s3_shift_compute_ns), to_ms(s3_instr_compute_ns), to_ms(s3_reg_compute_ns),
+                    to_ms(s3_shift_bind_ns),    to_ms(s3_instr_bind_ns),    to_ms(s3_reg_bind_ns),
+                });
             }
 
             if (comptime debug_verbose) {
@@ -1266,6 +1334,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
         // Original trace (needed for Phase 2 witness MLE reconstruction)
         cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+        raw_inputs: []const RawR1CSInputs,
         trace_len: usize,
 
         // Phase2 materialized polynomials (only allocated when transitioning)
@@ -1279,10 +1348,12 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
         pub fn init(
             allocator: Allocator,
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            raw_inputs: []const RawR1CSInputs,
             trace_len: usize,
             r_outer: []const F,
             r_product: []const F,
             gamma_powers: []const F,
+            thread_pool: ?*ThreadPool,
         ) !Self {
             const n_vars = r_outer.len;
             // Split r into hi (first half) and lo (second half)
@@ -1364,51 +1435,108 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             // Compute Q buffers by accumulating witness * suffix
             // Q[x_lo] = sum over x_hi of: witness(x) * suffix[x_hi]
             // where x = x_lo + (x_hi << prefix_n_vars)
-            for (0..prefix_size) |x_lo| {
-                var q_0_outer_acc = F.zero();
-                var q_1_outer_acc = F.zero();
-                var q_0_prod_acc = F.zero();
-                var q_1_prod_acc = F.zero();
+            // Each x_lo writes to disjoint Q indices and disjoint witness indices.
+            // Optimization: read from RawR1CSInputs (u64/bool) and use mulU64Unreduced
+            // for ~4x fewer multiply instructions per accumulation.
+            const ShiftInitCtx = struct {
+                raw_inputs: []const RawR1CSInputs,
+                suffix_0_outer: []const F,
+                suffix_1_outer: []const F,
+                suffix_0_prod: []const F,
+                suffix_1_prod: []const F,
+                Q_0_outer: []F,
+                Q_1_outer: []F,
+                Q_0_prod: []F,
+                Q_1_prod: []F,
+                unexpanded_pc: []F,
+                pc_arr: []F,
+                is_virtual: []F,
+                is_first_in_sequence: []F,
+                is_noop: []F,
+                gamma_powers: []const F,
+                prefix_n_vars: usize,
+                suffix_size: usize,
+                trace_len: usize,
+            };
+            const shift_init_ctx = ShiftInitCtx{
+                .raw_inputs = raw_inputs,
+                .suffix_0_outer = suffix_0_outer,
+                .suffix_1_outer = suffix_1_outer,
+                .suffix_0_prod = suffix_0_prod,
+                .suffix_1_prod = suffix_1_prod,
+                .Q_0_outer = Q_0_outer,
+                .Q_1_outer = Q_1_outer,
+                .Q_0_prod = Q_0_prod,
+                .Q_1_prod = Q_1_prod,
+                .unexpanded_pc = unexpanded_pc,
+                .pc_arr = pc,
+                .is_virtual = is_virtual,
+                .is_first_in_sequence = is_first_in_sequence,
+                .is_noop = is_noop,
+                .gamma_powers = gamma_powers,
+                .prefix_n_vars = prefix_n_vars,
+                .suffix_size = suffix_size,
+                .trace_len = trace_len,
+            };
+            const shiftInitWorker = struct {
+                fn f(c: ShiftInitCtx, x_lo: usize) void {
+                    // Use deferred-reduction accumulators for Q buffers
+                    var q_0_outer_acc = UnreducedProductAccum.zero();
+                    var q_1_outer_acc = UnreducedProductAccum.zero();
+                    // For prod Q buffers we just sum suffix values (when !noop), use FoldedMulU64
+                    var q_0_prod_acc = FoldedMulU64.zero();
+                    var q_1_prod_acc = FoldedMulU64.zero();
 
-                for (0..suffix_size) |x_hi| {
-                    const x = x_lo + (x_hi << @intCast(prefix_n_vars));
-                    if (x >= trace_len) continue;
+                    for (0..c.suffix_size) |x_hi| {
+                        const x = x_lo + (x_hi << @intCast(c.prefix_n_vars));
+                        if (x >= c.trace_len) continue;
 
-                    // Get witness values at this cycle
-                    const witness = &cycle_witnesses[x].values;
-                    const upc = witness[R1CSInputIndex.UnexpandedPC.toIndex()];
-                    const pc_val = witness[R1CSInputIndex.PC.toIndex()];
-                    const virt = witness[R1CSInputIndex.FlagVirtualInstruction.toIndex()];
-                    const first = witness[R1CSInputIndex.FlagIsFirstInSequence.toIndex()];
-                    const noop = witness[R1CSInputIndex.FlagIsNoop.toIndex()];
+                        // Read from RawR1CSInputs (u64/bool) instead of F
+                        const raw = &c.raw_inputs[x];
+                        const upc = raw.u64_values[2]; // UnexpandedPC
+                        const pc_val = raw.u64_values[1]; // PC
+                        const virt = raw.bool_flags[11]; // FlagVirtualInstruction
+                        const first_flag = raw.bool_flags[16]; // FlagIsFirstInSequence
+                        const noop = raw.bool_flags[20]; // FlagIsNoop
 
-                    // Store witness values for final claims
-                    unexpanded_pc[x] = upc;
-                    pc[x] = pc_val;
-                    is_virtual[x] = virt;
-                    is_first_in_sequence[x] = first;
-                    is_noop[x] = noop;
+                        // Fill witness MLE arrays (needed for Phase 2 claims)
+                        c.unexpanded_pc[x] = F.fromU64(upc);
+                        c.pc_arr[x] = F.fromU64(pc_val);
+                        c.is_virtual[x] = if (virt) F.one() else F.zero();
+                        c.is_first_in_sequence[x] = if (first_flag) F.one() else F.zero();
+                        c.is_noop[x] = if (noop) F.one() else F.zero();
 
-                    // Compute batched witness value v = upc + gamma*pc + gamma^2*virt + gamma^3*first
-                    var v = upc;
-                    v = v.add(gamma_powers[1].mul(pc_val));
-                    v = v.add(gamma_powers[2].mul(virt));
-                    v = v.add(gamma_powers[3].mul(first));
+                        // Compute v = gamma[0]*upc + gamma[1]*pc + gamma[2]*virt + gamma[3]*first
+                        // using mulU64Unreduced (4 mulq each) + bool conditional-add (0 mulq)
+                        var v_accum = field_mod.mulU64Unreduced(c.gamma_powers[0], upc);
+                        v_accum.addAssign(field_mod.mulU64Unreduced(c.gamma_powers[1], pc_val));
+                        if (virt) v_accum.addBigInt4(c.gamma_powers[2].limbs);
+                        if (first_flag) v_accum.addBigInt4(c.gamma_powers[3].limbs);
+                        const v = field_mod.reduceMulU64(v_accum);
 
-                    // Accumulate: Q_outer += v * suffix
-                    q_0_outer_acc = q_0_outer_acc.add(v.mul(suffix_0_outer[x_hi]));
-                    q_1_outer_acc = q_1_outer_acc.add(v.mul(suffix_1_outer[x_hi]));
+                        // Accumulate v * suffix into Q buffers (deferred Montgomery)
+                        q_0_outer_acc.addAssign(v.mulToProductAccum(c.suffix_0_outer[x_hi]));
+                        q_1_outer_acc.addAssign(v.mulToProductAccum(c.suffix_1_outer[x_hi]));
 
-                    // For product term: Q_prod += (1 - noop) * suffix
-                    const one_minus_noop = F.one().sub(noop);
-                    q_0_prod_acc = q_0_prod_acc.add(one_minus_noop.mul(suffix_0_prod[x_hi]));
-                    q_1_prod_acc = q_1_prod_acc.add(one_minus_noop.mul(suffix_1_prod[x_hi]));
+                        // For prod Q buffers: (1-noop) * suffix
+                        // When noop=false (the common case), just add the suffix value directly
+                        if (!noop) {
+                            q_0_prod_acc.addBigInt4(c.suffix_0_prod[x_hi].limbs);
+                            q_1_prod_acc.addBigInt4(c.suffix_1_prod[x_hi].limbs);
+                        }
+                    }
+
+                    c.Q_0_outer[x_lo] = q_0_outer_acc.reduce();
+                    c.Q_1_outer[x_lo] = q_1_outer_acc.reduce();
+                    c.Q_0_prod[x_lo] = field_mod.reduceMulU64(q_0_prod_acc).mul(c.gamma_powers[4]);
+                    c.Q_1_prod[x_lo] = field_mod.reduceMulU64(q_1_prod_acc).mul(c.gamma_powers[4]);
                 }
+            }.f;
 
-                Q_0_outer[x_lo] = q_0_outer_acc;
-                Q_1_outer[x_lo] = q_1_outer_acc;
-                Q_0_prod[x_lo] = q_0_prod_acc.mul(gamma_powers[4]);
-                Q_1_prod[x_lo] = q_1_prod_acc.mul(gamma_powers[4]);
+            if (thread_pool) |tp| {
+                tp.parallelForForce(prefix_size, shift_init_ctx, shiftInitWorker);
+            } else {
+                for (0..prefix_size) |x_lo| shiftInitWorker(shift_init_ctx, x_lo);
             }
 
             if (comptime debug_verbose) {
@@ -1616,10 +1744,12 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 .r_outer = r_outer,
                 .r_product = r_product,
                 .cycle_witnesses = cycle_witnesses,
+                .raw_inputs = raw_inputs,
                 .trace_len = trace_len,
                 .phase2_eq_plus_one_outer = null,
                 .phase2_eq_plus_one_prod = null,
                 .allocator = allocator,
+                .thread_pool = thread_pool,
             };
         }
 
@@ -2050,11 +2180,37 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             self.phase2_eq_plus_one_outer = self.allocator.alloc(F, suffix_size) catch unreachable;
             self.phase2_eq_plus_one_prod = self.allocator.alloc(F, suffix_size) catch unreachable;
 
-            for (0..suffix_size) |j| {
-                self.phase2_eq_plus_one_outer.?[j] = prefix_0_eval_outer.mul(suffix_0_outer[j])
-                    .add(prefix_1_eval_outer.mul(suffix_1_outer[j]));
-                self.phase2_eq_plus_one_prod.?[j] = prefix_0_eval_prod.mul(suffix_0_prod[j])
-                    .add(prefix_1_eval_prod.mul(suffix_1_prod[j]));
+            // Parallelize eq+1 materialization
+            const EqMatCtx = struct {
+                eq_outer: []F,
+                eq_prod: []F,
+                s0o: []const F,
+                s1o: []const F,
+                s0p: []const F,
+                s1p: []const F,
+                p0o: F,
+                p1o: F,
+                p0p: F,
+                p1p: F,
+            };
+            const eq_mat_ctx = EqMatCtx{
+                .eq_outer = self.phase2_eq_plus_one_outer.?,
+                .eq_prod = self.phase2_eq_plus_one_prod.?,
+                .s0o = suffix_0_outer, .s1o = suffix_1_outer,
+                .s0p = suffix_0_prod, .s1p = suffix_1_prod,
+                .p0o = prefix_0_eval_outer, .p1o = prefix_1_eval_outer,
+                .p0p = prefix_0_eval_prod, .p1p = prefix_1_eval_prod,
+            };
+            const eqMatWorker = struct {
+                fn f(c: EqMatCtx, j: usize) void {
+                    c.eq_outer[j] = c.p0o.mul(c.s0o[j]).add(c.p1o.mul(c.s1o[j]));
+                    c.eq_prod[j] = c.p0p.mul(c.s0p[j]).add(c.p1p.mul(c.s1p[j]));
+                }
+            }.f;
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(suffix_size, eq_mat_ctx, eqMatWorker);
+            } else {
+                for (0..suffix_size) |j| eqMatWorker(eq_mat_ctx, j);
             }
 
             // =====================================================================
@@ -2087,36 +2243,68 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             @memset(self.is_first_in_sequence, F.zero());
             @memset(self.is_noop, F.zero());
 
-            // Sum over prefix domain
-            for (0..suffix_size) |j| {
-                var upc_acc = F.zero();
-                var pc_acc = F.zero();
-                var virt_acc = F.zero();
-                var first_acc = F.zero();
-                var noop_acc = F.zero();
+            // Sum over prefix domain (parallelized — each j is independent)
+            // Optimization: use mulU64Unreduced for u64 witnesses and conditional-add for booleans
+            const WitReconCtx = struct {
+                raw_inputs_ptr: []const RawR1CSInputs,
+                eq_ev: []const F,
+                upc_out: []F,
+                pc_out: []F,
+                virt_out: []F,
+                first_out: []F,
+                noop_out: []F,
+                prefix_dom_size: usize,
+                tl: usize,
+            };
+            const wit_ctx = WitReconCtx{
+                .raw_inputs_ptr = self.raw_inputs,
+                .eq_ev = eq_evals,
+                .upc_out = self.unexpanded_pc,
+                .pc_out = self.pc,
+                .virt_out = self.is_virtual,
+                .first_out = self.is_first_in_sequence,
+                .noop_out = self.is_noop,
+                .prefix_dom_size = prefix_domain_size,
+                .tl = self.trace_len,
+            };
+            const witReconWorker = struct {
+                fn f(c: WitReconCtx, j: usize) void {
+                    // Use FoldedMulU64 accumulators for u64 witnesses (4 mulq each)
+                    var upc_acc = FoldedMulU64.zero();
+                    var pc_acc = FoldedMulU64.zero();
+                    // Use FoldedMulU64 for booleans too (conditional addBigInt4, 0 mulq)
+                    var virt_acc = FoldedMulU64.zero();
+                    var first_acc = FoldedMulU64.zero();
+                    var noop_acc = FoldedMulU64.zero();
 
-                for (0..prefix_domain_size) |i| {
-                    // Trace index = i * suffix_size + j (interleaved layout)
-                    // But Jolt uses trace.par_chunks(eq_evals.len()), meaning:
-                    // For suffix index j, the trace indices are j*prefix_domain_size + i
-                    const trace_idx = j * prefix_domain_size + i;
-                    if (trace_idx >= self.trace_len) continue;
+                    for (0..c.prefix_dom_size) |i| {
+                        const trace_idx = j * c.prefix_dom_size + i;
+                        if (trace_idx >= c.tl) continue;
 
-                    const witness = &self.cycle_witnesses[trace_idx].values;
-                    const eq_eval = eq_evals[i];
+                        const raw = &c.raw_inputs_ptr[trace_idx];
+                        const eq_eval = c.eq_ev[i];
 
-                    upc_acc = upc_acc.add(eq_eval.mul(witness[R1CSInputIndex.UnexpandedPC.toIndex()]));
-                    pc_acc = pc_acc.add(eq_eval.mul(witness[R1CSInputIndex.PC.toIndex()]));
-                    virt_acc = virt_acc.add(eq_eval.mul(witness[R1CSInputIndex.FlagVirtualInstruction.toIndex()]));
-                    first_acc = first_acc.add(eq_eval.mul(witness[R1CSInputIndex.FlagIsFirstInSequence.toIndex()]));
-                    noop_acc = noop_acc.add(eq_eval.mul(witness[R1CSInputIndex.FlagIsNoop.toIndex()]));
+                        // u64 witnesses: mulU64Unreduced (4 mulq each)
+                        upc_acc.addAssign(field_mod.mulU64Unreduced(eq_eval, raw.u64_values[2])); // UnexpandedPC
+                        pc_acc.addAssign(field_mod.mulU64Unreduced(eq_eval, raw.u64_values[1])); // PC
+
+                        // Boolean witnesses: conditional add (0 mulq)
+                        if (raw.bool_flags[11]) virt_acc.addBigInt4(eq_eval.limbs); // FlagVirtualInstruction
+                        if (raw.bool_flags[16]) first_acc.addBigInt4(eq_eval.limbs); // FlagIsFirstInSequence
+                        if (raw.bool_flags[20]) noop_acc.addBigInt4(eq_eval.limbs); // FlagIsNoop
+                    }
+
+                    c.upc_out[j] = field_mod.reduceMulU64(upc_acc);
+                    c.pc_out[j] = field_mod.reduceMulU64(pc_acc);
+                    c.virt_out[j] = field_mod.reduceMulU64(virt_acc);
+                    c.first_out[j] = field_mod.reduceMulU64(first_acc);
+                    c.noop_out[j] = field_mod.reduceMulU64(noop_acc);
                 }
-
-                self.unexpanded_pc[j] = upc_acc;
-                self.pc[j] = pc_acc;
-                self.is_virtual[j] = virt_acc;
-                self.is_first_in_sequence[j] = first_acc;
-                self.is_noop[j] = noop_acc;
+            }.f;
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(suffix_size, wit_ctx, witReconWorker);
+            } else {
+                for (0..suffix_size) |j| witReconWorker(wit_ctx, j);
             }
 
             self.current_witness_size = suffix_size;
@@ -2223,8 +2411,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
         fn bindPhase2(self: *Self, r_j: F) void {
             const new_size = self.current_witness_size / 2;
 
-            // Count how many arrays we actually need to bind
-            var num_arrays: usize = 5; // 5 witness MLEs always
+            var num_arrays: usize = 5;
             if (self.phase2_eq_plus_one_outer != null) num_arrays += 1;
             if (self.phase2_eq_plus_one_prod != null) num_arrays += 1;
 
@@ -2232,7 +2419,6 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 slices: [7]?[]F,
                 r: F,
                 n: usize,
-                count: usize,
             };
             const bctx = BindP2Ctx{
                 .slices = .{
@@ -2243,7 +2429,6 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 },
                 .r = r_j,
                 .n = new_size,
-                .count = num_arrays,
             };
             const bindOneFn = struct {
                 fn f(c: BindP2Ctx, idx: usize) void {
@@ -2345,7 +2530,7 @@ fn InstructionInputProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        // Witness MLEs
+        // Witness MLEs (double-buffered: main + scratch for parallel bind)
         left_is_rs1: []F,
         rs1_value: []F,
         left_is_pc: []F,
@@ -2355,8 +2540,11 @@ fn InstructionInputProver(comptime F: type) type {
         right_is_imm: []F,
         imm: []F,
 
-        // Eq polynomial evaluations (single eq at r_cycle_stage_2)
-        eq_stage2: []F,
+        // Scratch buffers for double-buffer parallel bind
+        scratch: [8][]F,
+
+        // Gruen split eq polynomial (factored eq at r_cycle_stage_2)
+        gruen_eq: poly_mod.GruenSplitEqPolynomial(F),
 
         gamma: F,
 
@@ -2368,10 +2556,12 @@ fn InstructionInputProver(comptime F: type) type {
         pub fn init(
             allocator: Allocator,
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            raw_inputs: []const RawR1CSInputs,
             trace_len: usize,
             r_outer: []const F,
             r_product: []const F,
             gamma: F,
+            thread_pool: ?*ThreadPool,
         ) !Self {
             // Allocate MLEs
             const left_is_rs1 = try allocator.alloc(F, trace_len);
@@ -2383,35 +2573,77 @@ fn InstructionInputProver(comptime F: type) type {
             const right_is_imm = try allocator.alloc(F, trace_len);
             const imm = try allocator.alloc(F, trace_len);
 
-            // Fill from witnesses
-            for (0..trace_len) |i| {
-                if (i < cycle_witnesses.len) {
-                    const values = &cycle_witnesses[i].values;
-                    left_is_rs1[i] = values[R1CSInputIndex.FlagLeftOperandIsRs1.toIndex()];
-                    left_is_pc[i] = values[R1CSInputIndex.FlagLeftOperandIsPC.toIndex()];
-                    right_is_rs2[i] = values[R1CSInputIndex.FlagRightOperandIsRs2.toIndex()];
-                    right_is_imm[i] = values[R1CSInputIndex.FlagRightOperandIsImm.toIndex()];
-                    rs1_value[i] = values[R1CSInputIndex.Rs1Value.toIndex()];
-                    unexpanded_pc[i] = values[R1CSInputIndex.UnexpandedPC.toIndex()];
-                    rs2_value[i] = values[R1CSInputIndex.Rs2Value.toIndex()];
-                    imm[i] = values[R1CSInputIndex.Imm.toIndex()];
-                } else {
-                    left_is_rs1[i] = F.zero();
-                    rs1_value[i] = F.zero();
-                    left_is_pc[i] = F.zero();
-                    unexpanded_pc[i] = F.zero();
-                    right_is_rs2[i] = F.zero();
-                    rs2_value[i] = F.zero();
-                    right_is_imm[i] = F.zero();
-                    imm[i] = F.zero();
+            // Fill from RawR1CSInputs for better cache locality (~100 bytes vs 1344 bytes per entry)
+            // Booleans use F.one()/F.zero(), u64s use F.fromU64(), Imm from field witnesses (i128)
+            const InstrFillCtx = struct {
+                raw_inputs_ptr: []const RawR1CSInputs,
+                cycle_witnesses_ptr: []const r1cs.R1CSCycleInputs(F),
+                left_is_rs1: []F,
+                rs1_value_arr: []F,
+                left_is_pc: []F,
+                unexpanded_pc: []F,
+                right_is_rs2: []F,
+                rs2_value_arr: []F,
+                right_is_imm: []F,
+                imm_arr: []F,
+                raw_len: usize,
+            };
+            const fill_ctx = InstrFillCtx{
+                .raw_inputs_ptr = raw_inputs,
+                .cycle_witnesses_ptr = cycle_witnesses,
+                .left_is_rs1 = left_is_rs1,
+                .rs1_value_arr = rs1_value,
+                .left_is_pc = left_is_pc,
+                .unexpanded_pc = unexpanded_pc,
+                .right_is_rs2 = right_is_rs2,
+                .rs2_value_arr = rs2_value,
+                .right_is_imm = right_is_imm,
+                .imm_arr = imm,
+                .raw_len = raw_inputs.len,
+            };
+            const fillWorker = struct {
+                fn f(c: InstrFillCtx, i: usize) void {
+                    if (i < c.raw_len) {
+                        const raw = &c.raw_inputs_ptr[i];
+                        // Booleans: conditional F.one()/F.zero() (no Montgomery mul)
+                        c.left_is_rs1[i] = if (raw.bool_flags[21]) F.one() else F.zero();
+                        c.left_is_pc[i] = if (raw.bool_flags[22]) F.one() else F.zero();
+                        c.right_is_rs2[i] = if (raw.bool_flags[23]) F.one() else F.zero();
+                        c.right_is_imm[i] = if (raw.bool_flags[24]) F.one() else F.zero();
+                        // u64 values
+                        c.rs1_value_arr[i] = F.fromU64(raw.u64_values[4]); // Rs1Value
+                        c.unexpanded_pc[i] = F.fromU64(raw.u64_values[2]); // UnexpandedPC
+                        c.rs2_value_arr[i] = F.fromU64(raw.u64_values[5]); // Rs2Value
+                        // Imm is i128 — read from field witnesses (correct Montgomery encoding)
+                        c.imm_arr[i] = c.cycle_witnesses_ptr[i].values[R1CSInputIndex.Imm.toIndex()];
+                    } else {
+                        c.left_is_rs1[i] = F.zero();
+                        c.rs1_value_arr[i] = F.zero();
+                        c.left_is_pc[i] = F.zero();
+                        c.unexpanded_pc[i] = F.zero();
+                        c.right_is_rs2[i] = F.zero();
+                        c.rs2_value_arr[i] = F.zero();
+                        c.right_is_imm[i] = F.zero();
+                        c.imm_arr[i] = F.zero();
+                    }
                 }
+            }.f;
+
+            if (thread_pool) |tp| {
+                tp.parallelForForce(trace_len, fill_ctx, fillWorker);
+            } else {
+                for (0..trace_len) |i| fillWorker(fill_ctx, i);
             }
 
-            // Compute eq evaluations — single eq polynomial at r_product (= r_cycle_stage_2)
+            // Initialize Gruen split eq polynomial at r_product (= r_cycle_stage_2)
             _ = r_outer; // Not used for InstructionInput
-            var eq_stage2_poly = try poly_mod.EqPolynomial(F).init(allocator, r_product);
-            defer eq_stage2_poly.deinit();
-            const eq_stage2 = try eq_stage2_poly.evals(allocator);
+            const gruen_eq = try poly_mod.GruenSplitEqPolynomial(F).init(allocator, r_product);
+
+            // Allocate scratch buffers for double-buffer parallel bind
+            var scratch: [8][]F = undefined;
+            for (0..8) |i| {
+                scratch[i] = try allocator.alloc(F, trace_len);
+            }
 
             return Self{
                 .left_is_rs1 = left_is_rs1,
@@ -2422,10 +2654,12 @@ fn InstructionInputProver(comptime F: type) type {
                 .rs2_value = rs2_value,
                 .right_is_imm = right_is_imm,
                 .imm = imm,
-                .eq_stage2 = eq_stage2,
+                .scratch = scratch,
+                .gruen_eq = gruen_eq,
                 .gamma = gamma,
                 .current_size = trace_len,
                 .allocator = allocator,
+                .thread_pool = thread_pool,
             };
         }
 
@@ -2438,12 +2672,19 @@ fn InstructionInputProver(comptime F: type) type {
             self.allocator.free(self.rs2_value);
             self.allocator.free(self.right_is_imm);
             self.allocator.free(self.imm);
-            self.allocator.free(self.eq_stage2);
+            for (0..8) |i| self.allocator.free(self.scratch[i]);
+            self.gruen_eq.deinit();
         }
 
         /// Compute round evaluations [p(0), p(1), p(2), p(3)] for degree-3 polynomial
+        /// Uses Gruen split eq: factored E_out × E_in, evaluate at {0, ∞}, reconstruct cubic.
         pub fn computeRoundEvals(self: *Self, previous_claim: F) [4]F {
             const half = self.current_size / 2;
+            const tables = self.gruen_eq.getWindowEqTables(self.gruen_eq.current_index, 1);
+            const E_out = tables.E_out;
+            const E_in = tables.E_in;
+            const head_in_bits = tables.head_in_bits;
+            const in_mask = (@as(usize, 1) << @intCast(head_in_bits)) -| 1;
 
             const Ctx = struct {
                 left_is_rs1: []const F,
@@ -2454,7 +2695,10 @@ fn InstructionInputProver(comptime F: type) type {
                 rs2_value: []const F,
                 right_is_imm: []const F,
                 imm: []const F,
-                eq_stage2: []const F,
+                E_out: []const F,
+                E_in: []const F,
+                head_in_bits: usize,
+                in_mask: usize,
                 gamma: F,
             };
 
@@ -2467,151 +2711,98 @@ fn InstructionInputProver(comptime F: type) type {
                 .rs2_value = self.rs2_value,
                 .right_is_imm = self.right_is_imm,
                 .imm = self.imm,
-                .eq_stage2 = self.eq_stage2,
+                .E_out = E_out,
+                .E_in = E_in,
+                .head_in_bits = head_in_bits,
+                .in_mask = in_mask,
                 .gamma = self.gamma,
             };
 
-            const use_deferred = comptime @hasDecl(F, "mulToProductAccum");
-
             const mapFn = struct {
-                fn map(c: Ctx, start: usize, end: usize) [3]F {
-                    if (use_deferred) {
-                        var accum: [3]UnreducedProductAccum = .{ UnreducedProductAccum.zero(), UnreducedProductAccum.zero(), UnreducedProductAccum.zero() };
-                        for (start..end) |j| {
-                            const left_is_rs1_0 = c.left_is_rs1[2 * j];
-                            const left_is_rs1_1 = c.left_is_rs1[2 * j + 1];
-                            const rs1_0 = c.rs1_value[2 * j];
-                            const rs1_1 = c.rs1_value[2 * j + 1];
-                            const left_is_pc_0 = c.left_is_pc[2 * j];
-                            const left_is_pc_1 = c.left_is_pc[2 * j + 1];
-                            const pc_0 = c.unexpanded_pc[2 * j];
-                            const pc_1 = c.unexpanded_pc[2 * j + 1];
-                            const right_is_rs2_0 = c.right_is_rs2[2 * j];
-                            const right_is_rs2_1 = c.right_is_rs2[2 * j + 1];
-                            const rs2_0 = c.rs2_value[2 * j];
-                            const rs2_1 = c.rs2_value[2 * j + 1];
-                            const right_is_imm_0 = c.right_is_imm[2 * j];
-                            const right_is_imm_1 = c.right_is_imm[2 * j + 1];
-                            const imm_0 = c.imm[2 * j];
-                            const imm_1 = c.imm[2 * j + 1];
-                            const eq_0 = c.eq_stage2[2 * j];
-                            const eq_1 = c.eq_stage2[2 * j + 1];
+                fn map(c: Ctx, start: usize, end: usize) [2]F {
+                    var q_constant = F.zero();
+                    var q_quadratic = F.zero();
 
-                            const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
-                            const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
-                            const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
-                            const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
-                            const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
-                            const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
-                            const pc_2 = pc_1.add(pc_1).sub(pc_0);
-                            const pc_3 = pc_2.add(pc_1).sub(pc_0);
-                            const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
-                            const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
-                            const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
-                            const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
-                            const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
-                            const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
-                            const imm_2 = imm_1.add(imm_1).sub(imm_0);
-                            const imm_3 = imm_2.add(imm_1).sub(imm_0);
-                            const eq_2 = eq_1.add(eq_1).sub(eq_0);
-                            const eq_3 = eq_2.add(eq_1).sub(eq_0);
+                    for (start..end) |j| {
+                        // Factored eq: E_prefix = E_out[j >> head_in_bits] * E_in[j & mask]
+                        const x_out = j >> @intCast(c.head_in_bits);
+                        const x_in = j & c.in_mask;
+                        const E_prefix = (if (x_out < c.E_out.len) c.E_out[x_out] else F.one())
+                            .mul(if (x_in < c.E_in.len) c.E_in[x_in] else F.one());
 
-                            const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
-                            const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
-                            const val_0 = right_0.add(c.gamma.mul(left_0));
-                            accum[0].addAssign(eq_0.mulToProductAccum(val_0));
+                        // Inner polynomial at X=0: val(0) = right(0) + γ*left(0)
+                        const left_0 = c.left_is_rs1[2 * j].mul(c.rs1_value[2 * j])
+                            .add(c.left_is_pc[2 * j].mul(c.unexpanded_pc[2 * j]));
+                        const right_0 = c.right_is_rs2[2 * j].mul(c.rs2_value[2 * j])
+                            .add(c.right_is_imm[2 * j].mul(c.imm[2 * j]));
+                        const val_0 = right_0.add(c.gamma.mul(left_0));
 
-                            const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
-                            const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
-                            const val_2 = right_2.add(c.gamma.mul(left_2));
-                            accum[1].addAssign(eq_2.mulToProductAccum(val_2));
+                        // Inner polynomial "eval at ∞" = coefficient of X² in val(X).
+                        // val(X) = right(X) + γ*left(X) where each is sum of products of linears.
+                        // For f(X)*g(X) with f linear, g linear: coeff of X² = f_slope * g_slope.
+                        const lis1_s = c.left_is_rs1[2 * j + 1].sub(c.left_is_rs1[2 * j]);
+                        const rs1_s = c.rs1_value[2 * j + 1].sub(c.rs1_value[2 * j]);
+                        const lipc_s = c.left_is_pc[2 * j + 1].sub(c.left_is_pc[2 * j]);
+                        const pc_s = c.unexpanded_pc[2 * j + 1].sub(c.unexpanded_pc[2 * j]);
+                        const ris2_s = c.right_is_rs2[2 * j + 1].sub(c.right_is_rs2[2 * j]);
+                        const rs2_s = c.rs2_value[2 * j + 1].sub(c.rs2_value[2 * j]);
+                        const riim_s = c.right_is_imm[2 * j + 1].sub(c.right_is_imm[2 * j]);
+                        const imm_s = c.imm[2 * j + 1].sub(c.imm[2 * j]);
 
-                            const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
-                            const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
-                            const val_3 = right_3.add(c.gamma.mul(left_3));
-                            accum[2].addAssign(eq_3.mulToProductAccum(val_3));
-                        }
-                        return .{ accum[0].reduce(), accum[1].reduce(), accum[2].reduce() };
-                    } else {
-                        var local_evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
-                        for (start..end) |j| {
-                            const left_is_rs1_0 = c.left_is_rs1[2 * j];
-                            const left_is_rs1_1 = c.left_is_rs1[2 * j + 1];
-                            const rs1_0 = c.rs1_value[2 * j];
-                            const rs1_1 = c.rs1_value[2 * j + 1];
-                            const left_is_pc_0 = c.left_is_pc[2 * j];
-                            const left_is_pc_1 = c.left_is_pc[2 * j + 1];
-                            const pc_0 = c.unexpanded_pc[2 * j];
-                            const pc_1 = c.unexpanded_pc[2 * j + 1];
-                            const right_is_rs2_0 = c.right_is_rs2[2 * j];
-                            const right_is_rs2_1 = c.right_is_rs2[2 * j + 1];
-                            const rs2_0 = c.rs2_value[2 * j];
-                            const rs2_1 = c.rs2_value[2 * j + 1];
-                            const right_is_imm_0 = c.right_is_imm[2 * j];
-                            const right_is_imm_1 = c.right_is_imm[2 * j + 1];
-                            const imm_0 = c.imm[2 * j];
-                            const imm_1 = c.imm[2 * j + 1];
-                            const eq_0 = c.eq_stage2[2 * j];
-                            const eq_1 = c.eq_stage2[2 * j + 1];
+                        const left_inf = lis1_s.mul(rs1_s).add(lipc_s.mul(pc_s));
+                        const right_inf = ris2_s.mul(rs2_s).add(riim_s.mul(imm_s));
+                        const val_inf = right_inf.add(c.gamma.mul(left_inf));
 
-                            const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
-                            const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
-                            const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
-                            const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
-                            const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
-                            const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
-                            const pc_2 = pc_1.add(pc_1).sub(pc_0);
-                            const pc_3 = pc_2.add(pc_1).sub(pc_0);
-                            const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
-                            const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
-                            const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
-                            const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
-                            const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
-                            const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
-                            const imm_2 = imm_1.add(imm_1).sub(imm_0);
-                            const imm_3 = imm_2.add(imm_1).sub(imm_0);
-                            const eq_2 = eq_1.add(eq_1).sub(eq_0);
-                            const eq_3 = eq_2.add(eq_1).sub(eq_0);
-
-                            const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
-                            const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
-                            const f_0 = eq_0.mul(right_0.add(c.gamma.mul(left_0)));
-
-                            const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
-                            const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
-                            const f_2 = eq_2.mul(right_2.add(c.gamma.mul(left_2)));
-
-                            const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
-                            const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
-                            const f_3 = eq_3.mul(right_3.add(c.gamma.mul(left_3)));
-
-                            local_evals[0] = local_evals[0].add(f_0);
-                            local_evals[1] = local_evals[1].add(f_2);
-                            local_evals[2] = local_evals[2].add(f_3);
-                        }
-                        return local_evals;
+                        // Accumulate: q_constant = Σ E_prefix * val(0)
+                        //             q_quadratic = Σ E_prefix * val(∞)  [X² coefficient]
+                        q_constant = q_constant.add(E_prefix.mul(val_0));
+                        q_quadratic = q_quadratic.add(E_prefix.mul(val_inf));
                     }
+                    return .{ q_constant, q_quadratic };
                 }
             }.map;
 
             const reduceFn = struct {
-                fn reduce(a: [3]F, b: [3]F) [3]F {
-                    return .{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]) };
+                fn reduce(a: [2]F, b: [2]F) [2]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]) };
                 }
             }.reduce;
 
-            const evals = if (self.thread_pool) |tp|
-                tp.parallelReduce([3]F, half, .{ F.zero(), F.zero(), F.zero() }, ctx, mapFn, reduceFn)
+            const sums = if (self.thread_pool) |tp|
+                tp.parallelReduce([2]F, half, .{ F.zero(), F.zero() }, ctx, mapFn, reduceFn)
             else
                 mapFn(ctx, 0, half);
 
-            const p_1 = previous_claim.sub(evals[0]);
-            return [4]F{ evals[0], p_1, evals[1], evals[2] };
+            // Reconstruct degree-3 polynomial from {0, ∞} evaluations
+            return self.gruen_eq.computeCubicRoundPoly(sums[0], sums[1], previous_claim);
         }
 
-        fn bindSlice(arr: []F, r_j: F, new_size: usize) void {
-            for (0..new_size) |i| {
-                arr[i] = arr[2 * i].add(r_j.mul(arr[2 * i + 1].sub(arr[2 * i])));
+        /// Get main arrays as a fixed-size array of pointers (for parallel bind)
+        fn getMainSlices(self: *Self) [8][]F {
+            return .{
+                self.left_is_rs1, self.rs1_value,
+                self.left_is_pc, self.unexpanded_pc,
+                self.right_is_rs2, self.rs2_value,
+                self.right_is_imm, self.imm,
+            };
+        }
+
+        /// Swap main ↔ scratch pointers after double-buffer bind
+        fn swapBuffers(self: *Self) void {
+            const pairs = .{
+                .{ &self.left_is_rs1, &self.scratch[0] },
+                .{ &self.rs1_value, &self.scratch[1] },
+                .{ &self.left_is_pc, &self.scratch[2] },
+                .{ &self.unexpanded_pc, &self.scratch[3] },
+                .{ &self.right_is_rs2, &self.scratch[4] },
+                .{ &self.rs2_value, &self.scratch[5] },
+                .{ &self.right_is_imm, &self.scratch[6] },
+                .{ &self.imm, &self.scratch[7] },
+            };
+            inline for (pairs) |pair| {
+                const tmp = pair[0].*;
+                pair[0].* = pair[1].*;
+                pair[1].* = tmp;
             }
         }
 
@@ -2641,34 +2832,38 @@ fn InstructionInputProver(comptime F: type) type {
 
             if (self.thread_pool) |tp| {
                 if (new_size >= 256) {
-                    // Bind 9 arrays in parallel (each array's bind is independent)
-                    const Ctx = struct {
-                        slices: [9][]F,
-                        r_j: F,
-                        new_size: usize,
+                    // Double-buffer parallel bind: read from main, write to scratch,
+                    // then swap pointers. No data races since src != dst.
+                    const BindCtx = struct {
+                        src: [8][]const F,
+                        dst: [8][]F,
+                        r: F,
                     };
-                    const ctx = Ctx{
-                        .slices = .{
-                            self.left_is_rs1, self.rs1_value,
-                            self.left_is_pc,  self.unexpanded_pc,
-                            self.right_is_rs2, self.rs2_value,
-                            self.right_is_imm, self.imm,
-                            self.eq_stage2,
-                        },
-                        .r_j = r_j,
-                        .new_size = new_size,
+                    const main = self.getMainSlices();
+                    var src: [8][]const F = undefined;
+                    for (0..8) |i| src[i] = main[i];
+                    const ctx = BindCtx{
+                        .src = src,
+                        .dst = self.scratch,
+                        .r = r_j,
                     };
-                    tp.parallelFor(9, ctx, struct {
-                        fn run(c: Ctx, idx: usize) void {
-                            bindSlice(c.slices[idx], c.r_j, c.new_size);
+                    tp.parallelForForce(new_size, ctx, struct {
+                        fn run(c: BindCtx, i: usize) void {
+                            inline for (0..8) |a| {
+                                const low = c.src[a][2 * i];
+                                const high = c.src[a][2 * i + 1];
+                                c.dst[a][i] = low.add(c.r.mul(high.sub(low)));
+                            }
                         }
                     }.run);
+                    self.swapBuffers();
+                    self.gruen_eq.bind(r_j);
                     self.current_size = new_size;
                     return;
                 }
             }
 
-            // Sequential fallback
+            // Sequential fallback (small arrays — in-place is safe when sequential)
             for (0..new_size) |i| {
                 self.left_is_rs1[i] = self.left_is_rs1[2 * i].add(r_j.mul(self.left_is_rs1[2 * i + 1].sub(self.left_is_rs1[2 * i])));
                 self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
@@ -2678,8 +2873,8 @@ fn InstructionInputProver(comptime F: type) type {
                 self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
                 self.right_is_imm[i] = self.right_is_imm[2 * i].add(r_j.mul(self.right_is_imm[2 * i + 1].sub(self.right_is_imm[2 * i])));
                 self.imm[i] = self.imm[2 * i].add(r_j.mul(self.imm[2 * i + 1].sub(self.imm[2 * i])));
-                self.eq_stage2[i] = self.eq_stage2[2 * i].add(r_j.mul(self.eq_stage2[2 * i + 1].sub(self.eq_stage2[2 * i])));
             }
+            self.gruen_eq.bind(r_j);
             self.current_size = new_size;
         }
 
@@ -2719,15 +2914,16 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         P: []F, // Prefix eq evals
         Q: []F, // Accumulated witness * suffix
 
-        // Witness MLEs
-        rd_write_value: []F,
-        rs1_value: []F,
-        rs2_value: []F,
+        // Witness MLEs (only allocated at Phase 2 transition, suffix_size)
+        rd_write_value: ?[]F,
+        rs1_value: ?[]F,
+        rs2_value: ?[]F,
 
         gamma: F,
         gamma_sqr: F,
 
         prefix_n_vars: usize,
+        suffix_n_vars: usize,
         current_prefix_size: usize,
         current_witness_size: usize,
         in_phase2: bool,
@@ -2742,17 +2938,22 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         // Accumulated prefix challenges
         prefix_challenges: std.ArrayListUnmanaged(F),
 
+        // Raw integer witness data (for Phase 2 reconstruction)
+        raw_inputs: []const RawR1CSInputs,
+        trace_len: usize,
+
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
         gpu_ops: ?*GpuPolyOps = null,
 
         pub fn init(
             allocator: Allocator,
-            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            raw_inputs: []const RawR1CSInputs,
             trace_len: usize,
             r_spartan: []const F,
             gamma: F,
             gamma_sqr: F,
+            thread_pool: ?*ThreadPool,
         ) !Self {
             const n_vars = r_spartan.len;
             // Split r into hi (first half) and lo (second half)
@@ -2781,108 +2982,89 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             const suffix_evals = try eq_hi.evals(allocator);
             defer allocator.free(suffix_evals);
 
-            // Allocate witness MLEs - MUST be padded to full T = prefix_size * suffix_size
-            // to match Jolt's behavior where the trace is physically padded to T with NoOp cycles.
-            // NoOp cycles have rd_write_value = 0, rs1_value = 0, rs2_value = 0.
-            // Without this padding, the MLE evaluation at the sumcheck challenges would be wrong
-            // because binding a 64-entry array 8 times is NOT the same as binding a 256-entry
-            // zero-padded array 8 times.
-            const padded_size = prefix_size * suffix_size; // = 2^n_vars = T
-            const rd_write_value = try allocator.alloc(F, padded_size);
-            const rs1_value = try allocator.alloc(F, padded_size);
-            const rs2_value = try allocator.alloc(F, padded_size);
-            @memset(rd_write_value, F.zero());
-            @memset(rs1_value, F.zero());
-            @memset(rs2_value, F.zero());
-
-            // Initialize Q buffer and fill witness MLEs
+            // Initialize Q buffer using RawR1CSInputs with mulU64Unreduced
+            // No witness MLEs allocated here — they're reconstructed at Phase 2 transition
             const Q = try allocator.alloc(F, prefix_size);
             @memset(Q, F.zero());
 
-            // Debug: Print first few R1CS witness values
             if (comptime debug_verbose) {
-                dbg("[STAGE3] RegistersClaimReduction: trace_len={}, prefix_size={}, suffix_size={}, padded_size={}\n", .{ trace_len, prefix_size, suffix_size, padded_size });
+                dbg("[STAGE3] RegistersClaimReduction: trace_len={}, prefix_size={}, suffix_size={}\n", .{ trace_len, prefix_size, suffix_size });
             }
 
-            for (0..prefix_size) |x_lo| {
-                var q_acc = F.zero();
+            const RegInitCtx = struct {
+                raw_inputs: []const RawR1CSInputs,
+                suffix_evals: []const F,
+                Q_buf: []F,
+                gamma_val: F,
+                gamma_sqr_val: F,
+                prefix_n_vars_val: usize,
+                suffix_size_val: usize,
+                trace_len_val: usize,
+            };
+            const reg_init_ctx = RegInitCtx{
+                .raw_inputs = raw_inputs,
+                .suffix_evals = suffix_evals,
+                .Q_buf = Q,
+                .gamma_val = gamma,
+                .gamma_sqr_val = gamma_sqr,
+                .prefix_n_vars_val = prefix_n_vars,
+                .suffix_size_val = suffix_size,
+                .trace_len_val = trace_len,
+            };
+            const regInitWorker = struct {
+                fn f(c: RegInitCtx, x_lo: usize) void {
+                    var q_acc = UnreducedProductAccum.zero();
+                    for (0..c.suffix_size_val) |x_hi| {
+                        const x = x_lo + (x_hi << @intCast(c.prefix_n_vars_val));
+                        if (x >= c.trace_len_val) continue;
 
-                for (0..suffix_size) |x_hi| {
-                    const x = x_lo + (x_hi << @intCast(prefix_n_vars));
-                    if (x >= trace_len) continue;
+                        const raw = &c.raw_inputs[x];
+                        const rd = raw.u64_values[6]; // RdWriteValue
+                        const rs1 = raw.u64_values[4]; // Rs1Value
+                        const rs2 = raw.u64_values[5]; // Rs2Value
 
-                    const witness = &cycle_witnesses[x].values;
-                    const rd = witness[R1CSInputIndex.RdWriteValue.toIndex()];
-                    const rs1 = witness[R1CSInputIndex.Rs1Value.toIndex()];
-                    const rs2 = witness[R1CSInputIndex.Rs2Value.toIndex()];
+                        // v = rd + gamma*rs1 + gamma^2*rs2 using mulU64Unreduced
+                        var v_accum = FoldedMulU64.zero();
+                        v_accum.addAssign(field_mod.mulU64Unreduced(F.one(), rd));
+                        v_accum.addAssign(field_mod.mulU64Unreduced(c.gamma_val, rs1));
+                        v_accum.addAssign(field_mod.mulU64Unreduced(c.gamma_sqr_val, rs2));
+                        const v = field_mod.reduceMulU64(v_accum);
 
-                    // Debug: Print first few cycles
-                    if (comptime debug_verbose) {
-                        if (x < 5) {
-                            // Extract raw u64 values for comparison with Stage 4
-                            const rd_limbs = rd.toBytes();
-                            const rd_u64: u64 = @as(u64, rd_limbs[0]) |
-                                (@as(u64, rd_limbs[1]) << 8) |
-                                (@as(u64, rd_limbs[2]) << 16) |
-                                (@as(u64, rd_limbs[3]) << 24) |
-                                (@as(u64, rd_limbs[4]) << 32) |
-                                (@as(u64, rd_limbs[5]) << 40) |
-                                (@as(u64, rd_limbs[6]) << 48) |
-                                (@as(u64, rd_limbs[7]) << 56);
-                            const rs1_limbs = rs1.toBytes();
-                            const rs1_u64: u64 = @as(u64, rs1_limbs[0]) |
-                                (@as(u64, rs1_limbs[1]) << 8) |
-                                (@as(u64, rs1_limbs[2]) << 16) |
-                                (@as(u64, rs1_limbs[3]) << 24) |
-                                (@as(u64, rs1_limbs[4]) << 32) |
-                                (@as(u64, rs1_limbs[5]) << 40) |
-                                (@as(u64, rs1_limbs[6]) << 48) |
-                                (@as(u64, rs1_limbs[7]) << 56);
-                            const rs2_limbs = rs2.toBytes();
-                            const rs2_u64: u64 = @as(u64, rs2_limbs[0]) |
-                                (@as(u64, rs2_limbs[1]) << 8) |
-                                (@as(u64, rs2_limbs[2]) << 16) |
-                                (@as(u64, rs2_limbs[3]) << 24) |
-                                (@as(u64, rs2_limbs[4]) << 32) |
-                                (@as(u64, rs2_limbs[5]) << 40) |
-                                (@as(u64, rs2_limbs[6]) << 48) |
-                                (@as(u64, rs2_limbs[7]) << 56);
-                            dbg("[STAGE3] Cycle {}: rd_wv={}, rs1_v={}, rs2_v={}\n", .{ x, rd_u64, rs1_u64, rs2_u64 });
-                        }
+                        // Accumulate v * suffix (deferred Montgomery)
+                        q_acc.addAssign(v.mulToProductAccum(c.suffix_evals[x_hi]));
                     }
-
-                    // Store witness values
-                    rd_write_value[x] = rd;
-                    rs1_value[x] = rs1;
-                    rs2_value[x] = rs2;
-
-                    // v = rd + gamma*rs1 + gamma^2*rs2
-                    const v = rd.add(gamma.mul(rs1)).add(gamma_sqr.mul(rs2));
-
-                    // Accumulate: Q[x_lo] += v * suffix[x_hi]
-                    q_acc = q_acc.add(v.mul(suffix_evals[x_hi]));
+                    c.Q_buf[x_lo] = q_acc.reduce();
                 }
+            }.f;
 
-                Q[x_lo] = q_acc;
+            if (thread_pool) |tp| {
+                tp.parallelForForce(prefix_size, reg_init_ctx, regInitWorker);
+            } else {
+                for (0..prefix_size) |x_lo| regInitWorker(reg_init_ctx, x_lo);
             }
 
+            const padded_size = prefix_size * suffix_size;
             return Self{
                 .P = P,
                 .Q = Q,
-                .rd_write_value = rd_write_value,
-                .rs1_value = rs1_value,
-                .rs2_value = rs2_value,
+                .rd_write_value = null, // Allocated at Phase 2 transition
+                .rs1_value = null,
+                .rs2_value = null,
                 .gamma = gamma,
                 .gamma_sqr = gamma_sqr,
                 .prefix_n_vars = prefix_n_vars,
+                .suffix_n_vars = suffix_n_vars,
                 .current_prefix_size = prefix_size,
-                .current_witness_size = padded_size, // Must be T (padded), not trace_len
+                .current_witness_size = padded_size,
                 .in_phase2 = false,
                 .phase2_eq = null,
                 .r_hi = r_hi,
                 .r_lo = r_lo,
                 .prefix_challenges = std.ArrayListUnmanaged(F).initCapacity(allocator, @intCast(prefix_n_vars)) catch unreachable,
+                .raw_inputs = raw_inputs,
+                .trace_len = trace_len,
                 .allocator = allocator,
+                .thread_pool = thread_pool,
             };
         }
 
@@ -2890,9 +3072,9 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             self.allocator.free(self.P);
             self.allocator.free(self.Q);
             self.prefix_challenges.deinit(self.allocator);
-            self.allocator.free(self.rd_write_value);
-            self.allocator.free(self.rs1_value);
-            self.allocator.free(self.rs2_value);
+            if (self.rd_write_value) |v| self.allocator.free(v);
+            if (self.rs1_value) |v| self.allocator.free(v);
+            if (self.rs2_value) |v| self.allocator.free(v);
             if (self.phase2_eq) |eq| self.allocator.free(eq);
         }
 
@@ -2944,21 +3126,21 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
         fn computeRoundEvalsPhase2(self: *Self, previous_claim: F) [3]F {
             const eq = self.phase2_eq.?;
-            // CRITICAL FIX: Use current_witness_size, NOT eq.len!
-            // eq.len is the original suffix_size allocation, but current_witness_size
-            // shrinks after each bindPhase2 call.
+            const rd = self.rd_write_value.?;
+            const rs1 = self.rs1_value.?;
+            const rs2 = self.rs2_value.?;
             const half = self.current_witness_size / 2;
             var evals: [2]F = .{ F.zero(), F.zero() };
 
             for (0..half) |j| {
                 const eq_0 = eq[2 * j];
                 const eq_1 = eq[2 * j + 1];
-                const rd_0 = self.rd_write_value[2 * j];
-                const rd_1 = self.rd_write_value[2 * j + 1];
-                const rs1_0 = self.rs1_value[2 * j];
-                const rs1_1 = self.rs1_value[2 * j + 1];
-                const rs2_0 = self.rs2_value[2 * j];
-                const rs2_1 = self.rs2_value[2 * j + 1];
+                const rd_0 = rd[2 * j];
+                const rd_1 = rd[2 * j + 1];
+                const rs1_0 = rs1[2 * j];
+                const rs1_1 = rs1[2 * j + 1];
+                const rs2_0 = rs2[2 * j];
+                const rs2_1 = rs2[2 * j + 1];
 
                 // Extrapolate
                 const eq_2 = eq_1.add(eq_1).sub(eq_0);
@@ -2995,8 +3177,8 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
         fn bindPhase1(self: *Self, r_j: F) void {
             const new_prefix_size = self.current_prefix_size / 2;
-            const witness_new_size = self.current_witness_size / 2;
 
+<<<<<<< HEAD
             // Bind 5 independent arrays: P, Q, rd_write_value, rs1_value, rs2_value
             const RegBindCtx = struct {
                 slices: [5][]F,
@@ -3041,10 +3223,16 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                 tp.parallelForForce(5, bctx, bindOneFn);
             } else {
                 for (0..5) |idx| bindOneFn(bctx, idx);
+=======
+            // Only bind P and Q (prefix-sized arrays)
+            // Witness MLEs are NOT bound during Phase 1 — they're reconstructed at transition
+            for (0..new_prefix_size) |i| {
+                self.P[i] = self.P[2 * i].add(r_j.mul(self.P[2 * i + 1].sub(self.P[2 * i])));
+                self.Q[i] = self.Q[2 * i].add(r_j.mul(self.Q[2 * i + 1].sub(self.Q[2 * i])));
+>>>>>>> fa769175 (perf: Stage 3 optimizations — pass raw R1CS inputs, use FoldedMulU64 for shift/register provers)
             }
 
             self.current_prefix_size = new_prefix_size;
-            self.current_witness_size = witness_new_size;
 
             // Record challenge for Phase 2 initialization
             self.prefix_challenges.append(self.allocator, r_j) catch unreachable;
@@ -3055,19 +3243,12 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             self.bindPhase1(r_j);
             self.in_phase2 = true;
 
+            const suffix_size: usize = @as(usize, 1) << @intCast(self.suffix_n_vars);
+
             // Materialize eq polynomial for Phase 2:
-            // eq_suffix = eq(r_hi, j) * eq(r_prefix, r_lo)
-            // where r_prefix = accumulated prefix challenges
+            // eq(r_spartan, (r_prefix, j)) = eq(r_lo, r_prefix) * eq(r_hi, j)
 
-            const remaining_size = self.current_witness_size;
-            self.phase2_eq = self.allocator.alloc(F, remaining_size) catch unreachable;
-
-            // Compute eq(r_prefix, r_lo) - the prefix evaluation
-            // r_prefix = prefix challenges (reversed from little-endian to big-endian)
-            // r_lo = second half of r_spartan (already in big-endian order)
-            //
-            // Jolt converts prefix_challenges from LITTLE_ENDIAN to BIG_ENDIAN via match_endianness(),
-            // which reverses the vector. We need to do the same.
+            // Reverse prefix challenges (LE → BE) for Jolt compatibility
             const reversed_prefix = self.allocator.alloc(F, self.prefix_challenges.items.len) catch unreachable;
             defer self.allocator.free(reversed_prefix);
             for (0..self.prefix_challenges.items.len) |i| {
@@ -3078,16 +3259,83 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             defer eq_prefix.deinit();
             const eq_prefix_eval = eq_prefix.evaluate(reversed_prefix);
 
-            // Compute eq(r_hi, j) for each j in [0, remaining_size)
+            // Compute eq(r_hi, j) for each j in suffix domain
             var eq_suffix = poly_mod.EqPolynomial(F).init(self.allocator, self.r_hi) catch unreachable;
             defer eq_suffix.deinit();
             const eq_suffix_evals = eq_suffix.evals(self.allocator) catch unreachable;
             defer self.allocator.free(eq_suffix_evals);
 
             // phase2_eq[j] = eq_suffix[j] * eq_prefix_eval
-            for (0..remaining_size) |j| {
+            self.phase2_eq = self.allocator.alloc(F, suffix_size) catch unreachable;
+            for (0..suffix_size) |j| {
                 self.phase2_eq.?[j] = eq_suffix_evals[j].mul(eq_prefix_eval);
             }
+
+            // Reconstruct witness MLEs at suffix_size by contracting over prefix domain
+            // using raw_inputs + mulU64Unreduced
+            const prefix_domain_size: usize = @as(usize, 1) << @intCast(self.prefix_challenges.items.len);
+
+            // Compute eq(r_prefix_be, i) for all prefix indices using EqPolynomial
+            var eq_poly = poly_mod.EqPolynomial(F).init(self.allocator, reversed_prefix) catch unreachable;
+            defer eq_poly.deinit();
+            const eq_evals_alloc = eq_poly.evals(self.allocator) catch unreachable;
+            defer self.allocator.free(eq_evals_alloc);
+            const eq_evals = eq_evals_alloc[0..prefix_domain_size];
+
+            // Allocate witness MLEs at suffix_size (not T)
+            self.rd_write_value = self.allocator.alloc(F, suffix_size) catch unreachable;
+            self.rs1_value = self.allocator.alloc(F, suffix_size) catch unreachable;
+            self.rs2_value = self.allocator.alloc(F, suffix_size) catch unreachable;
+
+            // Contract: witness_mle[j] = Sum_i eq_evals[i] * raw_inputs[j*prefix + i].u64_values[idx]
+            const RegReconCtx = struct {
+                raw_inputs_ptr: []const RawR1CSInputs,
+                eq_ev: []const F,
+                rd_out: []F,
+                rs1_out: []F,
+                rs2_out: []F,
+                prefix_dom_size: usize,
+                tl: usize,
+            };
+            const recon_ctx = RegReconCtx{
+                .raw_inputs_ptr = self.raw_inputs,
+                .eq_ev = eq_evals,
+                .rd_out = self.rd_write_value.?,
+                .rs1_out = self.rs1_value.?,
+                .rs2_out = self.rs2_value.?,
+                .prefix_dom_size = prefix_domain_size,
+                .tl = self.trace_len,
+            };
+            const regReconWorker = struct {
+                fn f(c: RegReconCtx, j: usize) void {
+                    var rd_acc = FoldedMulU64.zero();
+                    var rs1_acc = FoldedMulU64.zero();
+                    var rs2_acc = FoldedMulU64.zero();
+
+                    for (0..c.prefix_dom_size) |i| {
+                        const trace_idx = j * c.prefix_dom_size + i;
+                        if (trace_idx >= c.tl) continue;
+
+                        const raw = &c.raw_inputs_ptr[trace_idx];
+                        const eq_eval = c.eq_ev[i];
+
+                        rd_acc.addAssign(field_mod.mulU64Unreduced(eq_eval, raw.u64_values[6])); // RdWriteValue
+                        rs1_acc.addAssign(field_mod.mulU64Unreduced(eq_eval, raw.u64_values[4])); // Rs1Value
+                        rs2_acc.addAssign(field_mod.mulU64Unreduced(eq_eval, raw.u64_values[5])); // Rs2Value
+                    }
+
+                    c.rd_out[j] = field_mod.reduceMulU64(rd_acc);
+                    c.rs1_out[j] = field_mod.reduceMulU64(rs1_acc);
+                    c.rs2_out[j] = field_mod.reduceMulU64(rs2_acc);
+                }
+            }.f;
+            if (self.thread_pool) |tp| {
+                tp.parallelForForce(suffix_size, recon_ctx, regReconWorker);
+            } else {
+                for (0..suffix_size) |j| regReconWorker(recon_ctx, j);
+            }
+
+            self.current_witness_size = suffix_size;
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {
@@ -3100,13 +3348,11 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                 slices: [4]?[]F,
                 r: F,
                 n: usize,
-                count: usize,
             };
             const bctx = RegBP2Ctx{
                 .slices = .{ self.rd_write_value, self.rs1_value, self.rs2_value, self.phase2_eq },
                 .r = r_j,
                 .n = new_size,
-                .count = num_arrays,
             };
             const bindOneFn = struct {
                 fn f(c: RegBP2Ctx, idx: usize) void {
@@ -3146,9 +3392,9 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         } {
             std.debug.assert(self.current_witness_size == 1);
             return .{
-                .rd_write_value = self.rd_write_value[0],
-                .rs1_value = self.rs1_value[0],
-                .rs2_value = self.rs2_value[0],
+                .rd_write_value = self.rd_write_value.?[0],
+                .rs1_value = self.rs1_value.?[0],
+                .rs2_value = self.rs2_value.?[0],
             };
         }
     };

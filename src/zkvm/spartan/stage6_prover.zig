@@ -4615,7 +4615,9 @@ fn BooleanityProver(comptime F: type) type {
         r_address_le: []F,
         /// B_scalar: accumulated eq(r_addr_fixed[bound_vars], r_challenges[bound_vars])
         B_scalar: F,
-        /// eq(r_cycle, j) table for Phase 2 - halves each round
+        /// GruenSplitEq for eq(r_cycle, .) — O(1) bind, factored eq compute
+        gruen_eq_cycle: poly_mod.GruenSplitEqPolynomial(F),
+        /// Flat eq table (BE convention) for Phase 2 compute
         eq_cycle: []F,
         /// γ^{2i} powers for batching
         gamma_powers_sq: []F,
@@ -4664,6 +4666,7 @@ fn BooleanityProver(comptime F: type) type {
             allocator: std.mem.Allocator,
             G_tables: [][]F,
             r_addr_le: []F,
+            gruen_eq_in: poly_mod.GruenSplitEqPolynomial(F),
             eq_cycle_table: []F,
             gamma_sq: []F,
             gamma_unsq: []F,
@@ -4716,6 +4719,7 @@ fn BooleanityProver(comptime F: type) type {
                 .F_size = 1,
                 .r_address_le = r_addr_le,
                 .B_scalar = F.one(),
+                .gruen_eq_cycle = gruen_eq_in,
                 .eq_cycle = eq_cycle_table,
                 .gamma_powers_sq = gamma_sq,
                 .gamma_powers = gamma_unsq,
@@ -4745,6 +4749,7 @@ fn BooleanityProver(comptime F: type) type {
             self.allocator.free(self.G);
             self.allocator.free(self.F_table);
             self.allocator.free(self.r_address_le);
+            self.gruen_eq_cycle.deinit();
             self.allocator.free(self.eq_cycle);
             self.allocator.free(self.gamma_powers_sq);
             self.allocator.free(self.gamma_powers);
@@ -5043,31 +5048,37 @@ fn BooleanityProver(comptime F: type) type {
         fn computePhase2PolyDense(self: *Self, evals: []F, half: usize, previous_claim: F) void {
             const ht = self.H orelse return;
 
-            // Use flat eq table (BE, from getFullEqTable) for compute,
-            // GruenSplitEq for bind only
+            // GruenSplitEq factored eq — E_out * E_in decomposition + computeCubicRoundPoly
+            const eq_tables_d = self.gruen_eq_cycle.getWindowEqTables(self.gruen_eq_cycle.current_index, 1);
             const BoolP2Ctx = struct {
                 ht: [][]F,
-                eq_cycle: []const F,
+                E_out: []const F,
+                E_in: []const F,
+                in_mask: usize,
+                head_in_bits: usize,
                 gamma_powers: []const F,
                 N: usize,
             };
             const ctx = BoolP2Ctx{
                 .ht = ht,
-                .eq_cycle = self.eq_cycle,
+                .E_out = eq_tables_d.E_out,
+                .E_in = eq_tables_d.E_in,
+                .in_mask = (@as(usize, 1) << @intCast(eq_tables_d.head_in_bits)) -| 1,
+                .head_in_bits = eq_tables_d.head_in_bits,
                 .gamma_powers = self.gamma_powers,
                 .N = self.N,
             };
 
             const mapFn = struct {
-                fn f(c: BoolP2Ctx, start: usize, end: usize) [4]F {
+                fn f(c: BoolP2Ctx, start: usize, end: usize) [2]F {
                     const UPA = UnreducedProductAccum;
-                    var c_weighted = F.zero();
-                    var e_weighted = F.zero();
-                    var eq_sum_0 = F.zero();
-                    var eq_sum_1 = F.zero();
+                    var q_const_upa = UPA.zero();
+                    var q_quad_upa = UPA.zero();
                     for (start..end) |j| {
-                        const d0 = c.eq_cycle[2 * j];
-                        const d1 = c.eq_cycle[2 * j + 1];
+                        const x_out = j >> @intCast(c.head_in_bits);
+                        const x_in = j & c.in_mask;
+                        const eq_prefix = (if (x_out < c.E_out.len) c.E_out[x_out] else F.one())
+                            .mul(if (x_in < c.E_in.len) c.E_in[x_in] else F.one());
                         var acc_c = UPA.zero();
                         var acc_e = UPA.zero();
                         for (0..c.N) |i| {
@@ -5078,50 +5089,30 @@ fn BooleanityProver(comptime F: type) type {
                             acc_c.addAssign(h0.mulToProductAccum(h0.sub(rho)));
                             acc_e.addAssign(b.mulToProductAccum(b));
                         }
-                        const q_c = acc_c.reduce();
-                        const q_e = acc_e.reduce();
-                        c_weighted = c_weighted.add(d0.mul(q_c));
-                        e_weighted = e_weighted.add(d0.mul(q_e));
-                        eq_sum_0 = eq_sum_0.add(d0);
-                        eq_sum_1 = eq_sum_1.add(d1);
+                        q_const_upa.addAssign(eq_prefix.mulToProductAccum(acc_c.reduce()));
+                        q_quad_upa.addAssign(eq_prefix.mulToProductAccum(acc_e.reduce()));
                     }
-                    return [4]F{ c_weighted, e_weighted, eq_sum_0, eq_sum_1 };
+                    return .{ q_const_upa.reduce(), q_quad_upa.reduce() };
                 }
             }.f;
 
             const reduceFn = struct {
-                fn f(a: [4]F, b: [4]F) [4]F {
-                    return .{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]), a[3].add(b[3]) };
+                fn f(a: [2]F, b: [2]F) [2]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]) };
                 }
             }.f;
 
             const result = if (self.pool) |pool|
-                pool.parallelReduce([4]F, half, [4]F{ F.zero(), F.zero(), F.zero(), F.zero() }, ctx, mapFn, reduceFn)
+                pool.parallelReduce([2]F, half, [2]F{ F.zero(), F.zero() }, ctx, mapFn, reduceFn)
             else
                 mapFn(ctx, 0, half);
 
-            const c_weighted = result[0];
-            const e_weighted = result[1];
-            const eq_eval_0 = result[2];
-            const eq_eval_1 = result[3];
             const adjusted_claim = previous_claim.mul(self.eq_r_r.inverse().?);
-            const s0_inner = c_weighted;
-            const s1_inner = adjusted_claim.sub(c_weighted);
-            const eq0_inv = eq_eval_0.inverse().?;
-            const eq1_inv = eq_eval_1.inverse().?;
-            const c = c_weighted.mul(eq0_inv);
-            const e = e_weighted.mul(eq0_inv);
-            const q_1 = s1_inner.mul(eq1_inv);
-            const e_times_2 = e.add(e);
-            const q_2 = q_1.add(q_1).sub(c).add(e_times_2);
-            const q_3 = q_2.add(q_1).sub(c).add(e_times_2.add(e_times_2));
-            const eq_slope = eq_eval_1.sub(eq_eval_0);
-            const eq_eval_2 = eq_eval_1.add(eq_slope);
-            const eq_eval_3 = eq_eval_2.add(eq_slope);
-            evals[0] = s0_inner.mul(self.eq_r_r);
-            evals[1] = s1_inner.mul(self.eq_r_r);
-            evals[2] = eq_eval_2.mul(q_2).mul(self.eq_r_r);
-            evals[3] = eq_eval_3.mul(q_3).mul(self.eq_r_r);
+            const gruen_evals = self.gruen_eq_cycle.computeCubicRoundPoly(result[0], result[1], adjusted_claim);
+            evals[0] = gruen_evals[0].mul(self.eq_r_r);
+            evals[1] = gruen_evals[1].mul(self.eq_r_r);
+            evals[2] = gruen_evals[2].mul(self.eq_r_r);
+            evals[3] = gruen_evals[3].mul(self.eq_r_r);
         }
 
         pub fn bindChallenge(self: *Self, r: F) !void {
@@ -5216,8 +5207,9 @@ fn BooleanityProver(comptime F: type) type {
                         try self.materializeDense(r);
                     }
 
-                    // Bind eq_cycle only (no H arrays to bind in lazy state)
+                    // Bind eq_cycle + GruenSplitEq (no H arrays to bind in lazy state)
                     bindOne(self.eq_cycle, half, r);
+                    self.gruen_eq_cycle.bind(r);
                 } else if (self.H) |ht| {
                     // Dense state: bind H arrays and eq_cycle
                     if (self.gpu) |gpu| {
@@ -5251,8 +5243,10 @@ fn BooleanityProver(comptime F: type) type {
                         }
                         bindOne(self.eq_cycle, half, r);
                     }
+                    self.gruen_eq_cycle.bind(r);
                 } else {
                     bindOne(self.eq_cycle, half, r);
+                    self.gruen_eq_cycle.bind(r);
                 }
                 self.phase2_len = half;
             }
@@ -7481,7 +7475,15 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // eq(challenges, r_cycle_BE) = eq(challenges, rev(r_cycle_LE)), matching
                 // Jolt's verifier which computes combined_r_cycle = rev(r_cycle_LE).
                 // Build GruenSplitEq for Booleanity Phase 2 (O(1) bind)
+                // Build flat eq table (LE convention, proven correct for G-tables)
                 const eq_cycle_bool_phase2 = try computeEqTableParallel(F, self.allocator, lookups_ra_r_cycle, n_cycle_vars, self.thread_pool);
+                // Build GruenSplitEq with REVERSED r_cycle so its binding order matches
+                // the LE flat table: GruenSplitEq binds tau[n-1] first, which is
+                // reversed[n-1] = lookups_ra_r_cycle[0] = challenge MSB = bit 0 in LE.
+                var r_cycle_for_gruen = try self.allocator.alloc(F, n_cycle_vars);
+                defer self.allocator.free(r_cycle_for_gruen);
+                for (0..n_cycle_vars) |ri| r_cycle_for_gruen[ri] = lookups_ra_r_cycle[n_cycle_vars - 1 - ri];
+                const bool_gruen_eq = try poly_mod.GruenSplitEqPolynomial(F).init(self.allocator, r_cycle_for_gruen);
                 // eq_cycle_bool_phase2 is NOT deferred - shared with BooleanityProver
 
                 // Build G tables: G_i[k] = Σ_j eq(r_cycle_fixed, j) * [chunk_i(j) == k]
@@ -7666,6 +7668,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     self.allocator,
                     G_tables,
                     r_address_bool_le,
+                    bool_gruen_eq,
                     eq_cycle_bool_phase2,
                     gamma_sq,
                     booleanity_gamma_unsq,

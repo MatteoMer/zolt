@@ -4087,7 +4087,8 @@ fn HammingBooleanityProver(comptime F: type) type {
         }
 
         /// Phase 1: double loop with factored eq = eq_lo(x_lo) * eq_hi(x_hi)
-        fn computeRoundPolyPhase1(self: *Self) [4]F {
+        fn computeRoundPolyPhase1(self: *Self, previous_claim: F) [4]F {
+            _ = previous_claim;
             const half_lo = self.prefix_current_len / 2;
             const suffix_len = self.suffix_len;
 
@@ -4106,26 +4107,15 @@ fn HammingBooleanityProver(comptime F: type) type {
                 .suffix_len = suffix_len,
             };
 
-            // Parallelize over suffix_len (outer loop over j_outer).
-            // Index layout: H is a flat T-sized array with LE indexing. The flat index
-            // x = x_lo + x_hi * prefix_len, where x_lo ∈ [0, prefix_len) is the
-            // fastest-varying (prefix) dimension. We pair indices (2j, 2j+1) which
-            // toggle bit 0 (the first sumcheck variable). Decomposing j = j_inner +
-            // j_outer * half_lo gives: 2j = 2*j_inner + j_outer*prefix_len, keeping
-            // the j_outer (suffix) block constant within each pair — so eq_hi[j_outer]
-            // factors out correctly.
-            //
-            // Cache locality note: H accesses stride by prefix_len between j_outer blocks
-            // (non-contiguous). Swapping loop order (parallel over prefix, sequential over
-            // suffix) would improve locality but would prevent eq_hi factorization. The
-            // current order is chosen because the eq_hi factorization saves a multiply per
-            // pair, which dominates the cache cost for typical sizes.
+            // Compute s(0), s(1), s(2), s(3) using deferred reduction (UPA) to
+            // amortize Montgomery reduction across multiple products.
+            const UPA = UnreducedProductAccum;
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [4]F {
-                    var e0 = F.zero();
-                    var e1 = F.zero();
-                    var e2 = F.zero();
-                    var e3 = F.zero();
+                    var upa0 = UPA.zero();
+                    var upa1 = UPA.zero();
+                    var upa2 = UPA.zero();
+                    var upa3 = UPA.zero();
 
                     for (start..end) |j_outer| {
                         const eq_hi_val = c.eq_hi[j_outer];
@@ -4141,19 +4131,19 @@ fn HammingBooleanityProver(comptime F: type) type {
                             const eq1 = eq_lo_1.mul(eq_hi_val);
                             const e_delta = eq1.sub(eq0);
 
-                            e0 = e0.add(eq0.mul(h0.mul(h0).sub(h0)));
-                            e1 = e1.add(eq1.mul(h1.mul(h1).sub(h1)));
+                            upa0.addAssign(UPA.fromMul(eq0, h0.mul(h0).sub(h0)));
+                            upa1.addAssign(UPA.fromMul(eq1, h1.mul(h1).sub(h1)));
 
                             const h_at_2 = h1.add(h_delta);
                             const e_at_2 = eq1.add(e_delta);
-                            e2 = e2.add(e_at_2.mul(h_at_2.mul(h_at_2).sub(h_at_2)));
+                            upa2.addAssign(UPA.fromMul(e_at_2, h_at_2.mul(h_at_2).sub(h_at_2)));
 
                             const h_at_3 = h_at_2.add(h_delta);
                             const e_at_3 = e_at_2.add(e_delta);
-                            e3 = e3.add(e_at_3.mul(h_at_3.mul(h_at_3).sub(h_at_3)));
+                            upa3.addAssign(UPA.fromMul(e_at_3, h_at_3.mul(h_at_3).sub(h_at_3)));
                         }
                     }
-                    return [4]F{ e0, e1, e2, e3 };
+                    return [4]F{ upa0.reduce(), upa1.reduce(), upa2.reduce(), upa3.reduce() };
                 }
             }.f;
 
@@ -4260,7 +4250,7 @@ fn HammingBooleanityProver(comptime F: type) type {
 
         pub fn computeRoundPoly(self: *Self, previous_claim: F) [4]F {
             return switch (self.phase) {
-                .phase1 => self.computeRoundPolyPhase1(),
+                .phase1 => self.computeRoundPolyPhase1(previous_claim),
                 .phase2 => self.computeRoundPolyPhase2(previous_claim),
             };
         }
@@ -4750,6 +4740,8 @@ fn BooleanityProver(comptime F: type) type {
         allocator: std.mem.Allocator,
         pool: ?*ThreadPool = null,
         gpu: ?*GpuPolyOps = null,
+        /// Flat backing storage for chunk_indices (single alloc for all N arrays)
+        ci_flat_storage: ?[]u8 = null,
 
         pub fn init(
             allocator: std.mem.Allocator,
@@ -4844,7 +4836,7 @@ fn BooleanityProver(comptime F: type) type {
             self.allocator.free(self.F_table);
             self.allocator.free(self.r_address_le);
             self.gruen_eq_cycle.deinit();
-            self.allocator.free(self.eq_cycle);
+            if (self.eq_cycle.len > 0) self.allocator.free(self.eq_cycle);
             self.allocator.free(self.gamma_powers_sq);
             self.allocator.free(self.gamma_powers);
             if (self.H) |ht| {
@@ -4853,7 +4845,11 @@ fn BooleanityProver(comptime F: type) type {
             }
             if (self.prescaled_lazy_flat) |pl| self.allocator.free(pl);
             if (self.chunk_indices) |ci| {
-                for (ci) |c| self.allocator.free(c);
+                if (self.ci_flat_storage) |flat| {
+                    self.allocator.free(flat);
+                } else {
+                    for (ci) |c| self.allocator.free(c);
+                }
                 self.allocator.free(ci);
             }
             for (0..@as(usize, self.lazy_num_tables)) |i| {
@@ -5363,49 +5359,49 @@ fn BooleanityProver(comptime F: type) type {
                             }
                         }
                     } else {
-                        // Round3 → Dense: materialize H[N][T/8] and free indices/tables
+                        // Round3 → Dense: materialize H[N][T/8] and free indices/tables.
+                        // materializeDense frees eq_cycle (no longer needed in dense mode).
                         try self.materializeDense(r);
+                        // Only bind gruen_eq_cycle (O(1)); eq_cycle was freed above.
+                        self.gruen_eq_cycle.bind(r);
+                        self.phase2_len = half;
+                        self.round += 1;
+                        return;
                     }
 
-                    // Bind eq_cycle + GruenSplitEq (no H arrays to bind in lazy state)
+                    // Bind eq_cycle + GruenSplitEq (lazy state, eq_cycle still alive)
                     bindOne(self.eq_cycle, half, r);
                     self.gruen_eq_cycle.bind(r);
                 } else if (self.H) |ht| {
-                    // Dense state: bind H arrays and eq_cycle
+                    // Dense state: bind H arrays only (eq_cycle is NOT needed in dense
+                    // compute — computePhase2PolyDense uses gruen_eq_cycle exclusively).
                     if (self.gpu) |gpu| {
                         if (half >= 16384) {
                             for (0..self.N) |i| {
                                 gpu.polyBindLow(ht[i][0 .. half * 2], r, ht[i][0..half]) catch bindOne(ht[i], half, r);
                             }
-                            gpu.polyBindLow(self.eq_cycle[0 .. half * 2], r, self.eq_cycle[0..half]) catch bindOne(self.eq_cycle, half, r);
                         } else {
                             for (0..self.N) |i| {
                                 bindOne(ht[i], half, r);
                             }
-                            bindOne(self.eq_cycle, half, r);
                         }
                     } else if (self.pool) |pool| {
-                        const total = self.N + 1;
-                        const Ctx2 = struct { ht: [][]F, eq_cycle: []F, n: usize, half: usize, challenge: F };
-                        const ctx2 = Ctx2{ .ht = ht, .eq_cycle = self.eq_cycle, .n = self.N, .half = half, .challenge = r };
-                        pool.parallelForForce(total, ctx2, struct {
+                        const Ctx2 = struct { ht: [][]F, half: usize, challenge: F };
+                        const ctx2 = Ctx2{ .ht = ht, .half = half, .challenge = r };
+                        pool.parallelForForce(self.N, ctx2, struct {
                             fn f2(c: Ctx2, idx: usize) void {
-                                if (idx < c.n) {
-                                    bindOne(c.ht[idx], c.half, c.challenge);
-                                } else {
-                                    bindOne(c.eq_cycle, c.half, c.challenge);
-                                }
+                                bindOne(c.ht[idx], c.half, c.challenge);
                             }
                         }.f2);
                     } else {
                         for (0..self.N) |i| {
                             bindOne(ht[i], half, r);
                         }
-                        bindOne(self.eq_cycle, half, r);
                     }
                     self.gruen_eq_cycle.bind(r);
                 } else {
-                    bindOne(self.eq_cycle, half, r);
+                    // Fallback: no H arrays, no chunk indices (shouldn't happen in normal flow)
+                    if (self.eq_cycle.len > 0) bindOne(self.eq_cycle, half, r);
                     self.gruen_eq_cycle.bind(r);
                 }
                 self.phase2_len = half;
@@ -5450,25 +5446,87 @@ fn BooleanityProver(comptime F: type) type {
                 combined_tables[g][K] = F.zero();
             }
 
-            // Materialize dense H arrays, pre-scaled by γ^i for Gruen optimization
+            // Materialize dense H arrays, pre-scaled by γ^i for Gruen optimization.
+            // Pre-allocate all arrays first (allocator calls can't be parallelized),
+            // then fill in parallel across N polynomials.
             var ht = try self.allocator.alloc([]F, self.N);
             for (0..self.N) |i| {
                 ht[i] = try self.allocator.alloc(F, dense_len);
-                const idx = ci[i];
-                const rho = self.gamma_powers[i]; // γ^i
-                for (0..dense_len) |j| {
-                    const base = j * 8;
-                    var val = F.zero();
-                    inline for (0..8) |g| {
-                        val = val.add(combined_tables[g][idx[base + g]]);
+            }
+
+            // Pre-compute per-poly γ-scaled combined tables in a flat array:
+            //   scaled[i * stride8 + g * tbl_len + k] = γ^i * combined_tables[g][k]
+            // This eliminates the per-element multiply by γ^i in the inner loop
+            // (matches Jolt's approach of pre-baking gamma into the eq tables).
+            // Cost: N * 8 * K muls ≈ 5000 muls — negligible vs 2.5M inner-loop adds.
+            const stride8 = 8 * tbl_len;
+            const scaled = try self.allocator.alloc(F, self.N * stride8);
+            defer self.allocator.free(scaled);
+            for (0..self.N) |i| {
+                const rho = self.gamma_powers[i];
+                const base_off = i * stride8;
+                for (0..8) |g| {
+                    const g_off = base_off + g * tbl_len;
+                    for (0..tbl_len) |k| {
+                        scaled[g_off + k] = rho.mul(combined_tables[g][k]);
                     }
-                    ht[i][j] = val.mul(rho); // Pre-scale by γ^i
                 }
             }
 
-            // Free chunk indices in background (N arrays of T u8 entries, ~2.5MB).
-            // Ownership transfers to background thread.
-            dropInBackground(self.allocator, ci);
+            // Parallel fill: each task materializes one poly's H array
+            if (self.pool) |pool| {
+                const MdCtx = struct {
+                    ht: [][]F,
+                    ci: []const []const u8,
+                    scaled: []const F,
+                    stride8: usize,
+                    tbl_len: usize,
+                    dense_len: usize,
+                };
+                const md_ctx = MdCtx{
+                    .ht = ht,
+                    .ci = ci,
+                    .scaled = scaled,
+                    .stride8 = stride8,
+                    .tbl_len = tbl_len,
+                    .dense_len = dense_len,
+                };
+                pool.parallelForForce(self.N, md_ctx, struct {
+                    fn f(c: MdCtx, i: usize) void {
+                        const idx = c.ci[i];
+                        const my_off = i * c.stride8;
+                        for (0..c.dense_len) |j| {
+                            const base = j * 8;
+                            var val = F.zero();
+                            inline for (0..8) |g| {
+                                val = val.add(c.scaled[my_off + g * c.tbl_len + idx[base + g]]);
+                            }
+                            c.ht[i][j] = val; // no per-element gamma multiply
+                        }
+                    }
+                }.f);
+            } else {
+                // Sequential fallback
+                for (0..self.N) |i| {
+                    const idx = ci[i];
+                    const my_off = i * stride8;
+                    for (0..dense_len) |j| {
+                        const base = j * 8;
+                        var val = F.zero();
+                        inline for (0..8) |g| {
+                            val = val.add(scaled[my_off + g * tbl_len + idx[base + g]]);
+                        }
+                        ht[i][j] = val;
+                    }
+                }
+            }
+
+            // Free chunk indices: the flat backing storage + the slice-of-slices header.
+            if (self.ci_flat_storage) |flat| {
+                dropInBackground(self.allocator, flat);
+                self.ci_flat_storage = null;
+            }
+            self.allocator.free(ci);
             self.chunk_indices = null;
             // Free lazy tables and prescaled flat array (small, sync is fine)
             for (0..4) |i| {
@@ -5483,6 +5541,12 @@ fn BooleanityProver(comptime F: type) type {
             for (combined_tables) |ct| self.allocator.free(ct);
 
             self.H = ht;
+
+            // Free eq_cycle — no longer needed in dense mode.
+            // computePhase2PolyDense uses gruen_eq_cycle exclusively.
+            // The final eq value is available via gruen_eq_cycle.current_scalar.
+            self.allocator.free(self.eq_cycle);
+            self.eq_cycle = &[_]F{};
         }
 
         fn transitionToPhase2(self: *Self) !void {
@@ -5500,17 +5564,20 @@ fn BooleanityProver(comptime F: type) type {
 
             // Allocate chunk index arrays: N arrays of T u8 entries.
             // Use K as sentinel for "no value" (F.zero()), with tables extended by 1 entry.
+            // Single flat allocation reduces mmap overhead vs N separate allocs.
             std.debug.assert(K <= 255); // K+1 must fit in u8
             const sentinel: u8 = @intCast(K);
+            const ci_flat = try self.allocator.alloc(u8, self.N * T_val);
+            @memset(ci_flat, sentinel);
             var ci = try self.allocator.alloc([]u8, self.N);
             errdefer {
-                for (ci[0..self.N]) |c| self.allocator.free(c);
+                self.allocator.free(ci_flat);
                 self.allocator.free(ci);
             }
             for (0..self.N) |i| {
-                ci[i] = try self.allocator.alloc(u8, T_val);
-                @memset(ci[i], sentinel); // default = sentinel (zero value)
+                ci[i] = ci_flat[i * T_val .. (i + 1) * T_val];
             }
+            self.ci_flat_storage = ci_flat; // save for bulk free in materializeDense/deinit
 
             // Parallel chunk_indices build — each j writes to unique ci[*][j] positions
             const CiCtx = struct {
@@ -6806,37 +6873,69 @@ fn BytecodeReadRafProver(comptime F: type) type {
             self.ra_chunks = try self.allocator.alloc([]F, self.bytecode_d);
             const chunk_K: usize = @as(usize, 1) << @intCast(self.log_k_chunk);
 
+            // Pre-compute eq tables for each chunk (small, sequential is fine)
+            var eq_tables: [8][]F = undefined; // max bytecode_d = 8
             for (0..self.bytecode_d) |i| {
                 self.ra_chunks.?[i] = try self.allocator.alloc(F, T);
-
                 const chunk_start = i * self.log_k_chunk;
                 const chunk_end = chunk_start + self.log_k_chunk;
-
-                // Jolt uses EqPolynomial::evals (BE indexing) over r_address_BE chunks.
-                // Our computeEqTable uses LE indexing. To match, we reverse the chunk.
                 const r_chunk_be = r_address_be_padded[chunk_start..chunk_end];
                 var r_chunk_rev = try self.allocator.alloc(F, self.log_k_chunk);
                 defer self.allocator.free(r_chunk_rev);
                 for (0..self.log_k_chunk) |ci| {
                     r_chunk_rev[ci] = r_chunk_be[self.log_k_chunk - 1 - ci];
                 }
-                const eq_table = try computeEqTable(F, self.allocator, r_chunk_rev, self.log_k_chunk);
-                defer self.allocator.free(eq_table);
+                eq_tables[i] = try computeEqTable(F, self.allocator, r_chunk_rev, self.log_k_chunk);
+            }
+            defer for (0..self.bytecode_d) |i| self.allocator.free(eq_tables[i]);
 
+            // Fill ra_chunks in parallel across T elements
+            if (self.pool) |pool| {
+                const RaFillCtx = struct {
+                    ra_chunks: [][]F,
+                    eq_tables: *const [8][]F,
+                    steps: []const tracer.TraceStep,
+                    pc_map_ptr: *const BytecodePCMapper,
+                    bytecode_d: usize,
+                    bytecode_K: usize,
+                    chunk_K: usize,
+                    log_k_chunk: usize,
+                };
+                const fill_ctx = RaFillCtx{
+                    .ra_chunks = self.ra_chunks.?,
+                    .eq_tables = &eq_tables,
+                    .steps = self.trace.steps.items,
+                    .pc_map_ptr = self.pc_map,
+                    .bytecode_d = self.bytecode_d,
+                    .bytecode_K = bytecode_K,
+                    .chunk_K = chunk_K,
+                    .log_k_chunk = self.log_k_chunk,
+                };
+                pool.parallelFor(T, fill_ctx, struct {
+                    fn f(c: RaFillCtx, cycle: usize) void {
+                        const step = c.steps[cycle];
+                        const pc = c.pc_map_ptr.getPCForStep(step);
+                        for (0..c.bytecode_d) |i| {
+                            if (pc < c.bytecode_K) {
+                                const chunk_val = extractChunkMSB(pc, i, c.bytecode_d, c.log_k_chunk);
+                                c.ra_chunks[i][cycle] = if (chunk_val < c.chunk_K) c.eq_tables.*[i][chunk_val] else F.zero();
+                            } else {
+                                c.ra_chunks[i][cycle] = F.zero();
+                            }
+                        }
+                    }
+                }.f);
+            } else {
                 for (0..T) |c| {
                     const step = self.trace.steps.items[c];
-                    // Convert ELF address to bytecode array index
                     const pc = self.pc_map.getPCForStep(step);
-                    if (pc < bytecode_K) {
-                        // Extract chunk using MSB-first ordering with log_k_chunk bits
-                        const chunk_val = extractChunkMSB(pc, i, self.bytecode_d, self.log_k_chunk);
-                        if (chunk_val < chunk_K) {
-                            self.ra_chunks.?[i][c] = eq_table[chunk_val];
+                    for (0..self.bytecode_d) |i| {
+                        if (pc < bytecode_K) {
+                            const chunk_val = extractChunkMSB(pc, i, self.bytecode_d, self.log_k_chunk);
+                            self.ra_chunks.?[i][c] = if (chunk_val < chunk_K) eq_tables[i][chunk_val] else F.zero();
                         } else {
                             self.ra_chunks.?[i][c] = F.zero();
                         }
-                    } else {
-                        self.ra_chunks.?[i][c] = F.zero();
                     }
                 }
             }
@@ -6974,16 +7073,32 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
                     const MAX_D = 8;
                     var upa_acc: [MAX_RA_EVALS]UPA = .{UPA.zero()} ** MAX_RA_EVALS;
+
+                    // Factored E_out/E_in: for each x_out block, pre-combine
+                    // eff_lo/hi with E_out (saves 5 muls per j vs computing E_out*E_in per j).
+                    var prev_x_out: usize = std.math.maxInt(usize);
+                    var eff_lo_out: [5]F = undefined;
+                    var eff_hi_out: [5]F = undefined;
+
                     for (start..end) |j| {
-                        // Compute combined(2j) and combined(2j+1) from 5 GruenSplitEq stages
                         const x_out = j >> @intCast(c.head_in_bits);
                         const x_in = j & c.in_mask;
+
+                        // Re-compute eff_lo/hi_out only when x_out changes
+                        if (x_out != prev_x_out) {
+                            prev_x_out = x_out;
+                            inline for (0..5) |s| {
+                                eff_lo_out[s] = c.eff_lo[s].mul(c.E_out_arr[s][x_out]);
+                                eff_hi_out[s] = c.eff_hi[s].mul(c.E_out_arr[s][x_out]);
+                            }
+                        }
+
                         var combined_lo = F.zero();
                         var combined_hi = F.zero();
                         inline for (0..5) |s| {
-                            const e_prod = c.E_out_arr[s][x_out].mul(c.E_in_arr[s][x_in]);
-                            combined_lo = combined_lo.add(c.eff_lo[s].mul(e_prod));
-                            combined_hi = combined_hi.add(c.eff_hi[s].mul(e_prod));
+                            const e_in = c.E_in_arr[s][x_in];
+                            combined_lo = combined_lo.add(eff_lo_out[s].mul(e_in));
+                            combined_hi = combined_hi.add(eff_hi_out[s].mul(e_in));
                         }
                         // Entry correction: only at position 0 (j=0, even position)
                         if (j == 0) {
@@ -7951,6 +8066,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             booleanity_prover.pool = self.thread_pool;
             booleanity_prover.gpu = self.gpu_ops;
             defer booleanity_prover.deinit();
+            const t_after_booleanity = if (bench_s6) std.time.nanoTimestamp() else 0;
 
             // Instance 0: BytecodeReadRaf (degree bytecode_d+1)
             // Compute Val polynomials from bytecode entries and stage gammas
@@ -8863,6 +8979,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 bytecode_gamma_arr[i] = bytecode_raf_gamma_powers[i];
             }
             const entry_bytecode_index = pc_map.getPC(entry_address, 0);
+            const t_init_bcraf = if (bench_s6) std.time.nanoTimestamp() else 0;
             var bytecode_prover = try BytecodeReadRafProver(F).init(
                 self.allocator, trace, pc_map, bytecode_val_polys,
                 bytecode_log_k, n_cycle_vars, bytecode_d, log_k_chunk,
@@ -8881,6 +8998,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
             bytecode_prover.gpu = self.gpu_ops;
             defer bytecode_prover.deinit();
+            const t_after_bcraf = if (bench_s6) std.time.nanoTimestamp() else 0;
 
             // pc_maps now consistent — no override needed
 
@@ -9011,10 +9129,24 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             var bytecode_addr_challenges = try self.allocator.alloc(F, bytecode_log_k);
             defer self.allocator.free(bytecode_addr_challenges);
 
-            // Stage 6 fine-grained timing (gated by s6_bench_timing)
-            if (comptime s6_bench_timing) {
-                std.debug.print("    [STAGE6-BENCH] Init: {d:7.1}ms\n", .{
+            // Stage 6 fine-grained timing (gated by ZOLT_BENCH env var)
+            if (bench_s6) {
+                const toMs = struct {
+                    fn f(ns: i128) f64 {
+                        return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+                    }
+                }.f;
+                std.debug.print("    [STAGE6-BENCH] Init total: {d:7.1}ms\n", .{
                     @as(f64, @floatFromInt(s6_init_timer.read())) / 1_000_000.0,
+                });
+                std.debug.print("    [STAGE6-BENCH]   IncClaim init:       {d:7.1}ms\n", .{toMs(t_after_inc - t_init_inc)});
+                std.debug.print("    [STAGE6-BENCH]   Hamming init:        {d:7.1}ms\n", .{toMs(t_after_hamming - t_init_hamming)});
+                std.debug.print("    [STAGE6-BENCH]   RamRaVirtual init:   {d:7.1}ms\n", .{toMs(t_after_ram - t_init_ram)});
+                std.debug.print("    [STAGE6-BENCH]   LookupsRa init:      {d:7.1}ms\n", .{toMs(t_after_lookups - t_init_lookups)});
+                std.debug.print("    [STAGE6-BENCH]   Booleanity init:     {d:7.1}ms\n", .{toMs(t_after_booleanity - t_init_booleanity)});
+                std.debug.print("    [STAGE6-BENCH]   BytecodeRaf init:    {d:7.1}ms\n", .{toMs(t_after_bcraf - t_init_bcraf)});
+                std.debug.print("    [STAGE6-BENCH]   Val polys+eq+other:  {d:7.1}ms\n", .{
+                    toMs((t_init_bcraf - t_after_booleanity) + (t_init_booleanity - t_after_lookups) + (t_init_lookups - t_after_ram) + (t_init_ram - t_after_hamming) + (t_init_hamming - t_after_inc)),
                 });
             }
             var s6_t_compute: if (s6_bench_timing) [6]u64 else void = if (comptime s6_bench_timing) [6]u64{ 0, 0, 0, 0, 0, 0 } else {};
@@ -9052,7 +9184,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var dbg_inst_p1: [6]F = .{F.zero()} ** 6;
 
                 // Instance 0: BytecodeReadRaf - REAL prover
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 {
                     const inst = 0;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -9135,9 +9267,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
-                if (comptime s6_bench_timing) s6_t_compute[0] += s6_timer.read();
+                if (bench_s6) s6_t_compute[0] += s6_timer.read();
                 // Instance 1: Booleanity - REAL prover (degree 3)
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 var cached_booleanity: ?[]F = null;
                 {
                     const inst = 1;
@@ -9178,9 +9310,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
-                if (comptime s6_bench_timing) s6_t_compute[1] += s6_timer.read();
+                if (bench_s6) s6_t_compute[1] += s6_timer.read();
                 // Instance 2: HammingBooleanity - REAL prover
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 {
                     const inst = 2;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -9207,9 +9339,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
-                if (comptime s6_bench_timing) s6_t_compute[2] += s6_timer.read();
+                if (bench_s6) s6_t_compute[2] += s6_timer.read();
                 // Instance 3: RamRaVirtual - REAL prover
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 {
                     const inst = 3;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -9251,10 +9383,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
-                if (comptime s6_bench_timing) s6_t_compute[3] += s6_timer.read();
+                if (bench_s6) s6_t_compute[3] += s6_timer.read();
                 // Instance 4: LookupsRaVirtual - REAL prover
                 // Overlap with previous instances via join when both are active
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 {
                     const inst = 4;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -9284,9 +9416,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
-                if (comptime s6_bench_timing) s6_t_compute[4] += s6_timer.read();
+                if (bench_s6) s6_t_compute[4] += s6_timer.read();
                 // Instance 5: IncClaimReduction - REAL prover
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 {
                     const inst = 5;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -9462,8 +9594,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                if (comptime s6_bench_timing) s6_t_compute[5] += s6_timer.read();
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_t_compute[5] += s6_timer.read();
+                if (bench_s6) s6_timer.reset();
                 // Compress: strip c1 (linear term) from monomial coefficients
                 // compressed = [c0, c2, c3, ..., c_d] (same as Jolt's UniPoly::compress)
                 const compressed = try self.allocator.alloc(F, max_degree);
@@ -9578,10 +9710,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     dbg("]\n", .{});
                 }
 
-                if (comptime s6_bench_timing) s6_t_transcript += s6_timer.read();
+                if (bench_s6) s6_t_transcript += s6_timer.read();
                 // Update per-instance claims from CACHED round polys and bind challenge
                 // Instance 0: BytecodeReadRaf
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 if (inst_active[0]) {
                     if (bytecode_prover.phase == 0) {
                         // Phase 1: degree-2 poly, p(r) = a0 + a1*r + a2*r^2
@@ -9677,9 +9809,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                if (comptime s6_bench_timing) s6_t_bind[0] += s6_timer.read();
+                if (bench_s6) s6_t_bind[0] += s6_timer.read();
                 // Instance 1: Booleanity (real prover)
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 if (inst_active[1]) {
                     if (cached_booleanity) |polys| {
                         // Evaluate degree-3 poly at challenge from Vandermonde [p(0), p(1), p(2), p(3)]
@@ -9699,17 +9831,17 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                if (comptime s6_bench_timing) s6_t_bind[1] += s6_timer.read();
+                if (bench_s6) s6_t_bind[1] += s6_timer.read();
                 // Instance 2: HammingBooleanity
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 if (inst_active[2]) {
                     instance_claims[2] = UniPoly(F).evalFromEvalsDeg3(cached_hamming, challenge);
                     try hamming_prover.bindChallenge(challenge);
                 }
 
-                if (comptime s6_bench_timing) s6_t_bind[2] += s6_timer.read();
+                if (bench_s6) s6_t_bind[2] += s6_timer.read();
                 // Instance 3: RamRaVirtual
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 if (inst_active[3]) {
                     // Monomial coefficients — evaluate via Horner's method
                     const ram_mono = cached_ram_ra.?;
@@ -9725,9 +9857,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     try ram_ra_prover.bindChallenge(challenge);
                 }
 
-                if (comptime s6_bench_timing) s6_t_bind[3] += s6_timer.read();
+                if (bench_s6) s6_t_bind[3] += s6_timer.read();
                 // Instance 4: LookupsRaVirtual
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 if (inst_active[4]) {
                     // Monomial coefficients — evaluate via Horner's method
                     const mono = cached_lookups_ra.?;
@@ -9743,15 +9875,15 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     try lookups_ra_prover.bindChallenge(challenge);
                 }
 
-                if (comptime s6_bench_timing) s6_t_bind[4] += s6_timer.read();
+                if (bench_s6) s6_t_bind[4] += s6_timer.read();
                 // Instance 5: IncClaimReduction
-                if (comptime s6_bench_timing) s6_timer.reset();
+                if (bench_s6) s6_timer.reset();
                 if (inst_active[5]) {
                     instance_claims[5] = UniPoly(F).evalFromEvalsDeg2(cached_inc, challenge);
 
                     try inc_prover.bindChallenge(challenge);
                 }
-                if (comptime s6_bench_timing) s6_t_bind[5] += s6_timer.read();
+                if (bench_s6) s6_t_bind[5] += s6_timer.read();
 
                 // NOTE: Instance claims for inactive instances are NOT halved here.
                 // In Zolt, instance_claims starts at the UNSCALED input_claims (not 2^offset-scaled),
@@ -9761,7 +9893,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             }
 
 
-            if (comptime s6_bench_timing) {
+            if (bench_s6) {
                 const names = [6][]const u8{ "BcRaf", "Bool ", "Hamm ", "RamRa", "LkRa ", "Inc  " };
                 var total_compute: u64 = 0;
                 var total_bind: u64 = 0;
@@ -9769,23 +9901,33 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     total_compute += s6_t_compute[i];
                     total_bind += s6_t_bind[i];
                 }
-                std.debug.print("\n    [STAGE6-BENCH] Per-instance timing (compute + bind):\n", .{});
+                const s6_sumcheck_wall_ns: i128 = std.time.nanoTimestamp() - t_s6_overall_start;
+                const toMsU = struct {
+                    fn f(ns: u64) f64 {
+                        return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+                    }
+                }.f;
+                const toMsI = struct {
+                    fn f(ns: i128) f64 {
+                        return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+                    }
+                }.f;
+                std.debug.print("\n    [STAGE6-BENCH] Sumcheck loop ({} rounds):\n", .{max_num_rounds});
                 for (0..6) |i| {
                     std.debug.print("    [STAGE6-BENCH]   {s}: compute={d:7.1}ms  bind={d:7.1}ms  total={d:7.1}ms\n", .{
                         names[i],
-                        @as(f64, @floatFromInt(s6_t_compute[i])) / 1_000_000.0,
-                        @as(f64, @floatFromInt(s6_t_bind[i])) / 1_000_000.0,
-                        @as(f64, @floatFromInt(s6_t_compute[i] + s6_t_bind[i])) / 1_000_000.0,
+                        toMsU(s6_t_compute[i]),
+                        toMsU(s6_t_bind[i]),
+                        toMsU(s6_t_compute[i] + s6_t_bind[i]),
                     });
                 }
-                std.debug.print("    [STAGE6-BENCH]   transcript+compress: {d:7.1}ms\n", .{
-                    @as(f64, @floatFromInt(s6_t_transcript)) / 1_000_000.0,
+                std.debug.print("    [STAGE6-BENCH]   transcript+compress: {d:7.1}ms\n", .{toMsU(s6_t_transcript)});
+                std.debug.print("    [STAGE6-BENCH]   Sumcheck TOTAL: compute={d:7.1}ms  bind={d:7.1}ms  transcript={d:7.1}ms\n", .{
+                    toMsU(total_compute),
+                    toMsU(total_bind),
+                    toMsU(s6_t_transcript),
                 });
-                std.debug.print("    [STAGE6-BENCH]   TOTAL: compute={d:7.1}ms  bind={d:7.1}ms  other={d:7.1}ms\n", .{
-                    @as(f64, @floatFromInt(total_compute)) / 1_000_000.0,
-                    @as(f64, @floatFromInt(total_bind)) / 1_000_000.0,
-                    @as(f64, @floatFromInt(s6_t_transcript)) / 1_000_000.0,
-                });
+                std.debug.print("    [STAGE6-BENCH]   Stage 6 overall wall: {d:7.1}ms\n", .{toMsI(s6_sumcheck_wall_ns)});
             }
 
             // ====================================================================
@@ -9975,7 +10117,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
                 // Also, get the actual eq values from the prover
                 const bp_eq_r_r = booleanity_prover.eq_r_r;
-                const bp_eq_cycle_final = booleanity_prover.eq_cycle[0];
+                const bp_eq_cycle_final = booleanity_prover.gruen_eq_cycle.current_scalar;
                 const actual_output = bp_eq_r_r.mul(bp_eq_cycle_final).mul(sum_gamma_ra);
 
                 const sg_be = sum_gamma_ra.toBytesBE();

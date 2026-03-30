@@ -406,13 +406,6 @@ pub fn JoltProver(comptime F: type) type {
             var bytecode_prep_witness = try preproc_for_witness.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, null, text_sz_for_witness);
             defer bytecode_prep_witness.deinit();
 
-            // Generate R1CS cycle witnesses from execution trace
-            var constraint_gen = r1cs.R1CSConstraintGenerator(F).init(self.allocator);
-            defer constraint_gen.deinit();
-
-            const cycle_witnesses = try constraint_gen.generateWitnessWithPCMap(&emulator.trace, &bytecode_prep_witness.pc_map);
-            defer self.allocator.free(cycle_witnesses);
-
             // Build compact + raw integer witnesses directly from trace (no Montgomery round-trip).
             // This replaces the old buildCompactAndRawWitnesses which decoded field witnesses.
             const trace_witness = @import("r1cs/trace_witness.zig");
@@ -1117,7 +1110,6 @@ pub fn JoltProver(comptime F: type) type {
                     .prebuilt_compact = prebuilt.compact,
                     .prebuilt_raw = prebuilt.raw,
                 },
-                cycle_witnesses,
                 tau,
                 &transcript,
             );

@@ -181,10 +181,9 @@ pub fn JoltProver(comptime F: type) type {
             self: *Self,
             proof: *SumcheckInstanceProof(F),
             uniskip_proof: *const UniSkipFirstRoundProof(F),
-            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             tau: []const F,
             transcript: *Blake2bTranscript(F),
-            compact_witnesses: ?[]const @import("r1cs/evaluators.zig").CompactWitness,
+            compact_witnesses: []const @import("r1cs/evaluators.zig").CompactWitness,
         ) !Stage1Result {
             const StreamingOuterProver = streaming_outer.StreamingOuterProver(F);
             const LagrangePoly = r1cs.univariate_skip.LagrangePolynomial(F);
@@ -195,7 +194,7 @@ pub fn JoltProver(comptime F: type) type {
             // tau_high is the last element (used for Lagrange kernel)
             // Full tau is passed to split_eq (it handles the split internally)
             if (tau.len < 2) {
-                const num_rounds = 1 + std.math.log2_int(usize, @max(1, cycle_witnesses.len));
+                const num_rounds = 1 + std.math.log2_int(usize, @max(1, compact_witnesses.len));
                 try self.generateZeroSumcheckProof(proof, num_rounds, 3);
                 return Stage1Result{ .challenges = challenges, .r0 = F.zero(), .uni_skip_claim = F.zero(), .allocator = self.allocator };
             }
@@ -225,503 +224,22 @@ pub fn JoltProver(comptime F: type) type {
             // This matches Jolt's behavior in OuterSharedState::new().
             var outer_prover = StreamingOuterProver.initWithScaling(
                 self.allocator,
-                cycle_witnesses,
+                compact_witnesses,
                 tau, // Full tau - prover extracts tau_low and tau_high internally
                 lagrange_tau_r0,
             ) catch {
                 // Fallback to zero proofs if initialization fails
-                const num_rounds = 1 + std.math.log2_int(usize, @max(1, cycle_witnesses.len));
+                const num_rounds = 1 + std.math.log2_int(usize, @max(1, compact_witnesses.len));
                 try self.generateZeroSumcheckProof(proof, num_rounds, 3);
                 return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = F.zero(), .allocator = self.allocator };
             };
-            // Set pre-built compact witnesses (not owned — don't free on deinit)
-            outer_prover.compact_witnesses = compact_witnesses;
             outer_prover.thread_pool = self.thread_pool;
-            defer {
-                outer_prover.compact_witnesses = null; // prevent double-free
-                outer_prover.deinit();
-            }
+            defer outer_prover.deinit();
 
             // Compute the UnivariateSkip claim: evaluation of UniSkip polynomial at r0
             const uni_skip_claim = evaluatePolyAtChallenge(uniskip_proof.uni_poly, r0);
 
-            // DEBUG: Decompose s1(r0) = L(tau_high, r0) * t1(r0) and compare
-            if (comptime false) {
-                const inv_L = lagrange_tau_r0.inverse();
-                if (inv_L) |_| {
-
-                    // Now compute t1(r0) directly by evaluating the direct sum
-                    // using the witnesses and lagrange evals at r0
-                    // Build eq tables from the SAME full_tau
-                    const tau_len = tau.len;
-                    const m_d = tau_len / 2;
-                    const n_x_in_bits_d = if (tau_len > 1) tau_len - 1 - m_d else 0;
-                    const n_x_in_prime_bits_d = if (n_x_in_bits_d > 0) n_x_in_bits_d - 1 else 0;
-                    const n_x_out_d: usize = @as(usize, 1) << @intCast(m_d);
-                    const n_x_in_d: usize = @as(usize, 1) << @intCast(n_x_in_bits_d);
-
-                    // Build eq tables (same logic as streaming_outer.buildEqTable)
-                    const E_out_d = try self.allocator.alloc(F, n_x_out_d);
-                    defer self.allocator.free(E_out_d);
-                    E_out_d[0] = F.one();
-                    var cs_d: usize = 1;
-                    for (0..m_d) |kd| {
-                        const t_k = tau[kd];
-                        const omt_k = F.one().sub(t_k);
-                        var id: usize = cs_d;
-                        while (id > 0) {
-                            id -= 1;
-                            E_out_d[2 * id + 1] = E_out_d[id].mul(t_k);
-                            E_out_d[2 * id] = E_out_d[id].mul(omt_k);
-                        }
-                        cs_d *= 2;
-                    }
-
-                    const E_in_d = try self.allocator.alloc(F, n_x_in_d);
-                    defer self.allocator.free(E_in_d);
-                    E_in_d[0] = F.one();
-                    var cs_d2: usize = 1;
-                    for (0..n_x_in_bits_d) |kd2| {
-                        const t_k2 = tau[m_d + kd2];
-                        const omt_k2 = F.one().sub(t_k2);
-                        var id2: usize = cs_d2;
-                        while (id2 > 0) {
-                            id2 -= 1;
-                            E_in_d[2 * id2 + 1] = E_in_d[id2].mul(t_k2);
-                            E_in_d[2 * id2] = E_in_d[id2].mul(omt_k2);
-                        }
-                        cs_d2 *= 2;
-                    }
-
-                    // Compute Lagrange evals at r0
-                    const StreamProver = streaming_outer.StreamingOuterProver(F);
-                    const FGSZ = StreamProver.FIRST_GROUP_SIZE;
-                    const SGSZ = StreamProver.SECOND_GROUP_SIZE;
-                    const c_mod = r1cs.constraints;
-                    var lags: [FGSZ]F = undefined;
-                    {
-                        const lag_start: i64 = -@as(i64, (FGSZ - 1) / 2);
-                        for (0..FGSZ) |li| {
-                            var lnum = F.one();
-                            var lden = F.one();
-                            for (0..FGSZ) |lj| {
-                                if (li != lj) {
-                                    const lxj: i64 = lag_start + @as(i64, @intCast(lj));
-                                    const lxjf = if (lxj >= 0) F.fromU64(@intCast(lxj)) else F.zero().sub(F.fromU64(@intCast(-lxj)));
-                                    lnum = lnum.mul(r0.sub(lxjf));
-                                    const ldiff: i64 = @as(i64, @intCast(li)) - @as(i64, @intCast(lj));
-                                    const ldifff = if (ldiff > 0) F.fromU64(@intCast(ldiff)) else F.zero().sub(F.fromU64(@intCast(-ldiff)));
-                                    lden = lden.mul(ldifff);
-                                }
-                            }
-                            lags[li] = lnum.mul(lden.inverse().?);
-                        }
-                    }
-
-                    // Check Lagrange weights: should sum to 1
-                    var lag_sum = F.zero();
-                    for (0..FGSZ) |li| lag_sum = lag_sum.add(lags[li]);
-
-                    // Check base domain: t1 at Y=0 (base point, should be zero)
-                    {
-                        var t1_at_zero = F.zero();
-                        for (0..n_x_out_d) |xo0| {
-                            for (0..n_x_in_d) |xi0| {
-                                const eq0 = E_out_d[xo0].mul(E_in_d[xi0]);
-                                const xip0 = xi0 >> 1;
-                                const cyc0 = (xo0 << @intCast(n_x_in_prime_bits_d)) | xip0;
-                                const grp0: usize = xi0 & 1;
-                                if (cyc0 < cycle_witnesses.len) {
-                                    const gid0 = if (grp0 == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
-                                    const w0 = &cycle_witnesses[cyc0];
-                                    // At Y=0, L_i(0) = delta_{i,4} since domain is {-4,...,5}
-                                    const ci0 = 4; // index of Y=0 in domain
-                                    const gsz0: usize = if (grp0 == 0) FGSZ else SGSZ;
-                                    if (ci0 < gsz0) {
-                                        const cc0 = c_mod.UNIFORM_CONSTRAINTS[gid0[ci0]];
-                                        const az0 = cc0.condition.evaluate(F, w0.asSlice());
-                                        const bz0 = cc0.left.evaluate(F, w0.asSlice()).sub(cc0.right.evaluate(F, w0.asSlice()));
-                                        t1_at_zero = t1_at_zero.add(eq0.mul(az0.mul(bz0)));
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Check ALL 10 base domain points
-                    for (0..FGSZ) |base_idx| {
-                        var t1_at_base = F.zero();
-                        for (0..n_x_out_d) |xob| {
-                            for (0..n_x_in_d) |xib| {
-                                const eqb = E_out_d[xob].mul(E_in_d[xib]);
-                                const xipb = xib >> 1;
-                                const cycb = (xob << @intCast(n_x_in_prime_bits_d)) | xipb;
-                                const grpb: usize = xib & 1;
-                                if (cycb < cycle_witnesses.len) {
-                                    const gidb = if (grpb == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
-                                    const wb = &cycle_witnesses[cycb];
-                                    const gszb: usize = if (grpb == 0) FGSZ else SGSZ;
-                                    if (base_idx < gszb) {
-                                        const ccb = c_mod.UNIFORM_CONSTRAINTS[gidb[base_idx]];
-                                        const azb = ccb.condition.evaluate(F, wb.asSlice());
-                                        const bzb = ccb.left.evaluate(F, wb.asSlice()).sub(ccb.right.evaluate(F, wb.asSlice()));
-                                        const prod_b = azb.mul(bzb);
-                                        if (!prod_b.eql(F.zero())) {
-                                            // Print witness values for this cycle
-                                        }
-                                        t1_at_base = t1_at_base.add(eqb.mul(prod_b));
-                                    }
-                                }
-                            }
-                        }
-                        if (!t1_at_base.eql(F.zero())) {
-                        }
-                    }
-
-                    // Check direct_sum for cycle 0, group 0 individually
-                    if (cycle_witnesses.len > 0) {
-                        const w_test = &cycle_witnesses[0];
-                        var az_test = F.zero();
-                        var bz_test = F.zero();
-                        for (0..FGSZ) |ki| {
-                            const cc_test = c_mod.UNIFORM_CONSTRAINTS[c_mod.FIRST_GROUP_INDICES[ki]];
-                            const cv_test = cc_test.condition.evaluate(F, w_test.asSlice());
-                            const mv_test = cc_test.left.evaluate(F, w_test.asSlice()).sub(cc_test.right.evaluate(F, w_test.asSlice()));
-                            az_test = az_test.add(lags[ki].mul(cv_test));
-                            bz_test = bz_test.add(lags[ki].mul(mv_test));
-                        }
-                    }
-
-                    // Compute direct sum
-                    var direct_t1_r0 = F.zero();
-                    for (0..n_x_out_d) |xod| {
-                        for (0..n_x_in_d) |xid| {
-                            const eq_d = E_out_d[xod].mul(E_in_d[xid]);
-                            const xipd = xid >> 1;
-                            const cycd = (xod << @intCast(n_x_in_prime_bits_d)) | xipd;
-                            const grpd: usize = xid & 1;
-
-                            if (cycd < cycle_witnesses.len) {
-                                const gsz_d: usize = if (grpd == 0) FGSZ else SGSZ;
-                                const gid_d = if (grpd == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
-                                const wd = &cycle_witnesses[cycd];
-                                var azd = F.zero();
-                                var bzd = F.zero();
-                                for (0..gsz_d) |kkd| {
-                                    const ccd = c_mod.UNIFORM_CONSTRAINTS[gid_d[kkd]];
-                                    const cvd = ccd.condition.evaluate(F, wd.asSlice());
-                                    const mvd = ccd.left.evaluate(F, wd.asSlice()).sub(ccd.right.evaluate(F, wd.asSlice()));
-                                    azd = azd.add(lags[kkd].mul(cvd));
-                                    bzd = bzd.add(lags[kkd].mul(mvd));
-                                }
-                                direct_t1_r0 = direct_t1_r0.add(eq_d.mul(azd.mul(bzd)));
-                            }
-                        }
-                    }
-
-                    // Also: compute s1(r0) = L(tau_high,r0) * direct_t1_r0 and compare
-
-                    // CRITICAL: Evaluate t1(r0) from UniSkip coefficients directly
-                    // s1(r0) = uni_skip_claim, t1(r0) = s1(r0) / L(tau_high, r0)
-                    // But also evaluate t1 at r0 using Lagrange formula from the 19 domain evaluations
-                    {
-                        const US = r1cs.univariate_skip;
-                        const EXT_SIZE = US.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE; // 19
-                        const DEG = US.OUTER_UNIVARIATE_SKIP_DEGREE; // 9
-
-                        // Get t1_vals from the UniSkip polynomial's coefficient representation
-                        // Actually, we need the evaluation values. Let's compute t1(r0) using
-                        // Lagrange interpolation from the 19 evaluations that were used to build the polynomial.
-                        // We need the evaluations - recompute them quickly
-                        const targets = US.UNISKIP_TARGETS;
-
-                        // Build t1_eval_vals: the 19 evaluations on {-9,...,9}
-                        // Base domain {-4,...,5}: t1 = 0
-                        // Extended targets: computed from witnesses
-                        var t1_eval_19: [EXT_SIZE]F = [_]F{F.zero()} ** EXT_SIZE;
-
-                        // Recompute extended evaluations at the 9 target points
-                        for (targets) |target_y| {
-                            var ext_sum = F.zero();
-                            for (0..n_x_out_d) |xo| {
-                                const eo = if (xo < E_out_d.len) E_out_d[xo] else F.zero();
-                                for (0..n_x_in_d) |xi| {
-                                    const ei = if (xi < E_in_d.len) E_in_d[xi] else F.zero();
-                                    const eq_v = eo.mul(ei);
-                                    const xip = xi >> 1;
-                                    const cyc = (xo << @intCast(n_x_in_prime_bits_d)) | xip;
-                                    const grp: u1 = @truncate(xi & 1);
-                                    if (cyc < cycle_witnesses.len) {
-                                        const w = &cycle_witnesses[cyc];
-                                        const gsz: usize = if (grp == 0) FGSZ else SGSZ;
-                                        const gids = if (grp == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
-                                        // Build Lagrange evals at target_y
-                                        const tgt_f = if (target_y >= 0) F.fromU64(@intCast(target_y)) else F.zero().sub(F.fromU64(@intCast(-target_y)));
-                                        var lag_tgt: [FGSZ]F = undefined;
-                                        const lag_s: i64 = -@as(i64, (FGSZ - 1) / 2);
-                                        for (0..FGSZ) |lti| {
-                                            var ln = F.one();
-                                            var ld = F.one();
-                                            for (0..FGSZ) |ltj| {
-                                                if (lti != ltj) {
-                                                    const ltxj: i64 = lag_s + @as(i64, @intCast(ltj));
-                                                    const ltxjf = if (ltxj >= 0) F.fromU64(@intCast(ltxj)) else F.zero().sub(F.fromU64(@intCast(-ltxj)));
-                                                    ln = ln.mul(tgt_f.sub(ltxjf));
-                                                    const ltd: i64 = @as(i64, @intCast(lti)) - @as(i64, @intCast(ltj));
-                                                    const ltdf = if (ltd > 0) F.fromU64(@intCast(ltd)) else F.zero().sub(F.fromU64(@intCast(-ltd)));
-                                                    ld = ld.mul(ltdf);
-                                                }
-                                            }
-                                            lag_tgt[lti] = ln.mul(ld.inverse().?);
-                                        }
-                                        var az_t = F.zero();
-                                        var bz_t = F.zero();
-                                        for (0..gsz) |ki| {
-                                            const cc = c_mod.UNIFORM_CONSTRAINTS[gids[ki]];
-                                            const cv = cc.condition.evaluate(F, w.asSlice());
-                                            const mv = cc.left.evaluate(F, w.asSlice()).sub(cc.right.evaluate(F, w.asSlice()));
-                                            az_t = az_t.add(lag_tgt[ki].mul(cv));
-                                            bz_t = bz_t.add(lag_tgt[ki].mul(mv));
-                                        }
-                                        ext_sum = ext_sum.add(eq_v.mul(az_t.mul(bz_t)));
-                                    }
-                                }
-                            }
-                            const pos: usize = @intCast(target_y + @as(i64, DEG));
-                            t1_eval_19[pos] = ext_sum;
-                        }
-
-                        // Now evaluate t1(r0) using Lagrange formula from the 19 evaluations
-                        var t1_r0_lagrange19 = F.zero();
-                        for (0..EXT_SIZE) |li19| {
-                            if (t1_eval_19[li19].eql(F.zero())) continue;
-                            const xi19: i64 = @as(i64, @intCast(li19)) - @as(i64, DEG);
-                            var ln19 = F.one();
-                            var ld19 = F.one();
-                            for (0..EXT_SIZE) |lj19| {
-                                if (li19 != lj19) {
-                                    const xj19: i64 = @as(i64, @intCast(lj19)) - @as(i64, DEG);
-                                    const xj19f = if (xj19 >= 0) F.fromU64(@intCast(xj19)) else F.zero().sub(F.fromU64(@intCast(-xj19)));
-                                    ln19 = ln19.mul(r0.sub(xj19f));
-                                    const d19: i64 = xi19 - xj19;
-                                    const d19f = if (d19 > 0) F.fromU64(@intCast(d19)) else F.zero().sub(F.fromU64(@intCast(-d19)));
-                                    ld19 = ld19.mul(d19f);
-                                }
-                            }
-                            t1_r0_lagrange19 = t1_r0_lagrange19.add(t1_eval_19[li19].mul(ln19.mul(ld19.inverse().?)));
-                        }
-
-
-                        // Also check: does s1 polynomial Horner eval at r0 match uni_skip_claim?
-                        // (s1 = the actual polynomial sent in the proof)
-                    }
-
-                    // Now compute t1 at Y=-5 (first extended target) using the SAME
-                    // Lagrange eval approach (not COEFFS_PER_J) and compare with
-                    // what evaluateAzBzAtTargetY gives
-                    const neg5_field = F.zero().sub(F.fromU64(5));
-                    var lag_neg5: [FGSZ]F = undefined;
-                    {
-                        const lag_start_n5: i64 = -@as(i64, (FGSZ - 1) / 2);
-                        for (0..FGSZ) |li| {
-                            var lnum2 = F.one();
-                            var lden2 = F.one();
-                            for (0..FGSZ) |lj| {
-                                if (li != lj) {
-                                    const lxj2: i64 = lag_start_n5 + @as(i64, @intCast(lj));
-                                    const lxjf2 = if (lxj2 >= 0) F.fromU64(@intCast(lxj2)) else F.zero().sub(F.fromU64(@intCast(-lxj2)));
-                                    lnum2 = lnum2.mul(neg5_field.sub(lxjf2));
-                                    const ldiff2: i64 = @as(i64, @intCast(li)) - @as(i64, @intCast(lj));
-                                    const ldifff2 = if (ldiff2 > 0) F.fromU64(@intCast(ldiff2)) else F.zero().sub(F.fromU64(@intCast(-ldiff2)));
-                                    lden2 = lden2.mul(ldifff2);
-                                }
-                            }
-                            lag_neg5[li] = lnum2.mul(lden2.inverse().?);
-                        }
-                    }
-
-                    // Compute direct sum at Y=-5 using Lagrange evals at -5
-                    var direct_t1_neg5 = F.zero();
-                    for (0..n_x_out_d) |xod2| {
-                        for (0..n_x_in_d) |xid2| {
-                            const eq_d2 = E_out_d[xod2].mul(E_in_d[xid2]);
-                            const xipd2 = xid2 >> 1;
-                            const cycd2 = (xod2 << @intCast(n_x_in_prime_bits_d)) | xipd2;
-                            const grpd2: usize = xid2 & 1;
-
-                            if (cycd2 < cycle_witnesses.len) {
-                                const gsz_d2: usize = if (grpd2 == 0) FGSZ else SGSZ;
-                                const gid_d2 = if (grpd2 == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
-                                const wd2 = &cycle_witnesses[cycd2];
-                                var azd2 = F.zero();
-                                var bzd2 = F.zero();
-                                for (0..gsz_d2) |kkd2| {
-                                    const ccd2 = c_mod.UNIFORM_CONSTRAINTS[gid_d2[kkd2]];
-                                    const cvd2 = ccd2.condition.evaluate(F, wd2.asSlice());
-                                    const mvd2 = ccd2.left.evaluate(F, wd2.asSlice()).sub(ccd2.right.evaluate(F, wd2.asSlice()));
-                                    azd2 = azd2.add(lag_neg5[kkd2].mul(cvd2));
-                                    bzd2 = bzd2.add(lag_neg5[kkd2].mul(mvd2));
-                                }
-                                direct_t1_neg5 = direct_t1_neg5.add(eq_d2.mul(azd2.mul(bzd2)));
-                            }
-                        }
-                    }
-
-                    // Now compute using COEFFS_PER_J (same as evaluateAzBzAtTargetY)
-                    const unskip = r1cs.univariate_skip;
-                    var coeffs_t1_neg5 = F.zero();
-                    for (0..n_x_out_d) |xod3| {
-                        for (0..n_x_in_d) |xid3| {
-                            const eq_d3 = E_out_d[xod3].mul(E_in_d[xid3]);
-                            const xipd3 = xid3 >> 1;
-                            const cycd3 = (xod3 << @intCast(n_x_in_prime_bits_d)) | xipd3;
-                            const grpd3: usize = xid3 & 1;
-
-                            if (cycd3 < cycle_witnesses.len) {
-                                const gsz_d3: usize = if (grpd3 == 0) FGSZ else SGSZ;
-                                const gid_d3 = if (grpd3 == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
-                                const wd3 = &cycle_witnesses[cycd3];
-                                // Evaluate using COEFFS_PER_J[0] (target Y=-5 is index 0)
-                                const coeffs_j = unskip.COEFFS_PER_J[0]; // target -5
-                                var azd3 = F.zero();
-                                var bzd3 = F.zero();
-                                for (0..gsz_d3) |kkd3| {
-                                    const ccd3 = c_mod.UNIFORM_CONSTRAINTS[gid_d3[kkd3]];
-                                    const cvd3 = ccd3.condition.evaluate(F, wd3.asSlice());
-                                    const mvd3 = ccd3.left.evaluate(F, wd3.asSlice()).sub(ccd3.right.evaluate(F, wd3.asSlice()));
-                                    const cf3 = coeffs_j[kkd3];
-                                    const cf3f = if (cf3 > 0) F.fromU64(@intCast(cf3)) else F.zero().sub(F.fromU64(@intCast(-cf3)));
-                                    azd3 = azd3.add(cf3f.mul(cvd3));
-                                    bzd3 = bzd3.add(cf3f.mul(mvd3));
-                                }
-                                coeffs_t1_neg5 = coeffs_t1_neg5.add(eq_d3.mul(azd3.mul(bzd3)));
-                            }
-                        }
-                    }
-
-                    // Compute t1 at ALL 19 domain points {-9,...,9} using direct Lagrange
-                    // and compare with what the polynomial gives
-                    var domain_mismatches: usize = 0;
-                    for (0..19) |dpidx| {
-                        const dpy: i64 = @as(i64, @intCast(dpidx)) - 9;
-                        const dpy_field = if (dpy >= 0) F.fromU64(@intCast(dpy)) else F.zero().sub(F.fromU64(@intCast(-dpy)));
-
-                        // Compute Lagrange evals at this Y on 10-point domain
-                        var lag_y: [FGSZ]F = undefined;
-                        {
-                            const lag_start_y: i64 = -@as(i64, (FGSZ - 1) / 2);
-                            for (0..FGSZ) |liy| {
-                                var lnumy = F.one();
-                                var ldeny = F.one();
-                                for (0..FGSZ) |ljy| {
-                                    if (liy != ljy) {
-                                        const lxjy: i64 = lag_start_y + @as(i64, @intCast(ljy));
-                                        const lxjfy = if (lxjy >= 0) F.fromU64(@intCast(lxjy)) else F.zero().sub(F.fromU64(@intCast(-lxjy)));
-                                        lnumy = lnumy.mul(dpy_field.sub(lxjfy));
-                                        const ldiffy: i64 = @as(i64, @intCast(liy)) - @as(i64, @intCast(ljy));
-                                        const ldiffyf = if (ldiffy > 0) F.fromU64(@intCast(ldiffy)) else F.zero().sub(F.fromU64(@intCast(-ldiffy)));
-                                        ldeny = ldeny.mul(ldiffyf);
-                                    }
-                                }
-                                lag_y[liy] = lnumy.mul(ldeny.inverse().?);
-                            }
-                        }
-
-                        // Compute direct t1(dpy) sum
-                        var t1_dpy = F.zero();
-                        for (0..n_x_out_d) |xody| {
-                            for (0..n_x_in_d) |xidy| {
-                                const eq_dy = E_out_d[xody].mul(E_in_d[xidy]);
-                                const xipdy = xidy >> 1;
-                                const cycdy = (xody << @intCast(n_x_in_prime_bits_d)) | xipdy;
-                                const grpdy: usize = xidy & 1;
-                                if (cycdy < cycle_witnesses.len) {
-                                    const gsz_dy: usize = if (grpdy == 0) FGSZ else SGSZ;
-                                    const gid_dy = if (grpdy == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
-                                    const wdy = &cycle_witnesses[cycdy];
-                                    var azdy = F.zero();
-                                    var bzdy = F.zero();
-                                    for (0..gsz_dy) |kkdy| {
-                                        const ccdy = c_mod.UNIFORM_CONSTRAINTS[gid_dy[kkdy]];
-                                        const cvdy = ccdy.condition.evaluate(F, wdy.asSlice());
-                                        const mvdy = ccdy.left.evaluate(F, wdy.asSlice()).sub(ccdy.right.evaluate(F, wdy.asSlice()));
-                                        azdy = azdy.add(lag_y[kkdy].mul(cvdy));
-                                        bzdy = bzdy.add(lag_y[kkdy].mul(mvdy));
-                                    }
-                                    t1_dpy = t1_dpy.add(eq_dy.mul(azdy.mul(bzdy)));
-                                }
-                            }
-                        }
-
-                        // (placeholder for polynomial evaluation at dpy)
-
-                        // For base points, the direct sum should be 0 (correct witness)
-                        const is_base = (dpy >= -4 and dpy <= 5);
-                        if (!t1_dpy.eql(F.zero()) and is_base) {
-                            domain_mismatches += 1;
-
-                            // Find which cycles contribute non-zero AzBz at this base point
-                            var cnt_nz: usize = 0;
-                            for (0..n_x_out_d) |xodz| {
-                                for (0..n_x_in_d) |xidz| {
-                                    const xipz = xidz >> 1;
-                                    const cycz = (xodz << @intCast(n_x_in_prime_bits_d)) | xipz;
-                                    const grpz: usize = xidz & 1;
-                                    if (cycz < cycle_witnesses.len) {
-                                        const gsz_z: usize = if (grpz == 0) FGSZ else SGSZ;
-                                        const gid_z = if (grpz == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
-                                        const wdz = &cycle_witnesses[cycz];
-                                        var azz = F.zero();
-                                        var bzz = F.zero();
-                                        for (0..gsz_z) |kkz| {
-                                            const ccz = c_mod.UNIFORM_CONSTRAINTS[gid_z[kkz]];
-                                            const cvz = ccz.condition.evaluate(F, wdz.asSlice());
-                                            const mvz = ccz.left.evaluate(F, wdz.asSlice()).sub(ccz.right.evaluate(F, wdz.asSlice()));
-                                            azz = azz.add(lag_y[kkz].mul(cvz));
-                                            bzz = bzz.add(lag_y[kkz].mul(mvz));
-                                        }
-                                        const abz = azz.mul(bzz);
-                                        if (!abz.eql(F.zero())) {
-                                            cnt_nz += 1;
-                                            if (cnt_nz <= 3) {
-                                                // Also print individual Az, Bz
-                                                // And Lagrange evals used
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } else if (!is_base) {
-                        }
-                    }
-
-                    // Check ALL constraints at ALL cycles for violations
-                    var total_violations: usize = 0;
-                    for (0..cycle_witnesses.len) |cv| {
-                        const wcv = &cycle_witnesses[cv];
-                        for (0..c_mod.UNIFORM_CONSTRAINTS.len) |ci| {
-                            const cc = c_mod.UNIFORM_CONSTRAINTS[ci];
-                            const cond_v = cc.condition.evaluate(F, wcv.asSlice());
-                            const left_v = cc.left.evaluate(F, wcv.asSlice());
-                            const right_v = cc.right.evaluate(F, wcv.asSlice());
-                            const diff_v = left_v.sub(right_v);
-                            const prod_v = cond_v.mul(diff_v);
-                            if (!prod_v.eql(F.zero())) {
-                                total_violations += 1;
-                                if (total_violations <= 20) {
-                                }
-                            }
-                        }
-                    }
-
-                    // Print key witness values for violated cycles
-                    if (total_violations > 0 and cycle_witnesses.len > 54) {
-                        // Also print cycle 55
-                        if (cycle_witnesses.len > 55) {
-                        }
-                    }
-                }
-            }
+            // (Debug decomposition block removed — was gated by `comptime false`)
 
             // Bind the first-round challenge from transcript with the uni_skip_claim
             outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
@@ -822,88 +340,6 @@ pub fn JoltProver(comptime F: type) type {
 
             // Compute implied Az*Bz = final_claim / eq_factor
             if (!prover_eq_factor.eql(F.zero())) {
-            }
-
-            // CROSS-CHECK: Compute the "correct" final_claim directly from witnesses
-            // This is what the verifier expects: eq_factor * Az(r_stream, r0, r_cycle) * Bz(r_stream, r0, r_cycle)
-            // where r_cycle is the full set of bound challenges reversed
-            if (comptime false) {
-                const all_chal = challenges.items;
-                const r0_check = r0;
-
-                // Get the cycle challenges (skip r_stream)
-                const cycle_chal = if (all_chal.len > 1) all_chal[1..] else all_chal[0..0];
-
-                // Compute MLE evaluations of R1CS inputs at r_cycle (reversed)
-                const r_cycle_be = try self.allocator.alloc(F, cycle_chal.len);
-                defer self.allocator.free(r_cycle_be);
-                for (0..cycle_chal.len) |idx| {
-                    r_cycle_be[idx] = cycle_chal[cycle_chal.len - 1 - idx];
-                }
-
-                const R1CSInputEval = r1cs.R1CSInputEvaluator(F);
-                const check_evals = try R1CSInputEval.computeClaimedInputs(
-                    self.allocator,
-                    cycle_witnesses,
-                    r_cycle_be,
-                );
-
-                // Compute Lagrange weights at r0
-                const FGSZ = 10;
-                const SGSZ = 9;
-                var w_check: [FGSZ]F = undefined;
-                const start: i64 = -4;
-                for (0..FGSZ) |ii| {
-                    var numer = F.one();
-                    var denom = F.one();
-                    for (0..FGSZ) |jj| {
-                        if (ii != jj) {
-                            const x_j: i64 = start + @as(i64, @intCast(jj));
-                            const x_j_f = if (x_j >= 0)
-                                F.fromU64(@intCast(x_j))
-                            else
-                                F.zero().sub(F.fromU64(@intCast(-x_j)));
-                            numer = numer.mul(r0_check.sub(x_j_f));
-                            const d: i64 = @as(i64, @intCast(ii)) - @as(i64, @intCast(jj));
-                            if (d > 0) {
-                                denom = denom.mul(F.fromU64(@intCast(d)));
-                            } else {
-                                denom = denom.mul(F.zero().sub(F.fromU64(@intCast(-d))));
-                            }
-                        }
-                    }
-                    w_check[ii] = if (!denom.eql(F.zero())) numer.mul(denom.inverse().?) else F.zero();
-                }
-
-                // Build z vector
-                var z_check: [r1cs.R1CSInputIndex.NUM_INPUTS + 1]F = undefined;
-                @memcpy(z_check[0..r1cs.R1CSInputIndex.NUM_INPUTS], &check_evals);
-                z_check[r1cs.R1CSInputIndex.NUM_INPUTS] = F.one();
-
-                // Compute az_g0, bz_g0
-                var az_g0_c = F.zero();
-                var bz_g0_c = F.zero();
-                for (0..FGSZ) |ii| {
-                    const cidx = r1cs.FIRST_GROUP_INDICES[ii];
-                    const cons = r1cs.UNIFORM_CONSTRAINTS[cidx];
-                    const az_c = cons.condition.evaluateWithConstant(F, &z_check);
-                    const bz_c = cons.left.evaluateWithConstant(F, &z_check).sub(cons.right.evaluateWithConstant(F, &z_check));
-                    az_g0_c = az_g0_c.add(w_check[ii].mul(az_c));
-                    bz_g0_c = bz_g0_c.add(w_check[ii].mul(bz_c));
-                }
-
-                var az_g1_c = F.zero();
-                var bz_g1_c = F.zero();
-                for (0..SGSZ) |ii| {
-                    const cidx = r1cs.SECOND_GROUP_INDICES[ii];
-                    const cons = r1cs.UNIFORM_CONSTRAINTS[cidx];
-                    const az_c = cons.condition.evaluateWithConstant(F, &z_check);
-                    const bz_c = cons.left.evaluateWithConstant(F, &z_check).sub(cons.right.evaluateWithConstant(F, &z_check));
-                    az_g1_c = az_g1_c.add(w_check[ii].mul(az_c));
-                    bz_g1_c = bz_g1_c.add(w_check[ii].mul(bz_c));
-                }
-
-
             }
 
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
@@ -1059,8 +495,7 @@ pub fn JoltProver(comptime F: type) type {
         fn addSpartanOuterOpeningClaimsWithEvaluations(
             self: *Self,
             claims: *OpeningClaims(F),
-            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
-            raw_r1cs_inputs: ?[]const @import("r1cs/evaluators.zig").RawR1CSInputs,
+            raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
             padded_trace_len: usize,
             r_cycle: []const F,
             uni_skip_claim: F,
@@ -1068,16 +503,11 @@ pub fn JoltProver(comptime F: type) type {
             _: F, // r_stream (unused after debug removal)
             r0: F,
         ) !void {
-            // Compute MLE evaluations at r_cycle using typed accumulators when available
+            // Compute MLE evaluations at r_cycle using typed accumulators
             const R1CSInputEvaluator = r1cs.R1CSInputEvaluator(F);
-            const input_evals = if (raw_r1cs_inputs) |raw|
-                try R1CSInputEvaluator.computeClaimedInputsTyped(
-                    self.allocator, raw, padded_trace_len, r_cycle, self.thread_pool,
-                )
-            else
-                try R1CSInputEvaluator.computeClaimedInputsParallel(
-                    self.allocator, cycle_witnesses, r_cycle, self.thread_pool,
-                );
+            const input_evals = try R1CSInputEvaluator.computeClaimedInputsTyped(
+                self.allocator, raw_r1cs_inputs, padded_trace_len, r_cycle, self.thread_pool,
+            );
 
 
             // Compute Lagrange weights at r0
@@ -1220,11 +650,10 @@ pub fn JoltProver(comptime F: type) type {
         /// If we used the full tau, τ_high would be counted twice!
         fn createUniSkipProofStage1FromWitnesses(
             self: *Self,
-            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             tau: []const F,
-            compact_witnesses: ?[]const @import("r1cs/evaluators.zig").CompactWitness,
+            compact_witnesses: []const @import("r1cs/evaluators.zig").CompactWitness,
         ) !?UniSkipFirstRoundProof(F) {
-            if (cycle_witnesses.len == 0) {
+            if (compact_witnesses.len == 0) {
                 return self.createUniSkipProofStage1();
             }
 
@@ -1236,18 +665,13 @@ pub fn JoltProver(comptime F: type) type {
 
             var outer_prover = try streaming_outer.StreamingOuterProver(F).initWithScaling(
                 self.allocator,
-                cycle_witnesses,
+                compact_witnesses,
                 tau,
                 null, // No scaling for initial UniSkip - will be applied in interpolation
             );
             outer_prover.thread_pool = self.thread_pool;
             outer_prover.gpu_ops = self.gpu_ops;
-            // Set pre-built compact witnesses (not owned — don't free on deinit)
-            outer_prover.compact_witnesses = compact_witnesses;
-            defer {
-                outer_prover.compact_witnesses = null; // prevent double-free
-                outer_prover.deinit();
-            }
+            defer outer_prover.deinit();
 
             // Compute the univariate skip polynomial using the fixed implementation
             // that properly handles both constraint groups
@@ -1288,7 +712,6 @@ pub fn JoltProver(comptime F: type) type {
             commitments: []const Commitment,
             joint_opening_proof: ?Proof,
             config: JoltProverConfig,
-            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             tau: []const F,
             transcript: *Blake2bTranscript(F),
         ) !JoltProofType(F, Commitment, Proof) {
@@ -1319,50 +742,6 @@ pub fn JoltProver(comptime F: type) type {
             const n_cycle_vars = std.math.log2_int(usize, trace_length);
             const log_ram_k = std.math.log2_int(usize, ram_K);
 
-            // CRITICAL: Pad cycle_witnesses to trace_length with NoOp witness values.
-            // In Jolt, padded cycles are Cycle::NoOp which has:
-            //   - FlagIsNoop = 1
-            //   - FlagDoNotUpdateUnexpandedPC = 1
-            //   - All other R1CS inputs = 0
-            // The prover must use padded witnesses because:
-            //   1. The streaming outer sumcheck materializes Az/Bz over all trace_length cycles
-            //   2. Even though Az*Bz = 0 for NoOp cycles, the individual Az values at NoOp
-            //      cycles are non-zero (some conditions evaluate to 1)
-            //   3. The verifier evaluates Az(r)*Bz(r) using MLE openings that include NoOp
-            //      contributions, so the prover's MLE must match
-            const padded_witnesses = try self.allocator.alloc(r1cs.R1CSCycleInputs(F), trace_length);
-            defer self.allocator.free(padded_witnesses);
-
-            // Copy actual witness data
-            @memcpy(padded_witnesses[0..cycle_witnesses.len], cycle_witnesses);
-
-            // Fill padded cycles with NoOp witness values
-            {
-                const pad_len = trace_length - cycle_witnesses.len;
-                const pad_start = cycle_witnesses.len;
-                if (self.thread_pool != null and pad_len >= 256) {
-                    const PadCtx = struct {
-                        pw: []r1cs.R1CSCycleInputs(F),
-                        start: usize,
-                    };
-                    self.thread_pool.?.parallelFor(pad_len, PadCtx{ .pw = padded_witnesses, .start = pad_start }, struct {
-                        fn f(ctx: PadCtx, idx: usize) void {
-                            const i = ctx.start + idx;
-                            ctx.pw[i] = r1cs.R1CSCycleInputs(F).init();
-                            ctx.pw[i].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
-                            ctx.pw[i].values[r1cs.R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
-                        }
-                    }.f);
-                } else {
-                    for (pad_start..trace_length) |i| {
-                        padded_witnesses[i] = r1cs.R1CSCycleInputs(F).init();
-                        padded_witnesses[i].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
-                        padded_witnesses[i].values[r1cs.R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
-                    }
-                }
-            }
-
-
             // Copy commitments and append to transcript
             for (commitments) |c| {
                 try jolt_proof.commitments.append(self.allocator, c);
@@ -1381,30 +760,12 @@ pub fn JoltProver(comptime F: type) type {
             var bench_timer = std.time.Timer.start() catch unreachable;
             const bench = config.bench_output;
 
-            // Use pre-built compact/raw witnesses if available (built during witness gen,
-            // outside Stage 1 timing). Otherwise fall back to building from field witnesses.
-            const r1cs_evaluators = @import("r1cs/evaluators.zig");
-            var compact_witnesses: []const r1cs_evaluators.CompactWitness = undefined;
-            var raw_r1cs_inputs: ?[]const r1cs_evaluators.RawR1CSInputs = null;
-            var owns_compact = false;
-            var owns_raw = false;
-            if (config.prebuilt_compact != null and config.prebuilt_raw != null) {
-                compact_witnesses = config.prebuilt_compact.?;
-                raw_r1cs_inputs = config.prebuilt_raw.?;
-            } else {
-                const wd = try r1cs_evaluators.buildCompactAndRawWitnesses(F, padded_witnesses, self.allocator, self.thread_pool);
-                compact_witnesses = wd.compact;
-                raw_r1cs_inputs = wd.raw;
-                owns_compact = true;
-                owns_raw = true;
-            }
-            defer if (owns_compact) self.allocator.free(compact_witnesses);
-            defer if (owns_raw) {
-                if (raw_r1cs_inputs) |raw| self.allocator.free(raw);
-            };
+            // Use pre-built compact/raw witnesses from config (built during witness gen,
+            // outside Stage 1 timing).
+            const compact_witnesses = config.prebuilt_compact;
+            const raw_r1cs_inputs = config.prebuilt_raw;
 
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
-                padded_witnesses,
                 tau,
                 compact_witnesses,
             );
@@ -1412,13 +773,11 @@ pub fn JoltProver(comptime F: type) type {
             bench_timer.reset();
 
             // Stage 1: Outer Spartan Remaining - use streaming prover with transcript
-            // Use padded witnesses so Az/Bz MLE evaluations match the verifier's computation
             var stage1_result: ?Stage1Result = null;
             if (jolt_proof.stage1_uni_skip_first_round_proof) |*uniskip| {
                 stage1_result = try self.generateStreamingOuterSumcheckProofWithTranscript(
                     &jolt_proof.stage1_sumcheck_proof,
                     uniskip,
-                    padded_witnesses,
                     tau,
                     transcript,
                     compact_witnesses,
@@ -1464,8 +823,7 @@ pub fn JoltProver(comptime F: type) type {
 
                 try self.addSpartanOuterOpeningClaimsWithEvaluations(
                     &jolt_proof.opening_claims,
-                    padded_witnesses,
-                    raw_r1cs_inputs, // typed accumulators
+                    raw_r1cs_inputs,
                     trace_length,
                     r_cycle_big_endian,
                     result.uni_skip_claim,
@@ -1552,8 +910,7 @@ pub fn JoltProver(comptime F: type) type {
             jolt_proof.stage2_uni_skip_first_round_proof = try self.createUniSkipProofStage2WithClaims(
                 &base_evals_stage2,
                 tau_high_stage2,
-                padded_witnesses,
-                raw_r1cs_inputs.?,
+                raw_r1cs_inputs,
                 tau_stage2_early,
             );
 
@@ -1672,8 +1029,7 @@ pub fn JoltProver(comptime F: type) type {
                 uni_skip_claim_stage2,
                 tau_stage2,
                 r_spartan_original,
-                padded_witnesses,
-                raw_r1cs_inputs.?,
+                raw_r1cs_inputs,
                 n_cycle_vars,
                 log_ram_k,
                 &jolt_proof.opening_claims,
@@ -1882,8 +1238,7 @@ pub fn JoltProver(comptime F: type) type {
                 &jolt_proof.stage3_sumcheck_proof,
                 transcript,
                 &jolt_proof.opening_claims,
-                padded_witnesses,
-                raw_r1cs_inputs.?,
+                raw_r1cs_inputs,
                 n_cycle_vars,
                 r_spartan_original, // r_outer in BIG_ENDIAN
                 r_product, // r_product in BIG_ENDIAN
@@ -3504,7 +2859,6 @@ pub fn JoltProver(comptime F: type) type {
             uni_skip_claim_stage2: F,
             tau: []const F,
             r_spartan_for_instr: []const F,
-            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
             n_cycle_vars: usize,
             log_ram_k: usize,
@@ -3790,7 +3144,7 @@ pub fn JoltProver(comptime F: type) type {
                             }
                         } else if (i == 2) {
                             // Instance 2: InstructionLookupsClaimReduction
-                            if (round_idx == start_round and instr_prover == null and cycle_witnesses.len > 0) {
+                            if (round_idx == start_round and instr_prover == null and raw_r1cs_inputs.len > 0) {
                                 var instr_params = claim_reductions.InstructionLookupsParams(F).init(
                                     self.allocator,
                                     gamma_instr,
@@ -3803,7 +3157,7 @@ pub fn JoltProver(comptime F: type) type {
                                         self.allocator,
                                         params.*,
                                         input_claims[2],
-                                        cycle_witnesses,
+                                        raw_r1cs_inputs,
                                         self.thread_pool,
                                     ) catch blk: {
                                         params.deinit();
@@ -4699,7 +4053,6 @@ pub fn JoltProver(comptime F: type) type {
             self: *Self,
             base_evals: *const [3]F,
             tau_high: F,
-            _: []const r1cs.R1CSCycleInputs(F),
             raw_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
             tau_stage2: []const F,
         ) !?UniSkipFirstRoundProof(F) {
@@ -4872,11 +4225,10 @@ pub const JoltProverConfig = struct {
     bytecode_preprocessing: ?*const @import("preprocessing.zig").BytecodePreprocessing = null,
     /// ELF entry point address (e_entry). Used for Stage 6 entry-point constraint.
     entry_address: u64 = 0,
-    /// Pre-built compact integer witnesses (avoids Montgomery de-encoding in Stage 1 init).
-    /// If provided, Stage 1 skips buildCompactAndRawWitnesses.
-    prebuilt_compact: ?[]const @import("r1cs/evaluators.zig").CompactWitness = null,
+    /// Pre-built compact integer witnesses (built by buildFromTrace during witness gen).
+    prebuilt_compact: []const @import("r1cs/evaluators.zig").CompactWitness,
     /// Pre-built raw R1CS integer inputs for typed-accumulator claims.
-    prebuilt_raw: ?[]const @import("r1cs/evaluators.zig").RawR1CSInputs = null,
+    prebuilt_raw: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
 };
 
 // =============================================================================
@@ -4894,14 +4246,21 @@ test "proof converter: basic initialization" {
 
 test "proof converter: proveWithTranscript uses Blake2b transcript" {
     const F = BN254Scalar;
+    const r1cs_evaluators = @import("r1cs/evaluators.zig");
     var converter = JoltProver(F).init(testing.allocator);
 
-    // Create trivial cycle witnesses
-    const cycle_witnesses = [_]r1cs.R1CSCycleInputs(F){
-        .{ .values = [_]F{F.zero()} ** 36 },
-        .{ .values = [_]F{F.zero()} ** 36 },
-        .{ .values = [_]F{F.zero()} ** 36 },
-        .{ .values = [_]F{F.zero()} ** 36 },
+    // Create trivial compact/raw witnesses (4 noop cycles matching trace_length)
+    const compact_witnesses = [_]r1cs_evaluators.CompactWitness{
+        r1cs_evaluators.CompactWitness.noop(),
+        r1cs_evaluators.CompactWitness.noop(),
+        r1cs_evaluators.CompactWitness.noop(),
+        r1cs_evaluators.CompactWitness.noop(),
+    };
+    const raw_witnesses = [_]r1cs_evaluators.RawR1CSInputs{
+        r1cs_evaluators.RawR1CSInputs.noop(),
+        r1cs_evaluators.RawR1CSInputs.noop(),
+        r1cs_evaluators.RawR1CSInputs.noop(),
+        r1cs_evaluators.RawR1CSInputs.noop(),
     };
 
     // Create tau challenge vector
@@ -4922,8 +4281,7 @@ test "proof converter: proveWithTranscript uses Blake2b transcript" {
         8, // log_k: ram_K = 256
         &[_]DummyCommitment{},
         null,
-        .{},
-        &cycle_witnesses,
+        .{ .prebuilt_compact = &compact_witnesses, .prebuilt_raw = &raw_witnesses },
         &tau,
         &transcript,
     );
@@ -4945,14 +4303,24 @@ test "proof converter: proveWithTranscript uses Blake2b transcript" {
 
 test "proof converter: transcript produces deterministic challenges" {
     const F = BN254Scalar;
+    const r1cs_evaluators = @import("r1cs/evaluators.zig");
 
     // Create two converters and transcripts with same inputs
     var converter1 = JoltProver(F).init(testing.allocator);
     var converter2 = JoltProver(F).init(testing.allocator);
 
-    const cycle_witnesses = [_]r1cs.R1CSCycleInputs(F){
-        .{ .values = [_]F{F.zero()} ** 36 },
-        .{ .values = [_]F{F.zero()} ** 36 },
+    // Create compact/raw witnesses (4 noop cycles for trace_length = 4)
+    const compact_witnesses = [_]r1cs_evaluators.CompactWitness{
+        r1cs_evaluators.CompactWitness.noop(),
+        r1cs_evaluators.CompactWitness.noop(),
+        r1cs_evaluators.CompactWitness.noop(),
+        r1cs_evaluators.CompactWitness.noop(),
+    };
+    const raw_witnesses = [_]r1cs_evaluators.RawR1CSInputs{
+        r1cs_evaluators.RawR1CSInputs.noop(),
+        r1cs_evaluators.RawR1CSInputs.noop(),
+        r1cs_evaluators.RawR1CSInputs.noop(),
+        r1cs_evaluators.RawR1CSInputs.noop(),
     };
 
     const tau = [_]F{ F.fromU64(1), F.fromU64(2) };
@@ -4970,8 +4338,7 @@ test "proof converter: transcript produces deterministic challenges" {
         8, // log_k
         &[_]DummyCommitment{},
         null,
-        .{},
-        &cycle_witnesses,
+        .{ .prebuilt_compact = &compact_witnesses, .prebuilt_raw = &raw_witnesses },
         &tau,
         &transcript1,
     );
@@ -4984,8 +4351,7 @@ test "proof converter: transcript produces deterministic challenges" {
         8, // log_k
         &[_]DummyCommitment{},
         null,
-        .{},
-        &cycle_witnesses,
+        .{ .prebuilt_compact = &compact_witnesses, .prebuilt_raw = &raw_witnesses },
         &tau,
         &transcript2,
     );

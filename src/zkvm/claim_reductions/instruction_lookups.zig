@@ -22,6 +22,7 @@ const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 const EqPolynomial = @import("../../poly/mod.zig").EqPolynomial;
 const R1CSInputIndex = @import("../r1cs/constraints.zig").R1CSInputIndex;
+const RawR1CSInputs = @import("../r1cs/evaluators.zig").RawR1CSInputs;
 
 /// Parameters for instruction lookups claim reduction
 pub fn InstructionLookupsParams(comptime F: type) type {
@@ -94,7 +95,7 @@ const WitnessField = enum(usize) {
 };
 const NUM_WITNESS_FIELDS = 5;
 
-/// R1CS cycle inputs type (generic over field)
+/// R1CS cycle inputs type (generic over field) — kept for tests
 fn R1CSCycleInputs(comptime F: type) type {
     return @import("../r1cs/constraints.zig").R1CSCycleInputs(F);
 }
@@ -135,8 +136,8 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             suffix_n_vars: usize,
             /// Original prefix size (2^prefix_n_vars) for phase2 materialization
             original_prefix_size: usize,
-            /// Reference to trace data for Phase 2 materialization
-            cycle_witnesses: []const R1CSCycleInputs(F),
+            /// Reference to raw integer witness data for Phase 2 materialization
+            raw_inputs: []const RawR1CSInputs,
             /// Original P allocation size for dealloc
             original_P_size: usize,
             /// Original Q allocation size for dealloc
@@ -160,7 +161,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             allocator: Allocator,
             params: InstructionLookupsParams(F),
             initial_claim: F,
-            cycle_witnesses: []const R1CSCycleInputs(F),
+            raw_inputs: []const RawR1CSInputs,
             thread_pool: ?*ThreadPool,
         ) !Self {
             const n = params.n_cycle_vars;
@@ -186,13 +187,13 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             // Build Q via blocked accumulation
             // Q[x_lo] = Σ_{x_hi} eq_hi[x_hi] * combined(x_lo + x_hi * prefix_size)
             const Q = try allocator.alloc(F, prefix_size);
-            const trace_len = cycle_witnesses.len;
+            const trace_len = raw_inputs.len;
             const padded_T = @as(usize, 1) << @intCast(n);
 
             const QCtx = struct {
                 Q_buf: []F,
                 eq_hi_buf: []const F,
-                witnesses: []const R1CSCycleInputs(F),
+                raw_inputs: []const RawR1CSInputs,
                 gamma: F,
                 gamma_sqr: F,
                 gamma_cub: F,
@@ -205,7 +206,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             const qctx = QCtx{
                 .Q_buf = Q,
                 .eq_hi_buf = eq_hi,
-                .witnesses = cycle_witnesses,
+                .raw_inputs = raw_inputs,
                 .gamma = params.gamma,
                 .gamma_sqr = params.gamma_sqr,
                 .gamma_cub = params.gamma_cub,
@@ -231,12 +232,12 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                         if (j >= c.padded) break;
                         const e = c.eq_hi_buf[x_hi];
                         if (j < c.t_len) {
-                            const w = &c.witnesses[j].values;
-                            acc_lo = acc_lo.add(e.mul(w[R1CSInputIndex.LookupOutput.toIndex()]));
-                            acc_left = acc_left.add(e.mul(w[R1CSInputIndex.LeftLookupOperand.toIndex()]));
-                            acc_right = acc_right.add(e.mul(w[R1CSInputIndex.RightLookupOperand.toIndex()]));
-                            acc_li = acc_li.add(e.mul(w[R1CSInputIndex.LeftInstructionInput.toIndex()]));
-                            acc_ri = acc_ri.add(e.mul(w[R1CSInputIndex.RightInstructionInput.toIndex()]));
+                            const raw = &c.raw_inputs[j];
+                            acc_lo = acc_lo.add(e.mul(raw.toFieldValue(F, .LookupOutput)));
+                            acc_left = acc_left.add(e.mul(raw.toFieldValue(F, .LeftLookupOperand)));
+                            acc_right = acc_right.add(e.mul(raw.toFieldValue(F, .RightLookupOperand)));
+                            acc_li = acc_li.add(e.mul(raw.toFieldValue(F, .LeftInstructionInput)));
+                            acc_ri = acc_ri.add(e.mul(raw.toFieldValue(F, .RightInstructionInput)));
                         }
                         // else: padded cycle, all witness values are 0, contributes nothing
                     }
@@ -266,7 +267,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                     .prefix_n_vars = prefix_n_vars,
                     .suffix_n_vars = suffix_n_vars,
                     .original_prefix_size = prefix_size,
-                    .cycle_witnesses = cycle_witnesses,
+                    .raw_inputs = raw_inputs,
                     .original_P_size = prefix_size,
                     .original_Q_size = prefix_size,
                 } },
@@ -513,7 +514,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
 
             const MatCtx = struct {
                 eq_pref: []const F,
-                witnesses: []const R1CSCycleInputs(F),
+                raw_inputs: []const RawR1CSInputs,
                 p_size: usize,
                 t_len: usize,
                 lo_buf: []F,
@@ -524,9 +525,9 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             };
             const mctx = MatCtx{
                 .eq_pref = eq_prefix,
-                .witnesses = s1.cycle_witnesses,
+                .raw_inputs = s1.raw_inputs,
                 .p_size = prefix_size,
-                .t_len = s1.cycle_witnesses.len,
+                .t_len = s1.raw_inputs.len,
                 .lo_buf = lo_poly,
                 .left_buf = left_poly,
                 .right_buf = right_poly,
@@ -546,12 +547,12 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                         const j = j_lo + j_hi * c.p_size;
                         const eq_val = c.eq_pref[j_lo];
                         if (j < c.t_len) {
-                            const w = &c.witnesses[j].values;
-                            sum_lo = sum_lo.add(eq_val.mul(w[R1CSInputIndex.LookupOutput.toIndex()]));
-                            sum_left = sum_left.add(eq_val.mul(w[R1CSInputIndex.LeftLookupOperand.toIndex()]));
-                            sum_right = sum_right.add(eq_val.mul(w[R1CSInputIndex.RightLookupOperand.toIndex()]));
-                            sum_li = sum_li.add(eq_val.mul(w[R1CSInputIndex.LeftInstructionInput.toIndex()]));
-                            sum_ri = sum_ri.add(eq_val.mul(w[R1CSInputIndex.RightInstructionInput.toIndex()]));
+                            const raw = &c.raw_inputs[j];
+                            sum_lo = sum_lo.add(eq_val.mul(raw.toFieldValue(F, .LookupOutput)));
+                            sum_left = sum_left.add(eq_val.mul(raw.toFieldValue(F, .LeftLookupOperand)));
+                            sum_right = sum_right.add(eq_val.mul(raw.toFieldValue(F, .RightLookupOperand)));
+                            sum_li = sum_li.add(eq_val.mul(raw.toFieldValue(F, .LeftInstructionInput)));
+                            sum_ri = sum_ri.add(eq_val.mul(raw.toFieldValue(F, .RightInstructionInput)));
                         }
                     }
 

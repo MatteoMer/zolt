@@ -59,10 +59,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
         pub const FIRST_ROUND_NUM_COEFFS: usize = univariate_skip.OUTER_FIRST_ROUND_POLY_NUM_COEFFS;
         pub const REMAINING_DEGREE: usize = 3;
 
-        /// Per-cycle R1CS witnesses
-        cycle_witnesses: []const constraints.R1CSCycleInputs(F),
-        /// Compact integer witnesses for cache-friendly evaluation (optional)
-        compact_witnesses: ?[]const evaluators.CompactWitness = null,
+        /// Compact integer witnesses for cache-friendly evaluation
+        compact_witnesses: []const evaluators.CompactWitness,
         /// Number of cycle variables (log2 of trace length)
         num_cycle_vars: usize,
         /// Padded trace length (power of 2)
@@ -143,10 +141,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// which differs between length 11 and 12. Jolt uses full tau.
         pub fn init(
             allocator: Allocator,
-            cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+            compact_witnesses_arg: []const evaluators.CompactWitness,
             tau: []const F,
         ) !Self {
-            return initWithScaling(allocator, cycle_witnesses, tau, null);
+            return initWithScaling(allocator, compact_witnesses_arg, tau, null);
         }
 
         /// Initialize the streaming outer prover with Lagrange kernel scaling
@@ -163,11 +161,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// The split uses m = tau_low.len / 2.
         pub fn initWithScaling(
             allocator: Allocator,
-            cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+            compact_witnesses_arg: []const evaluators.CompactWitness,
             tau: []const F,
             lagrange_tau_r0: ?F,
         ) !Self {
-            const num_cycles = cycle_witnesses.len;
+            const num_cycles = compact_witnesses_arg.len;
             if (num_cycles == 0) {
                 return error.EmptyTrace;
             }
@@ -224,7 +222,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             };
 
             return Self{
-                .cycle_witnesses = cycle_witnesses,
+                .compact_witnesses = compact_witnesses_arg,
                 .num_cycle_vars = num_cycle_vars,
                 .padded_trace_len = padded_len,
                 .split_eq = split_eq,
@@ -245,22 +243,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             };
         }
 
-        /// Build and attach compact integer witnesses for fast evaluation.
-        /// Should be called once before any compute calls.
-        pub fn buildCompactWitnesses(self: *Self) !void {
-            if (self.compact_witnesses != null) return;
-            self.compact_witnesses = try evaluators.buildCompactWitnesses(
-                F,
-                self.cycle_witnesses,
-                self.allocator,
-                self.thread_pool,
-            );
-        }
-
         pub fn deinit(self: *Self) void {
-            if (self.compact_witnesses) |cw| {
-                self.allocator.free(cw);
-            }
             self.split_eq.deinit();
             self.challenges.deinit(self.allocator);
             self.r_grid.deinit();
@@ -349,8 +332,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             };
 
             const MatCtx = struct {
-                cycle_witnesses: []const constraints.R1CSCycleInputs(F),
-                compact: ?[]const evaluators.CompactWitness,
+                compact_witnesses: []const evaluators.CompactWitness,
                 lagrange_evals_r0: *const [FIRST_GROUP_SIZE]F,
                 az_evals: []F,
                 bz_evals: []F,
@@ -362,8 +344,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             };
 
             const mat_ctx = MatCtx{
-                .cycle_witnesses = self.cycle_witnesses,
-                .compact = self.compact_witnesses,
+                .compact_witnesses = self.compact_witnesses,
                 .lagrange_evals_r0 = &self.lagrange_evals_r0,
                 .az_evals = az_evals,
                 .bz_evals = bz_evals,
@@ -380,7 +361,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 fn mapFn(ctx: MatCtx, start: usize, end: usize) [3]F {
                     @setEvalBranchQuota(10000);
                     var local_ans = [3]F{ F.zero(), F.zero(), F.zero() };
-                    const cw_len = if (ctx.compact) |c| c.len else ctx.cycle_witnesses.len;
+                    const cw_len = ctx.compact_witnesses.len;
 
                     for (start..end) |flat_i| {
                         const x_in_val = flat_i % ctx.num_x_in_vals;
@@ -394,78 +375,29 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                             if (time_step_idx >= cw_len) continue;
 
-                            var az0: F = undefined;
-                            var bz0: F = undefined;
-                            var az1: F = undefined;
-                            var bz1: F = undefined;
+                            const cw = &ctx.compact_witnesses[time_step_idx];
 
-                            if (ctx.compact) |compact| {
-                                // Tiered accumulator path: avoid Montgomery muls
-                                const cw = &compact[time_step_idx];
-
-                                // First group: SmallAccumU for Az, MedAccumS for Bz (i128 safe)
-                                var az0_acc = field_mod.SmallAccumU.zero();
-                                var bz0_acc = field_mod.MedAccumS.zero();
-                                inline for (0..FIRST_GROUP_SIZE) |t| {
-                                    const w = ctx.lagrange_evals_r0[t];
-                                    az0_acc.fmaddI8(w, cw.az_first[t]);
-                                    bz0_acc.fmaddI128(w, cw.bz_first[t]);
-                                }
-                                az0 = az0_acc.barrettReduce();
-                                bz0 = bz0_acc.barrettReduce();
-
-                                // Second group: SmallAccumU for Az, WideAccumS for Bz (S192)
-                                const g2_size = comptime @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
-                                var az1_acc = field_mod.SmallAccumU.zero();
-                                var bz1_acc = field_mod.WideAccumS.zero();
-                                inline for (0..g2_size) |t| {
-                                    az1_acc.fmaddI8(ctx.lagrange_evals_r0[t], cw.az_second[t]);
-                                    bz1_acc.fmaddS192(ctx.lagrange_evals_r0[t], cw.bz_second[t]);
-                                }
-                                az1 = az1_acc.barrettReduce();
-                                bz1 = bz1_acc.barrettReduce();
-                            } else {
-                                // Fallback: field arithmetic path
-                                const witness = ctx.cycle_witnesses[time_step_idx].asSlice();
-
-                                const az_int_fg = evaluators.computeAzFirstGroupInt(F, witness);
-                                const bz_field_fg = evaluators.computeBzFirstGroupDirect(F, witness);
-                                az0 = F.zero();
-                                bz0 = F.zero();
-                                for (0..FIRST_GROUP_SIZE) |t| {
-                                    const w = ctx.lagrange_evals_r0[t];
-                                    const az_i = az_int_fg[t];
-                                    if (az_i != 0) {
-                                        if (az_i == 1) {
-                                            az0 = az0.add(w);
-                                        } else if (az_i == -1) {
-                                            az0 = az0.sub(w);
-                                        } else {
-                                            az0 = az0.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
-                                        }
-                                    }
-                                    bz0 = bz0.add(w.mul(bz_field_fg[t]));
-                                }
-
-                                const az_int_sg = evaluators.computeAzSecondGroupInt(F, witness);
-                                const bz_field_sg = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
-                                az1 = F.zero();
-                                bz1 = F.zero();
-                                for (0..@min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE)) |t| {
-                                    const w = ctx.lagrange_evals_r0[t];
-                                    const az_i = az_int_sg[t];
-                                    if (az_i != 0) {
-                                        if (az_i == 1) {
-                                            az1 = az1.add(w);
-                                        } else if (az_i == -1) {
-                                            az1 = az1.sub(w);
-                                        } else {
-                                            az1 = az1.add(w.mul(evaluators.fieldFromI32(F, @as(i32, az_i))));
-                                        }
-                                    }
-                                    bz1 = bz1.add(w.mul(bz_field_sg[t]));
-                                }
+                            // First group: SmallAccumU for Az, MedAccumS for Bz (i128 safe)
+                            var az0_acc = field_mod.SmallAccumU.zero();
+                            var bz0_acc = field_mod.MedAccumS.zero();
+                            inline for (0..FIRST_GROUP_SIZE) |t| {
+                                const w = ctx.lagrange_evals_r0[t];
+                                az0_acc.fmaddI8(w, cw.az_first[t]);
+                                bz0_acc.fmaddI128(w, cw.bz_first[t]);
                             }
+                            const az0 = az0_acc.barrettReduce();
+                            const bz0 = bz0_acc.barrettReduce();
+
+                            // Second group: SmallAccumU for Az, WideAccumS for Bz (S192)
+                            const g2_size = comptime @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+                            var az1_acc = field_mod.SmallAccumU.zero();
+                            var bz1_acc = field_mod.WideAccumS.zero();
+                            inline for (0..g2_size) |t| {
+                                az1_acc.fmaddI8(ctx.lagrange_evals_r0[t], cw.az_second[t]);
+                                bz1_acc.fmaddS192(ctx.lagrange_evals_r0[t], cw.bz_second[t]);
+                            }
+                            const az1 = az1_acc.barrettReduce();
+                            const bz1 = bz1_acc.barrettReduce();
 
                             // Store materialized values
                             const base_idx = ctx.grid_size * i;
@@ -760,10 +692,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 num_x_in_prime_bits: u6,
                 E_out: []const F,
                 E_in: []const F,
-                // Compact integer witnesses (primary path)
-                compact: ?[]const evaluators.CompactWitness,
-                // Field witnesses (fallback when compact not available)
-                cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+                compact_witnesses: []const evaluators.CompactWitness,
                 two_pow_64: F,
             };
 
@@ -777,7 +706,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                 fn map(ctx: FirstRoundCtx, start: usize, end: usize) [DEGREE]F {
                     var accum_outer: [DEGREE]Accum = accum_zero;
-                    const cw_len = if (ctx.compact) |c| c.len else ctx.cycle_witnesses.len;
+                    const cw_len = ctx.compact_witnesses.len;
 
                     for (start..end) |x_out| {
                         const e_out = if (x_out < ctx.E_out.len) ctx.E_out[x_out] else F.zero();
@@ -789,8 +718,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         // Group 1 accumulators: S192 Barrett via FoldedMulU128Accum (7 slots)
                         var sg_pos: [DEGREE]FoldedU128Accum = accum7_zero;
                         var sg_neg: [DEGREE]FoldedU128Accum = accum7_zero;
-                        // Field products accumulator: fallback path only (Montgomery)
-                        var gf_accum: [DEGREE]Accum = accum_zero;
 
                         for (0..ctx.num_x_in_vals) |x_in| {
                             const e_in = if (x_in < ctx.E_in.len) ctx.E_in[x_in] else F.zero();
@@ -800,64 +727,34 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             const group: u1 = @truncate(x_in & 1);
 
                             if (cycle < cw_len) {
-                                if (ctx.compact) |compact| {
-                                    const cw = &compact[cycle];
-                                    if (group == 0) {
-                                        // Integer path: Barrett reduction via FoldedMulU128
-                                        inline for (0..DEGREE) |j| {
-                                            const product_int = evaluators.interpolateAzBzProductInt(
-                                                &cw.az_first,
-                                                &cw.bz_first,
-                                                &univariate_skip.COEFFS_PER_J[j],
-                                            );
-                                            if (product_int > 0) {
-                                                g0_pos[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(product_int)));
-                                            } else if (product_int < 0) {
-                                                g0_neg[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(-product_int)));
-                                            }
-                                        }
-                                    } else {
-                                        // Second group: S192 integer path, Barrett via 7-slot accum
-                                        inline for (0..DEGREE) |j| {
-                                            const coeffs = univariate_skip.COEFFS_PER_J[j][0..SECOND_GROUP_SIZE];
-                                            const product = evaluators.interpolateAzBzProductSecondGroupInt(
-                                                &cw.az_second, &cw.bz_second, coeffs,
-                                            );
-                                            if (!product.isZero()) {
-                                                const unreduced = field_mod.mulU192Unreduced(e_in, product.magnitude);
-                                                if (product.is_positive) {
-                                                    sg_pos[j].addAssign(unreduced);
-                                                } else {
-                                                    sg_neg[j].addAssign(unreduced);
-                                                }
-                                            }
+                                const cw = &ctx.compact_witnesses[cycle];
+                                if (group == 0) {
+                                    // Integer path: Barrett reduction via FoldedMulU128
+                                    inline for (0..DEGREE) |j| {
+                                        const product_int = evaluators.interpolateAzBzProductInt(
+                                            &cw.az_first,
+                                            &cw.bz_first,
+                                            &univariate_skip.COEFFS_PER_J[j],
+                                        );
+                                        if (product_int > 0) {
+                                            g0_pos[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(product_int)));
+                                        } else if (product_int < 0) {
+                                            g0_neg[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(-product_int)));
                                         }
                                     }
                                 } else {
-                                    // Fallback: field arithmetic, deferred reduction
-                                    const witness = ctx.cycle_witnesses[cycle].asSlice();
-                                    if (group == 0) {
-                                        const az_int = evaluators.computeAzFirstGroupInt(F, witness);
-                                        const bz_field = evaluators.computeBzFirstGroupDirect(F, witness);
-                                        inline for (0..DEGREE) |j| {
-                                            const product = evaluators.interpolateAzBzProduct(
-                                                F, &az_int, &bz_field,
-                                                &univariate_skip.COEFFS_PER_J[j], FIRST_GROUP_SIZE,
-                                            );
-                                            if (!product.eql(F.zero())) {
-                                                gf_accum[j].addAssign(Accum.fromMul(e_in, product));
-                                            }
-                                        }
-                                    } else {
-                                        const az_int = evaluators.computeAzSecondGroupInt(F, witness);
-                                        const bz_field = evaluators.computeBzSecondGroupDirect(F, witness, ctx.two_pow_64);
-                                        inline for (0..DEGREE) |j| {
-                                            const product = evaluators.interpolateAzBzProduct(
-                                                F, &az_int, &bz_field,
-                                                &univariate_skip.COEFFS_PER_J[j], SECOND_GROUP_SIZE,
-                                            );
-                                            if (!product.eql(F.zero())) {
-                                                gf_accum[j].addAssign(Accum.fromMul(e_in, product));
+                                    // Second group: S192 integer path, Barrett via 7-slot accum
+                                    inline for (0..DEGREE) |j| {
+                                        const coeffs = univariate_skip.COEFFS_PER_J[j][0..SECOND_GROUP_SIZE];
+                                        const product = evaluators.interpolateAzBzProductSecondGroupInt(
+                                            &cw.az_second, &cw.bz_second, coeffs,
+                                        );
+                                        if (!product.isZero()) {
+                                            const unreduced = field_mod.mulU192Unreduced(e_in, product.magnitude);
+                                            if (product.is_positive) {
+                                                sg_pos[j].addAssign(unreduced);
+                                            } else {
+                                                sg_neg[j].addAssign(unreduced);
                                             }
                                         }
                                     }
@@ -871,9 +768,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             const int_sum = field_mod.reduceMulU128(g0_pos[j]).sub(field_mod.reduceMulU128(g0_neg[j]));
                             // Group 1: Barrett reduction of S192 products
                             const sg_sum = field_mod.reduceMulU128Accum(sg_pos[j]).sub(field_mod.reduceMulU128Accum(sg_neg[j]));
-                            // Fallback: field products
-                            const field_sum = gf_accum[j].reduce();
-                            const inner_total = int_sum.add(sg_sum).add(field_sum);
+                            const inner_total = int_sum.add(sg_sum);
                             accum_outer[j].addAssign(Accum.fromMul(e_out, inner_total));
                         }
                     }
@@ -906,8 +801,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .num_x_in_prime_bits = @intCast(num_x_in_prime_bits),
                 .E_out = E_out,
                 .E_in = E_in,
-                .compact = self.compact_witnesses,
-                .cycle_witnesses = self.cycle_witnesses,
+                .compact_witnesses = self.compact_witnesses,
                 .two_pow_64 = two_pow_64,
             };
 
@@ -947,8 +841,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// Avoids the split_eq, r_grid, and full_tau allocations (~8MB for primes_large).
         pub fn computeUniSkipFirstRound(
             allocator: Allocator,
-            cycle_witnesses: []const constraints.R1CSCycleInputs(F),
-            compact_witnesses: ?[]const evaluators.CompactWitness,
+            compact_witnesses_arg: []const evaluators.CompactWitness,
             tau: []const F,
             thread_pool: ?*@import("../../utils/thread_pool.zig").ThreadPool,
         ) ![FIRST_ROUND_NUM_COEFFS]F {
@@ -981,8 +874,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 num_x_in_prime_bits: u6,
                 E_out: []const F,
                 E_in: []const F,
-                compact: ?[]const evaluators.CompactWitness,
-                cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+                compact_witnesses: []const evaluators.CompactWitness,
                 two_pow_64: F,
             };
 
@@ -991,8 +883,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .num_x_in_prime_bits = @intCast(num_x_in_prime_bits),
                 .E_out = E_out,
                 .E_in = E_in,
-                .compact = compact_witnesses,
-                .cycle_witnesses = cycle_witnesses,
+                .compact_witnesses = compact_witnesses_arg,
                 .two_pow_64 = two_pow_64,
             };
 
@@ -1007,7 +898,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                 fn mapFn(c: FirstRoundCtx, start: usize, end: usize) [DEGREE]F {
                     var accum_outer: [DEGREE]Accum = accum_zero;
-                    const cw_len = if (c.compact) |cw| cw.len else c.cycle_witnesses.len;
+                    const cw_len = c.compact_witnesses.len;
 
                     for (start..end) |x_out| {
                         const e_out = if (x_out < c.E_out.len) c.E_out[x_out] else F.zero();
@@ -1017,7 +908,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         var g0_neg: [DEGREE]FoldedU128 = folded_zero;
                         var sg_pos: [DEGREE]FoldedU128Accum = accum7_zero;
                         var sg_neg: [DEGREE]FoldedU128Accum = accum7_zero;
-                        var gf_accum: [DEGREE]Accum = accum_zero;
 
                         for (0..c.num_x_in_vals) |x_in| {
                             const e_in = if (x_in < c.E_in.len) c.E_in[x_in] else F.zero();
@@ -1026,61 +916,32 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             const group: u1 = @truncate(x_in & 1);
 
                             if (cycle < cw_len) {
-                                if (c.compact) |compact| {
-                                    const cw = &compact[cycle];
-                                    if (group == 0) {
-                                        inline for (0..DEGREE) |j| {
-                                            const product_int = evaluators.interpolateAzBzProductInt(
-                                                &cw.az_first, &cw.bz_first,
-                                                &univariate_skip.COEFFS_PER_J[j],
-                                            );
-                                            if (product_int > 0) {
-                                                g0_pos[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(product_int)));
-                                            } else if (product_int < 0) {
-                                                g0_neg[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(-product_int)));
-                                            }
-                                        }
-                                    } else {
-                                        // Second group: S192 integer path
-                                        inline for (0..DEGREE) |j| {
-                                            const coeffs = univariate_skip.COEFFS_PER_J[j][0..SECOND_GROUP_SIZE];
-                                            const product = evaluators.interpolateAzBzProductSecondGroupInt(
-                                                &cw.az_second, &cw.bz_second, coeffs,
-                                            );
-                                            if (!product.isZero()) {
-                                                const unreduced = field_mod.mulU192Unreduced(e_in, product.magnitude);
-                                                if (product.is_positive) {
-                                                    sg_pos[j].addAssign(unreduced);
-                                                } else {
-                                                    sg_neg[j].addAssign(unreduced);
-                                                }
-                                            }
+                                const cw = &c.compact_witnesses[cycle];
+                                if (group == 0) {
+                                    inline for (0..DEGREE) |j| {
+                                        const product_int = evaluators.interpolateAzBzProductInt(
+                                            &cw.az_first, &cw.bz_first,
+                                            &univariate_skip.COEFFS_PER_J[j],
+                                        );
+                                        if (product_int > 0) {
+                                            g0_pos[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(product_int)));
+                                        } else if (product_int < 0) {
+                                            g0_neg[j].addAssign(field_mod.mulU128Unreduced(e_in, @intCast(-product_int)));
                                         }
                                     }
                                 } else {
-                                    const witness = c.cycle_witnesses[cycle].asSlice();
-                                    if (group == 0) {
-                                        const az_int = evaluators.computeAzFirstGroupInt(F, witness);
-                                        const bz_field = evaluators.computeBzFirstGroupDirect(F, witness);
-                                        inline for (0..DEGREE) |j| {
-                                            const product = evaluators.interpolateAzBzProduct(
-                                                F, &az_int, &bz_field,
-                                                &univariate_skip.COEFFS_PER_J[j], FIRST_GROUP_SIZE,
-                                            );
-                                            if (!product.eql(F.zero())) {
-                                                gf_accum[j].addAssign(Accum.fromMul(e_in, product));
-                                            }
-                                        }
-                                    } else {
-                                        const az_int = evaluators.computeAzSecondGroupInt(F, witness);
-                                        const bz_field = evaluators.computeBzSecondGroupDirect(F, witness, c.two_pow_64);
-                                        inline for (0..DEGREE) |j| {
-                                            const product = evaluators.interpolateAzBzProduct(
-                                                F, &az_int, &bz_field,
-                                                &univariate_skip.COEFFS_PER_J[j], SECOND_GROUP_SIZE,
-                                            );
-                                            if (!product.eql(F.zero())) {
-                                                gf_accum[j].addAssign(Accum.fromMul(e_in, product));
+                                    // Second group: S192 integer path
+                                    inline for (0..DEGREE) |j| {
+                                        const coeffs = univariate_skip.COEFFS_PER_J[j][0..SECOND_GROUP_SIZE];
+                                        const product = evaluators.interpolateAzBzProductSecondGroupInt(
+                                            &cw.az_second, &cw.bz_second, coeffs,
+                                        );
+                                        if (!product.isZero()) {
+                                            const unreduced = field_mod.mulU192Unreduced(e_in, product.magnitude);
+                                            if (product.is_positive) {
+                                                sg_pos[j].addAssign(unreduced);
+                                            } else {
+                                                sg_neg[j].addAssign(unreduced);
                                             }
                                         }
                                     }
@@ -1091,8 +952,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         inline for (0..DEGREE) |j| {
                             const int_sum = field_mod.reduceMulU128(g0_pos[j]).sub(field_mod.reduceMulU128(g0_neg[j]));
                             const sg_sum = field_mod.reduceMulU128Accum(sg_pos[j]).sub(field_mod.reduceMulU128Accum(sg_neg[j]));
-                            const field_sum = gf_accum[j].reduce();
-                            const inner_total = int_sum.add(sg_sum).add(field_sum);
+                            const inner_total = int_sum.add(sg_sum);
                             accum_outer[j].addAssign(Accum.fromMul(e_out, inner_total));
                         }
                     }
@@ -2371,15 +2231,14 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 head_in_bits: u6,
                 window_bits: u6,
                 num_r_bits: u6,
-                cycle_witnesses: []const constraints.R1CSCycleInputs(F),
-                compact_witnesses: ?[]const evaluators.CompactWitness,
+                compact_witnesses: []const evaluators.CompactWitness,
                 self_ptr: *const Self,
             };
             const reduceMap = struct {
                 fn f(ctx: ReduceCtx, start: usize, end: usize) [2]F {
                     var local_t_00 = F.zero();
                     var local_t_inf = F.zero();
-                    const cw_len = if (ctx.compact_witnesses) |cw| cw.len else ctx.cycle_witnesses.len;
+                    const cw_len = ctx.compact_witnesses.len;
 
                     var x_out_idx: usize = start;
                     while (x_out_idx < end) : (x_out_idx += 1) {
@@ -2410,10 +2269,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                         const selector: usize = full_idx & 1;
 
                                         if (step_idx < cw_len) {
-                                            const result = if (ctx.compact_witnesses) |compact|
-                                                ctx.self_ptr.computeCycleAzBzForGroupCompact(&compact[step_idx], selector)
-                                            else
-                                                ctx.self_ptr.computeCycleAzBzForGroup(&ctx.cycle_witnesses[step_idx], selector);
+                                            const result = ctx.self_ptr.computeCycleAzBzForGroupCompact(&ctx.compact_witnesses[step_idx], selector);
                                             az_grid[x_val] = az_grid[x_val].add(r_weight.mul(result.az));
                                             bz_grid[x_val] = bz_grid[x_val].add(r_weight.mul(result.bz));
                                         }
@@ -2448,7 +2304,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .head_in_bits = head_in_bits,
                 .window_bits = window_bits,
                 .num_r_bits = num_r_bits,
-                .cycle_witnesses = self.cycle_witnesses,
                 .compact_witnesses = self.compact_witnesses,
                 .self_ptr = self,
             };

@@ -576,6 +576,97 @@ pub const RawR1CSInputs = struct {
         .FlagLeftOperandIsRs1, .FlagLeftOperandIsPC, .FlagRightOperandIsRs2, .FlagRightOperandIsImm,
     };
 
+    /// Convert a single R1CS input from its native integer type to a Montgomery field element.
+    /// This enables on-the-fly encoding without pre-computing all 42 field elements per cycle.
+    pub fn toFieldValue(self: *const RawR1CSInputs, comptime F: type, comptime idx: R1CSInputIndex) F {
+        // Map R1CSInputIndex to the correct typed storage and convert
+        switch (idx) {
+            // u64 values
+            .LeftInstructionInput => return F.fromU64(self.u64_values[0]),
+            .PC => return F.fromU64(self.u64_values[1]),
+            .UnexpandedPC => return F.fromU64(self.u64_values[2]),
+            .RamAddress => return F.fromU64(self.u64_values[3]),
+            .Rs1Value => return F.fromU64(self.u64_values[4]),
+            .Rs2Value => return F.fromU64(self.u64_values[5]),
+            .RdWriteValue => return F.fromU64(self.u64_values[6]),
+            .RamReadValue => return F.fromU64(self.u64_values[7]),
+            .RamWriteValue => return F.fromU64(self.u64_values[8]),
+            .LeftLookupOperand => return F.fromU64(self.u64_values[9]),
+            .NextUnexpandedPC => return F.fromU64(self.u64_values[10]),
+            .NextPC => return F.fromU64(self.u64_values[11]),
+            .LookupOutput => return F.fromU64(self.u64_values[12]),
+            // Signed i128 values
+            .RightInstructionInput, .Imm => {
+                const slot: usize = if (idx == .RightInstructionInput) 0 else 1;
+                const val = self.signed_values[slot];
+                if (val >= 0) {
+                    const v: u128 = @intCast(val);
+                    if (v <= 0xFFFFFFFFFFFFFFFF) {
+                        return F.fromU64(@intCast(v));
+                    } else {
+                        var bytes: [16]u8 = undefined;
+                        std.mem.writeInt(u128, &bytes, v, .little);
+                        return F.fromBytes(&bytes);
+                    }
+                } else {
+                    const neg_v: u128 = @intCast(-val);
+                    if (neg_v <= 0xFFFFFFFFFFFFFFFF) {
+                        return F.zero().sub(F.fromU64(@intCast(neg_v)));
+                    } else {
+                        var bytes: [16]u8 = undefined;
+                        std.mem.writeInt(u128, &bytes, neg_v, .little);
+                        return F.zero().sub(F.fromBytes(&bytes));
+                    }
+                }
+            },
+            // Wide S192 values
+            .Product, .RightLookupOperand => {
+                const slot: usize = if (idx == .Product) 0 else 1;
+                const s = self.wide_values[slot];
+                // Convert magnitude to field element
+                var bytes: [24]u8 = undefined;
+                std.mem.writeInt(u64, bytes[0..8], s.magnitude[0], .little);
+                std.mem.writeInt(u64, bytes[8..16], s.magnitude[1], .little);
+                std.mem.writeInt(u64, bytes[16..24], s.magnitude[2], .little);
+                const mag = F.fromBytes(&bytes);
+                return if (s.is_positive) mag else F.zero().sub(mag);
+            },
+            // Bool flags
+            else => {
+                // All remaining indices are boolean flags
+                const bool_idx = switch (idx) {
+                    .ShouldBranch => 0,
+                    .NextIsVirtual => 1,
+                    .NextIsFirstInSequence => 2,
+                    .ShouldJump => 3,
+                    .FlagAddOperands => 4,
+                    .FlagSubtractOperands => 5,
+                    .FlagMultiplyOperands => 6,
+                    .FlagLoad => 7,
+                    .FlagStore => 8,
+                    .FlagJump => 9,
+                    .FlagWriteLookupOutputToRD => 10,
+                    .FlagVirtualInstruction => 11,
+                    .FlagAssert => 12,
+                    .FlagDoNotUpdateUnexpandedPC => 13,
+                    .FlagAdvice => 14,
+                    .FlagIsCompressed => 15,
+                    .FlagIsFirstInSequence => 16,
+                    .FlagIsLastInSequence => 17,
+                    .FlagIsRdNotZero => 18,
+                    .FlagBranch => 19,
+                    .FlagIsNoop => 20,
+                    .FlagLeftOperandIsRs1 => 21,
+                    .FlagLeftOperandIsPC => 22,
+                    .FlagRightOperandIsRs2 => 23,
+                    .FlagRightOperandIsImm => 24,
+                    else => unreachable,
+                };
+                return if (self.bool_flags[bool_idx]) F.one() else F.zero();
+            },
+        }
+    }
+
     /// NoOp witness: FlagIsNoop=true, FlagDoNotUpdateUnexpandedPC=true, all else zero
     pub fn noop() RawR1CSInputs {
         var raw: RawR1CSInputs = undefined;

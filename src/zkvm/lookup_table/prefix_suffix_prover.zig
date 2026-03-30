@@ -1405,26 +1405,29 @@ pub fn initQRaf(
     const T = lookup_indices.len;
 
     if (tp) |pool| {
-        // Parallel path: per-chunk local Q accumulators with merge
-        // 6 Q arrays: left.Q[0], left.Q[1], right.Q[0], right.Q[1], identity.Q[0], identity.Q[1]
+        const field_mod = @import("../../field/mod.zig");
+        const FoldedMulU64 = field_mod.FoldedMulU64;
+
+        // Parallel path with unreduced accumulators (deferred Barrett reduction).
+        // Uses FoldedMulU64 instead of F to avoid per-cycle Montgomery muls.
         const NUM_QS = 6;
         const num_chunks = pool.thread_count + 1;
         const buf_size = NUM_QS * poly_len;
         const chunk_size = (T + num_chunks - 1) / num_chunks;
 
-        const chunk_bufs = try alloc.alloc([]F, num_chunks);
+        const chunk_bufs = try alloc.alloc([]FoldedMulU64, num_chunks);
         defer alloc.free(chunk_bufs);
         var bufs_allocated: usize = 0;
         errdefer for (chunk_bufs[0..bufs_allocated]) |buf| alloc.free(buf);
         for (0..num_chunks) |c| {
-            chunk_bufs[c] = try alloc.alloc(F, buf_size);
+            chunk_bufs[c] = try alloc.alloc(FoldedMulU64, buf_size);
             bufs_allocated = c + 1;
-            @memset(chunk_bufs[c], F.zero());
+            for (chunk_bufs[c]) |*slot| slot.* = FoldedMulU64.zero();
         }
         defer for (chunk_bufs) |buf| alloc.free(buf);
 
         const Ctx = struct {
-            chunk_bufs_ptr: [*][]F,
+            chunk_bufs_ptr: [*][]FoldedMulU64,
             u_ev: []const F,
             indices: []const u128,
             is_interleaved: []const bool,
@@ -1462,31 +1465,36 @@ pub fn initQRaf(
                 for (start..end) |j| {
                     const k = c.indices[j];
                     const u = c.u_ev[j];
+                    const u_limbs = u.limbs;
                     const suffix_bits = k & suf_mask;
                     const prefix_bits = (k >> @intCast(c.suf_len)) & p_mask;
                     const ri: usize = @intCast(prefix_bits);
 
                     if (c.is_interleaved[j]) {
-                        lq0[ri] = lq0[ri].add(u);
-                        rq0[ri] = rq0[ri].add(u);
+                        // Q[0]: just add u (shared for left and right)
+                        lq0[ri].addBigInt4(u_limbs);
+                        rq0[ri].addBigInt4(u_limbs);
 
                         const lo_bits = uninterleaveBitsLeft(suffix_bits, c.suf_len);
                         const ro_bits = uninterleaveBitsRight(suffix_bits, c.suf_len);
 
+                        // Q[1]: u * suffix_bits via unreduced 4x1 schoolbook
                         if (lo_bits != 0) {
-                            lq1[ri] = lq1[ri].add(u.mul(F.fromU64(lo_bits)));
+                            lq1[ri].addAssign(field_mod.mulU64Unreduced(u, lo_bits));
                         }
                         if (ro_bits != 0) {
-                            rq1[ri] = rq1[ri].add(u.mul(F.fromU64(ro_bits)));
+                            rq1[ri].addAssign(field_mod.mulU64Unreduced(u, ro_bits));
                         }
                     } else {
-                        iq0[ri] = iq0[ri].add(u);
+                        iq0[ri].addBigInt4(u_limbs);
 
                         if (suffix_bits != 0) {
                             if (c.suf_len <= 64) {
-                                iq1[ri] = iq1[ri].add(u.mul(F.fromU64(@truncate(suffix_bits))));
+                                iq1[ri].addAssign(field_mod.mulU64Unreduced(u, @truncate(suffix_bits)));
                             } else {
-                                iq1[ri] = iq1[ri].add(u.mul(F.fromU128(suffix_bits)));
+                                // Rare path for suffix_len > 64: fall back to full field mul
+                                const prod = u.mul(F.fromU128(suffix_bits));
+                                iq1[ri].addBigInt4(prod.limbs);
                             }
                         }
                     }
@@ -1494,16 +1502,22 @@ pub fn initQRaf(
             }
         }.f);
 
-        // Merge chunk buffers into output Q arrays
-        for (chunk_bufs) |buf| {
-            for (0..poly_len) |i| {
-                left.Q[0][i] = left.Q[0][i].add(buf[0 * poly_len + i]);
-                left.Q[1][i] = left.Q[1][i].add(buf[1 * poly_len + i]);
-                right.Q[0][i] = right.Q[0][i].add(buf[2 * poly_len + i]);
-                right.Q[1][i] = right.Q[1][i].add(buf[3 * poly_len + i]);
-                identity.Q[0][i] = identity.Q[0][i].add(buf[4 * poly_len + i]);
-                identity.Q[1][i] = identity.Q[1][i].add(buf[5 * poly_len + i]);
+        // Merge chunk buffers and reduce to F
+        // First merge all chunks into chunk_bufs[0]
+        for (chunk_bufs[1..]) |buf| {
+            for (0..buf_size) |i| {
+                chunk_bufs[0][i].addAssign(buf[i]);
             }
+        }
+        // Then Barrett-reduce into output Q arrays
+        const merged = chunk_bufs[0];
+        for (0..poly_len) |i| {
+            left.Q[0][i] = field_mod.reduceMulU64(merged[0 * poly_len + i]);
+            left.Q[1][i] = field_mod.reduceMulU64(merged[1 * poly_len + i]);
+            right.Q[0][i] = field_mod.reduceMulU64(merged[2 * poly_len + i]);
+            right.Q[1][i] = field_mod.reduceMulU64(merged[3 * poly_len + i]);
+            identity.Q[0][i] = field_mod.reduceMulU64(merged[4 * poly_len + i]);
+            identity.Q[1][i] = field_mod.reduceMulU64(merged[5 * poly_len + i]);
         }
     } else {
         // Sequential fallback (original code)

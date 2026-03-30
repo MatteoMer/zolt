@@ -2700,6 +2700,12 @@ pub fn reduceMulU64(folded: FoldedMulU64) BN254Scalar {
     return barrettReduce(6, folded.normalize());
 }
 
+/// Multiply a field element by a small u64 constant. Cheaper than full field mul:
+/// uses 4×1 schoolbook (4 mulq) + Barrett reduction vs 4×4 (16 mulq) + Montgomery.
+pub inline fn mulU64(self: BN254Scalar, scalar: u64) BN254Scalar {
+    return reduceMulU64(mulU64Unreduced(self, scalar));
+}
+
 /// Reduce FoldedMulU128 (6 slots) → BN254Scalar via Barrett.
 pub fn reduceMulU128(folded: FoldedMulU128) BN254Scalar {
     return barrettReduce(6, folded.normalize());

@@ -1282,74 +1282,188 @@ pub fn UniPoly(comptime F: type) type {
             return result;
         }
 
+        // =====================================================================
+        // Product-tree helpers (ported from Jolt's mles_product_sum.rs)
+        // =====================================================================
+
+        /// Extrapolate degree-2 polynomial to next integer point.
+        /// Given f[0]=P(k), f[1]=P(k+1), f_inf=leading coeff, returns P(k+2).
+        /// Cost: 0 field multiplications.
+        inline fn ex2(f: [2]F, f_inf: F) F {
+            return f[1].add(f_inf).double().sub(f[0]);
+        }
+
+        /// Extrapolate degree-4 polynomial to next integer point.
+        /// f[0..4]=P(k)..P(k+3), f_inf6=6*leading_coeff. Returns P(k+4).
+        /// Cost: 0 field multiplications.
+        inline fn ex4(f: [4]F, f_inf6: F) F {
+            var t = f_inf6;
+            t = t.add(f[3]);
+            t = t.sub(f[2]);
+            t = t.add(f[1]);
+            t = t.double();
+            t = t.sub(f[2]);
+            t = t.double();
+            t = t.sub(f[0]);
+            return t;
+        }
+
+        /// Joint extrapolation of two consecutive degree-4 polynomial points.
+        /// Returns (P(k+4), P(k+5)). Cost: 0 field multiplications.
+        inline fn ex4_2(f: [4]F, f_inf6: F) [2]F {
+            const f3m2 = f[3].sub(f[2]);
+            var f4 = f_inf6;
+            f4 = f4.add(f3m2);
+            f4 = f4.add(f[1]);
+            f4 = f4.double();
+            f4 = f4.sub(f[2]);
+            f4 = f4.double();
+            f4 = f4.sub(f[0]);
+
+            var f5 = f4.sub(f3m2).add(f_inf6);
+            f5 = f5.double();
+            f5 = f5.sub(f[3]);
+            f5 = f5.double();
+            f5 = f5.sub(f[1]);
+
+            return .{ f4, f5 };
+        }
+
+        /// Product of 2 linear polynomials at {1, 2, inf}. Cost: 3 field muls.
+        inline fn evalLinearProd2Internal(p: [2]F, q: [2]F) [3]F {
+            const p_inf = p[1].sub(p[0]);
+            const p2 = p_inf.add(p[1]);
+            const q_inf = q[1].sub(q[0]);
+            const q2 = q_inf.add(q[1]);
+            return .{
+                p[1].mul(q[1]), // P(1)
+                p2.mul(q2), // P(2)
+                p_inf.mul(q_inf), // P(inf)
+            };
+        }
+
+        /// Product of 4 linear polynomials at {1, 2, 3, 4, inf}. Cost: 11 field muls.
+        inline fn evalLinearProd4Internal(p: [4][2]F) [5]F {
+            const ab = evalLinearProd2Internal(p[0], p[1]);
+            const a3 = ex2(.{ ab[0], ab[1] }, ab[2]);
+            const a4 = ex2(.{ ab[1], a3 }, ab[2]);
+
+            const cd = evalLinearProd2Internal(p[2], p[3]);
+            const b3 = ex2(.{ cd[0], cd[1] }, cd[2]);
+            const b4 = ex2(.{ cd[1], b3 }, cd[2]);
+
+            return .{
+                ab[0].mul(cd[0]), // P(1)
+                ab[1].mul(cd[1]), // P(2)
+                a3.mul(b3), // P(3)
+                a4.mul(b4), // P(4)
+                ab[2].mul(cd[2]), // P(inf)
+            };
+        }
+
+        /// Product of 8 linear polynomials at {1..8, inf}. Cost: 31 muls + 2 mulU64.
+        fn evalLinearProd8Internal(p: [8][2]F) [9]F {
+            // Left half
+            const a = evalLinearProd4Internal(p[0..4].*);
+            const a_inf6 = field.mulU64(a[4], 6);
+            const a_56 = ex4_2(.{ a[0], a[1], a[2], a[3] }, a_inf6);
+            const a_78 = ex4_2(.{ a[2], a[3], a_56[0], a_56[1] }, a_inf6);
+
+            // Right half
+            const b = evalLinearProd4Internal(p[4..8].*);
+            const b_inf6 = field.mulU64(b[4], 6);
+            const b_56 = ex4_2(.{ b[0], b[1], b[2], b[3] }, b_inf6);
+            const b_78 = ex4_2(.{ b[2], b[3], b_56[0], b_56[1] }, b_inf6);
+
+            // 9 pointwise cross-products
+            return .{
+                a[0].mul(b[0]), // P(1)
+                a[1].mul(b[1]), // P(2)
+                a[2].mul(b[2]), // P(3)
+                a[3].mul(b[3]), // P(4)
+                a_56[0].mul(b_56[0]), // P(5)
+                a_56[1].mul(b_56[1]), // P(6)
+                a_78[0].mul(b_78[0]), // P(7)
+                a_78[1].mul(b_78[1]), // P(8)
+                a[4].mul(b[4]), // P(inf)
+            };
+        }
+
         /// Evaluate the product of 9 linear polynomials at points [1, 2, ..., 8, ∞]
         ///
-        /// Given pairs [(p_j(0), p_j(1))] for j in 0..8, computes evaluations of
-        /// P(x) = Π_j p_j(x) at x = 1, 2, ..., 8, ∞.
-        ///
-        /// For a linear polynomial p_j(x) = p_j(0) + x*(p_j(1) - p_j(0)):
-        /// - p_j(k) = p_j(0) + k*(p_j(1) - p_j(0))
-        /// - p_j(∞) = leading coefficient = p_j(1) - p_j(0)
+        /// Uses divide-and-conquer product tree: 40 field muls total
+        /// (31 from 8-internal + 9 cross-products with 9th factor).
         pub fn evalLinearProd9(pairs: [9][2]F) [9]F {
+            const tree8 = evalLinearProd8Internal(pairs[0..8].*);
+
+            // 9th factor: slide linearly from p(1) to p(8)
+            const delta = pairs[8][1].sub(pairs[8][0]);
+            var cur = pairs[8][1]; // p_9(1)
             var result: [9]F = undefined;
 
-            // Sliding evaluation: cur[i] steps from p_i(1) by delta[i] per point.
-            // Avoids redundant delta recomputation across eval points.
-            var cur: [9]F = undefined;
-            var deltas: [9]F = undefined;
-            inline for (0..9) |i| {
-                deltas[i] = pairs[i][1].sub(pairs[i][0]);
-                cur[i] = pairs[i][1]; // p_i(1)
+            result[0] = tree8[0].mul(cur);
+            inline for (1..8) |i| {
+                cur = cur.add(delta);
+                result[i] = tree8[i].mul(cur);
             }
-
-            // Evaluate at x = 1, 2, ..., 8
-            inline for (0..8) |pt| {
-                if (pt > 0) {
-                    inline for (0..9) |i| cur[i] = cur[i].add(deltas[i]);
-                }
-                var product = cur[0];
-                inline for (1..9) |i| product = product.mul(cur[i]);
-                result[pt] = product;
-            }
-
-            // Point ∞: product of leading coefficients
-            var prod_inf = deltas[0];
-            inline for (1..9) |i| prod_inf = prod_inf.mul(deltas[i]);
-            result[8] = prod_inf;
+            result[8] = tree8[8].mul(delta); // P(inf)
 
             return result;
         }
 
+        /// Evaluate product of 9 linear polynomials and accumulate into unreduced
+        /// product accumulators. Defers Montgomery reduction for better throughput.
+        /// Cost: 31 muls (8-internal) + 2 mulU64 + 9 widening muls.
+        pub fn evalProd9Accumulate(
+            pairs: [9][2]F,
+            accum: *[9]field.UnreducedProductAccum,
+        ) void {
+            const tree8 = evalLinearProd8Internal(pairs[0..8].*);
+
+            const delta = pairs[8][1].sub(pairs[8][0]);
+            var cur = pairs[8][1];
+
+            accum[0].addAssign(tree8[0].mulToProductAccum(cur));
+            inline for (1..8) |i| {
+                cur = cur.add(delta);
+                accum[i].addAssign(tree8[i].mulToProductAccum(cur));
+            }
+            accum[8].addAssign(tree8[8].mulToProductAccum(delta));
+        }
+
         /// Evaluate product of 10 linear polynomials at points [1, 2, ..., 9, ∞]
         ///
-        /// For a linear polynomial p_j(x) = p_j(0) + x*(p_j(1) - p_j(0)):
-        /// - p_j(k) = p_j(0) + k*(p_j(1) - p_j(0))
-        /// - p_j(∞) = leading coefficient = p_j(1) - p_j(0)
+        /// Uses product tree for first 8, slides 9th and 10th factors.
+        /// Cost: ~58 muls (was 90 naive).
         pub fn evalLinearProd10(pairs: [10][2]F) [10]F {
+            const tree8 = evalLinearProd8Internal(pairs[0..8].*);
+
+            const delta9 = pairs[8][1].sub(pairs[8][0]);
+            const delta10 = pairs[9][1].sub(pairs[9][0]);
+            var cur9 = pairs[8][1];
+            var cur10 = pairs[9][1];
             var result: [10]F = undefined;
 
-            // Sliding evaluation: cur[i] steps from p_i(1) by delta[i] per point.
-            var cur: [10]F = undefined;
-            var deltas: [10]F = undefined;
-            inline for (0..10) |i| {
-                deltas[i] = pairs[i][1].sub(pairs[i][0]);
-                cur[i] = pairs[i][1]; // p_i(1)
+            // Points 1..8: tree8[i] * p9(i+1) * p10(i+1)
+            result[0] = tree8[0].mul(cur9).mul(cur10);
+            inline for (1..8) |i| {
+                cur9 = cur9.add(delta9);
+                cur10 = cur10.add(delta10);
+                result[i] = tree8[i].mul(cur9).mul(cur10);
             }
 
-            // Evaluate at x = 1, 2, ..., 9
-            inline for (0..9) |pt| {
-                if (pt > 0) {
-                    inline for (0..10) |i| cur[i] = cur[i].add(deltas[i]);
-                }
-                var product = cur[0];
-                inline for (1..10) |i| product = product.mul(cur[i]);
-                result[pt] = product;
+            // Point 9: compute tree8 at point 9 naively (product of 8 linear polys at x=9)
+            cur9 = cur9.add(delta9);
+            cur10 = cur10.add(delta10);
+            var tree8_at_9 = pairs[0][0].add(pairs[0][1].sub(pairs[0][0]).mul(F.fromU64(9)));
+            inline for (1..8) |i| {
+                const pi_9 = pairs[i][0].add(pairs[i][1].sub(pairs[i][0]).mul(F.fromU64(9)));
+                tree8_at_9 = tree8_at_9.mul(pi_9);
             }
+            result[8] = tree8_at_9.mul(cur9).mul(cur10);
 
-            // Point ∞: product of leading coefficients
-            var prod_inf = deltas[0];
-            inline for (1..10) |i| prod_inf = prod_inf.mul(deltas[i]);
-            result[9] = prod_inf;
+            // Point inf
+            result[9] = tree8[8].mul(delta9).mul(delta10);
 
             return result;
         }

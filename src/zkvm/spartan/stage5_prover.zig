@@ -1632,22 +1632,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             defer self.allocator.free(ram_G_A);
             var ram_G_B = try self.allocator.alloc(F, ram_access_count);
             defer self.allocator.free(ram_G_B);
-            // Store original eq(r_address_x, addr) values for each access
-            // These are used in the sparse polynomial computation instead of the bound B_1/B_2 arrays
-            var ram_B1_original = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(ram_B1_original);
-            var ram_B2_original = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(ram_B2_original);
+            // Precompute per-access eq(r_cycle_*, cycle) values once (used by G_A/G_B and cycle rounds)
+            var eq_raf_access = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_raf_access);
+            var eq_rw_access = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_rw_access);
+            var eq_val_access = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_val_access);
 
-            // Precompute G_A and G_B for each RAM access
+            if (memory_trace) |mt| {
+                for (mt.accesses.items, 0..) |access, i| {
+                    const cycle = access.timestamp;
+                    eq_raf_access[i] = computeEqAtPoint(F, r_cycle_raf, cycle);
+                    eq_rw_access[i] = computeEqAtPoint(F, r_cycle_rw, cycle);
+                    eq_val_access[i] = computeEqAtPoint(F, r_cycle_val, cycle);
+                }
+            }
+
+            // Precompute G_A and G_B for each RAM access using precomputed eq values
             // G_A[i] = eq(r_cycle_raf, c_i) + γ · eq(r_cycle_val, c_i)
             // G_B[i] = eq(r_cycle_rw, c_i) + γ · eq(r_cycle_val, c_i)
             //
             // Remap addresses to polynomial index space using memory_layout
-            // In Jolt, remap_address(address, memory_layout) = (address - lowest_address) / 8
             if (memory_trace) |mt| {
                 for (mt.accesses.items, 0..) |access, i| {
-                    // Use memory_layout.remapAddress if available, otherwise mask
                     const remapped_addr: u64 = if (memory_layout) |ml|
                         ml.remapAddress(access.address) orelse 0
                     else
@@ -1656,12 +1664,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     ram_addresses[i] = remapped_addr;
                     ram_cycles[i] = access.timestamp;
 
-                    // Compute eq(r_cycle_x, cycle) for each cycle point
-                    // r_cycle vectors are in BIG_ENDIAN order
-                    const cycle = access.timestamp;
-                    const eq_raf_c = computeEqAtPoint(F, r_cycle_raf, cycle);
-                    const eq_rw_c = computeEqAtPoint(F, r_cycle_rw, cycle);
-                    const eq_val_c = computeEqAtPoint(F, r_cycle_val, cycle);
+                    // Reuse precomputed eq values
+                    const eq_raf_c = eq_raf_access[i];
+                    const eq_rw_c = eq_rw_access[i];
+                    const eq_val_c = eq_val_access[i];
 
                     // G_A = eq_raf + γ · eq_val
                     // G_B = eq_rw + γ · eq_val
@@ -1669,7 +1675,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     ram_G_B[i] = eq_rw_c.add(gamma.mul(eq_val_c));
 
                     if (comptime debug_verbose) {
-                        dbg("[STAGE5 RAM_RA] Access {}: raw_addr=0x{x}, remapped_addr={}, cycle={}\n", .{ i, access.address, remapped_addr, cycle });
+                        dbg("[STAGE5 RAM_RA] Access {}: raw_addr=0x{x}, remapped_addr={}, cycle={}\n", .{ i, access.address, remapped_addr, access.timestamp });
                         dbg("  eq_raf_c={any}, eq_rw_c={any}, eq_val_c={any}\n", .{
                             eq_raf_c.toBytesBE()[16..32].*,
                             eq_rw_c.toBytesBE()[16..32].*,
@@ -1711,12 +1717,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var B_2 = try self.allocator.alloc(F, K);
             defer self.allocator.free(B_2);
 
-            // Compute B_1[k] = eq(r_address_raf, k) for all k
-            // r_address_raf is in BIG_ENDIAN order
-            for (0..K) |k| {
-                B_1[k] = computeEqAtPoint(F, r_address_raf, @intCast(k));
-                B_2[k] = computeEqAtPoint(F, r_address_rw, @intCast(k));
-            }
+            // Compute B_1[k] = eq(r_address_raf, k) and B_2[k] = eq(r_address_rw, k) for all k
+            // Uses O(2^n) butterfly construction instead of O(n * 2^n) per-element computation
+            buildFullEqTable(r_address_raf, B_1[0..K], self.thread_pool);
+            buildFullEqTable(r_address_rw, B_2[0..K], self.thread_pool);
 
             // Debug: print B_1 and B_2 for first few addresses
             if (comptime debug_verbose) {
@@ -1739,89 +1743,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 }
             }
 
-            // =====================================================================
-            // CRITICAL FIX: Compute actual RamRa opening claims from trace data
-            // =====================================================================
-            // The opening claims should be evaluations of the ra polynomial MLE at
-            // various random points. Since we have the trace, we compute them here.
-            //
-            // claim_raf = Σ_i eq(r_address_raf, addr_i) * eq(r_cycle_raf, cycle_i)
-            // claim_val_final = Σ_i eq(r_address_raf, addr_i) * eq(r_cycle_val, cycle_i)
-            // claim_rw = Σ_i eq(r_address_rw, addr_i) * eq(r_cycle_rw, cycle_i)
-            // claim_val_eval = Σ_i eq(r_address_rw, addr_i) * eq(r_cycle_val, cycle_i)
-            var computed_claim_raf = F.zero();
-            var computed_claim_val_final = F.zero();
-            var computed_claim_rw = F.zero();
-            var computed_claim_val_eval = F.zero();
-
-            if (memory_trace) |mt| {
-                for (mt.accesses.items, 0..) |access, i| {
-                    const addr = ram_addresses[i];
-                    const addr_usize: usize = @intCast(addr);
-                    const cycle = access.timestamp;
-
-                    // eq(r_cycle_x, cycle) values
-                    const eq_raf_c = computeEqAtPoint(F, r_cycle_raf, cycle);
-                    const eq_rw_c = computeEqAtPoint(F, r_cycle_rw, cycle);
-                    const eq_val_c = computeEqAtPoint(F, r_cycle_val, cycle);
-
-                    // eq(r_address_x, addr) values - STORE ORIGINAL VALUES
-                    const B1_at_addr = B_1[addr_usize];
-                    const B2_at_addr = B_2[addr_usize];
-                    ram_B1_original[i] = B1_at_addr;
-                    ram_B2_original[i] = B2_at_addr;
-
-                    // Accumulate claims (upstream uses single r_address = r_address_raf for all)
-                    computed_claim_raf = computed_claim_raf.add(B1_at_addr.mul(eq_raf_c));
-                    computed_claim_val_final = computed_claim_val_final.add(B1_at_addr.mul(eq_val_c));
-                    computed_claim_rw = computed_claim_rw.add(B1_at_addr.mul(eq_rw_c));
-                    computed_claim_val_eval = computed_claim_val_eval.add(B1_at_addr.mul(eq_val_c));
-
-                    if (comptime debug_verbose) {
-                        dbg("[STAGE5 COMPUTED CLAIMS] Access {}: addr={}, cycle={}\n", .{ i, addr, cycle });
-                        dbg("  B1_at_addr={x}, B2_at_addr={x}\n", .{
-                            B1_at_addr.toBytesBE()[16..32].*,
-                            B2_at_addr.toBytesBE()[16..32].*,
-                        });
-                        dbg("  eq_raf_c={x}, eq_rw_c={x}, eq_val_c={x}\n", .{
-                            eq_raf_c.toBytesBE()[16..32].*,
-                            eq_rw_c.toBytesBE()[16..32].*,
-                            eq_val_c.toBytesBE()[16..32].*,
-                        });
-                    }
-                }
-            }
-
-            if (comptime debug_verbose) {
-                dbg("[STAGE5] Computed RamRa claims from trace:\n", .{});
-                dbg("  computed_claim_raf = {x}\n", .{computed_claim_raf.toBytesBE()[16..32].*});
-                dbg("  computed_claim_val_final = {x}\n", .{computed_claim_val_final.toBytesBE()[16..32].*});
-                dbg("  computed_claim_rw = {x}\n", .{computed_claim_rw.toBytesBE()[16..32].*});
-                dbg("  computed_claim_val_eval = {x}\n", .{computed_claim_val_eval.toBytesBE()[16..32].*});
-            }
-
-            // Recompute ram_ra_input using upstream formula: raf + gamma*rw + gamma^2*val
-            const computed_ram_ra_input = computed_claim_raf
-                .add(gamma.mul(computed_claim_rw))
-                .add(gamma2.mul(computed_claim_val_eval));
-
-            if (comptime debug_verbose) {
-                dbg("  computed_ram_ra_input = {x}\n", .{computed_ram_ra_input.toBytesBE()[16..32].*});
-                dbg("  original ram_ra_input = {x}\n", .{ram_ra_input.toBytesBE()[16..32].*});
-            }
-
-            // Initialize Instance 1 claim tracking with SCALED value (matches batched_claim computation)
-            // NOTE: We use the ORIGINAL ram_ra_input (from opening_claims), NOT computed_ram_ra_input.
-            // The verifier computes its initial claim from opening_claims, so the prover MUST match.
-            // If computed_ram_ra_input differs from ram_ra_input, the polynomial computation must
-            // be adjusted to match the opening_claims, not the other way around.
+            // Initialize Instance 1 claim tracking with SCALED value
             ram_ra_current_claim = ram_ra_scaled;
-
-            if (comptime debug_verbose) {
-                dbg("[STAGE5] Using original batched claim = {any}\n", .{batched_claim.toBytesBE()});
-                dbg("[STAGE5] computed_ram_ra_input = {x}\n", .{computed_ram_ra_input.toBytesBE()[16..32].*});
-                dbg("[STAGE5] original ram_ra_input = {x}\n", .{ram_ra_input.toBytesBE()[16..32].*});
-            }
 
             // Expanding table to track eq(r_addr_reduced_so_far, k_bound_bits)
             // This accumulates the eq value as we bind address bits
@@ -1855,24 +1778,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             //
             // The contribution should be eq_*_bound * eq_*_remaining * eq_bit(r_cycle_*[m], c_i[m])
             // instead of eq(r_cycle_*, c_i).
-
-            // Per-access individual eq values (for computing remaining factors)
-            var eq_raf_access = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_raf_access);
-            var eq_rw_access = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_rw_access);
-            var eq_val_access = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_val_access);
-
-            // Precompute individual eq values for each access
-            if (memory_trace) |mt| {
-                for (mt.accesses.items, 0..) |access, i| {
-                    const cycle = access.timestamp;
-                    eq_raf_access[i] = computeEqAtPoint(F, r_cycle_raf, cycle);
-                    eq_rw_access[i] = computeEqAtPoint(F, r_cycle_rw, cycle);
-                    eq_val_access[i] = computeEqAtPoint(F, r_cycle_val, cycle);
-                }
-            }
 
             // Bound factors (shared for all accesses) - eq(r_cycle_*, r_cycle_reduced_so_far)
             // These track the product of eq_bit(r_cycle_*[j], r_j) for j < current_round
@@ -5611,7 +5516,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const identity = [_]F{F.zero()} ** 9;
                         const mapFn = struct {
                             fn f(c: EvalCtx, start: usize, end: usize) [9]F {
-                                var acc = [_]F{F.zero()} ** 9;
+                                var acc = [_]UnreducedProductAccum{UnreducedProductAccum.zero()} ** 9;
                                 for (start..end) |j| {
                                     var pairs: [9][2]F = undefined;
                                     const x_in = j & c.e_in_mask;
@@ -5623,12 +5528,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                         pairs[ci + 1][0] = c.chunks[ci][2 * j];
                                         pairs[ci + 1][1] = c.chunks[ci][2 * j + 1];
                                     }
-                                    const prod_evals = UniPoly(F).evalLinearProd9(pairs);
-                                    for (0..9) |k| {
-                                        acc[k] = acc[k].add(prod_evals[k]);
-                                    }
+                                    UniPoly(F).evalProd9Accumulate(pairs, &acc);
                                 }
-                                return acc;
+                                // Reduce accumulators at chunk boundary
+                                var result: [9]F = undefined;
+                                inline for (0..9) |k| result[k] = acc[k].reduce();
+                                return result;
                             }
                         }.f;
                         const reduceFn = struct {

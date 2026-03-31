@@ -131,6 +131,23 @@ pub fn build(b: *std.Build) void {
     const bench_tp_step = b.step("bench-tp", "Run ThreadPool micro-benchmark");
     bench_tp_step.dependOn(&run_bench_tp.step);
 
+    // Benchmark: Scaling (parallelFor, repeated dispatch, multi-array bind)
+    const bench_scaling = b.addExecutable(.{
+        .name = "bench-scaling",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/threadpool_vs_rayon/bench_scaling.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    b.installArtifact(bench_scaling);
+    const run_bench_scaling = b.addRunArtifact(bench_scaling);
+    const bench_scaling_step = b.step("bench-scaling", "Run scaling micro-benchmark (parallelFor, dispatch, bind)");
+    bench_scaling_step.dependOn(&run_bench_scaling.step);
+
     // Benchmark: Parallelism threshold (only built when explicitly requested)
     const bench_thresh = b.addExecutable(.{
         .name = "bench-thresh",

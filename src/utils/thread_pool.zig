@@ -42,7 +42,7 @@ const Job = struct {
     execute_fn: *const fn (*Job, *WorkerData) void,
     data: [56]u8 align(8) = undefined,
 
-    fn initFrom(comptime T: type, val: T, execute_fn: *const fn (*Job, *WorkerData) void) Job {
+    fn init(comptime T: type, val: T, execute_fn: *const fn (*Job, *WorkerData) void) Job {
         comptime std.debug.assert(@sizeOf(T) <= 56);
         var job = Job{ .execute_fn = execute_fn };
         @memcpy(job.data[0..@sizeOf(T)], std.mem.asBytes(&val));
@@ -91,16 +91,14 @@ const CompletionLatch = struct {
     fn waitWhileWorking(self: *CompletionLatch, worker: *WorkerData, pool: *ThreadPool) void {
         while (!self.isDone()) {
             // Try to pop from own deque (LIFO — cache friendly)
-            if (worker.deque.pop()) |*job_mut| {
-                var job = job_mut.*;
-                job.execute_fn(&job, worker);
+            if (worker.deque.pop()) |job| {
+                job.execute_fn(job, worker);
                 continue;
             }
 
             // Try to steal from random victim
-            if (worker.tryStealing(pool)) |*stolen_mut| {
-                var job = stolen_mut.*;
-                job.execute_fn(&job, worker);
+            if (worker.tryStealing(pool)) |job| {
+                job.execute_fn(job, worker);
                 continue;
             }
 
@@ -141,16 +139,14 @@ const SpinLatch = struct {
         if (self.probe()) return;
         while (true) {
             // Try own deque (LIFO, cache friendly)
-            if (worker.deque.pop()) |*j| {
-                var job = j.*;
-                job.execute_fn(&job, worker);
+            if (worker.deque.pop()) |job| {
+                job.execute_fn(job, worker);
                 if (self.probe()) return;
                 continue;
             }
             // Try stealing
-            if (worker.tryStealing(pool)) |*j| {
-                var job = j.*;
-                job.execute_fn(&job, worker);
+            if (worker.tryStealing(pool)) |job| {
+                job.execute_fn(job, worker);
                 if (self.probe()) return;
                 continue;
             }
@@ -169,18 +165,18 @@ const SpinLatch = struct {
 // ============================================================================
 
 const Deque = struct {
-    buffer: [DEQUE_CAP]Job align(cache_line) = undefined,
+    buffer: [DEQUE_CAP]*Job align(cache_line) = undefined,
     bottom: atomic.Value(i64) align(cache_line) = atomic.Value(i64).init(0),
     top: atomic.Value(i64) align(cache_line) = atomic.Value(i64).init(0),
 
     const StealResult = union(enum) {
-        success: Job,
+        success: *Job,
         empty,
         retry,
     };
 
     /// Owner-only push. O(1), uncontended. Returns false if deque is full.
-    fn push(self: *Deque, job: Job) bool {
+    fn push(self: *Deque, job: *Job) bool {
         const b = self.bottom.load(.monotonic);
         const t = self.top.load(.acquire);
 
@@ -195,7 +191,7 @@ const Deque = struct {
     }
 
     /// Owner-only pop. LIFO (cache-friendly). Returns null if empty.
-    fn pop(self: *Deque) ?Job {
+    fn pop(self: *Deque) ?*Job {
         const b = self.bottom.load(.monotonic) - 1;
         // All four pop/steal boundary ops use seq_cst per Chase-Lev (Lê et al., PPoPP 2013)
         self.bottom.store(b, .seq_cst);
@@ -271,7 +267,7 @@ const WorkerData = struct {
         return x;
     }
 
-    fn tryStealing(self: *WorkerData, pool: *ThreadPool) ?Job {
+    fn tryStealing(self: *WorkerData, pool: *ThreadPool) ?*Job {
         const total = pool.thread_count + 1; // workers + main thread slot
         if (total <= 1) return null;
 
@@ -290,7 +286,7 @@ const WorkerData = struct {
                     .empty => continue,
                     .retry => {
                         got_retry = true;
-                        break; // restart sweep from new random start
+                        continue; // restart sweep from new random start
                     },
                 }
             }
@@ -314,6 +310,7 @@ const RangeJobPayload = struct {
     end: usize,
     latch: *CompletionLatch,
     split_threshold: usize,
+    parent_spin: ?*SpinLatch,
 };
 
 comptime {
@@ -335,14 +332,15 @@ comptime {
     std.debug.assert(@sizeOf(ReduceJobPayload) <= 56);
 }
 
-const ClosureJobPayload = struct {
+const JoinJobPayload = struct {
     user_fn: *const anyopaque,
     context_ptr: *const anyopaque,
-    latch: *CompletionLatch,
+    result_ptr: *anyopaque,
+    latch: *SpinLatch,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(ClosureJobPayload) <= 56);
+    std.debug.assert(@sizeOf(JoinJobPayload) <= 56);
 }
 
 // ============================================================================
@@ -637,32 +635,51 @@ pub const ThreadPool = struct {
         };
         defer if (worker.index == self.thread_count) releaseWorkerClaim(worker);
 
-        var latch = CompletionLatch.init(1);
+        var latch = SpinLatch{};
 
-        const closure_payload = ClosureJobPayload{
+        const join_payload = JoinJobPayload{
             .user_fn = @ptrCast(&struct {
                 fn call(jc: *const JoinCtx) void {
                     jc.result_ptr.* = func_b(jc.ctx_b);
                 }
             }.call),
             .context_ptr = @ptrCast(&join_ctx),
+            .result_ptr = @ptrCast(&result_b),
             .latch = &latch,
         };
 
-        const job = Job.initFrom(ClosureJobPayload, closure_payload, &closureJobExecute);
-        if (!worker.deque.push(job)) {
+        var job = Job.init(JoinJobPayload, join_payload, &joinJobExecute);
+        if (!worker.deque.push(&job)) {
             // Deque full: run both sequentially
             return .{ func_a(context_a), func_b(context_b) };
         }
 
-        // Wake idle workers
-        self.wakeWorkers(1);
+        // Wake all idle workers on first push (deque was empty/near-empty).
+        // Previous code only woke 1, causing slow fan-out in recursive joins.
+        const b = worker.deque.bottom.load(.monotonic);
+        const t = worker.deque.top.load(.monotonic);
+        if (b -% t <= 1) {
+            self.wakeWorkers(self.thread_count);
+        }
 
         // Caller does task A
         const result_a = func_a(context_a);
 
-        // Wait for task B, staying productive
-        latch.waitWhileWorking(worker, self);
+        // Try to pop back our job (Rayon pattern: pop before latch check).
+        // Common case: job is still in our deque — direct call, no type erasure.
+        if (worker.deque.pop()) |job_ptr| {
+            if (job_ptr == &job) {
+                // Got it back — run inline, no latch/steal overhead
+                result_b = func_b(context_b);
+                return .{ result_a, result_b };
+            }
+            // Different job — execute it then wait for ours
+            job_ptr.execute_fn(job_ptr, worker);
+        }
+        // Task B was stolen — wait for completion, staying productive
+        if (!latch.probe()) {
+            latch.waitWhileWorking(worker, self);
+        }
 
         return .{ result_a, result_b };
     }
@@ -699,6 +716,7 @@ pub const ThreadPool = struct {
         var ctx_copy = context;
 
         var latch = CompletionLatch.init(1);
+        var root_spin = SpinLatch{};
 
         const range_payload = RangeJobPayload{
             .user_fn = @ptrCast(&struct {
@@ -711,10 +729,11 @@ pub const ThreadPool = struct {
             .end = len,
             .latch = &latch,
             .split_threshold = split_threshold,
+            .parent_spin = &root_spin,
         };
 
-        const job = Job.initFrom(RangeJobPayload, range_payload, &rangeJobExecute);
-        if (!worker.deque.push(job)) {
+        var job = Job.init(RangeJobPayload, range_payload, &rangeJobExecute);
+        if (!worker.deque.push(&job)) {
             // Deque full: run sequentially
             for (0..len) |i| func(ctx_copy, i);
             return;
@@ -723,8 +742,29 @@ pub const ThreadPool = struct {
         // Wake idle workers
         self.wakeWorkers(@min(actual_threads - 1, self.thread_count));
 
-        // Caller participates by popping/stealing
-        latch.waitWhileWorking(worker, self);
+        // Try to pop back our own job (Rayon join pattern)
+        if (worker.deque.pop()) |job_ptr| {
+            if (job_ptr == &job) {
+                // Got it back — run inline, no steal overhead
+                executeRange(
+                    range_payload.user_fn,
+                    range_payload.context_ptr,
+                    0,
+                    len,
+                    split_threshold,
+                    &latch,
+                    worker,
+                    self,
+                );
+                return;
+            }
+            // Different job — execute it then wait
+            job_ptr.execute_fn(job_ptr, worker);
+        }
+
+        // Wait for root job to fully complete (stack lifetime safety:
+        // root_spin is set AFTER rangeJobExecute returns, so &job is still alive)
+        root_spin.waitWhileWorking(worker, self);
     }
 
     // ========================================================================
@@ -785,15 +825,13 @@ pub const ThreadPool = struct {
             fn spinWait(latch: *SpinLatch, worker: *WorkerData, pool: *ThreadPool) void {
                 if (latch.probe()) return;
                 while (true) {
-                    if (worker.deque.pop()) |*j| {
-                        var job = j.*;
-                        executeJobSpecialized(&job, worker);
+                    if (worker.deque.pop()) |job| {
+                        executeJobSpecialized(job, worker);
                         if (latch.probe()) return;
                         continue;
                     }
-                    if (worker.tryStealing(pool)) |*j| {
-                        var job = j.*;
-                        executeJobSpecialized(&job, worker);
+                    if (worker.tryStealing(pool)) |job| {
+                        executeJobSpecialized(job, worker);
                         if (latch.probe()) return;
                         continue;
                     }
@@ -849,9 +887,9 @@ pub const ThreadPool = struct {
                     .pusher_index = @intCast(worker.index),
                 };
 
-                const right_job = Job.initFrom(ReduceJobPayload, right_payload, &execute);
+                var right_job = Job.init(ReduceJobPayload, right_payload, &execute);
 
-                const pushed = worker.deque.push(right_job);
+                const pushed = worker.deque.push(&right_job);
                 if (!pushed) {
                     // Deque full: compute right inline (no overhead)
                     right_result = computeRange(ctx_ptr, mid, end, splits / 2, worker, pool);
@@ -865,16 +903,13 @@ pub const ThreadPool = struct {
                     if (!right_spin.probe()) {
                         // Not done yet — try to pop from our deque
                         // If we get it back, run inline (zero latch overhead!)
-                        if (worker.deque.pop()) |*popped| {
-                            var job = popped.*;
-                            // Check if this is our right job by checking the partial_ptr
-                            const popped_payload = job.getPayload(ReduceJobPayload);
-                            if (popped_payload.partial_ptr == @as(*anyopaque, @ptrCast(&right_result))) {
+                        if (worker.deque.pop()) |job_ptr| {
+                            if (job_ptr == &right_job) {
                                 // Got it back! Run inline, no latch overhead
                                 right_result = computeRange(ctx_ptr, mid, end, splits / 2, worker, pool);
                             } else {
                                 // Got a different job — use specialized dispatch (direct call if ours)
-                                executeJobSpecialized(&job, worker);
+                                executeJobSpecialized(job_ptr, worker);
                                 spinWait(&right_spin, worker, pool);
                             }
                         } else {
@@ -912,52 +947,74 @@ pub const ThreadPool = struct {
 
     fn rangeJobExecute(job: *Job, worker: *WorkerData) void {
         const p = job.getPayload(RangeJobPayload);
-        const len = p.end - p.start;
+        const pool: *ThreadPool = worker.pool_ptr;
+        executeRange(p.user_fn, p.context_ptr, p.start, p.end, p.split_threshold, p.latch, worker, pool);
+        if (p.parent_spin) |spin| spin.set();
+    }
 
-        if (len > p.split_threshold) {
-            // Split in half: push left, tail-recurse right.
-            // Latch accounting: this job's pending count (1) is NOT completed here.
-            // Instead, addPending(1) adds a count for the left child. The right child
-            // inherits the original count via tail recursion to its eventual leaf.
-            // Net: original 1 → +1 (addPending) = 2 pending, both halves complete → 0.
-            const mid = p.start + len / 2;
-
-            var left_payload = p.*;
-            left_payload.end = mid;
-            const left_job = Job.initFrom(RangeJobPayload, left_payload, &rangeJobExecute);
-
-            p.latch.addPending(1);
-            if (!worker.deque.push(left_job)) {
-                // Deque full: execute left half inline and complete it
-                const TypeErasedFn = *const fn (*const anyopaque, usize, usize) void;
-                const call_fn: TypeErasedFn = @ptrCast(@alignCast(p.user_fn));
-                call_fn(p.context_ptr, p.start, mid);
-                p.latch.completeOne();
-            }
-
-            // Execute right half (may split further)
-            var right_payload = p.*;
-            right_payload.start = mid;
-            var right_job = Job.initFrom(RangeJobPayload, right_payload, &rangeJobExecute);
-            rangeJobExecute(&right_job, worker);
-        } else {
-            // Leaf: execute the range
+    fn executeRange(
+        user_fn: *const anyopaque,
+        context_ptr: *const anyopaque,
+        start: usize,
+        end: usize,
+        split_threshold: usize,
+        latch: *CompletionLatch,
+        worker: *WorkerData,
+        pool: *ThreadPool,
+    ) void {
+        const len = end - start;
+        if (len <= split_threshold) {
             const TypeErasedFn = *const fn (*const anyopaque, usize, usize) void;
-            const call_fn: TypeErasedFn = @ptrCast(@alignCast(p.user_fn));
-            call_fn(p.context_ptr, p.start, p.end);
-            p.latch.completeOne();
+            const call_fn: TypeErasedFn = @ptrCast(@alignCast(user_fn));
+            call_fn(context_ptr, start, end);
+            latch.completeOne();
+            return;
+        }
+        const mid = start + len / 2;
+        var right_spin = SpinLatch{};
+        const right_payload = RangeJobPayload{
+            .user_fn = user_fn,
+            .context_ptr = context_ptr,
+            .start = mid,
+            .end = end,
+            .latch = latch,
+            .split_threshold = split_threshold,
+            .parent_spin = &right_spin,
+        };
+        var right_job = Job.init(RangeJobPayload, right_payload, &rangeJobExecute);
+        latch.addPending(1);
+        const pushed = worker.deque.push(&right_job);
+        if (!pushed) {
+            executeRange(user_fn, context_ptr, mid, end, split_threshold, latch, worker, pool);
+        }
+        // Execute LEFT inline
+        executeRange(user_fn, context_ptr, start, mid, split_threshold, latch, worker, pool);
+        if (pushed) {
+            // MUST wait for right before returning (stack lifetime of right_job!)
+            if (!right_spin.probe()) {
+                if (worker.deque.pop()) |job_ptr| {
+                    if (job_ptr == &right_job) {
+                        executeRange(user_fn, context_ptr, mid, end, split_threshold, latch, worker, pool);
+                        return;
+                    }
+                    // Different job — execute it then wait
+                    job_ptr.execute_fn(job_ptr, worker);
+                }
+                // Wait for right to complete
+                right_spin.waitWhileWorking(worker, pool);
+            }
         }
     }
 
     // reduceJobExecute is now generated at comptime inside reduceImpl
     // (each instantiation captures R, map, reduce via Zig's monomorphization)
 
-    fn closureJobExecute(job: *Job, _: *WorkerData) void {
-        const p = job.getPayload(ClosureJobPayload);
+    fn joinJobExecute(job: *Job, _: *WorkerData) void {
+        const p = job.getPayload(JoinJobPayload);
         const TypeErasedFn = *const fn (*const anyopaque) void;
         const call_fn: TypeErasedFn = @ptrCast(@alignCast(p.user_fn));
         call_fn(p.context_ptr);
-        p.latch.completeOne();
+        p.latch.set();
     }
 
     // ========================================================================
@@ -983,14 +1040,12 @@ pub const ThreadPool = struct {
             }
 
             // Try to find work opportunistically
-            if (worker.deque.pop()) |*job_mut| {
-                var job = job_mut.*;
-                job.execute_fn(&job, worker);
+            if (worker.deque.pop()) |job| {
+                job.execute_fn(job, worker);
                 continue;
             }
-            if (worker.tryStealing(self)) |*stolen_mut| {
-                var job = stolen_mut.*;
-                job.execute_fn(&job, worker);
+            if (worker.tryStealing(self)) |job| {
+                job.execute_fn(job, worker);
                 continue;
             }
 
@@ -1006,15 +1061,13 @@ pub const ThreadPool = struct {
                 }
                 // Check deque + steal periodically during spin
                 if (spin_i % 8 == 7) {
-                    if (worker.deque.pop()) |*j| {
-                        var job = j.*;
-                        job.execute_fn(&job, worker);
+                    if (worker.deque.pop()) |job| {
+                        job.execute_fn(job, worker);
                         found_work = true;
                         break;
                     }
-                    if (worker.tryStealing(self)) |*j| {
-                        var job = j.*;
-                        job.execute_fn(&job, worker);
+                    if (worker.tryStealing(self)) |job| {
+                        job.execute_fn(job, worker);
                         found_work = true;
                         break;
                     }
@@ -1022,13 +1075,19 @@ pub const ThreadPool = struct {
             }
             if (found_work) continue;
 
-            // Phase 2: Yield
+            // Phase 2: Yield (with stealing attempts)
             worker.state.store(@intFromEnum(WorkerState.yielding), .release);
             for (0..YIELD_ITERS) |_| {
                 std.Thread.yield() catch {};
                 if (worker.state.load(.acquire) == @intFromEnum(WorkerState.shutdown)) return;
                 const g = self.generation.load(.acquire);
                 if (g != last_seen_gen) {
+                    found_work = true;
+                    break;
+                }
+                // Try stealing during yield phase
+                if (worker.tryStealing(self)) |job| {
+                    job.execute_fn(job, worker);
                     found_work = true;
                     break;
                 }
@@ -1059,16 +1118,16 @@ pub const ThreadPool = struct {
     fn workerProcessWork(self: *ThreadPool, worker: *WorkerData) void {
         var consecutive_steal_failures: u32 = 0;
         while (true) {
-            if (worker.deque.pop()) |*job_mut| {
-                var job = job_mut.*;
-                job.execute_fn(&job, worker);
+            if (worker.deque.pop()) |job| {
+                job.execute_fn(job, worker);
                 consecutive_steal_failures = 0;
                 continue;
             }
-            if (worker.tryStealing(self)) |*stolen_mut| {
-                var job = stolen_mut.*;
-                job.execute_fn(&job, worker);
+            if (worker.tryStealing(self)) |job| {
+                job.execute_fn(job, worker);
                 consecutive_steal_failures = 0;
+                // Cascading wake: bump generation so other parked workers notice work
+                _ = self.generation.fetchAdd(1, .release);
                 continue;
             }
             consecutive_steal_failures += 1;

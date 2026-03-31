@@ -7,6 +7,10 @@ edition = "2021"
 name = "rayon-bench"
 path = "bench_rayon.rs"
 
+[[bin]]
+name = "rayon-scaling-bench"
+path = "bench_scaling_rayon.rs"
+
 [dependencies]
 ark-bn254 = "0.5"
 ark-ff = "0.5"

@@ -261,11 +261,9 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 for (0..padded_len) |idx| initFn(ictx, idx);
             }
 
-            var left_poly = try DensePolynomial(F).init(allocator, left_evals);
-            allocator.free(left_evals);
+            var left_poly = DensePolynomial(F).initOwned(allocator, left_evals);
 
-            var right_poly = try DensePolynomial(F).init(allocator, right_evals);
-            allocator.free(right_evals);
+            var right_poly = DensePolynomial(F).initOwned(allocator, right_evals);
 
             if (thread_pool != null) {
                 left_poly.scratch = try allocator.alloc(F, padded_len);

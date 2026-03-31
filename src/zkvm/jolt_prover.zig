@@ -2441,49 +2441,162 @@ pub fn JoltProver(comptime F: type) type {
                     @memset(G[i], F.zero());
                 }
 
-                // Iterate over all cycles to populate G_i
+                // Iterate over all cycles to populate G_i (parallelized)
                 // G_i(k) = Σ_j eq(r_cycle, j) · [addr_chunk_i(j) == k]
-                for (0..T_val) |j| {
-                    const step = the_trace.steps.items[j];
-                    const eq_j = eq_cycle[j];
-
-                    // InstructionRa: compute 128-bit lookup index, split into chunks
-                    // Use the same computeLookupIndex as Stage 6 LookupsRaVirtualProver
-                    // to ensure G tables are consistent with the virt_claims.
-                    {
-                        const lookup_idx = stage6_mod.computeLookupIndex(step);
-                        for (0..s6_instruction_d) |i| {
-                            const shift = s6_log_k_chunk * (s6_instruction_d - 1 - i);
-                            const mask: u128 = (@as(u128, 1) << @intCast(s6_log_k_chunk)) - 1;
-                            const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
-                            if (chunk_val < k_chunk) {
-                                G[i][chunk_val] = G[i][chunk_val].add(eq_j);
+                if (self.thread_pool) |tp| {
+                    // Parallel: each chunk accumulates into thread-local G tables, then merge
+                    const GTableCtx = struct {
+                        steps: []const tracer.TraceStep,
+                        eq_cycle: []const F,
+                        G: [][]F,
+                        N: usize,
+                        k_chunk: usize,
+                        instruction_d: usize,
+                        bytecode_d: usize,
+                        ram_d: usize,
+                        log_k_chunk: usize,
+                        pc_map: *const @import("preprocessing.zig").BytecodePCMapper,
+                        mem_layout: *const @import("jolt_device.zig").MemoryLayout,
+                        allocator: Allocator,
+                    };
+                    const g_ctx = GTableCtx{
+                        .steps = the_trace.steps.items[0..T_val],
+                        .eq_cycle = eq_cycle[0..T_val],
+                        .G = G,
+                        .N = N,
+                        .k_chunk = k_chunk,
+                        .instruction_d = s6_instruction_d,
+                        .bytecode_d = s6_bytecode_d,
+                        .ram_d = s6_ram_d,
+                        .log_k_chunk = s6_log_k_chunk,
+                        .pc_map = pc_map_ptr,
+                        .mem_layout = the_memory_layout,
+                        .allocator = self.allocator,
+                    };
+                    // Use parallelFor over T_val cycles, accumulating directly into G
+                    // Since G[i][chunk_val] has write conflicts, split N arrays across
+                    // parallel workers: each worker handles a subset of ra indices.
+                    // Actually, N is small (~50), and k_chunk is small (16), so
+                    // use parallelReduce over cycle ranges with per-range local G tables.
+                    const LocalG = [][]F;
+                    const mapFn = struct {
+                        fn f(c: GTableCtx, start: usize, end: usize) LocalG {
+                            // Allocate thread-local G table
+                            const local_G = c.allocator.alloc([]F, c.N) catch return &[_][]F{};
+                            for (0..c.N) |i| {
+                                local_G[i] = c.allocator.alloc(F, c.k_chunk) catch {
+                                    // Cleanup already-allocated
+                                    for (0..i) |ii| c.allocator.free(local_G[ii]);
+                                    c.allocator.free(local_G);
+                                    return &[_][]F{};
+                                };
+                                @memset(local_G[i], F.zero());
+                            }
+                            const mask128: u128 = (@as(u128, 1) << @intCast(c.log_k_chunk)) - 1;
+                            for (start..end) |j| {
+                                const step = c.steps[j];
+                                const eq_j = c.eq_cycle[j];
+                                // InstructionRa
+                                {
+                                    const lookup_idx = stage6_mod.computeLookupIndex(step);
+                                    for (0..c.instruction_d) |i| {
+                                        const shift = c.log_k_chunk * (c.instruction_d - 1 - i);
+                                        const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask128);
+                                        if (chunk_val < c.k_chunk) {
+                                            local_G[i][chunk_val] = local_G[i][chunk_val].add(eq_j);
+                                        }
+                                    }
+                                }
+                                // BytecodeRa
+                                {
+                                    const pc_idx = c.pc_map.getPCForStep(step);
+                                    for (0..c.bytecode_d) |i| {
+                                        const chunk_val = stage6_mod.extractChunkMSB(@intCast(pc_idx), i, c.bytecode_d, c.log_k_chunk);
+                                        const ra_idx = c.instruction_d + i;
+                                        if (chunk_val < c.k_chunk) {
+                                            local_G[ra_idx][chunk_val] = local_G[ra_idx][chunk_val].add(eq_j);
+                                        }
+                                    }
+                                }
+                                // RamRa
+                                {
+                                    if (step.memory_addr) |addr| {
+                                        if (addr != 0) {
+                                            if (c.mem_layout.remapAddress(addr)) |raddr| {
+                                                for (0..c.ram_d) |i| {
+                                                    const chunk_val = stage6_mod.extractChunkMSB(raddr, i, c.ram_d, c.log_k_chunk);
+                                                    const ra_idx = c.instruction_d + c.bytecode_d + i;
+                                                    if (chunk_val < c.k_chunk) {
+                                                        local_G[ra_idx][chunk_val] = local_G[ra_idx][chunk_val].add(eq_j);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            return local_G;
+                        }
+                    }.f;
+                    const reduceFn = struct {
+                        fn f(a: LocalG, b: LocalG) LocalG {
+                            if (a.len == 0) return b;
+                            if (b.len == 0) return a;
+                            // Merge b into a
+                            for (0..a.len) |i| {
+                                for (0..a[i].len) |k| {
+                                    a[i][k] = a[i][k].add(b[i][k]);
+                                }
+                            }
+                            return a;
+                        }
+                    }.f;
+                    const empty_g: LocalG = &[_][]F{};
+                    const result_g = tp.parallelReduce(LocalG, T_val, empty_g, g_ctx, mapFn, reduceFn);
+                    // Copy result into G and free the reduce result
+                    if (result_g.len > 0) {
+                        for (0..N) |i| {
+                            @memcpy(G[i], result_g[i]);
+                            self.allocator.free(result_g[i]);
+                        }
+                        self.allocator.free(result_g);
+                    }
+                } else {
+                    // Sequential fallback
+                    for (0..T_val) |j| {
+                        const step = the_trace.steps.items[j];
+                        const eq_j = eq_cycle[j];
+                        {
+                            const lookup_idx = stage6_mod.computeLookupIndex(step);
+                            for (0..s6_instruction_d) |i| {
+                                const shift = s6_log_k_chunk * (s6_instruction_d - 1 - i);
+                                const mask: u128 = (@as(u128, 1) << @intCast(s6_log_k_chunk)) - 1;
+                                const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
+                                if (chunk_val < k_chunk) {
+                                    G[i][chunk_val] = G[i][chunk_val].add(eq_j);
+                                }
                             }
                         }
-                    }
-
-                    // BytecodeRa: bytecode address (pc_idx) split into chunks
-                    {
-                        const pc_idx = pc_map_ptr.getPCForStep(step);
-                        for (0..s6_bytecode_d) |i| {
-                            const chunk_val = stage6_mod.extractChunkMSB(@intCast(pc_idx), i, s6_bytecode_d, s6_log_k_chunk);
-                            const ra_idx = s6_instruction_d + i;
-                            if (chunk_val < k_chunk) {
-                                G[ra_idx][chunk_val] = G[ra_idx][chunk_val].add(eq_j);
+                        {
+                            const pc_idx = pc_map_ptr.getPCForStep(step);
+                            for (0..s6_bytecode_d) |i| {
+                                const chunk_val = stage6_mod.extractChunkMSB(@intCast(pc_idx), i, s6_bytecode_d, s6_log_k_chunk);
+                                const ra_idx = s6_instruction_d + i;
+                                if (chunk_val < k_chunk) {
+                                    G[ra_idx][chunk_val] = G[ra_idx][chunk_val].add(eq_j);
+                                }
                             }
                         }
-                    }
-
-                    // RamRa: memory address (remapped) split into chunks
-                    {
-                        if (step.memory_addr) |addr| {
-                            if (addr != 0) {
-                                if (the_memory_layout.remapAddress(addr)) |raddr| {
-                                    for (0..s6_ram_d) |i| {
-                                        const chunk_val = stage6_mod.extractChunkMSB(raddr, i, s6_ram_d, s6_log_k_chunk);
-                                        const ra_idx = s6_instruction_d + s6_bytecode_d + i;
-                                        if (chunk_val < k_chunk) {
-                                            G[ra_idx][chunk_val] = G[ra_idx][chunk_val].add(eq_j);
+                        {
+                            if (step.memory_addr) |addr| {
+                                if (addr != 0) {
+                                    if (the_memory_layout.remapAddress(addr)) |raddr| {
+                                        for (0..s6_ram_d) |i| {
+                                            const chunk_val = stage6_mod.extractChunkMSB(raddr, i, s6_ram_d, s6_log_k_chunk);
+                                            const ra_idx = s6_instruction_d + s6_bytecode_d + i;
+                                            if (chunk_val < k_chunk) {
+                                                G[ra_idx][chunk_val] = G[ra_idx][chunk_val].add(eq_j);
+                                            }
                                         }
                                     }
                                 }
@@ -2596,22 +2709,7 @@ pub fn JoltProver(comptime F: type) type {
                 for (0..num_rounds) |round| {
                     const half = poly_size / 2;
 
-                    // Sanity check: verify sum over current table = current_claim / batch_coeff
-                    {
-                        var check_sum = F.zero();
-                        for (0..poly_size) |k| {
-                            for (0..N) |i| {
-                                const gi = G[i][k];
-                                const w = gamma_powers[3 * i].add(gamma_powers[3 * i + 1].mul(eq_bool[k])).add(gamma_powers[3 * i + 2].mul(eq_virt[i][k]));
-                                check_sum = check_sum.add(gi.mul(w));
-                            }
-                        }
-                        check_sum = check_sum.mul(batch_coeff);
-                        const eq_claim = check_sum.eql(current_claim);
-                        if (!eq_claim) {
-                        } else {
-                        }
-                    }
+
 
                     // LowToHigh binding: pair (2*j, 2*j+1) to bind LSB first
                     // Compute round polynomial evaluations at {0, 2}

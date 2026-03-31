@@ -435,14 +435,10 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
                 }
             }
 
-            // Sort entries by (row, col) - nearly sorted (filled in cycle order),
-            // pdq detects this and runs near-O(N)
-            std.sort.pdq(Entry, entries, {}, struct {
-                fn cmp(_: void, a: Entry, b: Entry) bool {
-                    if (a.row != b.row) return a.row < b.row;
-                    return a.col < b.col;
-                }
-            }.cmp);
+            // Entries are already sorted by (row, col):
+            // - Filled in cycle (= row) order
+            // - fillEntriesForStepIndependent sorts ≤3 entries by col inline
+            // No global sort needed (matches Jolt which also avoids sorting).
 
             // Initialize lookup tables
             const gamma_sq = gamma.mul(gamma);
@@ -843,11 +839,152 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
         // ---- Bind (cycle variable) ----
 
         /// Bind a cycle variable. Matches Jolt ReadWriteMatrixCycleMajor::bind.
-        pub fn bind(self: *Self, r: F) !void {
+        /// Parallelized: both count and fill passes run in parallel chunks.
+        pub fn bind(self: *Self, r: F, pool: ?*ThreadPool) !void {
             const ra_tbl = if (use_lookups) &self.ra_lookup_table else {};
             const wa_tbl = if (use_lookups) &self.wa_lookup_table else {};
 
-            // Pass 1: count output entries per row-pair group
+            const MAX_CHUNKS = 64;
+            const tp = pool orelse {
+                return self.bindSequential(r, ra_tbl, wa_tbl);
+            };
+            if (self.entries.len < 2048) {
+                return self.bindSequential(r, ra_tbl, wa_tbl);
+            }
+
+            // Chunk-based parallel bind (matches Jolt par_chunk_by + par_iter pattern).
+            // Each chunk handles a contiguous range of entries aligned to group boundaries.
+            const num_threads = tp.thread_count + 1; // +1 for caller thread
+            const num_chunks = @min(num_threads, MAX_CHUNKS);
+            const raw_chunk_size = (self.entries.len + num_chunks - 1) / num_chunks;
+
+            // Compute aligned chunk boundaries: each chunk starts at a group boundary.
+            var chunk_starts: [MAX_CHUNKS + 1]usize = undefined;
+            chunk_starts[0] = 0;
+            for (1..num_chunks) |c| {
+                var pos = @min(c * raw_chunk_size, self.entries.len);
+                // Advance to next group boundary (skip past current group)
+                if (pos > 0 and pos < self.entries.len) {
+                    const prev_pid = self.entries[pos - 1].row / 2;
+                    while (pos < self.entries.len and self.entries[pos].row / 2 == prev_pid) pos += 1;
+                }
+                chunk_starts[c] = pos;
+            }
+            chunk_starts[num_chunks] = self.entries.len;
+
+            // Phase 1: Parallel count — each chunk counts its output entries
+            var chunk_counts: [MAX_CHUNKS]usize = undefined;
+            @memset(chunk_counts[0..num_chunks], 0);
+
+            const CountCtx = struct {
+                entries: []const Entry,
+                starts: []const usize,
+                counts: []usize,
+            };
+            const count_ctx = CountCtx{
+                .entries = self.entries,
+                .starts = chunk_starts[0 .. num_chunks + 1],
+                .counts = chunk_counts[0..num_chunks],
+            };
+            tp.parallelForForce(num_chunks, count_ctx, struct {
+                fn f(ctx: CountCtx, chunk_id: usize) void {
+                    const start = ctx.starts[chunk_id];
+                    const end = ctx.starts[chunk_id + 1];
+                    if (start >= end) {
+                        ctx.counts[chunk_id] = 0;
+                        return;
+                    }
+                    var total: usize = 0;
+                    var idx = start;
+                    while (idx < end) {
+                        const pair_id = ctx.entries[idx].row / 2;
+                        const group_start = idx;
+                        while (idx < end and ctx.entries[idx].row / 2 == pair_id) idx += 1;
+                        const group = ctx.entries[group_start..idx];
+                        var split: usize = 0;
+                        for (group) |e| {
+                            if (e.row & 1 == 0) split += 1 else break;
+                        }
+                        total += countMergedEntries(group[0..split], group[split..]);
+                    }
+                    ctx.counts[chunk_id] = total;
+                }
+            }.f);
+
+            // Sequential prefix-sum (trivial, num_chunks iterations)
+            var chunk_offsets: [MAX_CHUNKS + 1]usize = undefined;
+            chunk_offsets[0] = 0;
+            for (0..num_chunks) |c| {
+                chunk_offsets[c + 1] = chunk_offsets[c] + chunk_counts[c];
+            }
+            const total_output = chunk_offsets[num_chunks];
+
+            // Allocate output
+            const new_entries = try self.allocator.alloc(Entry, total_output);
+
+            // Phase 2: Parallel fill — each chunk writes to its non-overlapping output slice
+            const FillCtx = struct {
+                entries: []const Entry,
+                starts: []const usize,
+                offsets: []const usize,
+                output: []Entry,
+                r: F,
+                ra_tbl: if (use_lookups) *const OneHotCoeffLookupTable(F) else void,
+                wa_tbl: if (use_lookups) *const OneHotCoeffLookupTable(F) else void,
+            };
+            const fill_ctx = FillCtx{
+                .entries = self.entries,
+                .starts = chunk_starts[0 .. num_chunks + 1],
+                .offsets = chunk_offsets[0 .. num_chunks + 1],
+                .output = new_entries,
+                .r = r,
+                .ra_tbl = ra_tbl,
+                .wa_tbl = wa_tbl,
+            };
+            tp.parallelForForce(num_chunks, fill_ctx, struct {
+                fn f(ctx: FillCtx, chunk_id: usize) void {
+                    const start = ctx.starts[chunk_id];
+                    const end = ctx.starts[chunk_id + 1];
+                    if (start >= end) return;
+                    var idx = start;
+                    var out_idx = ctx.offsets[chunk_id];
+                    while (idx < end) {
+                        const pair_id = ctx.entries[idx].row / 2;
+                        const group_start = idx;
+                        while (idx < end and ctx.entries[idx].row / 2 == pair_id) idx += 1;
+                        const group = ctx.entries[group_start..idx];
+                        var split: usize = 0;
+                        for (group) |e| {
+                            if (e.row & 1 == 0) split += 1 else break;
+                        }
+                        out_idx += seqBindRows(group[0..split], group[split..], ctx.r, ctx.output[out_idx..], ctx.ra_tbl, ctx.wa_tbl);
+                    }
+                }
+            }.f);
+
+            // Replace entries
+            self.allocator.free(self.entries);
+            self.entries = new_entries;
+
+            // Bind lookup tables
+            if (use_lookups) {
+                if (!self.ra_lookup_table.isSaturated()) {
+                    try self.ra_lookup_table.bind(r);
+                }
+                if (!self.wa_lookup_table.isSaturated()) {
+                    try self.wa_lookup_table.bind(r);
+                }
+            }
+        }
+
+        /// Sequential fallback for small entry counts or when no pool is available.
+        fn bindSequential(
+            self: *Self,
+            r: F,
+            ra_tbl: if (use_lookups) *const OneHotCoeffLookupTable(F) else void,
+            wa_tbl: if (use_lookups) *const OneHotCoeffLookupTable(F) else void,
+        ) !void {
+            // Pass 1: count output entries
             var total_output: usize = 0;
             {
                 var idx: usize = 0;
@@ -863,11 +1000,7 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
                     total_output += countMergedEntries(group[0..split], group[split..]);
                 }
             }
-
-            // Allocate output
             const new_entries = try self.allocator.alloc(Entry, total_output);
-
-            // Pass 2: fill output
             {
                 var idx: usize = 0;
                 var out_idx: usize = 0;
@@ -884,12 +1017,9 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
                 }
                 std.debug.assert(out_idx == total_output);
             }
-
-            // Replace entries
             self.allocator.free(self.entries);
             self.entries = new_entries;
 
-            // Bind lookup tables
             if (use_lookups) {
                 if (!self.ra_lookup_table.isSaturated()) {
                     try self.ra_lookup_table.bind(r);
@@ -1212,7 +1342,8 @@ pub fn SparseRegistersAddressMajor(comptime F: type) type {
         // ---- Bind (address variable) ----
 
         /// Bind an address variable. Matches Jolt ReadWriteMatrixAddressMajor::bind.
-        pub fn bind(self: *Self, r: F) !void {
+        /// Pool parameter accepted for API consistency; sequential for small entry counts.
+        pub fn bind(self: *Self, r: F, _: ?*ThreadPool) !void {
             // Pass 1: count
             var total_output: usize = 0;
             {

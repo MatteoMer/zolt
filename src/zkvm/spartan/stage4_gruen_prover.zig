@@ -134,11 +134,12 @@ pub fn Stage4GruenProver(comptime F: type) type {
             r_cycle: []const F,
             stage3_claims: ?Stage3Claims(F),
             batching_coeff: F,
+            pool: ?*ThreadPool,
         ) !Self {
             const T = std.math.ceilPowerOfTwo(usize, trace.steps.items.len) catch trace.steps.items.len;
             const log_T = @ctz(T);
             // Default config: phase1 = log_T (ALL cycle vars), phase2 = LOG_K (ALL address vars)
-            return initWithPhaseConfig(allocator, trace, gamma, r_cycle, stage3_claims, batching_coeff, log_T, LOG_K);
+            return initWithPhaseConfig(allocator, trace, gamma, r_cycle, stage3_claims, batching_coeff, log_T, LOG_K, pool);
         }
 
         /// Initialize with explicit phase configuration
@@ -151,6 +152,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
             batching_coeff: F,
             phase1_num_rounds: usize,
             phase2_num_rounds: usize,
+            pool: ?*ThreadPool,
         ) !Self {
             const trace_len = trace.steps.items.len;
             if (trace_len == 0) return error.EmptyTrace;
@@ -164,7 +166,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
             const gamma_sq = gamma.mul(gamma);
 
             // Build sparse matrix from trace
-            var sparse_lookup = try SparseRegsLookup.fromTrace(allocator, trace, gamma, null);
+            var sparse_lookup = try SparseRegsLookup.fromTrace(allocator, trace, gamma, pool);
             errdefer sparse_lookup.deinit();
 
             // Build dense inc_poly from trace
@@ -290,57 +292,127 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     r_address_be[i] = self.challenges_buf[self.phase1_num_rounds + self.phase2_num_rounds - 1 - i];
                 }
 
-                // Compute rs2_ra from trace using MLE evaluation with precomputed eq tables.
+                // Compute rs2_ra from trace using split-eq (matches Jolt compute_rs2_ra_claim).
                 // rs2_ra(r_addr, r_cycle) = Σ_j [has_rs2[j]] * eq(r_cycle, j) * eq(r_addr, rs2[j])
+                // Uses 2-way split over joint (cycle, address) space for parallelism.
                 const rs2_ra_claim = blk: {
                     const trace = self.trace_ref.?;
+                    const addr_bits = self.phase2_num_rounds; // = 7
 
-                    // Precompute LE eq_cycle table: eq_tbl[j] = eq(cycle_challenges_LE, j)
-                    // LE construction: bit i of index j corresponds to challenges_buf[i]
-                    const eq_cycle_tbl = self.allocator.alloc(F, self.T) catch break :blk F.zero();
-                    defer self.allocator.free(eq_cycle_tbl);
-                    eq_cycle_tbl[0] = F.one();
+                    // r_joint = [r_cycle_LE..., r_address_LE...]
+                    // Split: hi_bits from cycle, lo_bits from remaining cycle + all address
+                    const n = self.phase1_num_rounds + addr_bits;
+                    const hi_bits = @min(self.phase1_num_rounds, (n + 1) / 2);
+                    const lo_bits = n - hi_bits;
+                    const cycle_bits_in_lo = lo_bits - addr_bits;
+
+                    // Build E_hi from the high cycle challenge bits (LE order)
+                    const e_hi_size = @as(usize, 1) << @intCast(hi_bits);
+                    const E_hi = self.allocator.alloc(F, e_hi_size) catch break :blk F.zero();
+                    defer self.allocator.free(E_hi);
+                    E_hi[0] = F.one();
                     {
                         var len: usize = 1;
-                        for (0..self.phase1_num_rounds) |bit| {
-                            const ri = self.challenges_buf[bit];
+                        // hi bits are the top cycle challenges: challenges_buf[cycle_bits_in_lo .. phase1_num_rounds]
+                        for (0..hi_bits) |bit| {
+                            const ri = self.challenges_buf[cycle_bits_in_lo + bit];
                             const one_m_r = F.one().sub(ri);
-                            // Expand forward: bit goes to position `bit` (new high bit)
                             var j: usize = 0;
                             while (j < len) : (j += 1) {
-                                const old = eq_cycle_tbl[j];
-                                eq_cycle_tbl[j + len] = old.mul(ri);
-                                eq_cycle_tbl[j] = old.mul(one_m_r);
+                                const old = E_hi[j];
+                                E_hi[j + len] = old.mul(ri);
+                                E_hi[j] = old.mul(one_m_r);
                             }
                             len *= 2;
                         }
                     }
 
-                    // Precompute LE eq_addr table: eq_addr_tbl[k] = eq(addr_challenges_LE, k)
-                    var eq_addr_tbl: [K]F = undefined;
-                    eq_addr_tbl[0] = F.one();
+                    // Build E_lo from low cycle bits + all address bits
+                    const e_lo_size = @as(usize, 1) << @intCast(lo_bits);
+                    const E_lo = self.allocator.alloc(F, e_lo_size) catch break :blk F.zero();
+                    defer self.allocator.free(E_lo);
+                    E_lo[0] = F.one();
                     {
                         var len: usize = 1;
-                        for (0..self.phase2_num_rounds) |bit| {
+                        // Joint LE order: [addr_0, ..., addr_6, cycle_0, ..., cycle_{lo-addr-1}]
+                        // Address bits first (LSB of joint index)
+                        for (0..addr_bits) |bit| {
                             const ri = self.challenges_buf[self.phase1_num_rounds + bit];
                             const one_m_r = F.one().sub(ri);
                             var j: usize = 0;
                             while (j < len) : (j += 1) {
-                                const old = eq_addr_tbl[j];
-                                eq_addr_tbl[j + len] = old.mul(ri);
-                                eq_addr_tbl[j] = old.mul(one_m_r);
+                                const old = E_lo[j];
+                                E_lo[j + len] = old.mul(ri);
+                                E_lo[j] = old.mul(one_m_r);
+                            }
+                            len *= 2;
+                        }
+                        // Low cycle bits next
+                        for (0..cycle_bits_in_lo) |bit| {
+                            const ri = self.challenges_buf[bit];
+                            const one_m_r = F.one().sub(ri);
+                            var j: usize = 0;
+                            while (j < len) : (j += 1) {
+                                const old = E_lo[j];
+                                E_lo[j + len] = old.mul(ri);
+                                E_lo[j] = old.mul(one_m_r);
                             }
                             len *= 2;
                         }
                     }
 
-                    // Sum over trace
-                    var result = F.zero();
-                    for (trace.steps.items, 0..) |step, j| {
-                        if (step.is_noop or !step.rs2_read) continue;
-                        result = result.add(eq_cycle_tbl[j].mul(eq_addr_tbl[step.rs2_index]));
+                    // Parallel reduce over E_hi blocks
+                    const cycles_per_block = @as(usize, 1) << @intCast(cycle_bits_in_lo);
+                    const cycle_lo_mask = cycles_per_block - 1;
+                    const trace_len = trace.steps.items.len;
+
+                    const SplitEqCtx = struct {
+                        e_hi: []const F,
+                        e_lo: []const F,
+                        steps: []const @import("../../tracer/mod.zig").TraceStep,
+                        cpb: usize,
+                        clm: usize,
+                        ab: usize,
+                        tlen: usize,
+                    };
+                    const ctx = SplitEqCtx{
+                        .e_hi = E_hi,
+                        .e_lo = E_lo,
+                        .steps = trace.steps.items,
+                        .cpb = cycles_per_block,
+                        .clm = cycle_lo_mask,
+                        .ab = addr_bits,
+                        .tlen = trace_len,
+                    };
+                    const mapFn = struct {
+                        fn f(c: SplitEqCtx, start: usize, end: usize) F {
+                            var acc = F.zero();
+                            for (start..end) |idx_hi| {
+                                const block_start = idx_hi * c.cpb;
+                                if (block_start >= c.tlen) continue;
+                                const block_end = @min(block_start + c.cpb, c.tlen);
+                                var inner = F.zero();
+                                for (block_start..block_end) |j| {
+                                    const step = c.steps[j];
+                                    if (step.is_noop or !step.rs2_read) continue;
+                                    const j_in_block = j & c.clm;
+                                    const idx_lo = (j_in_block << @intCast(c.ab)) | @as(usize, step.rs2_index);
+                                    inner = inner.add(c.e_lo[idx_lo]);
+                                }
+                                acc = acc.add(c.e_hi[idx_hi].mul(inner));
+                            }
+                            return acc;
+                        }
+                    }.f;
+                    const reduceFn = struct {
+                        fn f(a: F, b: F) F { return a.add(b); }
+                    }.f;
+
+                    if (self.thread_pool) |tp| {
+                        break :blk tp.parallelReduce(F, e_hi_size, F.zero(), ctx, mapFn, reduceFn);
+                    } else {
+                        break :blk mapFn(ctx, 0, e_hi_size);
                     }
-                    break :blk result;
                 };
 
                 // Derive rs1_ra = (combined_ra - gamma^2 * rs2_ra) / gamma
@@ -444,50 +516,33 @@ pub fn Stage4GruenProver(comptime F: type) type {
         fn phase1Bind(self: *Self, round: usize, challenge: F) void {
             const half_T = self.current_T / 2;
 
-            // Bind inc_poly (dense) — GPU-accelerated for large polynomials
+            // Bind inc_poly (dense) — parallel when pool available, GPU-accelerated for large polys
             if (self.gpu_ops) |gpu| {
                 if (half_T >= 16384) {
                     gpu.polyBindLow(self.inc_poly[0..self.current_T], challenge, self.inc_poly[0..half_T]) catch {
-                        // CPU fallback on GPU error
-                        for (0..half_T) |i| {
-                            const lo = self.inc_poly[2 * i];
-                            const hi = self.inc_poly[2 * i + 1];
-                            self.inc_poly[i] = lo.add(challenge.mul(hi.sub(lo)));
-                        }
+                        self.bindIncPolyCpu(half_T, challenge);
                     };
                 } else {
-                    for (0..half_T) |i| {
-                        const lo = self.inc_poly[2 * i];
-                        const hi = self.inc_poly[2 * i + 1];
-                        self.inc_poly[i] = lo.add(challenge.mul(hi.sub(lo)));
-                    }
+                    self.bindIncPolyCpu(half_T, challenge);
                 }
             } else {
-                for (0..half_T) |i| {
-                    const lo = self.inc_poly[2 * i];
-                    const hi = self.inc_poly[2 * i + 1];
-                    self.inc_poly[i] = lo.add(challenge.mul(hi.sub(lo)));
-                }
+                self.bindIncPolyCpu(half_T, challenge);
             }
 
             // Bind sparse matrix entries
             if (self.sparse_lookup) |*sl| {
-                sl.bind(challenge) catch @panic("sparse bind failed");
+                sl.bind(challenge, self.thread_pool) catch @panic("sparse bind failed");
 
                 // Check if lookup tables are saturated after bind
                 if (sl.isLookupSaturated()) {
                     // Deref: convert LookupTableIndex entries to F entries
                     var field_matrix = sl.derefCoeffs() catch @panic("deref failed");
-                    // sparse_lookup is now invalidated (entries freed by derefCoeffs)
                     self.sparse_lookup = null;
-                    // But we need to check: derefCoeffs frees self.entries and lookup tables,
-                    // and sets self.entries to empty. We set sparse_lookup to null.
-                    // The new field matrix takes over.
                     self.sparse_field = field_matrix;
                     _ = &field_matrix;
                 }
             } else if (self.sparse_field) |*sf| {
-                sf.bind(challenge) catch @panic("sparse bind failed");
+                sf.bind(challenge, self.thread_pool) catch @panic("sparse bind failed");
             } else unreachable;
 
             self.current_T = half_T;
@@ -518,11 +573,20 @@ pub fn Stage4GruenProver(comptime F: type) type {
         fn phase2Bind(self: *Self, challenge: F) void {
             // Bind address-major sparse matrix (includes val_init binding)
             if (self.address_major) |*am| {
-                am.bind(challenge) catch @panic("address-major bind failed");
+                am.bind(challenge, self.thread_pool) catch @panic("address-major bind failed");
             } else unreachable;
 
             self.current_K = self.current_K / 2;
             // Note: merged_eq and inc_poly are NOT bound during Phase 2 (address binding)
+        }
+
+        /// Dense inc_poly bind — sequential (in-place, cannot parallelize without extra buffer).
+        fn bindIncPolyCpu(self: *Self, half_T: usize, challenge: F) void {
+            for (0..half_T) |i| {
+                const lo = self.inc_poly[2 * i];
+                const hi = self.inc_poly[2 * i + 1];
+                self.inc_poly[i] = lo.add(challenge.mul(hi.sub(lo)));
+            }
         }
     };
 }

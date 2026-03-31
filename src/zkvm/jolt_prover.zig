@@ -1684,6 +1684,7 @@ pub fn JoltProver(comptime F: type) type {
                     stage3_r_cycle_le,
                     stage3_claims,
                     batch0, // Use the correct batching coefficient from transcript
+                    self.thread_pool,
                 ) catch {
                     try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
                     try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
@@ -1801,7 +1802,6 @@ pub fn JoltProver(comptime F: type) type {
                 }
 
                 // Verify batched = sum of weighted claims
-
                 s4_sumcheck_ns = bench_timer.read();
                 bench_timer.reset();
 

@@ -252,76 +252,221 @@ pub fn AllSuffixPolys(comptime F: type) type {
                     .m_val = m,
                     .ubuf = unreduced_buf,
                 };
-                tp.?.parallelForForce(NUM_TABLES, ptctx, struct {
-                    fn f(c: PerTableCtx, t_idx: usize) void {
-                        const table_cycle_indices = c.ibt[t_idx];
-                        if (table_cycle_indices.len == 0) return;
+                // Runtime check: is any single table heavily imbalanced?
+                const num_threads = tp.?.thread_count + 1;
+                var max_table_cycles: usize = 0;
+                for (0..NUM_TABLES) |ti| {
+                    if (ptctx.ibt[ti].len > max_table_cycles) max_table_cycles = ptctx.ibt[ti].len;
+                }
+                const imbalanced = max_table_cycles > T / num_threads;
+
+                if (imbalanced) {
+                    // Intra-table parallelism: process tables sequentially, split large tables across cores.
+                    // Pre-allocate chunk buffers once (reused across tables).
+                    const max_suffixes = MAX_SUFFIXES_PER_TABLE;
+                    const chunk_buf_per_thread = max_suffixes * m;
+                    const chunk_bufs = alloc.alloc(FoldedMulU64, num_threads * chunk_buf_per_thread) catch {
+                        // Allocation failed, fall through to per-table path
+                        @panic("OOM in initPhase intra-table alloc");
+                    };
+                    defer alloc.free(chunk_bufs);
+
+                    for (0..NUM_TABLES) |t_idx| {
+                        const table_cycle_indices = ptctx.ibt[t_idx];
+                        if (table_cycle_indices.len == 0) continue;
 
                         const ts = tableSuffixes(t_idx);
                         const num_suffixes = ts.len;
-                        const suf_mask: u128 = (@as(u128, 1) << @intCast(c.suf_len)) - 1;
-                        const base = suffix_offsets[t_idx] * c.m_val;
+                        const suf_mask: u128 = (@as(u128, 1) << @intCast(ptctx.suf_len)) - 1;
+                        const base = suffix_offsets[t_idx] * ptctx.m_val;
+                        const buf_per_thread = num_suffixes * ptctx.m_val;
 
-                        // Pre-classify suffixes (matches Jolt's suffix classification at lines 600-616)
+                        // Pre-classify suffixes
                         var suffix_one_idx: ?usize = null;
                         var suffix_01_count: usize = 0;
-                        var suffix_01_indices: [MAX_SUFFIXES_PER_TABLE]usize = undefined;
+                        var suffix_01_indices_arr: [MAX_SUFFIXES_PER_TABLE]usize = undefined;
                         var suffix_other_count: usize = 0;
-                        var suffix_other_indices: [MAX_SUFFIXES_PER_TABLE]usize = undefined;
+                        var suffix_other_indices_arr: [MAX_SUFFIXES_PER_TABLE]usize = undefined;
                         for (ts, 0..) |suffix, s_idx| {
                             if (suffix == .One) {
                                 suffix_one_idx = s_idx;
                             } else if (suffixes_mod.is01Valued(suffix)) {
-                                suffix_01_indices[suffix_01_count] = s_idx;
+                                suffix_01_indices_arr[suffix_01_count] = s_idx;
                                 suffix_01_count += 1;
                             } else {
-                                suffix_other_indices[suffix_other_count] = s_idx;
+                                suffix_other_indices_arr[suffix_other_count] = s_idx;
                                 suffix_other_count += 1;
                             }
                         }
 
-                        // Accumulate into unreduced buffers
-                        for (table_cycle_indices) |j| {
-                            const k = c.indices[j];
-                            const prefix_bits = (k >> @intCast(c.suf_len)) & c.mask;
-                            const suffix_bits = LookupBits(128).new(k & suf_mask, c.suf_len);
-                            const u = c.u_ev[j];
-                            const u_limbs = u.limbs;
-                            const idx: usize = @intCast(prefix_bits);
-
-                            // Suffixes::One — just add u (no multiply)
-                            if (suffix_one_idx) |one_idx| {
-                                c.ubuf[base + one_idx * c.m_val + idx].addBigInt4(u_limbs);
-                            }
-
-                            // 01-valued suffixes — add u when suffix_mle == 1
-                            for (0..suffix_01_count) |i| {
-                                const s_idx = suffix_01_indices[i];
-                                const t = suffixMle(ts[s_idx], suffix_bits);
-                                if (t == 1) {
-                                    c.ubuf[base + s_idx * c.m_val + idx].addBigInt4(u_limbs);
+                        if (table_cycle_indices.len < 256) {
+                            // Small table: accumulate directly into shared unreduced_buf
+                            for (table_cycle_indices) |j| {
+                                const k = ptctx.indices[j];
+                                const prefix_bits = (k >> @intCast(ptctx.suf_len)) & ptctx.mask;
+                                const suffix_bits = LookupBits(128).new(k & suf_mask, ptctx.suf_len);
+                                const u = ptctx.u_ev[j];
+                                const idx: usize = @intCast(prefix_bits);
+                                if (suffix_one_idx) |oi| unreduced_buf[base + oi * ptctx.m_val + idx].addBigInt4(u.limbs);
+                                for (0..suffix_01_count) |i| {
+                                    const si = suffix_01_indices_arr[i];
+                                    if (suffixMle(ts[si], suffix_bits) == 1) unreduced_buf[base + si * ptctx.m_val + idx].addBigInt4(u.limbs);
+                                }
+                                for (0..suffix_other_count) |i| {
+                                    const si = suffix_other_indices_arr[i];
+                                    const t2 = suffixMle(ts[si], suffix_bits);
+                                    if (t2 != 0) unreduced_buf[base + si * ptctx.m_val + idx].addAssign(field_mod.mulU64Unreduced(u, t2));
                                 }
                             }
+                        } else {
+                            // Large table: split cycles across threads with pre-allocated chunk buffers
+                            const chunk_size = (table_cycle_indices.len + num_threads - 1) / num_threads;
+                            const actual_chunks = (table_cycle_indices.len + chunk_size - 1) / chunk_size;
 
-                            // General suffixes — multiply u by t (unreduced, no Montgomery)
-                            for (0..suffix_other_count) |i| {
-                                const s_idx = suffix_other_indices[i];
-                                const t = suffixMle(ts[s_idx], suffix_bits);
-                                if (t != 0) {
-                                    c.ubuf[base + s_idx * c.m_val + idx].addAssign(field_mod.mulU64Unreduced(u, t));
+                            // Zero only the needed portion of chunk buffers
+                            for (0..actual_chunks) |ci| {
+                                const local_start = ci * chunk_buf_per_thread;
+                                for (chunk_bufs[local_start .. local_start + buf_per_thread]) |*slot| slot.* = FoldedMulU64.zero();
+                            }
+
+                            const ChunkCtx = struct {
+                                tci_p: []const usize,
+                                indices_p: []const u128,
+                                u_ev_p: []const F,
+                                suf_len_p: usize,
+                                mask_p: u128,
+                                suf_mask_p: u128,
+                                m_val_p: usize,
+                                s_one_p: ?usize,
+                                s_01_cnt_p: usize,
+                                s_01_idx_p: [MAX_SUFFIXES_PER_TABLE]usize,
+                                s_other_cnt_p: usize,
+                                s_other_idx_p: [MAX_SUFFIXES_PER_TABLE]usize,
+                                ts_p: []const suffixes_mod.Suffixes,
+                                chunk_sz: usize,
+                                buf: []FoldedMulU64,
+                                cbpt: usize, // chunk_buf_per_thread (stride)
+                                bpt: usize, // buf_per_thread (actual used)
+                            };
+                            const cctx = ChunkCtx{
+                                .tci_p = table_cycle_indices,
+                                .indices_p = lookup_indices,
+                                .u_ev_p = u_evals,
+                                .suf_len_p = ptctx.suf_len,
+                                .mask_p = ptctx.mask,
+                                .suf_mask_p = suf_mask,
+                                .m_val_p = ptctx.m_val,
+                                .s_one_p = suffix_one_idx,
+                                .s_01_cnt_p = suffix_01_count,
+                                .s_01_idx_p = suffix_01_indices_arr,
+                                .s_other_cnt_p = suffix_other_count,
+                                .s_other_idx_p = suffix_other_indices_arr,
+                                .ts_p = ts,
+                                .chunk_sz = chunk_size,
+                                .buf = chunk_bufs,
+                                .cbpt = chunk_buf_per_thread,
+                                .bpt = buf_per_thread,
+                            };
+                            tp.?.parallelForForce(actual_chunks, cctx, struct {
+                                fn f(c: ChunkCtx, chunk_idx: usize) void {
+                                    const ci_start = chunk_idx * c.chunk_sz;
+                                    const ci_end = @min(ci_start + c.chunk_sz, c.tci_p.len);
+                                    const local_base = chunk_idx * c.cbpt;
+                                    for (ci_start..ci_end) |ci| {
+                                        const j = c.tci_p[ci];
+                                        const k = c.indices_p[j];
+                                        const prefix_bits = (k >> @intCast(c.suf_len_p)) & c.mask_p;
+                                        const suffix_bits = LookupBits(128).new(k & c.suf_mask_p, c.suf_len_p);
+                                        const u = c.u_ev_p[j];
+                                        const idx: usize = @intCast(prefix_bits);
+                                        if (c.s_one_p) |oi| c.buf[local_base + oi * c.m_val_p + idx].addBigInt4(u.limbs);
+                                        for (0..c.s_01_cnt_p) |i| {
+                                            const si = c.s_01_idx_p[i];
+                                            if (suffixMle(c.ts_p[si], suffix_bits) == 1) c.buf[local_base + si * c.m_val_p + idx].addBigInt4(u.limbs);
+                                        }
+                                        for (0..c.s_other_cnt_p) |i| {
+                                            const si = c.s_other_idx_p[i];
+                                            const t2 = suffixMle(c.ts_p[si], suffix_bits);
+                                            if (t2 != 0) c.buf[local_base + si * c.m_val_p + idx].addAssign(field_mod.mulU64Unreduced(u, t2));
+                                        }
+                                    }
+                                }
+                            }.f);
+
+                            // Merge chunk buffers into unreduced_buf
+                            for (0..actual_chunks) |ci| {
+                                const local_start = ci * chunk_buf_per_thread;
+                                for (0..buf_per_thread) |p| {
+                                    unreduced_buf[base + p].addAssign(chunk_bufs[local_start + p]);
                                 }
                             }
                         }
 
                         // Barrett reduce into final suffix polys
                         for (0..num_suffixes) |s_idx| {
-                            const q_poly = c.self_tables[t_idx].?.polys[s_idx];
-                            for (0..c.m_val) |p| {
-                                q_poly[p] = field_mod.reduceMulU64(c.ubuf[base + s_idx * c.m_val + p]);
+                            const q_poly = ptctx.self_tables[t_idx].?.polys[s_idx];
+                            for (0..ptctx.m_val) |p| {
+                                q_poly[p] = field_mod.reduceMulU64(unreduced_buf[base + s_idx * ptctx.m_val + p]);
                             }
                         }
                     }
-                }.f);
+                } else {
+                    // Balanced: per-table parallel dispatch (all tables concurrent, 1 thread each)
+                    tp.?.parallelForForce(NUM_TABLES, ptctx, struct {
+                        fn f(c: PerTableCtx, t_idx: usize) void {
+                            const table_cycle_indices = c.ibt[t_idx];
+                            if (table_cycle_indices.len == 0) return;
+
+                            const ts = tableSuffixes(t_idx);
+                            const num_suffixes = ts.len;
+                            const suf_mask: u128 = (@as(u128, 1) << @intCast(c.suf_len)) - 1;
+                            const base = suffix_offsets[t_idx] * c.m_val;
+
+                            var suffix_one_idx: ?usize = null;
+                            var suffix_01_count: usize = 0;
+                            var suffix_01_indices_arr: [MAX_SUFFIXES_PER_TABLE]usize = undefined;
+                            var suffix_other_count: usize = 0;
+                            var suffix_other_indices_arr: [MAX_SUFFIXES_PER_TABLE]usize = undefined;
+                            for (ts, 0..) |suffix, s_idx| {
+                                if (suffix == .One) {
+                                    suffix_one_idx = s_idx;
+                                } else if (suffixes_mod.is01Valued(suffix)) {
+                                    suffix_01_indices_arr[suffix_01_count] = s_idx;
+                                    suffix_01_count += 1;
+                                } else {
+                                    suffix_other_indices_arr[suffix_other_count] = s_idx;
+                                    suffix_other_count += 1;
+                                }
+                            }
+
+                            for (table_cycle_indices) |j| {
+                                const k = c.indices[j];
+                                const prefix_bits = (k >> @intCast(c.suf_len)) & c.mask;
+                                const suffix_bits = LookupBits(128).new(k & suf_mask, c.suf_len);
+                                const u = c.u_ev[j];
+                                const u_limbs = u.limbs;
+                                const idx: usize = @intCast(prefix_bits);
+                                if (suffix_one_idx) |one_idx| c.ubuf[base + one_idx * c.m_val + idx].addBigInt4(u_limbs);
+                                for (0..suffix_01_count) |i| {
+                                    const s_idx = suffix_01_indices_arr[i];
+                                    if (suffixMle(ts[s_idx], suffix_bits) == 1) c.ubuf[base + s_idx * c.m_val + idx].addBigInt4(u_limbs);
+                                }
+                                for (0..suffix_other_count) |i| {
+                                    const s_idx = suffix_other_indices_arr[i];
+                                    const t2 = suffixMle(ts[s_idx], suffix_bits);
+                                    if (t2 != 0) c.ubuf[base + s_idx * c.m_val + idx].addAssign(field_mod.mulU64Unreduced(u, t2));
+                                }
+                            }
+
+                            for (0..num_suffixes) |s_idx| {
+                                const q_poly = c.self_tables[t_idx].?.polys[s_idx];
+                                for (0..c.m_val) |p| {
+                                    q_poly[p] = field_mod.reduceMulU64(c.ubuf[base + s_idx * c.m_val + p]);
+                                }
+                            }
+                        }
+                    }.f);
+                }
             } else if (tp) |pool| {
                 // Fallback: per-chunk parallel path with sequential merge
                 const num_chunks = pool.thread_count + 1;
@@ -609,9 +754,13 @@ pub fn proverMsgReadChecking(
         .half_len = half_len,
     };
 
+    const FoldedMulU64 = @import("../../field/mod.zig").FoldedMulU64;
+    const reduceMulU64 = @import("../../field/mod.zig").reduceMulU64;
+
     const rc_map = struct {
         fn map(ctx: ReadCheckCtx, start: usize, end: usize) [3]F {
-            var acc = [3]F{ F.zero(), F.zero(), F.zero() };
+            // Use unreduced accumulators — defer Montgomery reduction to end
+            var acc: [3]FoldedMulU64 = .{FoldedMulU64.zero()} ** 3;
             for (start..end) |b_idx| {
                 const b = LookupBits(128).new(@as(u128, b_idx), ctx.log_len - 1);
 
@@ -627,7 +776,7 @@ pub fn proverMsgReadChecking(
                     prefixes_c2[i] = prefixes_mod.prefixMle(F, prefix, &ctx.prefix_checkpoints.checkpoints, ctx.r_x, 2, &b_copy, ctx.round);
                 }
 
-                // Sum contributions from all tables
+                // Sum contributions from all tables using unreduced accumulation
                 for (0..NUM_TABLES) |table_idx| {
                     if (ctx.suffix_polys.tables[table_idx]) |table| {
                         const table_suffixes = tableSuffixes(table_idx);
@@ -647,13 +796,14 @@ pub fn proverMsgReadChecking(
                         const combined_2_left = tableCombine(F, table_idx, &prefixes_c2, suffixes_left[0..table_suffixes.len]);
                         const combined_2_right = tableCombine(F, table_idx, &prefixes_c2, suffixes_right[0..table_suffixes.len]);
 
-                        acc[0] = acc[0].add(combined_0);
-                        acc[1] = acc[1].add(combined_2_left);
-                        acc[2] = acc[2].add(combined_2_right);
+                        acc[0].addBigInt4(combined_0.limbs);
+                        acc[1].addBigInt4(combined_2_left.limbs);
+                        acc[2].addBigInt4(combined_2_right.limbs);
                     }
                 }
             }
-            return acc;
+            // Reduce once at end of chunk
+            return .{ reduceMulU64(acc[0]), reduceMulU64(acc[1]), reduceMulU64(acc[2]) };
         }
     }.map;
 
@@ -1502,22 +1652,46 @@ pub fn initQRaf(
             }
         }.f);
 
-        // Merge chunk buffers and reduce to F
-        // First merge all chunks into chunk_bufs[0]
-        for (chunk_bufs[1..]) |buf| {
-            for (0..buf_size) |i| {
-                chunk_bufs[0][i].addAssign(buf[i]);
-            }
-        }
-        // Then Barrett-reduce into output Q arrays
-        const merged = chunk_bufs[0];
-        for (0..poly_len) |i| {
-            left.Q[0][i] = field_mod.reduceMulU64(merged[0 * poly_len + i]);
-            left.Q[1][i] = field_mod.reduceMulU64(merged[1 * poly_len + i]);
-            right.Q[0][i] = field_mod.reduceMulU64(merged[2 * poly_len + i]);
-            right.Q[1][i] = field_mod.reduceMulU64(merged[3 * poly_len + i]);
-            identity.Q[0][i] = field_mod.reduceMulU64(merged[4 * poly_len + i]);
-            identity.Q[1][i] = field_mod.reduceMulU64(merged[5 * poly_len + i]);
+        // Merge chunk buffers and reduce to F — parallelized
+        {
+            const MergeCtx = struct {
+                cbufs: []const []FoldedMulU64,
+                n_chunks: usize,
+                bsize: usize,
+                plen: usize,
+                l: *RafDecomposition(F),
+                r: *RafDecomposition(F),
+                id: *RafDecomposition(F),
+            };
+            const mctx = MergeCtx{
+                .cbufs = chunk_bufs,
+                .n_chunks = num_chunks,
+                .bsize = buf_size,
+                .plen = poly_len,
+                .l = left,
+                .r = right,
+                .id = identity,
+            };
+            pool.parallelForForce(poly_len, mctx, struct {
+                fn f(c: MergeCtx, i: usize) void {
+                    // Merge all chunks for 6 Q entries at position i
+                    var merged: [6]FoldedMulU64 = .{FoldedMulU64.zero()} ** 6;
+                    for (0..6) |q| {
+                        merged[q] = c.cbufs[0][q * c.plen + i];
+                    }
+                    for (c.cbufs[1..c.n_chunks]) |buf| {
+                        for (0..6) |q| {
+                            merged[q].addAssign(buf[q * c.plen + i]);
+                        }
+                    }
+                    c.l.Q[0][i] = field_mod.reduceMulU64(merged[0]);
+                    c.l.Q[1][i] = field_mod.reduceMulU64(merged[1]);
+                    c.r.Q[0][i] = field_mod.reduceMulU64(merged[2]);
+                    c.r.Q[1][i] = field_mod.reduceMulU64(merged[3]);
+                    c.id.Q[0][i] = field_mod.reduceMulU64(merged[4]);
+                    c.id.Q[1][i] = field_mod.reduceMulU64(merged[5]);
+                }
+            }.f);
         }
     } else {
         // Sequential fallback (original code)
@@ -1771,9 +1945,13 @@ pub fn proverMsgRaf(
         .half_len = half_len,
     };
 
+    const FoldedMulU64_ = @import("../../field/mod.zig").FoldedMulU64;
+    const reduceMulU64_ = @import("../../field/mod.zig").reduceMulU64;
+
     const raf_map = struct {
         fn map(ctx: RafCtx, start: usize, end: usize) [6]F {
-            var acc = [6]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
+            // Use unreduced accumulators — defer Montgomery reduction to end
+            var acc: [6]FoldedMulU64_ = .{FoldedMulU64_.zero()} ** 6;
             for (start..end) |b| {
                 const l_q0_left = ctx.left_ps.Q[0][b];
                 const l_q0_right = ctx.left_ps.Q[0][b + ctx.half_len];
@@ -1809,17 +1987,32 @@ pub fn proverMsgRaf(
                 const i_pair0_2_left = i_prefix[1].mul(i_q0_left);
                 const i_pair0_2_right = i_prefix[1].mul(i_q0_right);
 
-                // Left totals
-                acc[0] = acc[0].add(l_pair0_0).add(l_q1_left);
-                acc[1] = acc[1].add(l_pair0_2_left).add(l_q1_left);
-                acc[2] = acc[2].add(l_pair0_2_right).add(l_q1_right);
+                // Left totals (unreduced)
+                acc[0].addBigInt4(l_pair0_0.limbs);
+                acc[0].addBigInt4(l_q1_left.limbs);
+                acc[1].addBigInt4(l_pair0_2_left.limbs);
+                acc[1].addBigInt4(l_q1_left.limbs);
+                acc[2].addBigInt4(l_pair0_2_right.limbs);
+                acc[2].addBigInt4(l_q1_right.limbs);
 
-                // Right+Identity totals
-                acc[3] = acc[3].add(i_pair0_0).add(i_q1_left).add(r_pair0_0).add(r_q1_left);
-                acc[4] = acc[4].add(i_pair0_2_left).add(i_q1_left).add(r_pair0_2_left).add(r_q1_left);
-                acc[5] = acc[5].add(i_pair0_2_right).add(i_q1_right).add(r_pair0_2_right).add(r_q1_right);
+                // Right+Identity totals (unreduced)
+                acc[3].addBigInt4(i_pair0_0.limbs);
+                acc[3].addBigInt4(i_q1_left.limbs);
+                acc[3].addBigInt4(r_pair0_0.limbs);
+                acc[3].addBigInt4(r_q1_left.limbs);
+                acc[4].addBigInt4(i_pair0_2_left.limbs);
+                acc[4].addBigInt4(i_q1_left.limbs);
+                acc[4].addBigInt4(r_pair0_2_left.limbs);
+                acc[4].addBigInt4(r_q1_left.limbs);
+                acc[5].addBigInt4(i_pair0_2_right.limbs);
+                acc[5].addBigInt4(i_q1_right.limbs);
+                acc[5].addBigInt4(r_pair0_2_right.limbs);
+                acc[5].addBigInt4(r_q1_right.limbs);
             }
-            return acc;
+            // Reduce once at end of chunk
+            var result: [6]F = undefined;
+            inline for (0..6) |i| result[i] = reduceMulU64_(acc[i]);
+            return result;
         }
     }.map;
 

@@ -13,7 +13,7 @@ const Allocator = std.mem.Allocator;
 
 /// Minimum number of elements per thread to justify parallelism.
 /// Below this threshold, work runs sequentially on the caller's thread.
-const MIN_ITEMS_PER_THREAD: usize = 256;
+const MIN_ITEMS_PER_THREAD: usize = 8;
 
 const MAX_THREADS: usize = 16;
 const cache_line = atomic.cache_line;
@@ -779,6 +779,42 @@ pub const ThreadPool = struct {
                 signal(p.latch);
             }
 
+            /// Specialized wait: tries direct call for jobs matching our Executor,
+            /// falls back to indirect call for foreign jobs. This lets LLVM inline
+            /// the map function through the direct call path.
+            fn spinWait(latch: *SpinLatch, worker: *WorkerData, pool: *ThreadPool) void {
+                if (latch.probe()) return;
+                while (true) {
+                    if (worker.deque.pop()) |*j| {
+                        var job = j.*;
+                        executeJobSpecialized(&job, worker);
+                        if (latch.probe()) return;
+                        continue;
+                    }
+                    if (worker.tryStealing(pool)) |*j| {
+                        var job = j.*;
+                        executeJobSpecialized(&job, worker);
+                        if (latch.probe()) return;
+                        continue;
+                    }
+                    for (0..32) |_| {
+                        if (latch.probe()) return;
+                        atomic.spinLoopHint();
+                    }
+                    std.Thread.yield() catch {};
+                }
+            }
+
+            /// If the job belongs to this Executor, call execute directly (LLVM can inline).
+            /// Otherwise fall back to the indirect function pointer.
+            inline fn executeJobSpecialized(job: *Job, worker: *WorkerData) void {
+                if (job.execute_fn == &execute) {
+                    execute(job, worker);
+                } else {
+                    job.execute_fn(job, worker);
+                }
+            }
+
             /// Rayon join pattern: push right half to deque, execute left inline,
             /// try to pop right back. If right wasn't stolen, run it inline
             /// with ZERO latch overhead. If stolen, spin-wait.
@@ -837,13 +873,13 @@ pub const ThreadPool = struct {
                                 // Got it back! Run inline, no latch overhead
                                 right_result = computeRange(ctx_ptr, mid, end, splits / 2, worker, pool);
                             } else {
-                                // Got a different job — execute it and keep waiting
-                                job.execute_fn(&job, worker);
-                                right_spin.waitWhileWorking(worker, pool);
+                                // Got a different job — use specialized dispatch (direct call if ours)
+                                executeJobSpecialized(&job, worker);
+                                spinWait(&right_spin, worker, pool);
                             }
                         } else {
-                            // Deque empty, right was stolen — wait
-                            right_spin.waitWhileWorking(worker, pool);
+                            // Deque empty, right was stolen — wait with specialized dispatch
+                            spinWait(&right_spin, worker, pool);
                         }
                     }
                     // else: right already completed (stolen and finished fast)

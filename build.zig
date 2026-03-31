@@ -131,6 +131,40 @@ pub fn build(b: *std.Build) void {
     const bench_tp_step = b.step("bench-tp", "Run ThreadPool micro-benchmark");
     bench_tp_step.dependOn(&run_bench_tp.step);
 
+    // Benchmark: Parallelism threshold
+    const bench_thresh = b.addExecutable(.{
+        .name = "bench-thresh",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/cycle_compute/bench_threshold.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    b.installArtifact(bench_thresh);
+    const run_bench_thresh = b.addRunArtifact(bench_thresh);
+    const bench_thresh_step = b.step("bench-thresh", "Run parallelism threshold benchmark");
+    bench_thresh_step.dependOn(&run_bench_thresh.step);
+
+    // Benchmark: Cycle compute kernel
+    const bench_cycle = b.addExecutable(.{
+        .name = "bench-cycle",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/cycle_compute/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    b.installArtifact(bench_cycle);
+    const run_bench_cycle = b.addRunArtifact(bench_cycle);
+    const bench_cycle_step = b.step("bench-cycle", "Run cycle compute kernel benchmark");
+    bench_cycle_step.dependOn(&run_bench_cycle.step);
+
     // Example: RISC-V Emulation
     const riscv_example = b.addExecutable(.{
         .name = "example-riscv",

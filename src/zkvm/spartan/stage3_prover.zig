@@ -512,7 +512,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 }
 
                 // Compress evaluations to [c0, c2, c3] using finite differences (no allocation for interp)
-                const inv2 = F.fromU64(2).inverse().?;
+                const inv2 = poly_mod.UniPoly(F).INV2;
                 const inv6 = F.fromU64(6).inverse().?;
                 const d1_c = combined_evals[1].sub(combined_evals[0]);
                 const d2_c = combined_evals[2].sub(combined_evals[1]);
@@ -1227,7 +1227,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 const ddd = dd2.sub(dd1);
 
                 const six_inv = F.fromU64(6).inverse() orelse F.one();
-                const two_inv = F.fromU64(2).inverse() orelse F.one();
+                const two_inv = poly_mod.UniPoly(F).INV2;
 
                 const c3 = ddd.mul(six_inv);
                 const c2 = dd1.mul(two_inv).sub(c3.mul(F.fromU64(3)));

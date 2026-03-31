@@ -569,7 +569,7 @@ test "R1CS input evaluation: all inputs populated" {
     }
 
     const witnesses = [_]R1CSCycleInputs(F){ witness0, witness1 };
-    const r = [_]F{F.fromU64(1).mul(F.fromU64(2).inverse().?)}; // r0 = 1/2
+    const r = [_]F{F.fromU64(1).mul(@import("../../poly/mod.zig").UniPoly(F).INV2)}; // r0 = 1/2
 
     const result = try R1CSInputEvaluator(F).computeClaimedInputs(
         std.testing.allocator,
@@ -582,7 +582,7 @@ test "R1CS input evaluation: all inputs populated" {
     //          = (witness0[i] + witness1[i]) / 2
     for (0..NUM_R1CS_INPUTS) |i| {
         const expected = witness0.values[i].add(witness1.values[i])
-            .mul(F.fromU64(2).inverse().?);
+            .mul(@import("../../poly/mod.zig").UniPoly(F).INV2);
         try std.testing.expect(result[i].eql(expected));
     }
 }

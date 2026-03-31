@@ -1101,7 +1101,7 @@ pub fn MontgomeryField(
                 if (!r.lessThanModulus()) r = r.subtractModulus();
                 return r;
             }
-            if (comptime use_asm_mul) return self.montgomeryMulX86(other);
+            if (!@inComptime() and comptime use_asm_mul) return self.montgomeryMulX86(other);
             return self.montgomeryMul(other);
         }
 
@@ -1113,7 +1113,7 @@ pub fn MontgomeryField(
                 if (!r.lessThanModulus()) r = r.subtractModulus();
                 return r;
             }
-            if (comptime use_asm_mul) return self.montgomeryMulX86(self);
+            if (!@inComptime() and comptime use_asm_mul) return self.montgomeryMulX86(self);
             return self.montgomeryMul(self);
         }
 
@@ -1442,7 +1442,7 @@ pub const BN254Scalar = struct {
     }
 
     inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
-        if (comptime builtin.cpu.arch == .x86_64) {
+        if (!@inComptime() and comptime builtin.cpu.arch == .x86_64) {
             var result: u64 = undefined;
             const b_out = x86.subborrow(@truncate(borrow_in), a, b, &result);
             return .{ .result = result, .borrow = b_out };
@@ -1739,7 +1739,7 @@ pub const BN254Scalar = struct {
             if (!r.lessThanModulus()) r = r.subtractModulus();
             return r;
         }
-        if (comptime use_asm_mul) return self.montgomeryMulX86(other);
+        if (!@inComptime() and comptime use_asm_mul) return self.montgomeryMulX86(other);
         return self.montgomeryMul(other);
     }
 
@@ -1980,7 +1980,7 @@ pub const BN254Scalar = struct {
             if (!r.lessThanModulus()) r = r.subtractModulus();
             return r;
         }
-        if (comptime use_asm_mul) return self.montgomeryMulX86(self);
+        if (!@inComptime() and comptime use_asm_mul) return self.montgomeryMulX86(self);
         // Optimized squaring: we can compute a^2 with fewer multiplications
         // Since (a0 + a1*2^64 + a2*2^128 + a3*2^192)^2 has symmetric terms
         // For example: 2*a0*a1 instead of a0*a1 + a1*a0

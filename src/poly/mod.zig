@@ -675,6 +675,17 @@ pub fn UniPoly(comptime F: type) type {
     return struct {
         const Self = @This();
 
+        /// Precomputed field constants to avoid redundant inverse() calls per round.
+        /// Each inverse costs ~256 Montgomery muls via Fermat's little theorem.
+        pub const INV2: F = blk: {
+            @setEvalBranchQuota(1000000);
+            break :blk F.fromU64(2).inverse().?;
+        };
+        pub const INV6: F = blk: {
+            @setEvalBranchQuota(1000000);
+            break :blk F.fromU64(6).inverse().?;
+        };
+
         /// Coefficients in monomial basis (constant term first)
         coeffs: []F,
         allocator: Allocator,
@@ -738,8 +749,8 @@ pub fn UniPoly(comptime F: type) type {
             // We compute these using field arithmetic
 
             // Compute 1/6 and 1/2 as field inverses
-            const inv6 = F.fromU64(6).inverse().?;
-            const inv2 = F.fromU64(2).inverse().?;
+            const inv6 = Self.INV6;
+            const inv2 = Self.INV2;
 
             // c1 = (-11*p0 + 18*p1 - 9*p2 + 2*p3) / 6
             const c1_num = F.zero()
@@ -796,7 +807,7 @@ pub fn UniPoly(comptime F: type) type {
             // c2 = (p(2) - 2*p(1) + p(0) - 6*p_inf) / 2
             const two = F.fromU64(2);
             const six = F.fromU64(6);
-            const inv2 = two.inverse().?;
+            const inv2 = Self.INV2;
 
             const c2_num = p2.sub(two.mul(p1)).add(p0).sub(six.mul(p_inf));
             const c2 = c2_num.mul(inv2);
@@ -832,7 +843,7 @@ pub fn UniPoly(comptime F: type) type {
             // c2 = (p(2) - 2*p(1) + p(0) - 6*p_inf) / 2
             const two = F.fromU64(2);
             const six = F.fromU64(6);
-            const inv2 = two.inverse().?;
+            const inv2 = Self.INV2;
 
             const c2_num = p2.sub(two.mul(p1)).add(p0).sub(six.mul(p_inf));
             const c2 = c2_num.mul(inv2);
@@ -878,7 +889,7 @@ pub fn UniPoly(comptime F: type) type {
             // c2 = (eval_2 - 2*p(1) + eval_0) / 2
             const two = F.fromU64(2);
             const c2_num = eval_2.sub(two.mul(p1)).add(eval_0);
-            const c2 = c2_num.mul(two.inverse().?);
+            const c2 = c2_num.mul(Self.INV2);
 
             // Compressed format: [c0, c2, c3] where c3=0 for degree-2
             return .{ .coeffs = [3]F{ eval_0, c2, F.zero() } };
@@ -1125,7 +1136,7 @@ pub fn UniPoly(comptime F: type) type {
 
             // Fast path for small n using closed-form finite differences (no Gaussian elimination)
             if (n <= 4) {
-                const inv2 = F.fromU64(2).inverse().?;
+                const inv2 = Self.INV2;
                 const compressed = try allocator.alloc(F, n - 1);
                 compressed[0] = evals[0]; // c0 = p(0)
                 if (n == 2) {
@@ -1137,7 +1148,7 @@ pub fn UniPoly(comptime F: type) type {
                     return compressed;
                 } else {
                     // degree 3: finite differences
-                    const inv6 = F.fromU64(6).inverse().?;
+                    const inv6 = Self.INV6;
                     const d1 = evals[1].sub(evals[0]);
                     const d2 = evals[2].sub(evals[1]);
                     const d3 = evals[3].sub(evals[2]);
@@ -1217,7 +1228,7 @@ pub fn UniPoly(comptime F: type) type {
         /// Evaluate degree-2 poly at x from Vandermonde evals [p(0), p(1), p(2)].
         /// Uses Newton forward differences: 6 muls, no allocation.
         pub fn evalFromEvalsDeg2(evals: [3]F, x: F) F {
-            const inv2 = F.fromU64(2).inverse().?;
+            const inv2 = Self.INV2;
             // Newton forward differences for points 0, 1, 2:
             // p(x) = p(0) + Δ₁·x + Δ₂·x·(x-1)/2
             // where Δ₁ = p(1)-p(0), Δ₂ = p(2)-2p(1)+p(0)
@@ -1230,8 +1241,8 @@ pub fn UniPoly(comptime F: type) type {
         /// Evaluate degree-3 poly at x from Vandermonde evals [p(0), p(1), p(2), p(3)].
         /// Uses Newton forward differences: ~8 muls, no allocation.
         pub fn evalFromEvalsDeg3(evals: [4]F, x: F) F {
-            const inv2 = F.fromU64(2).inverse().?;
-            const inv6 = F.fromU64(6).inverse().?;
+            const inv2 = Self.INV2;
+            const inv6 = Self.INV6;
             // Newton forward differences for points 0, 1, 2, 3:
             const d1 = evals[1].sub(evals[0]);
             const d2 = evals[2].sub(evals[1]);
@@ -1362,7 +1373,7 @@ pub fn UniPoly(comptime F: type) type {
         }
 
         /// Product of 8 linear polynomials at {1..8, inf}. Cost: 31 muls + 2 mulU64.
-        fn evalLinearProd8Internal(p: [8][2]F) [9]F {
+        inline fn evalLinearProd8Internal(p: [8][2]F) [9]F {
             // Left half
             const a = evalLinearProd4Internal(p[0..4].*);
             const a_inf6 = field.mulU64(a[4], 6);
@@ -1393,7 +1404,7 @@ pub fn UniPoly(comptime F: type) type {
         ///
         /// Uses divide-and-conquer product tree: 40 field muls total
         /// (31 from 8-internal + 9 cross-products with 9th factor).
-        pub fn evalLinearProd9(pairs: [9][2]F) [9]F {
+        pub inline fn evalLinearProd9(pairs: [9][2]F) [9]F {
             const tree8 = evalLinearProd8Internal(pairs[0..8].*);
 
             // 9th factor: slide linearly from p(1) to p(8)
@@ -1414,7 +1425,7 @@ pub fn UniPoly(comptime F: type) type {
         /// Evaluate product of 9 linear polynomials and accumulate into unreduced
         /// product accumulators. Defers Montgomery reduction for better throughput.
         /// Cost: 31 muls (8-internal) + 2 mulU64 + 9 widening muls.
-        pub fn evalProd9Accumulate(
+        pub inline fn evalProd9Accumulate(
             pairs: [9][2]F,
             accum: *[9]field.UnreducedProductAccum,
         ) void {
@@ -1435,7 +1446,7 @@ pub fn UniPoly(comptime F: type) type {
         ///
         /// Uses product tree for first 8, slides 9th and 10th factors.
         /// Cost: ~58 muls (was 90 naive).
-        pub fn evalLinearProd10(pairs: [10][2]F) [10]F {
+        pub inline fn evalLinearProd10(pairs: [10][2]F) [10]F {
             const tree8 = evalLinearProd8Internal(pairs[0..8].*);
 
             const delta9 = pairs[8][1].sub(pairs[8][0]);
@@ -1548,7 +1559,7 @@ test "EqPolynomial partition of unity" {
 
     // Test 1: with r = [1/2, 1/3] (simple values)
     {
-        const half = F.one().mul(F.fromU64(2).inverse().?);
+        const half = F.one().mul(UniPoly(F).INV2);
         const third = F.one().mul(F.fromU64(3).inverse().?);
         const r = [_]F{ half, third };
 

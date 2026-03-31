@@ -695,7 +695,7 @@ fn evaluateCubicAtPointGeneric(comptime F: type, evals: [4]F, x: F) F {
     const L0 = x_minus_1.mul(x_minus_2).mul(x_minus_3).mul(F.fromU64(6).neg().inverse().?);
 
     // L_1(x) = x(x-2)(x-3) / (1-0)(1-2)(1-3) = x(x-2)(x-3) / (1*-1*-2) = x(x-2)(x-3) / 2
-    const L1 = x_minus_0.mul(x_minus_2).mul(x_minus_3).mul(F.fromU64(2).inverse().?);
+    const L1 = x_minus_0.mul(x_minus_2).mul(x_minus_3).mul(poly_mod.UniPoly(F).INV2);
 
     // L_2(x) = x(x-1)(x-3) / (2-0)(2-1)(2-3) = x(x-1)(x-3) / (2*1*-1) = x(x-1)(x-3) / (-2)
     const L2 = x_minus_0.mul(x_minus_1).mul(x_minus_3).mul(F.fromU64(2).neg().inverse().?);

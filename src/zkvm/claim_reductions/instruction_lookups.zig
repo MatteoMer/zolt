@@ -20,7 +20,9 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const EqPolynomial = @import("../../poly/mod.zig").EqPolynomial;
+const poly_mod = @import("../../poly/mod.zig");
+const EqPolynomial = poly_mod.EqPolynomial;
+const UniPoly = poly_mod.UniPoly;
 const R1CSInputIndex = @import("../r1cs/constraints.zig").R1CSInputIndex;
 const RawR1CSInputs = @import("../r1cs/evaluators.zig").RawR1CSInputs;
 
@@ -599,7 +601,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             const neg6 = F.zero().sub(F.fromU64(6));
             const L0 = c_minus_1.mul(c_minus_2).mul(c_minus_3).mul(neg6.inverse().?);
 
-            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(F.fromU64(2).inverse().?);
+            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(UniPoly(F).INV2);
 
             const neg2 = F.zero().sub(F.fromU64(2));
             const L2 = c.mul(c_minus_1).mul(c_minus_3).mul(neg2.inverse().?);

@@ -10680,7 +10680,7 @@ fn addEvalsAsMonomialToCoeffs(comptime F: type, combined_coeffs: []F, polys: []c
         combined_coeffs[1] = combined_coeffs[1].add(batch_coeff.mul(c1));
     } else if (n_evals == 3) {
         // Degree 2: c0 = p(0), c2 = (p(2) - 2p(1) + p(0)) / 2, c1 = p(1) - p(0) - c2
-        const inv2 = F.fromU64(2).inverse().?;
+        const inv2 = UniPoly(F).INV2;
         const c0 = polys[0];
         const c2 = polys[2].sub(polys[1]).sub(polys[1]).add(polys[0]).mul(inv2);
         const c1 = polys[1].sub(polys[0]).sub(c2);
@@ -10689,7 +10689,7 @@ fn addEvalsAsMonomialToCoeffs(comptime F: type, combined_coeffs: []F, polys: []c
         combined_coeffs[2] = combined_coeffs[2].add(batch_coeff.mul(c2));
     } else if (n_evals == 4) {
         // Degree 3: finite differences
-        const inv2 = F.fromU64(2).inverse().?;
+        const inv2 = UniPoly(F).INV2;
         const inv6 = F.fromU64(6).inverse().?;
         const c0 = polys[0];
         const d1 = polys[1].sub(polys[0]);
@@ -11265,7 +11265,7 @@ fn evaluateDeg3FromEvals(comptime F: type, evals: [4]F, challenge: F) F {
     const xm2 = x.sub(F.fromU64(2));
     const xm3 = x.sub(F.fromU64(3));
     const six_inv = F.fromU64(6).inverse().?;
-    const two_inv = F.fromU64(2).inverse().?;
+    const two_inv = UniPoly(F).INV2;
 
     const l0 = xm1.mul(xm2).mul(xm3).mul(six_inv).neg();
     const l1 = x.mul(xm2).mul(xm3).mul(two_inv);

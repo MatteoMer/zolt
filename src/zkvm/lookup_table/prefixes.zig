@@ -90,31 +90,35 @@ pub fn LookupBits(comptime max_bits: usize) type {
         ///   x = bits from ODD positions = left operand
         ///   y = bits from EVEN positions = right operand
         pub fn uninterleave(self: *const Self) struct { left: u64, right: u64, left_len: usize, right_len: usize } {
-            var left: u64 = 0;
-            var right: u64 = 0;
+            // Parallel bit extraction — O(1) using shift+mask+OR cascade.
+            // Matches Jolt's uninterleave_bits (jolt-core/src/utils/mod.rs:105-124).
+            // Left operand bits at odd positions (1,3,5,...), right at even (0,2,4,...).
+            var x_bits: u128 = (self.value >> 1) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+            var y_bits: u128 = self.value & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+            // Compact x bits into lower part
+            x_bits = (x_bits | (x_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+            x_bits = (x_bits | (x_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+            x_bits = (x_bits | (x_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+            x_bits = (x_bits | (x_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+            x_bits = (x_bits | (x_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+            x_bits = (x_bits | (x_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+            // Compact y bits into lower part
+            y_bits = (y_bits | (y_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+            y_bits = (y_bits | (y_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+            y_bits = (y_bits | (y_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+            y_bits = (y_bits | (y_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+            y_bits = (y_bits | (y_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+            y_bits = (y_bits | (y_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+
             const half_len = self.len / 2;
-            var i: usize = 0;
-            while (i < half_len) : (i += 1) {
-                const bit_pos = 2 * i;
-                // right operand bits are at even positions (0, 2, 4, ...)
-                const right_bit = (self.value >> @intCast(bit_pos)) & 1;
-                // left operand bits are at odd positions (1, 3, 5, ...)
-                const left_bit = (self.value >> @intCast(bit_pos + 1)) & 1;
-                left |= @as(u64, @truncate(left_bit)) << @intCast(i);
-                right |= @as(u64, @truncate(right_bit)) << @intCast(i);
-            }
-            // When len is odd, the last bit is at an even position (2*half_len),
-            // which is a right/even-indexed bit. Jolt's uninterleave_bits handles
-            // this because it processes all 128 bits. We must include it too.
             const left_len = half_len;
-            var right_len = half_len;
-            if (self.len % 2 == 1) {
-                const last_bit_pos = 2 * half_len;
-                const last_bit = (self.value >> @intCast(last_bit_pos)) & 1;
-                right |= @as(u64, @truncate(last_bit)) << @intCast(half_len);
-                right_len = half_len + 1;
-            }
-            return .{ .left = left, .right = right, .left_len = left_len, .right_len = right_len };
+            const right_len = if (self.len % 2 == 1) half_len + 1 else half_len;
+            return .{
+                .left = @truncate(x_bits),
+                .right = @truncate(y_bits),
+                .left_len = left_len,
+                .right_len = right_len,
+            };
         }
         /// Split into (prefix, suffix) where suffix.len == suffix_len
         pub fn split(self: *const Self, suffix_len: usize) struct { prefix: Self, suffix: Self } {

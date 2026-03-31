@@ -482,7 +482,7 @@ pub fn RafEvaluationProver(comptime F: type) type {
             const L0 = c_minus_1.mul(c_minus_2).mul(c_minus_3).mul(neg6.inverse().?);
 
             // L1(c) = c(c-2)(c-3) / (1-0)(1-2)(1-3) = c(c-2)(c-3) / 2
-            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(F.fromU64(2).inverse().?);
+            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(@import("../../poly/mod.zig").UniPoly(F).INV2);
 
             // L2(c) = c(c-1)(c-3) / (2-0)(2-1)(2-3) = c(c-1)(c-3) / -2
             const neg2 = F.zero().sub(F.fromU64(2));

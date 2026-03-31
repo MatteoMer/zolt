@@ -1313,7 +1313,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
 
             const neg6 = F.zero().sub(F.fromU64(6));
             const L0 = c_minus_1.mul(c_minus_2).mul(c_minus_3).mul(neg6.inverse().?);
-            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(F.fromU64(2).inverse().?);
+            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(@import("../../poly/mod.zig").UniPoly(F).INV2);
             const neg2 = F.zero().sub(F.fromU64(2));
             const L2 = c.mul(c_minus_1).mul(c_minus_3).mul(neg2.inverse().?);
             const L3 = c.mul(c_minus_1).mul(c_minus_2).mul(F.fromU64(6).inverse().?);

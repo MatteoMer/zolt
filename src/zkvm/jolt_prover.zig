@@ -1745,7 +1745,7 @@ pub fn JoltProver(comptime F: type) type {
 
                     // Instance 1: Combined RamValCheck = val_eval + gamma * val_final
                     const ram_val_check_offset = stage4_max_rounds - ram_val_check_rounds;
-                    const two_inv_local = F.fromU64(2).inverse() orelse F.one();
+                    const two_inv_local = poly_mod.UniPoly(F).INV2;
 
                     var ram_val_check_evals_opt: ?[4]F = null;
                     const ram_val_check_active = round_idx >= ram_val_check_offset;
@@ -2657,7 +2657,7 @@ pub fn JoltProver(comptime F: type) type {
                     // a2 = (p(2) - 2*p(1) + p(0)) / 2
                     const two_p1 = p1.add(p1);
                     const a2_num = p2.sub(two_p1).add(p0);
-                    const a2 = a2_num.mul(F.fromU64(2).inverse().?);
+                    const a2 = a2_num.mul(poly_mod.UniPoly(F).INV2);
 
                     const coeffs = try self.allocator.alloc(F, degree_bound);
                     coeffs[0] = p0; // a0 = p(0) = constant term
@@ -3212,7 +3212,7 @@ pub fn JoltProver(comptime F: type) type {
                                 const remaining_rounds = rounds_per_instance[i] - (round_idx - start_round);
                                 var scaled = individual_claims[i];
                                 for (0..remaining_rounds) |_| scaled = scaled.mul(F.fromU64(2));
-                                scaled = scaled.mul(F.fromU64(2).inverse().?);
+                                scaled = scaled.mul(poly_mod.UniPoly(F).INV2);
                                 const weighted = scaled.mul(batching_coeffs[i]);
                                 for (0..4) |j| combined_evals[j] = combined_evals[j].add(weighted);
                             }

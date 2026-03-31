@@ -1075,7 +1075,7 @@ pub fn MontgomeryField(
 
         /// Field subtraction
         pub inline fn sub(self: Self, other: Self) Self {
-            if (comptime use_arm64_asm) return Self{ .limbs = arm64SubMod256(self.limbs, other.limbs, modulus) };
+            if (!@inComptime() and comptime use_arm64_asm) return Self{ .limbs = arm64SubMod256(self.limbs, other.limbs, modulus) };
             @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var borrow: u64 = 0;
@@ -1095,7 +1095,7 @@ pub fn MontgomeryField(
 
         /// Field multiplication
         pub inline fn mul(self: Self, other: Self) Self {
-            if (comptime use_arm64_asm) {
+            if (!@inComptime() and comptime use_arm64_asm) {
                 const mod_arr: [4]u64 = modulus;
                 var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &other.limbs, &mod_arr, montgomery_inv) };
                 if (!r.lessThanModulus()) r = r.subtractModulus();
@@ -1107,7 +1107,7 @@ pub fn MontgomeryField(
 
         /// Field squaring
         pub inline fn square(self: Self) Self {
-            if (comptime use_arm64_asm) {
+            if (!@inComptime() and comptime use_arm64_asm) {
                 const mod_arr: [4]u64 = modulus;
                 var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &self.limbs, &mod_arr, montgomery_inv) };
                 if (!r.lessThanModulus()) r = r.subtractModulus();
@@ -1229,7 +1229,7 @@ pub fn MontgomeryField(
         }
 
         inline fn subtractModulus(self: Self) Self {
-            if (comptime use_arm64_asm) return Self{ .limbs = arm64Sub256(self.limbs, modulus) };
+            if (!@inComptime() and comptime use_arm64_asm) return Self{ .limbs = arm64Sub256(self.limbs, modulus) };
             @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var borrow: u64 = 0;
@@ -1244,7 +1244,7 @@ pub fn MontgomeryField(
         }
 
         inline fn addModulus(self: Self) Self {
-            if (comptime use_arm64_asm) return Self{ .limbs = arm64Add256(self.limbs, modulus) };
+            if (!@inComptime() and comptime use_arm64_asm) return Self{ .limbs = arm64Add256(self.limbs, modulus) };
             @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var carry: u64 = 0;
@@ -1518,7 +1518,7 @@ pub const BN254Scalar = struct {
 
     /// Field subtraction
     pub fn sub(self: Self, other: Self) Self {
-        if (comptime use_arm64_asm) return Self{ .limbs = arm64SubMod256(self.limbs, other.limbs, BN254_MODULUS) };
+        if (!@inComptime() and comptime use_arm64_asm) return Self{ .limbs = arm64SubMod256(self.limbs, other.limbs, BN254_MODULUS) };
         var result: [4]u64 = undefined;
         var borrow: u64 = 0;
 
@@ -1734,7 +1734,7 @@ pub const BN254Scalar = struct {
 
     /// Field multiplication
     pub inline fn mul(self: Self, other: Self) Self {
-        if (comptime use_arm64_asm) {
+        if (!@inComptime() and comptime use_arm64_asm) {
             var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &other.limbs, &BN254_MODULUS, BN254_INV) };
             if (!r.lessThanModulus()) r = r.subtractModulus();
             return r;
@@ -1975,7 +1975,7 @@ pub const BN254Scalar = struct {
     /// Field squaring (optimized using Karatsuba-like technique)
     /// Saves ~25% multiplications compared to naive multiplication
     pub inline fn square(self: Self) Self {
-        if (comptime use_arm64_asm) {
+        if (!@inComptime() and comptime use_arm64_asm) {
             var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &self.limbs, &BN254_MODULUS, BN254_INV) };
             if (!r.lessThanModulus()) r = r.subtractModulus();
             return r;
@@ -2129,7 +2129,7 @@ pub const BN254Scalar = struct {
     }
 
     inline fn subtractModulus(self: Self) Self {
-        if (comptime use_arm64_asm) return Self{ .limbs = arm64Sub256(self.limbs, BN254_MODULUS) };
+        if (!@inComptime() and comptime use_arm64_asm) return Self{ .limbs = arm64Sub256(self.limbs, BN254_MODULUS) };
         @setEvalBranchQuota(10000);
         var result: [4]u64 = undefined;
         var borrow: u64 = 0;
@@ -2144,7 +2144,7 @@ pub const BN254Scalar = struct {
     }
 
     fn addModulus(self: Self) Self {
-        if (comptime use_arm64_asm) return Self{ .limbs = arm64Add256(self.limbs, BN254_MODULUS) };
+        if (!@inComptime() and comptime use_arm64_asm) return Self{ .limbs = arm64Add256(self.limbs, BN254_MODULUS) };
         var result: [4]u64 = undefined;
         var carry: u64 = 0;
 
@@ -2938,7 +2938,7 @@ pub const S192 = struct {
     }
 
     fn addMagnitudes(a: [3]u64, b: [3]u64) [3]u64 {
-        if (comptime use_arm64_asm) return arm64Add192(a, b);
+        if (!@inComptime() and comptime use_arm64_asm) return arm64Add192(a, b);
         var result: [3]u64 = undefined;
         if (comptime builtin.cpu.arch == .x86_64) {
             var c: u8 = 0;
@@ -2957,7 +2957,7 @@ pub const S192 = struct {
     }
 
     fn subMagnitudes(a: [3]u64, b: [3]u64) [3]u64 {
-        if (comptime use_arm64_asm) return arm64Sub192(a, b);
+        if (!@inComptime() and comptime use_arm64_asm) return arm64Sub192(a, b);
         var result: [3]u64 = undefined;
         if (comptime builtin.cpu.arch == .x86_64) {
             var b_out: u8 = 0;

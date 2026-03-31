@@ -131,7 +131,7 @@ pub fn build(b: *std.Build) void {
     const bench_tp_step = b.step("bench-tp", "Run ThreadPool micro-benchmark");
     bench_tp_step.dependOn(&run_bench_tp.step);
 
-    // Benchmark: Parallelism threshold
+    // Benchmark: Parallelism threshold (only built when explicitly requested)
     const bench_thresh = b.addExecutable(.{
         .name = "bench-thresh",
         .root_module = b.createModule(.{
@@ -143,12 +143,11 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(bench_thresh);
     const run_bench_thresh = b.addRunArtifact(bench_thresh);
     const bench_thresh_step = b.step("bench-thresh", "Run parallelism threshold benchmark");
     bench_thresh_step.dependOn(&run_bench_thresh.step);
 
-    // Benchmark: Cycle compute kernel
+    // Benchmark: Cycle compute kernel (only built when explicitly requested)
     const bench_cycle = b.addExecutable(.{
         .name = "bench-cycle",
         .root_module = b.createModule(.{
@@ -160,7 +159,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(bench_cycle);
     const run_bench_cycle = b.addRunArtifact(bench_cycle);
     const bench_cycle_step = b.step("bench-cycle", "Run cycle compute kernel benchmark");
     bench_cycle_step.dependOn(&run_bench_cycle.step);

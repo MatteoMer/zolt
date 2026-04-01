@@ -655,17 +655,27 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             return digits;
         }
 
-        /// Pippenger's bucket method MSM with wNAF + XYZZ buckets
+        /// Pippenger's bucket method MSM with wNAF + XYZZ buckets.
+        /// Auto-detects effective scalar bit-width to minimize windows.
         fn pippengerMSM(
             bases: []const Affine,
             scalars: []const F,
         ) Affine {
+            return pippengerMSMWithMaxBits(bases, scalars, SCALAR_BITS);
+        }
+
+        /// Pippenger's bucket method MSM with configurable scalar bit-width.
+        /// When max_scalar_bits < 256, fewer windows are needed (e.g. 64-bit scalars → 5 windows vs 19).
+        fn pippengerMSMWithMaxBits(
+            bases: []const Affine,
+            scalars: []const F,
+            max_scalar_bits_hint: usize,
+        ) Affine {
             const c = optimalWindowSize(bases.len);
-            const num_scalar_windows = (SCALAR_BITS + c - 1) / c;
-            const num_windows = num_scalar_windows + 1; // +1 for wNAF carry digit
             const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2; // 2^(c-1) buckets for wNAF
 
-            // Pre-convert all scalars and compute wNAF digits
+            // Pre-convert all scalars and compute wNAF digits.
+            // Also detect effective max bit-width to skip unnecessary windows.
             const stack_threshold = 256;
             var stack_digits: [stack_threshold][MAX_DIGITS]i32 = undefined;
             var heap_digits: ?[][MAX_DIGITS]i32 = null;
@@ -679,9 +689,21 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                 break :blk heap_digits.?;
             };
 
+            // Detect effective max bit-width by OR-ing all normal-form limbs
+            var or_limbs: [4]u64 = .{ 0, 0, 0, 0 };
+            const full_num_scalar_windows = (max_scalar_bits_hint + c - 1) / c;
             for (scalars, 0..) |s, i| {
-                all_digits[i] = makeDigits(s.fromMontgomery().limbs, c, num_scalar_windows);
+                const normal = s.fromMontgomery();
+                all_digits[i] = makeDigits(normal.limbs, c, full_num_scalar_windows);
+                or_limbs[0] |= normal.limbs[0];
+                or_limbs[1] |= normal.limbs[1];
+                or_limbs[2] |= normal.limbs[2];
+                or_limbs[3] |= normal.limbs[3];
             }
+            const effective_bits = limbsBitWidth(or_limbs);
+            const actual_max_bits = @min(max_scalar_bits_hint, if (effective_bits == 0) 1 else effective_bits);
+            const num_scalar_windows = (actual_max_bits + c - 1) / c;
+            const num_windows = num_scalar_windows + 1; // +1 for wNAF carry digit
 
             // Allocate buckets on heap for larger windows
             var heap_buckets: ?[]Bucket = null;
@@ -734,9 +756,9 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             }
 
             // Phase 2: Batch convert window sums to affine using Montgomery's trick
-            // (1 inversion + O(n) muls instead of 2n inversions)
+            // (1 inversion + O(n) muls instead of n inversions)
             var window_sums_affine: [MAX_DIGITS]Affine = undefined;
-            var products: [MAX_DIGITS]G = undefined; // zz * zzz per non-empty window
+            var products: [MAX_DIGITS]G = undefined;
             var non_empty_indices: [MAX_DIGITS]usize = undefined;
             var num_non_empty: usize = 0;
 
@@ -751,17 +773,14 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             }
 
             if (num_non_empty > 0) {
-                // Build prefix products
                 var prefix: [MAX_DIGITS]G = undefined;
                 prefix[0] = products[0];
                 for (1..num_non_empty) |i| {
                     prefix[i] = prefix[i - 1].mul(products[i]);
                 }
 
-                // Single inversion of the total product
                 var running_inv = prefix[num_non_empty - 1].inverse() orelse G.one();
 
-                // Backtrack to recover individual inverses
                 var i = num_non_empty;
                 while (i > 1) {
                     i -= 1;
@@ -775,7 +794,6 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                         window_sums[wi].y.mul(zzz_inv),
                     );
                 }
-                // Handle first element
                 {
                     const wi = non_empty_indices[0];
                     const zz_inv = running_inv.mul(window_sums[wi].zzz);
@@ -787,7 +805,7 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                 }
             }
 
-            // Phase 3: Combine windows (MSB to LSB) using addAffine (cheaper than generic add)
+            // Phase 3: Combine windows (MSB to LSB) using addAffine
             var final_result = Projective.identity();
             var window_idx: usize = num_windows;
             while (window_idx > 0) {
@@ -806,6 +824,157 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                     } else {
                         final_result = final_result.addAffine(window_sums_affine[window_idx]);
                     }
+                }
+            }
+
+            return final_result.toAffine();
+        }
+
+        /// Compute effective bit-width of a 4-limb value
+        fn limbsBitWidth(limbs: [4]u64) usize {
+            // Find highest non-zero limb
+            var i: usize = 4;
+            while (i > 0) {
+                i -= 1;
+                if (limbs[i] != 0) {
+                    return i * 64 + 64 - @as(usize, @clz(limbs[i]));
+                }
+            }
+            return 0;
+        }
+
+        /// Subtract 4-limb value: result = a - b, assuming a >= b
+        fn limbsSub(a: [4]u64, b: [4]u64) [4]u64 {
+            var result: [4]u64 = undefined;
+            var borrow: u64 = 0;
+            inline for (0..4) |j| {
+                const diff = @subWithOverflow(a[j], b[j]);
+                const diff2 = @subWithOverflow(diff[0], borrow);
+                result[j] = diff2[0];
+                borrow = diff[1] | diff2[1];
+            }
+            return result;
+        }
+
+        /// Signed MSM: classify scalars by effective bit-width using negation trick,
+        /// then dispatch each group to Pippenger with the appropriate window count.
+        /// For BN254: if bits(p-s) < bits(s), use -base with scalar (p-s) instead.
+        /// This reduces the average number of windows per scalar by ~50% for random inputs.
+        fn computeSignedMSM(
+            bases: []const Affine,
+            scalars: []const F,
+        ) Affine {
+            const n = bases.len;
+            if (n == 0) return Affine.identity();
+            if (n < 32) return naiveMSM(bases, scalars); // overhead not worth it for small inputs
+
+            const modulus: [4]u64 = @import("../field/mod.zig").BN254_MODULUS;
+
+            // Group thresholds (matching arkworks: binary, u8, u16, u32, u64, full)
+            const GROUP_1: u8 = 0; // bits <= 1 (binary)
+            const GROUP_8: u8 = 1; // bits <= 8
+            const GROUP_16: u8 = 2; // bits <= 16
+            const GROUP_32: u8 = 3; // bits <= 32
+            const GROUP_64: u8 = 4; // bits <= 64
+            const GROUP_FULL: u8 = 5; // bits > 64
+            const NUM_GROUPS: usize = 6;
+            const group_max_bits = [NUM_GROUPS]usize{ 1, 8, 16, 32, 64, SCALAR_BITS };
+
+            // Classify each scalar: pack (group:4, negated:1, index:59) into u64 for sorting
+            const tagged = std.heap.page_allocator.alloc(u64, n) catch
+                return pippengerMSM(bases, scalars);
+            defer std.heap.page_allocator.free(tagged);
+
+            for (0..n) |i| {
+                const s_limbs = scalars[i].fromMontgomery().limbs;
+                const s_bits = limbsBitWidth(s_limbs);
+
+                // Compute p - s
+                const ps_limbs = limbsSub(modulus, s_limbs);
+                const ps_bits = limbsBitWidth(ps_limbs);
+
+                const negated: u1 = if (ps_bits < s_bits) 1 else 0;
+                const eff_bits = if (negated == 1) ps_bits else s_bits;
+
+                const group: u8 = if (eff_bits <= 1)
+                    GROUP_1
+                else if (eff_bits <= 8)
+                    GROUP_8
+                else if (eff_bits <= 16)
+                    GROUP_16
+                else if (eff_bits <= 32)
+                    GROUP_32
+                else if (eff_bits <= 64)
+                    GROUP_64
+                else
+                    GROUP_FULL;
+
+                // Pack: group in top 4 bits, negated in bit 59, index in low 59 bits
+                tagged[i] = (@as(u64, group) << 60) | (@as(u64, negated) << 59) | @as(u64, i);
+            }
+
+            // Sort by group (stable within group due to index ordering)
+            std.sort.pdq(u64, tagged, {}, struct {
+                fn cmp(_: void, a: u64, b: u64) bool {
+                    return a < b;
+                }
+            }.cmp);
+
+            // Find group boundaries
+            var group_start: [NUM_GROUPS + 1]usize = undefined;
+            group_start[0] = 0;
+            var gi: usize = 0;
+            for (0..n) |i| {
+                const g = tagged[i] >> 60;
+                while (gi < g) {
+                    gi += 1;
+                    group_start[gi] = i;
+                }
+            }
+            while (gi < NUM_GROUPS) {
+                gi += 1;
+                group_start[gi] = n;
+            }
+
+            // Process each group
+            var final_result = Projective.identity();
+
+            for (0..NUM_GROUPS) |g| {
+                const start = group_start[g];
+                const end = group_start[g + 1];
+                if (start >= end) continue;
+
+                const group_n = end - start;
+                const max_bits = group_max_bits[g];
+
+                // Gather bases and scalars for this group
+                const g_bases = std.heap.page_allocator.alloc(Affine, group_n) catch continue;
+                defer std.heap.page_allocator.free(g_bases);
+                const g_scalars = std.heap.page_allocator.alloc(F, group_n) catch continue;
+                defer std.heap.page_allocator.free(g_scalars);
+
+                for (tagged[start..end], 0..) |t, j| {
+                    const idx = @as(usize, @intCast(t & ((1 << 59) - 1)));
+                    const negated = (t >> 59) & 1;
+                    if (negated == 1) {
+                        g_bases[j] = bases[idx].neg();
+                        // Use p - s as the scalar (in Montgomery form: 0 - s = p - s mod p)
+                        g_scalars[j] = F.zero().sub(scalars[idx]);
+                    } else {
+                        g_bases[j] = bases[idx];
+                        g_scalars[j] = scalars[idx];
+                    }
+                }
+
+
+                // Dispatch to Pippenger with appropriate bit-width
+                const group_result = if (group_n < 8)
+                    naiveMSM(g_bases, g_scalars)
+                else
+                    pippengerMSMWithMaxBits(g_bases, g_scalars, max_bits);
+
+                if (!group_result.isIdentity()) {
+                    final_result = final_result.addAffine(group_result);
                 }
             }
 

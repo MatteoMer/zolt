@@ -180,6 +180,23 @@ pub fn build(b: *std.Build) void {
     const bench_cycle_step = b.step("bench-cycle", "Run cycle compute kernel benchmark");
     bench_cycle_step.dependOn(&run_bench_cycle.step);
 
+    // Benchmark: MSM (G1/G2 multi-scalar multiplication)
+    const bench_msm = b.addExecutable(.{
+        .name = "bench-msm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/msm/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    b.installArtifact(bench_msm);
+    const run_bench_msm = b.addRunArtifact(bench_msm);
+    const bench_msm_step = b.step("bench-msm", "Run MSM benchmark (G1/G2 Pippenger)");
+    bench_msm_step.dependOn(&run_bench_msm.step);
+
     // Example: RISC-V Emulation
     const riscv_example = b.addExecutable(.{
         .name = "example-riscv",

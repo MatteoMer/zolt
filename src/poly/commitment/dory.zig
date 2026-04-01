@@ -656,51 +656,89 @@ fn computeEvaluationVectors(comptime F: type, point: []const F, nu: u32, sigma: 
 }
 
 /// Compute vector-matrix product: v = L^T * M
-/// Treats coefficients as a 2^nu x 2^sigma matrix.
-/// Parallelizable version: each column is independent.
+/// Treats coefficients as a 2^nu x 2^sigma matrix (row-major in evals).
+/// Row-parallel: each thread processes a chunk of rows into a local accumulator,
+/// then accumulators are reduced. This gives contiguous memory access per thread.
 fn computeVectorMatrixProduct(comptime F: type, evals: []const F, left_vec: []const F, nu: u32, sigma: u32, allocator: Allocator) ![]F {
     const num_cols = @as(usize, 1) << @intCast(sigma);
     const num_rows = @as(usize, 1) << @intCast(nu);
+    const active_rows = @min(num_rows, left_vec.len);
 
     const result = try allocator.alloc(F, num_cols);
 
-    const Ctx = struct {
-        evals_ptr: []const F,
-        left_ptr: []const F,
-        out: []F,
-        n_cols: usize,
-        n_rows: usize,
-        left_len: usize,
-        evals_len: usize,
-    };
-    const ctx = Ctx{
-        .evals_ptr = evals,
-        .left_ptr = left_vec,
-        .out = result,
-        .n_cols = num_cols,
-        .n_rows = num_rows,
-        .left_len = left_vec.len,
-        .evals_len = evals.len,
-    };
+    if (ThreadPool.getPool()) |pool| {
+        const num_threads = pool.thread_count + 1;
+        // Allocate per-thread accumulators
+        const accum_buf = try allocator.alloc(F, num_threads * num_cols);
+        defer allocator.free(accum_buf);
+        @memset(accum_buf, F.zero());
 
-    const computeCol = struct {
-        fn f(c: Ctx, col: usize) void {
-            var acc = F.zero();
-            for (0..c.n_rows) |row| {
-                if (row >= c.left_len) break;
-                const idx = row * c.n_cols + col;
-                if (idx < c.evals_len) {
-                    acc = acc.add(c.left_ptr[row].mul(c.evals_ptr[idx]));
+        const Ctx = struct {
+            evals_ptr: []const F,
+            left_ptr: []const F,
+            accum: []F,
+            n_cols: usize,
+            active_rows: usize,
+            evals_len: usize,
+            rows_per_thread: usize,
+        };
+        const rows_per_thread = (active_rows + num_threads - 1) / num_threads;
+        const ctx = Ctx{
+            .evals_ptr = evals,
+            .left_ptr = left_vec,
+            .accum = accum_buf,
+            .n_cols = num_cols,
+            .active_rows = active_rows,
+            .evals_len = evals.len,
+            .rows_per_thread = rows_per_thread,
+        };
+
+        // Each thread processes a chunk of rows into its own accumulator slice
+        pool.parallelForForce(num_threads, ctx, struct {
+            fn f(c: Ctx, thread_idx: usize) void {
+                const row_start = thread_idx * c.rows_per_thread;
+                const row_end = @min(row_start + c.rows_per_thread, c.active_rows);
+                if (row_start >= row_end) return;
+
+                const my_acc = c.accum[thread_idx * c.n_cols .. (thread_idx + 1) * c.n_cols];
+
+                for (row_start..row_end) |row| {
+                    const weight = c.left_ptr[row];
+                    const row_offset = row * c.n_cols;
+                    const row_end_idx = @min(row_offset + c.n_cols, c.evals_len);
+                    if (row_offset >= c.evals_len) break;
+                    const row_slice = c.evals_ptr[row_offset..row_end_idx];
+
+                    for (row_slice, 0..) |eval, col| {
+                        my_acc[col] = my_acc[col].add(weight.mul(eval));
+                    }
                 }
             }
-            c.out[col] = acc;
-        }
-    }.f;
+        }.f);
 
-    if (ThreadPool.getPool()) |pool| {
-        pool.parallelFor(num_cols, ctx, computeCol);
+        // Reduce: sum all per-thread accumulators into result
+        // First thread's accumulator is the base
+        @memcpy(result, accum_buf[0..num_cols]);
+        for (1..num_threads) |t| {
+            const t_acc = accum_buf[t * num_cols .. (t + 1) * num_cols];
+            for (0..num_cols) |col| {
+                result[col] = result[col].add(t_acc[col]);
+            }
+        }
     } else {
-        for (0..num_cols) |col| computeCol(ctx, col);
+        // Sequential fallback: row-major iteration
+        @memset(result, F.zero());
+        for (0..active_rows) |row| {
+            const weight = left_vec[row];
+            const row_offset = row * num_cols;
+            const row_end = @min(row_offset + num_cols, evals.len);
+            if (row_offset >= evals.len) break;
+            const row_slice = evals[row_offset..row_end];
+
+            for (row_slice, 0..) |eval, col| {
+                result[col] = result[col].add(weight.mul(eval));
+            }
+        }
     }
 
     return result;
@@ -1161,6 +1199,11 @@ pub fn multiPairBatched(comptime N: comptime_int, groups: [N]PairGroup, tp: ?*Th
     }.f);
 
     return results;
+}
+
+/// Public wrapper for G2 MSM benchmarking.
+pub fn msmG2Bench(comptime F: type, g2_vec: []const G2Point, scalars: []const F, tp: ?*ThreadPool) G2Point {
+    return msmG2(F, g2_vec, scalars, tp);
 }
 
 /// MSM for G2 points using Pippenger's bucket method with wNAF.
@@ -2927,6 +2970,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             defer if (row_commitments_opt == null) allocator.free(row_commitments);
 
             // Step 2: Compute evaluation vectors
+            var vmv_sub_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
             const left_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(nu));
             defer allocator.free(left_vec);
             const right_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(sigma));
@@ -2934,9 +2978,14 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             computeEvaluationVectors(F, point, nu, sigma, left_vec, right_vec);
 
-            // Step 3: Compute v_vec
+            // Step 3: Compute v_vec (row-parallel with thread-local accumulators)
             const v_vec = try computeVectorMatrixProduct(F, evals, left_vec, nu, sigma, allocator);
             defer allocator.free(v_vec);
+
+            if (comptime dory_bench_timing) {
+                std.debug.print("    [DORY-VMV] eval_vectors + VMP ({}x{}): {d:.2} ms\n", .{@as(usize, 1) << @intCast(nu), @as(usize, 1) << @intCast(sigma), @as(f64, @floatFromInt(vmv_sub_t.read())) / 1_000_000.0});
+                vmv_sub_t.reset();
+            }
 
             // Step 4: Build v1_affine (padded row_commitments) — used for VMV message,
             // then converted to projective for IPA rounds.
@@ -3041,6 +3090,11 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     break :blk2 msm.MSM(F, Fp).computeWithPool(e1_bases, left_vec, null);
                 } else msm.MSM(F, Fp).computeWithPool(e1_bases, left_vec, null),
             };
+
+            if (comptime dory_bench_timing) {
+                std.debug.print("    [DORY-VMV] MSM_C + join(D2_msm,e1_msm): {d:.2} ms\n", .{@as(f64, @floatFromInt(vmv_sub_t.read())) / 1_000_000.0});
+                vmv_sub_t.reset();
+            }
 
             // D₂ = e(gamma1_v, Γ₂₀)
             const gamma1_v_fp = G1PointFp{
@@ -3181,8 +3235,20 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 var round_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
 
                 // BATCH NORMALIZE v1_proj → v1_affine, v2_proj → v2_affine for pairing inputs
-                G1Proj.batchNormalize(v1_proj[0..current_len], v1_affine[0..current_len]);
-                G2Projective.batchNormalize(v2_proj[0..current_len], v2_affine[0..current_len]);
+                // Overlap G1 and G2 normalizations using thread pool join
+                if (tp) |pool| {
+                    const BnG1Ctx = struct { src: []const G1Proj, dst: []G1Point };
+                    const BnG2Ctx = struct { src: []const G2Projective, dst: []G2Point };
+                    _ = pool.join(void, void,
+                        BnG1Ctx{ .src = v1_proj[0..current_len], .dst = v1_affine[0..current_len] },
+                        struct { fn f(ctx_bn: BnG1Ctx) void { G1Proj.batchNormalize(ctx_bn.src, ctx_bn.dst); } }.f,
+                        BnG2Ctx{ .src = v2_proj[0..current_len], .dst = v2_affine[0..current_len] },
+                        struct { fn f(ctx_bn: BnG2Ctx) void { G2Projective.batchNormalize(ctx_bn.src, ctx_bn.dst); } }.f,
+                    );
+                } else {
+                    G1Proj.batchNormalize(v1_proj[0..current_len], v1_affine[0..current_len]);
+                    G2Projective.batchNormalize(v2_proj[0..current_len], v2_affine[0..current_len]);
+                }
 
                 // Compute first reduce message: D1L, D1R, D2L, D2R
                 // D1 uses prepared G2 SRS, D2 uses v2_affine — independent, overlap via join.
@@ -3487,8 +3553,20 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 }
 
                 // BATCH NORMALIZE after beta_scale for second_msg pairings
-                G1Proj.batchNormalize(v1_proj[0..current_len], v1_affine[0..current_len]);
-                G2Projective.batchNormalize(v2_proj[0..current_len], v2_affine[0..current_len]);
+                // Overlap G1 and G2 normalizations using thread pool join
+                if (tp) |pool| {
+                    const BnG1Ctx = struct { src: []const G1Proj, dst: []G1Point };
+                    const BnG2Ctx = struct { src: []const G2Projective, dst: []G2Point };
+                    _ = pool.join(void, void,
+                        BnG1Ctx{ .src = v1_proj[0..current_len], .dst = v1_affine[0..current_len] },
+                        struct { fn f(ctx_bn: BnG1Ctx) void { G1Proj.batchNormalize(ctx_bn.src, ctx_bn.dst); } }.f,
+                        BnG2Ctx{ .src = v2_proj[0..current_len], .dst = v2_affine[0..current_len] },
+                        struct { fn f(ctx_bn: BnG2Ctx) void { G2Projective.batchNormalize(ctx_bn.src, ctx_bn.dst); } }.f,
+                    );
+                } else {
+                    G1Proj.batchNormalize(v1_proj[0..current_len], v1_affine[0..current_len]);
+                    G2Projective.batchNormalize(v2_proj[0..current_len], v2_affine[0..current_len]);
+                }
 
                 // Compute second reduce message using affine temps
                 const c_batch = multiPairBatched(2, .{

@@ -1636,13 +1636,14 @@ pub fn JoltProver(comptime F: type) type {
                 // CRITICAL: Use initWithLayout to filter out synthetic termination/panic writes.
                 // This matches Jolt's behavior where these bits are set directly in final memory
                 // without corresponding trace entries in the inc polynomial.
-                var val_eval_prover_early = try ram.ValEvaluationProver(F).initWithLayout(
+                var val_eval_prover_early = try ram.ValEvaluationProver(F).initWithLayoutAndPool(
                     self.allocator,
                     memory_trace,
                     config.initial_ram,
                     val_eval_params_early,
                     start_address,
                     config.memory_layout, // Pass memory_layout to filter synthetic writes
+                    self.thread_pool, // Pass thread pool for parallel init
                 );
                 val_eval_prover_early.thread_pool = self.thread_pool;
                 defer val_eval_prover_early.deinit();

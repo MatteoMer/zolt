@@ -7,8 +7,8 @@ use jolt_core::zkvm::verifier::JoltSharedPreprocessing;
 use jolt_core::zkvm::RV64IMACProver;
 use std::fs;
 use std::time::Instant;
-use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -33,16 +33,25 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
+    let bench = std::env::var("JOLT_BENCH").is_ok();
 
     // Enable tracing for stage-level timing
-    if cli.span_timing {
-        // Show span close events with elapsed time for Dory sub-operations
-        fmt()
-            .with_env_filter(EnvFilter::new("jolt_core=trace"))
+    // In bench mode, use info level which picks up Jolt's native [BENCH] lines
+    if bench || cli.span_timing {
+        let level = if cli.span_timing {
+            "jolt_core=trace"
+        } else {
+            "jolt_core=info"
+        };
+        let builder = fmt()
+            .with_env_filter(EnvFilter::new(level))
             .with_target(false)
-            .with_timer(fmt::time::uptime())
-            .with_span_events(FmtSpan::CLOSE)
-            .init();
+            .with_timer(fmt::time::uptime());
+        if cli.span_timing {
+            builder.with_span_events(FmtSpan::CLOSE).init();
+        } else {
+            builder.init();
+        }
     } else {
         fmt()
             .with_env_filter(EnvFilter::new("jolt_core=info"))
@@ -60,7 +69,7 @@ fn main() {
 
     // Decode bytecode
     let t_decode = Instant::now();
-    let (bytecode, init_memory_state, program_size, entry_address) = guest::program::decode(&elf_bytes);
+    let (bytecode, init_memory_state, program_size) = guest::program::decode(&elf_bytes);
     let decode_ms = t_decode.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
         "Decode: {:.2} ms ({} instructions, program_size={})",
@@ -86,9 +95,9 @@ fn main() {
     let (_lazy_trace, trace, _memory, _io_device, _advice_tape) = guest::program::trace(
         &elf_bytes,
         None,
-        &[],  // no inputs
-        &[],  // no untrusted advice
-        &[],  // no trusted advice
+        &[], // no inputs
+        &[], // no untrusted advice
+        &[], // no trusted advice
         &memory_config,
         None,
     );
@@ -111,9 +120,8 @@ fn main() {
         memory_layout,
         init_memory_state,
         padded_trace_len.max(cli.max_trace),
-        entry_address,
     );
-    let prover_preprocessing = ProverPreproc::new(shared.expect("preprocessing failed"));
+    let prover_preprocessing = ProverPreproc::new(shared);
     let preproc_ms = t_preproc.elapsed().as_secs_f64() * 1000.0;
     eprintln!("Preprocessing: {:.2} ms", preproc_ms);
 
@@ -122,9 +130,9 @@ fn main() {
     let prover = RV64IMACProver::gen_from_elf(
         &prover_preprocessing,
         &elf_bytes,
-        &[],  // no inputs
-        &[],  // no untrusted advice
-        &[],  // no trusted advice
+        &[], // no inputs
+        &[], // no untrusted advice
+        &[], // no trusted advice
         None, // trusted_advice_commitment
         None, // trusted_advice_hint
         None, // advice_tape
@@ -137,6 +145,11 @@ fn main() {
     let (proof, _debug_info) = prover.prove();
     let prove_ms = t_prove.elapsed().as_secs_f64() * 1000.0;
     eprintln!("Prove: {:.2} ms", prove_ms);
+
+    // Output prove_total for bench script parsing
+    if bench {
+        eprintln!("[BENCH] prove_total={:.1}", prove_ms);
+    }
 
     let total_ms = decode_ms + trace_ms + preproc_ms + gen_ms + prove_ms;
     eprintln!("\n--- Summary ---");

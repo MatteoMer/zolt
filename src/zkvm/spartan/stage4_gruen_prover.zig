@@ -169,15 +169,28 @@ pub fn Stage4GruenProver(comptime F: type) type {
             var sparse_lookup = try SparseRegsLookup.fromTrace(allocator, trace, gamma, pool);
             errdefer sparse_lookup.deinit();
 
-            // Build dense inc_poly from trace
-            // Uses TraceStep pre-recorded rd_pre_value — no sequential register tracking needed
+            // Build dense inc_poly from trace — parallel, each cycle independent
             const inc_poly = try allocator.alloc(F, T);
-            @memset(inc_poly, F.zero());
-            for (trace.steps.items, 0..) |step, cycle| {
-                if (step.is_noop) continue;
-                if (step.rd_written and step.rd_index != 0) {
-                    inc_poly[cycle] = F.fromU64(step.rd_value).sub(F.fromU64(step.rd_pre_value));
+            const IncCtx = struct { steps: []const TraceStep, out: []F, tlen: usize };
+            const inc_ctx = IncCtx{ .steps = trace.steps.items, .out = inc_poly, .tlen = trace_len };
+            const incFn = struct {
+                fn f(ctx: IncCtx, cycle: usize) void {
+                    if (cycle >= ctx.tlen) {
+                        ctx.out[cycle] = F.zero();
+                        return;
+                    }
+                    const step = ctx.steps[cycle];
+                    if (!step.is_noop and step.rd_written and step.rd_index != 0) {
+                        ctx.out[cycle] = F.fromU64(step.rd_value).sub(F.fromU64(step.rd_pre_value));
+                    } else {
+                        ctx.out[cycle] = F.zero();
+                    }
                 }
+            }.f;
+            if (pool) |tp| {
+                tp.parallelFor(T, inc_ctx, incFn);
+            } else {
+                for (0..T) |cycle| incFn(inc_ctx, cycle);
             }
 
             // Convert r_cycle from LE to BE for GruenSplitEqPolynomial
@@ -580,8 +593,33 @@ pub fn Stage4GruenProver(comptime F: type) type {
             // Note: merged_eq and inc_poly are NOT bound during Phase 2 (address binding)
         }
 
-        /// Dense inc_poly bind — sequential (in-place, cannot parallelize without extra buffer).
+        /// Dense inc_poly bind — uses scratch buffer for parallel execution.
         fn bindIncPolyCpu(self: *Self, half_T: usize, challenge: F) void {
+            if (self.thread_pool != null and half_T >= 512) {
+                // Parallel: write to scratch buffer, then copy back.
+                // In-place is unsafe because thread A reading inc_poly[2i] may race
+                // with thread B writing inc_poly[j] when 2i == j.
+                const scratch = self.allocator.alloc(F, half_T) catch {
+                    // Allocation failed — fall back to sequential
+                    self.bindIncPolyCpuSeq(half_T, challenge);
+                    return;
+                };
+                defer self.allocator.free(scratch);
+                const Ctx = struct { src: []const F, dst: []F, ch: F };
+                self.thread_pool.?.parallelFor(half_T, Ctx{ .src = self.inc_poly, .dst = scratch, .ch = challenge }, struct {
+                    fn f(ctx: Ctx, i: usize) void {
+                        const lo = ctx.src[2 * i];
+                        const hi = ctx.src[2 * i + 1];
+                        ctx.dst[i] = lo.add(ctx.ch.mul(hi.sub(lo)));
+                    }
+                }.f);
+                @memcpy(self.inc_poly[0..half_T], scratch);
+            } else {
+                self.bindIncPolyCpuSeq(half_T, challenge);
+            }
+        }
+
+        fn bindIncPolyCpuSeq(self: *Self, half_T: usize, challenge: F) void {
             for (0..half_T) |i| {
                 const lo = self.inc_poly[2 * i];
                 const hi = self.inc_poly[2 * i + 1];

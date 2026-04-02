@@ -133,19 +133,19 @@ pub fn IncPolynomial(comptime F: type) type {
             initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
             memory_layout: ?*const jolt_device.MemoryLayout,
         ) !Self {
+            _ = memory_layout; // unused after removing synthetic write filter
             const effective_len = if (trace_len == 0) 1 else trace_len;
             const padded_len = std.math.ceilPowerOfTwo(usize, effective_len) catch effective_len;
             const num_vars = if (padded_len <= 1) 0 else std.math.log2_int_ceil(usize, padded_len);
 
             const evals = try allocator.alloc(F, padded_len);
-            for (evals) |*e| {
-                e.* = F.zero();
-            }
+            @memset(evals, F.zero());
 
-            // Track last written value per address for computing increments.
-            // Initialize from the provided initial RAM map (if any).
-            var last_value = std.AutoHashMap(u64, u64).init(allocator);
-            defer last_value.deinit();
+            // Dense array tracking last written value per remapped address (replaces HashMap).
+            // K entries × 8 bytes = 128KB for K=16384 — fits L2 cache.
+            const last_value = try allocator.alloc(u64, k);
+            defer allocator.free(last_value);
+            @memset(last_value, 0);
 
             if (initial_ram) |ram| {
                 var iter = ram.iterator();
@@ -154,53 +154,30 @@ pub fn IncPolynomial(comptime F: type) type {
                     if (addr < start_address) continue;
                     const idx = (addr - start_address) / 8;
                     if (idx >= k) continue;
-                    try last_value.put(addr, entry.value_ptr.*);
+                    last_value[idx] = entry.value_ptr.*;
                 }
             }
 
-            dbg("[IncPolynomial] Processing {} accesses, trace_len={}, start_address=0x{X:0>16}, k={}\n", .{ trace.accesses.items.len, trace_len, start_address, k });
             for (trace.accesses.items) |access| {
                 if (access.op != .Write) continue;
-                if (access.address < start_address) {
-                    dbg("[IncPolynomial] Skipping write at 0x{X:0>16}: address < start_address\n", .{access.address});
-                    continue;
-                }
-
-                // NOTE: Jolt DOES include termination/panic writes in the trace.
-                // The guest program writes to the termination address via `core::ptr::write_volatile`,
-                // which is captured by the tracer as a normal RAM access. The Inc polynomial must
-                // include this write's increment (0 -> 1 = 1) for the ValFinal sumcheck to verify:
-                //   val_final(r) - val_init(r) = Σ_j inc(j) * wa(r, j)
-                //
-                // Previously we filtered these out, but that was incorrect - Jolt includes them.
-                _ = memory_layout; // unused after removing the filter
+                if (access.address < start_address) continue;
 
                 const idx = (access.address - start_address) / 8;
-                if (idx >= k) {
-                    dbg("[IncPolynomial] Skipping write at 0x{X:0>16}: idx {} >= k {}\n", .{ access.address, idx, k });
-                    continue;
-                }
+                if (idx >= k) continue;
 
                 const timestamp = @as(usize, @intCast(access.timestamp));
-                if (timestamp >= trace_len) {
-                    dbg("[IncPolynomial] Skipping write at 0x{X:0>16}: timestamp {} >= trace_len {}\n", .{ access.address, timestamp, trace_len });
-                    continue;
-                }
+                if (timestamp >= trace_len) continue;
 
-                const old_val = last_value.get(access.address) orelse 0;
+                const old_val = last_value[idx];
                 const new_val = access.value;
 
-                // inc = new_val - old_val (as field element)
                 if (new_val >= old_val) {
                     evals[timestamp] = F.fromU64(new_val - old_val);
                 } else {
-                    // Negative difference: -|diff|
                     evals[timestamp] = F.zero().sub(F.fromU64(old_val - new_val));
                 }
 
-                dbg("[IncPolynomial] Write at idx={}, timestamp={}, old_val={}, new_val={}, inc={}\n", .{ idx, timestamp, old_val, new_val, if (new_val >= old_val) new_val - old_val else 0 });
-
-                try last_value.put(access.address, new_val);
+                last_value[idx] = new_val;
             }
 
             return Self{
@@ -267,26 +244,51 @@ pub fn WaPolynomial(comptime F: type) type {
             start_address: u64,
             k: usize,
         ) !Self {
+            return fromTraceWithPool(allocator, trace, trace_len, r_address, start_address, k, null);
+        }
+
+        pub fn fromTraceWithPool(
+            allocator: Allocator,
+            trace: *const MemoryTrace,
+            trace_len: usize,
+            r_address: []const F,
+            start_address: u64,
+            k: usize,
+            pool: ?*ThreadPool,
+        ) !Self {
             const effective_len = if (trace_len == 0) 1 else trace_len;
             const padded_len = std.math.ceilPowerOfTwo(usize, effective_len) catch effective_len;
             const num_cycle_vars = if (padded_len <= 1) 0 else std.math.log2_int_ceil(usize, padded_len);
 
             const write_addresses = try allocator.alloc(?u64, padded_len);
-            for (write_addresses) |*w| {
-                w.* = null;
-            }
+            @memset(write_addresses, null);
 
-            for (trace.accesses.items) |access| {
-                // Include ALL accesses (reads AND writes) - the RA polynomial
-                // has entries for every RAM operation, not just writes.
-                // In Jolt's model, every timestamp is an access.
-                if (access.address < start_address) continue;
-                const remapped = (access.address - start_address) / 8;
-                if (remapped >= k) continue;
+            // Each access writes to a unique timestamp — parallelizable
+            const accesses = trace.accesses.items;
+            const WaCtx = struct {
+                items: []const mod.MemoryAccess,
+                wa: []?u64,
+                start: u64,
+                kk: usize,
+                tlen: usize,
+            };
+            const wa_ctx = WaCtx{ .items = accesses, .wa = write_addresses, .start = start_address, .kk = k, .tlen = trace_len };
+            const waFn = struct {
+                fn f(ctx: WaCtx, idx: usize) void {
+                    const access = ctx.items[idx];
+                    if (access.address < ctx.start) return;
+                    const remapped = (access.address - ctx.start) / 8;
+                    if (remapped >= ctx.kk) return;
+                    const timestamp = @as(usize, @intCast(access.timestamp));
+                    if (timestamp >= ctx.tlen) return;
+                    ctx.wa[timestamp] = remapped;
+                }
+            }.f;
 
-                const timestamp = @as(usize, @intCast(access.timestamp));
-                if (timestamp >= trace_len) continue;
-                write_addresses[timestamp] = remapped;
+            if (pool != null and accesses.len >= 256) {
+                pool.?.parallelFor(accesses.len, wa_ctx, waFn);
+            } else {
+                for (0..accesses.len) |idx| waFn(wa_ctx, idx);
             }
 
             const r_addr_copy = try allocator.alloc(F, r_address.len);
@@ -348,6 +350,10 @@ pub fn LtPolynomial(comptime F: type) type {
         /// Initialize with r_cycle in BIG_ENDIAN order (r_cycle[0] = MSB)
         /// This precomputes all LT(j, r_cycle) values using Jolt's algorithm.
         pub fn init(allocator: Allocator, r_cycle_be: []const F) !Self {
+            return initWithPool(allocator, r_cycle_be, null);
+        }
+
+        pub fn initWithPool(allocator: Allocator, r_cycle_be: []const F, pool: ?*ThreadPool) !Self {
             const n = r_cycle_be.len;
             const size = @as(usize, 1) << @intCast(n);
 
@@ -361,33 +367,30 @@ pub fn LtPolynomial(comptime F: type) type {
                 e.* = F.zero();
             }
 
-            // Build LT evaluations using Jolt's algorithm:
-            // for (i, r) in r.r.iter().rev().enumerate() {
-            //     let (evals_left, evals_right) = evals.split_at_mut(1 << i);
-            //     zip(evals_left, evals_right).for_each(|(x, y)| {
-            //         *y = *x * r;
-            //         *x += *r - *y;
-            //     });
-            // }
-            //
-            // r.r.iter().rev() means we iterate from r_cycle_be[n-1] (LSB) to r_cycle_be[0] (MSB)
-            // i=0 corresponds to r_cycle_be[n-1], i=1 to r_cycle_be[n-2], etc.
+            // Build LT evaluations using Jolt's algorithm.
+            // Outer loop has data dependencies (level i depends on level i-1).
+            // Inner loop pairs are independent — parallelize when half >= 256.
             for (0..n) |i| {
-                // r_cycle_be is BE, so r_cycle_be[n-1-i] is the coefficient for bit position i (LSB=0)
                 const r = r_cycle_be[n - 1 - i];
                 const half = @as(usize, 1) << @intCast(i);
 
-                // Split evals at position 'half' and process pairs
-                var idx: usize = 0;
-                while (idx < half) : (idx += 1) {
-                    const left_idx = idx;
-                    const right_idx = idx + half;
-
-                    const old_x = evals[left_idx];
-                    // y = old_x * r
-                    evals[right_idx] = old_x.mul(r);
-                    // x = old_x + r - y = old_x + r - old_x * r = old_x * (1 - r) + r
-                    evals[left_idx] = old_x.add(r).sub(evals[right_idx]);
+                if (pool != null and half >= 256) {
+                    const Ctx = struct { ev: []F, rr: F, h: usize };
+                    pool.?.parallelFor(half, Ctx{ .ev = evals, .rr = r, .h = half }, struct {
+                        fn f(ctx: Ctx, idx: usize) void {
+                            const old_x = ctx.ev[idx];
+                            const y = old_x.mul(ctx.rr);
+                            ctx.ev[idx + ctx.h] = y;
+                            ctx.ev[idx] = old_x.add(ctx.rr).sub(y);
+                        }
+                    }.f);
+                } else {
+                    var idx: usize = 0;
+                    while (idx < half) : (idx += 1) {
+                        const old_x = evals[idx];
+                        evals[idx + half] = old_x.mul(r);
+                        evals[idx] = old_x.add(r).sub(evals[idx + half]);
+                    }
                 }
             }
 
@@ -424,30 +427,145 @@ pub fn LtPolynomial(comptime F: type) type {
     };
 }
 
+/// Split LT polynomial: stores LT_hi, LT_lo, EQ_hi instead of dense T-element array.
+/// Memory: 3 × 2^(n/2) elements instead of 2^n (e.g., 64KB vs 16MB for n=19).
+///
+/// Decomposition: LT(i) = LT_hi(i_hi) + EQ_hi(i_hi) * LT_lo(i_lo)
+/// where i_hi = i >> n_lo_vars, i_lo = i & ((1 << n_lo_vars) - 1).
+///
+/// Binding order: LowToHigh — binds lo vars first, then hi vars.
+pub fn SplitLtPolynomial(comptime F: type) type {
+    const EqPoly = @import("../../poly/mod.zig").EqPolynomial(F);
+    return struct {
+        const Self = @This();
+
+        lt_lo: []F,
+        lt_hi: []F,
+        eq_hi: []F,
+        n_lo_vars: usize,
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator, r_cycle_be: []const F, pool: ?*ThreadPool) !Self {
+            const n = r_cycle_be.len;
+            const n_hi = n / 2;
+            const n_lo = n - n_hi;
+
+            // Split r_cycle_be into hi and lo halves
+            const r_hi = r_cycle_be[0..n_hi]; // MSB side
+            const r_lo = r_cycle_be[n_hi..n]; // LSB side
+
+            // Build lt_lo from r_lo using LtPolynomial.init algorithm
+            const lt_lo = try ltEvalsAlloc(allocator, r_lo, pool);
+            errdefer allocator.free(lt_lo);
+
+            // Build lt_hi from r_hi
+            const lt_hi = try ltEvalsAlloc(allocator, r_hi, pool);
+            errdefer allocator.free(lt_hi);
+
+            // Build eq_hi = EqPolynomial::evals(r_hi) — same BE convention as lt_hi
+            const eq_hi = try EqPoly.evalsSliceWithScalingParallel(F, allocator, r_hi, null, pool);
+            errdefer allocator.free(eq_hi);
+
+            return Self{
+                .lt_lo = lt_lo,
+                .lt_hi = lt_hi,
+                .eq_hi = eq_hi,
+                .n_lo_vars = n_lo,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.lt_lo);
+            self.allocator.free(self.lt_hi);
+            self.allocator.free(self.eq_hi);
+        }
+
+        /// Get bound coefficient at index i (O(1): 3 lookups + 1 mul + 1 add)
+        pub inline fn getBoundCoeff(self: *const Self, i: usize) F {
+            const lo_mask = (@as(usize, 1) << @intCast(self.n_lo_vars)) - 1;
+            const i_lo = i & lo_mask;
+            const i_hi = i >> @intCast(self.n_lo_vars);
+            return self.lt_hi[i_hi].add(self.eq_hi[i_hi].mul(self.lt_lo[i_lo]));
+        }
+
+        /// Bind LowToHigh: lo vars first, then hi vars
+        pub fn bind(self: *Self, r: F) void {
+            if (self.n_lo_vars > 0) {
+                // Bind lo
+                bindHalf(self.lt_lo, r);
+                self.n_lo_vars -= 1;
+            } else {
+                // Bind hi + eq_hi
+                bindHalf(self.lt_hi, r);
+                bindHalf(self.eq_hi, r);
+            }
+        }
+
+        fn bindHalf(arr: []F, r: F) void {
+            const n = arr.len;
+            const half = n / 2;
+            for (0..half) |i| {
+                const lo = arr[2 * i];
+                const hi = arr[2 * i + 1];
+                arr[i] = lo.add(r.mul(hi.sub(lo)));
+            }
+        }
+
+        /// Build lt_evals using the standard algorithm (same as LtPolynomial.init)
+        fn ltEvalsAlloc(allocator: Allocator, r_be: []const F, pool: ?*ThreadPool) ![]F {
+            const n = r_be.len;
+            const size = @as(usize, 1) << @intCast(n);
+            const evals = try allocator.alloc(F, size);
+            @memset(evals, F.zero());
+
+            for (0..n) |i| {
+                const r = r_be[n - 1 - i];
+                const half = @as(usize, 1) << @intCast(i);
+
+                if (pool != null and half >= 256) {
+                    const Ctx = struct { ev: []F, rr: F, h: usize };
+                    pool.?.parallelFor(half, Ctx{ .ev = evals, .rr = r, .h = half }, struct {
+                        fn f(ctx: Ctx, idx: usize) void {
+                            const old_x = ctx.ev[idx];
+                            const y = old_x.mul(ctx.rr);
+                            ctx.ev[idx + ctx.h] = y;
+                            ctx.ev[idx] = old_x.add(ctx.rr).sub(y);
+                        }
+                    }.f);
+                } else {
+                    var idx: usize = 0;
+                    while (idx < half) : (idx += 1) {
+                        const old_x = evals[idx];
+                        evals[idx + half] = old_x.mul(r);
+                        evals[idx] = old_x.add(r).sub(evals[idx + half]);
+                    }
+                }
+            }
+            return evals;
+        }
+    };
+}
+
 /// Value Evaluation Sumcheck Prover
 ///
-/// This prover implements the sumcheck for the value evaluation:
-///   Σ_{j=0}^{T-1} inc(j) · wa(j) · LT(j, r_cycle)
-///
-/// The key insight is that wa(j) and LT(j) depend on the *full* index j,
-/// but after binding variables, the indices are constructed from:
-/// - bound challenges (for already-summed variables)
-/// - the current free variable (0 or 1)
-/// - remaining free variables (summed over)
-///
-/// To correctly implement this, we:
-/// 1. Materialize wa and lt evaluations upfront (same as inc)
-/// 2. Bind all three polynomials together after each challenge
+/// Uses SplitLtPolynomial for memory-efficient LT evaluation (64KB vs 16MB).
+/// inc and wa are materialized as dense arrays; lt uses hi/lo decomposition.
 pub fn ValEvaluationProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
         /// Increment polynomial evaluations
         inc_evals: []F,
-        /// Write-address indicator evaluations: wa(r_address, j) for each j
-        wa_evals: []F,
-        /// Less-than evaluations: LT(j, r_cycle) for each j
-        lt_evals: []F,
+        /// Wa: either lazy (eq_table + sparse indices) or dense (materialized after first bind)
+        wa_evals: ?[]F,
+        /// Lazy wa state: sparse write addresses (freed after first bind)
+        wa_addrs: ?[]const ?u64,
+        wa_addrs_owned: bool,
+        /// Lazy wa state: eq table (freed after first bind)
+        wa_eq_table: ?[]const F,
+        /// Split LT polynomial (hi/lo decomposition, ~64KB vs 16MB dense)
+        lt_poly: SplitLtPolynomial(F),
         /// Number of variables (log of trace length)
         num_vars: usize,
         /// Current round (bound variables count)
@@ -458,6 +576,17 @@ pub fn ValEvaluationProver(comptime F: type) type {
         params: ValEvaluationParams(F),
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
+
+        /// Get wa value at index j — lazy (eq_table lookup) or dense (array access)
+        pub inline fn getWa(self: *const Self, j: usize) F {
+            if (self.wa_evals) |wa| return wa[j];
+            // Lazy path: sparse lookup into eq table
+            const addrs = self.wa_addrs.?;
+            if (j < addrs.len) {
+                if (addrs[j]) |addr| return self.wa_eq_table.?[@intCast(addr)];
+            }
+            return F.zero();
+        }
 
         pub fn init(
             allocator: Allocator,
@@ -483,6 +612,19 @@ pub fn ValEvaluationProver(comptime F: type) type {
             start_address: u64,
             memory_layout: ?*const jolt_device.MemoryLayout,
         ) !Self {
+            return initWithLayoutAndPool(allocator, trace, initial_ram, params, start_address, memory_layout, null);
+        }
+
+        /// Initialize with optional thread pool for parallel init
+        pub fn initWithLayoutAndPool(
+            allocator: Allocator,
+            trace: *const MemoryTrace,
+            initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
+            params: ValEvaluationParams(F),
+            start_address: u64,
+            memory_layout: ?*const jolt_device.MemoryLayout,
+            pool: ?*ThreadPool,
+        ) !Self {
 
             // Build inc polynomial (filtering out synthetic writes if memory_layout provided)
             var inc_poly = try IncPolynomial(F).fromTraceWithLayout(
@@ -496,102 +638,73 @@ pub fn ValEvaluationProver(comptime F: type) type {
             );
             defer inc_poly.deinit();
 
-            // Build wa polynomial helper
-            var wa_poly = try WaPolynomial(F).fromTrace(
+            // Build wa polynomial helper (keep sparse addresses for lazy lookup)
+            const wa_poly = try WaPolynomial(F).fromTraceWithPool(
                 allocator,
                 trace,
                 params.trace_len,
                 params.r_address,
                 start_address,
                 params.k,
+                pool,
             );
-            defer wa_poly.deinit();
+            // Transfer write_addresses ownership to prover; free only r_address here
+            defer allocator.free(wa_poly.r_address);
 
-            // Build lt polynomial helper
-            var lt_poly = try LtPolynomial(F).init(allocator, params.r_cycle);
-            defer lt_poly.deinit();
+            // Build split LT polynomial (hi/lo decomposition, ~64KB vs 16MB dense)
+            var split_lt = try SplitLtPolynomial(F).init(allocator, params.r_cycle, pool);
+            errdefer split_lt.deinit();
 
             const n = inc_poly.evals.len;
             const num_vars = inc_poly.num_vars;
 
-            // Allocate evaluation arrays
-            const inc_evals = try allocator.alloc(F, n);
-            const wa_evals = try allocator.alloc(F, n);
-            const lt_evals = try allocator.alloc(F, n);
-
-            // Materialize all polynomial evaluations
-            for (0..n) |j| {
-                inc_evals[j] = inc_poly.get(j);
-                wa_evals[j] = wa_poly.evaluateAtCycle(j);
-                lt_evals[j] = lt_poly.evaluateAtIndex(j);
+            // Precompute K-element eq table for wa evaluation: eq_table[addr] = eq(r_address, addr).
+            // Reverse r_address for LE indexing (buildEqTableInPlace uses BE convention).
+            const EqPoly = @import("../../poly/mod.zig").EqPolynomial(F);
+            const r_addr = params.r_address;
+            const r_addr_rev = try allocator.alloc(F, r_addr.len);
+            defer allocator.free(r_addr_rev);
+            for (0..r_addr.len) |ri| {
+                r_addr_rev[ri] = r_addr[r_addr.len - 1 - ri];
             }
+            // eq_table ownership transfers to prover (freed on first bind or deinit)
+            const eq_table = try EqPoly.evalsSliceWithScalingParallel(F, allocator, r_addr_rev, null, pool);
 
-            // Debug: print r_address used by this prover (first and last 4)
-            // Note: r_address uses LE for eq polynomial (symmetric, order doesn't matter)
-            dbg("[VALEVAL_INIT] r_address from params, len={}:\n", .{params.r_address.len});
-            for (0..@min(4, params.r_address.len)) |i| {
-                dbg("  r_address[{}] = {any}\n", .{ i, params.r_address[i].toBytes()[0..8] });
-            }
-            // Also print last 4 to verify full array
-            if (params.r_address.len > 4) {
-                for ((params.r_address.len - 4)..params.r_address.len) |i| {
-                    dbg("  r_address[{}] = {any}\n", .{ i, params.r_address[i].toBytes()[0..8] });
+            // Transfer inc_poly.evals ownership to prover (avoids 16MB memcpy)
+            const inc_evals = inc_poly.evals;
+            inc_poly.evals = &.{}; // prevent deinit from double-freeing
+
+            // Compute initial claim using lazy wa + split LT — parallel when pool available
+            const LazyClaimCtx = struct { inc: []const F, addrs: []const ?u64, eq_tbl: []const F, lt: *const SplitLtPolynomial(F), addrs_len: usize };
+            const claim_ctx = LazyClaimCtx{ .inc = inc_evals, .addrs = wa_poly.write_addresses, .eq_tbl = eq_table, .lt = &split_lt, .addrs_len = wa_poly.write_addresses.len };
+            const claimMapFn = struct {
+                fn f(c: LazyClaimCtx, start: usize, end: usize) F {
+                    var s = F.zero();
+                    for (start..end) |j| {
+                        const wa_j = if (j < c.addrs_len)
+                            (if (c.addrs[j]) |addr| c.eq_tbl[@intCast(addr)] else F.zero())
+                        else
+                            F.zero();
+                        s = s.add(c.inc[j].mul(wa_j).mul(c.lt.getBoundCoeff(j)));
+                    }
+                    return s;
                 }
-            }
-
-            // Debug: print initial LT evaluations for indices 0, 1, 128 (to check pattern)
-            dbg("[VALEVAL_INIT] LT polynomial values:\n", .{});
-            dbg("  lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
-            dbg("  lt_evals[1] = {any}\n", .{lt_evals[1].toBytes()[0..8]});
-            dbg("  lt_evals[128] = {any}\n", .{if (n > 128) lt_evals[128].toBytes()[0..8] else lt_evals[0].toBytes()[0..8]});
-            dbg("  r_cycle values (from params, BIG_ENDIAN - r[0]=MSB):\n", .{});
-            for (0..@min(3, params.r_cycle.len)) |i| {
-                dbg("    r_cycle_be[{}] = {any}\n", .{ i, params.r_cycle[i].toBytes()[0..8] });
-            }
-            // Verify LT(0, r_cycle_be) using Jolt's verifier formula:
-            // LT(0, r) = Σ_i (1 - 0_i) · r_i · eq(0[i+1:], r[i+1:])
-            //          = Σ_i r_i · (1-r[i+1]) · (1-r[i+2]) · ... · (1-r[n-1])
-            // where i runs from MSB (index 0 in BE) to LSB
-            dbg("  Verifying LT(0, r_cycle_be) directly (BE formula):\n", .{});
-            var lt_0_direct = F.zero();
-            var eq_suffix = F.one();
-            // Iterate from MSB (index 0) to LSB (index n-1)
-            // But we need eq(0[i+1:], r[i+1:]) which is the product for indices > i
-            // So we iterate backwards to compute the running product
-            var i: usize = num_vars;
-            while (i > 0) {
-                i -= 1;
-                // At position i (BE: 0=MSB), contribution is r[i] * eq_suffix
-                // For j=0, all bits are 0, so (1 - j_i) = 1
-                lt_0_direct = lt_0_direct.add(params.r_cycle[i].mul(eq_suffix));
-                // Update eq_suffix for next iteration (which is position i-1)
-                // eq_suffix *= eq(0, r[i]) = (1-r[i])
-                eq_suffix = eq_suffix.mul(F.one().sub(params.r_cycle[i]));
-            }
-            dbg("    LT(0, r_cycle_be) direct = {any}\n", .{lt_0_direct.toBytes()[0..8]});
-            dbg("    lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
-            dbg("    Match? {}\n", .{lt_0_direct.eql(lt_evals[0])});
-
-            // Compute initial claim
-            var initial_claim = F.zero();
-            for (0..n) |j| {
-                initial_claim = initial_claim.add(inc_evals[j].mul(wa_evals[j]).mul(lt_evals[j]));
-            }
-
-            // Debug: print value at j=54 (known termination write cycle)
-            if (n > 54) {
-                dbg("[VALEVAL_INIT] At j=54: inc={any}, wa={any}, lt={any}\n", .{
-                    inc_evals[54].toBytes()[0..8],
-                    wa_evals[54].toBytes()[0..8],
-                    lt_evals[54].toBytes()[0..8],
-                });
-            }
-            dbg("[VALEVAL_INIT] n={}, initial_claim={any}\n", .{ n, initial_claim.toBytes()[0..8] });
+            }.f;
+            const claimReduceFn = struct {
+                fn f(a: F, b: F) F { return a.add(b); }
+            }.f;
+            const initial_claim = if (pool) |tp|
+                tp.parallelReduce(F, n, F.zero(), claim_ctx, claimMapFn, claimReduceFn)
+            else
+                claimMapFn(claim_ctx, 0, n);
 
             return Self{
                 .inc_evals = inc_evals,
-                .wa_evals = wa_evals,
-                .lt_evals = lt_evals,
+                .wa_evals = null, // Lazy: materialized on first bind
+                .wa_addrs = wa_poly.write_addresses, // Transfer ownership
+                .wa_addrs_owned = true,
+                .wa_eq_table = eq_table, // Transfer ownership
+                .lt_poly = split_lt,
                 .num_vars = num_vars,
                 .round = 0,
                 .current_claim = initial_claim,
@@ -602,8 +715,12 @@ pub fn ValEvaluationProver(comptime F: type) type {
 
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.inc_evals);
-            self.allocator.free(self.wa_evals);
-            self.allocator.free(self.lt_evals);
+            if (self.wa_evals) |wa| self.allocator.free(wa);
+            if (self.wa_addrs_owned) {
+                if (self.wa_addrs) |addrs| self.allocator.free(addrs);
+            }
+            if (self.wa_eq_table) |eq| self.allocator.free(eq);
+            self.lt_poly.deinit();
             self.params.deinit();
         }
 
@@ -627,7 +744,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
             if (half == 0) {
                 // Single element: p(0) = f(0), others are 0
                 if (n > 0) {
-                    evals[0] = self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0]);
+                    evals[0] = self.inc_evals[0].mul(self.getWa(0)).mul(self.lt_poly.getBoundCoeff(0));
                 }
                 return evals;
             }
@@ -636,12 +753,12 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 // For LowToHigh binding, x=0 is at index 2*i (bit 0 = 0)
                 // and x=1 is at index 2*i+1 (bit 0 = 1)
                 const inc_0 = self.inc_evals[2 * i];
-                const wa_0 = self.wa_evals[2 * i];
-                const lt_0 = self.lt_evals[2 * i];
+                const wa_0 = self.getWa(2 * i);
+                const lt_0 = self.lt_poly.getBoundCoeff(2 * i);
 
                 const inc_1 = self.inc_evals[2 * i + 1];
-                const wa_1 = self.wa_evals[2 * i + 1];
-                const lt_1 = self.lt_evals[2 * i + 1];
+                const wa_1 = self.getWa(2 * i + 1);
+                const lt_1 = self.lt_poly.getBoundCoeff(2 * i + 1);
 
                 // p(0): product at x = 0
                 evals[0] = evals[0].add(inc_0.mul(wa_0).mul(lt_0));
@@ -681,21 +798,34 @@ pub fn ValEvaluationProver(comptime F: type) type {
             if (half == 0) {
                 var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
                 if (n > 0) {
-                    evals[0] = self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0].add(gamma));
+                    evals[0] = self.inc_evals[0].mul(self.getWa(0)).mul(self.lt_poly.getBoundCoeff(0).add(gamma));
                 }
                 return evals;
             }
 
             const ComputeCtx = struct {
                 inc: []const F,
-                wa: []const F,
-                lt: []const F,
+                wa_dense: ?[]const F,
+                wa_addrs: ?[]const ?u64,
+                wa_eq_tbl: ?[]const F,
+                lt: *const SplitLtPolynomial(F),
                 gamma: F,
+
+                inline fn getWaAt(c: @This(), j: usize) F {
+                    if (c.wa_dense) |wa| return wa[j];
+                    const addrs = c.wa_addrs.?;
+                    if (j < addrs.len) {
+                        if (addrs[j]) |addr| return c.wa_eq_tbl.?[@intCast(addr)];
+                    }
+                    return F.zero();
+                }
             };
             const ctx = ComputeCtx{
                 .inc = self.inc_evals,
-                .wa = self.wa_evals,
-                .lt = self.lt_evals,
+                .wa_dense = self.wa_evals,
+                .wa_addrs = self.wa_addrs,
+                .wa_eq_tbl = self.wa_eq_table,
+                .lt = &self.lt_poly,
                 .gamma = gamma,
             };
 
@@ -711,8 +841,8 @@ pub fn ValEvaluationProver(comptime F: type) type {
                             UnreducedProductAccum.zero(), UnreducedProductAccum.zero(),
                         };
                         for (start..end) |i| {
-                            const inc_0 = c.inc[2 * i]; const wa_0 = c.wa[2 * i]; const lt_0 = c.lt[2 * i];
-                            const inc_1 = c.inc[2 * i + 1]; const wa_1 = c.wa[2 * i + 1]; const lt_1 = c.lt[2 * i + 1];
+                            const inc_0 = c.inc[2 * i]; const wa_0 = c.getWaAt(2 * i); const lt_0 = c.lt.getBoundCoeff(2 * i);
+                            const inc_1 = c.inc[2 * i + 1]; const wa_1 = c.getWaAt(2 * i + 1); const lt_1 = c.lt.getBoundCoeff(2 * i + 1);
                             const inc_2 = two.mul(inc_1).sub(inc_0);
                             const wa_2 = two.mul(wa_1).sub(wa_0);
                             const lt_2 = two.mul(lt_1).sub(lt_0);
@@ -731,8 +861,8 @@ pub fn ValEvaluationProver(comptime F: type) type {
                     } else {
                         var local: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
                         for (start..end) |i| {
-                            const inc_0 = c.inc[2 * i]; const wa_0 = c.wa[2 * i]; const lt_0 = c.lt[2 * i];
-                            const inc_1 = c.inc[2 * i + 1]; const wa_1 = c.wa[2 * i + 1]; const lt_1 = c.lt[2 * i + 1];
+                            const inc_0 = c.inc[2 * i]; const wa_0 = c.getWaAt(2 * i); const lt_0 = c.lt.getBoundCoeff(2 * i);
+                            const inc_1 = c.inc[2 * i + 1]; const wa_1 = c.getWaAt(2 * i + 1); const lt_1 = c.lt.getBoundCoeff(2 * i + 1);
                             const inc_2 = two.mul(inc_1).sub(inc_0);
                             const wa_2 = two.mul(wa_1).sub(wa_0);
                             const lt_2 = two.mul(lt_1).sub(lt_0);
@@ -774,63 +904,103 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 return;
             }
 
-            _ = round_poly;
+            // If wa is lazy (first bind), materialize to dense at half size
+            if (self.wa_evals == null) {
+                // First bind: materialize wa from lazy (sparse addrs + eq table) → dense at half size
+                const wa_dense = self.allocator.alloc(F, half) catch @panic("wa materialize alloc");
+                const addrs = self.wa_addrs.?;
+                const eq_tbl = self.wa_eq_table.?;
 
-            // Bind 3 independent arrays in parallel: inc, wa, lt
-            const BindCtx = struct {
-                slices: [3][]F,
-                r: F,
-                half: usize,
-                n: usize,
-            };
-            const bind_ctx = BindCtx{
-                .slices = .{ self.inc_evals, self.wa_evals, self.lt_evals },
-                .r = r,
-                .half = half,
-                .n = n,
-            };
-            const bindFn = struct {
-                fn f(ctx: BindCtx, idx: usize) void {
-                    const arr = ctx.slices[idx];
-                    const one_minus_r = F.one().sub(ctx.r);
-                    for (0..ctx.half) |i| {
-                        arr[i] = one_minus_r.mul(arr[2 * i]).add(ctx.r.mul(arr[2 * i + 1]));
+                const MatWaCtx = struct {
+                    dst: []F,
+                    ad: []const ?u64,
+                    eq: []const F,
+                    rr: F,
+                    omr: F,
+                    alen: usize,
+                };
+                const mctx = MatWaCtx{
+                    .dst = wa_dense,
+                    .ad = addrs,
+                    .eq = eq_tbl,
+                    .rr = r,
+                    .omr = F.one().sub(r),
+                    .alen = addrs.len,
+                };
+                const matWaFn = struct {
+                    fn f(c: MatWaCtx, i: usize) void {
+                        const wa_0 = if (2 * i < c.alen)
+                            (if (c.ad[2 * i]) |a| c.eq[@intCast(a)] else F.zero())
+                        else
+                            F.zero();
+                        const wa_1 = if (2 * i + 1 < c.alen)
+                            (if (c.ad[2 * i + 1]) |a| c.eq[@intCast(a)] else F.zero())
+                        else
+                            F.zero();
+                        c.dst[i] = c.omr.mul(wa_0).add(c.rr.mul(wa_1));
                     }
-                    for (ctx.half..ctx.n) |i| {
-                        arr[i] = F.zero();
-                    }
+                }.f;
+
+                if (self.thread_pool) |tp| {
+                    tp.parallelFor(half, mctx, matWaFn);
+                } else {
+                    for (0..half) |i| matWaFn(mctx, i);
                 }
-            }.f;
 
-            if (self.thread_pool) |tp| {
-                tp.parallelForForce(3, bind_ctx, bindFn);
+                // Free lazy state
+                if (self.wa_addrs_owned) {
+                    self.allocator.free(self.wa_addrs.?);
+                }
+                self.wa_addrs = null;
+                self.wa_addrs_owned = false;
+                self.allocator.free(self.wa_eq_table.?);
+                self.wa_eq_table = null;
+                self.wa_evals = wa_dense;
+
+                // Bind inc only (wa already bound above)
+                const one_minus_r2 = F.one().sub(r);
+                for (0..half) |i| {
+                    self.inc_evals[i] = one_minus_r2.mul(self.inc_evals[2 * i]).add(r.mul(self.inc_evals[2 * i + 1]));
+                }
             } else {
-                for (0..3) |idx| bindFn(bind_ctx, idx);
+                // Both arrays are dense — bind in parallel
+                const BindCtx = struct {
+                    slices: [2][]F,
+                    r: F,
+                    half: usize,
+                };
+                const bind_ctx = BindCtx{
+                    .slices = .{ self.inc_evals, self.wa_evals.? },
+                    .r = r,
+                    .half = half,
+                };
+                const bindFn = struct {
+                    fn f(ctx: BindCtx, idx: usize) void {
+                        const arr = ctx.slices[idx];
+                        const one_minus_r3 = F.one().sub(ctx.r);
+                        for (0..ctx.half) |i| {
+                            arr[i] = one_minus_r3.mul(arr[2 * i]).add(ctx.r.mul(arr[2 * i + 1]));
+                        }
+                    }
+                }.f;
+
+                if (self.thread_pool) |tp| {
+                    tp.parallelForForce(2, bind_ctx, bindFn);
+                } else {
+                    for (0..2) |idx| bindFn(bind_ctx, idx);
+                }
             }
+
+            // Bind split LT polynomial (O(sqrt(T)) work)
+            self.lt_poly.bind(r);
 
             self.round += 1;
 
-            // Recompute new claim: Σ inc[j]*wa[j]*lt[j]
-            const new_len = self.effectiveLen();
-            const ClaimCtx = struct { inc: []const F, wa: []const F, lt: []const F };
-            const claim_ctx = ClaimCtx{ .inc = self.inc_evals, .wa = self.wa_evals, .lt = self.lt_evals };
-            const claimMapFn = struct {
-                fn f(c: ClaimCtx, start: usize, end: usize) F {
-                    var s = F.zero();
-                    for (start..end) |j| {
-                        s = s.add(c.inc[j].mul(c.wa[j]).mul(c.lt[j]));
-                    }
-                    return s;
-                }
-            }.f;
-            const claimReduceFn = struct {
-                fn f(a: F, b: F) F { return a.add(b); }
-            }.f;
-
-            self.current_claim = if (self.thread_pool) |tp|
-                tp.parallelReduce(F, new_len, F.zero(), claim_ctx, claimMapFn, claimReduceFn)
-            else
-                claimMapFn(claim_ctx, 0, new_len);
+            // Update claim from round polynomial evaluation at challenge point.
+            // This is O(1) (3 field muls) vs the previous O(T/2^round) full re-summation.
+            // The caller already uses this same value for individual_claims[1].
+            const poly_mod = @import("../../poly/mod.zig");
+            self.current_claim = poly_mod.UniPoly(F).evaluateToomCookAt(round_poly, r);
         }
 
         /// Bind the current variable to challenge r (DEPRECATED - use bindChallengeWithPoly)
@@ -849,7 +1019,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
         /// Get final claim: the product at the fully bound point
         pub fn getFinalClaim(self: *const Self) F {
             if (self.inc_evals.len == 0) return F.zero();
-            return self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0]);
+            return self.inc_evals[0].mul(self.getWa(0)).mul(self.lt_poly.getBoundCoeff(0));
         }
 
         pub fn getFinalOpenings(self: *const Self) struct { inc_eval: F, wa_eval: F, lt_eval: F } {
@@ -858,8 +1028,8 @@ pub fn ValEvaluationProver(comptime F: type) type {
             }
             return .{
                 .inc_eval = self.inc_evals[0],
-                .wa_eval = self.wa_evals[0],
-                .lt_eval = self.lt_evals[0],
+                .wa_eval = self.getWa(0),
+                .lt_eval = self.lt_poly.getBoundCoeff(0),
             };
         }
 

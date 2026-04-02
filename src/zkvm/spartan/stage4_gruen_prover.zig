@@ -169,8 +169,18 @@ pub fn Stage4GruenProver(comptime F: type) type {
             var sparse_lookup = try SparseRegsLookup.fromTrace(allocator, trace, gamma, pool);
             errdefer sparse_lookup.deinit();
 
+            // Batch allocation: inc_poly (T) + r_cycle_copy (log_T) + challenges_buf (num_rounds)
+            const combined_len = T + r_cycle.len + num_rounds;
+            const combined = try allocator.alloc(F, combined_len);
+            const inc_poly = combined[0..T];
+            const r_cycle_copy = combined[T .. T + r_cycle.len];
+            const challenges_buf = combined[T + r_cycle.len ..][0..num_rounds];
+
+            // Fill r_cycle_copy (LE order) and zero challenges_buf
+            @memcpy(r_cycle_copy, r_cycle);
+            @memset(challenges_buf, F.zero());
+
             // Build dense inc_poly from trace — parallel, each cycle independent
-            const inc_poly = try allocator.alloc(F, T);
             const IncCtx = struct { steps: []const TraceStep, out: []F, tlen: usize };
             const inc_ctx = IncCtx{ .steps = trace.steps.items, .out = inc_poly, .tlen = trace_len };
             const incFn = struct {
@@ -193,21 +203,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 for (0..T) |cycle| incFn(inc_ctx, cycle);
             }
 
-            // Convert r_cycle from LE to BE for GruenSplitEqPolynomial
-            const r_cycle_be = try allocator.alloc(F, r_cycle.len);
-            for (0..r_cycle.len) |i| {
-                r_cycle_be[i] = r_cycle[r_cycle.len - 1 - i];
-            }
-            const gruen_eq_poly = try GruenSplitEqPolynomial(F).init(allocator, r_cycle_be);
-            allocator.free(r_cycle_be);
-
-            // Copy r_cycle (keep original LE order)
-            const r_cycle_copy = try allocator.alloc(F, r_cycle.len);
-            @memcpy(r_cycle_copy, r_cycle);
-
-            // Allocate challenges buffer
-            const challenges_buf = try allocator.alloc(F, num_rounds);
-            @memset(challenges_buf, F.zero());
+            // Build GruenSplitEqPolynomial from r_cycle in BE order.
+            // Reverse r_cycle_copy in-place, build eq poly (which copies internally), then restore.
+            std.mem.reverse(F, r_cycle_copy);
+            const gruen_eq_poly = try GruenSplitEqPolynomial(F).init(allocator, r_cycle_copy);
+            std.mem.reverse(F, r_cycle_copy); // restore LE order
 
             return Self{
                 .allocator = allocator,
@@ -236,9 +236,9 @@ pub fn Stage4GruenProver(comptime F: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.allocator.free(self.inc_poly);
-            self.allocator.free(@constCast(self.r_cycle));
-            self.allocator.free(self.challenges_buf);
+            // inc_poly, r_cycle, and challenges_buf are a single batched allocation
+            const combined_len = self.T + self.r_cycle.len + self.num_rounds;
+            self.allocator.free(self.inc_poly.ptr[0..combined_len]);
             if (self.gruen_eq) |*g| g.deinit();
             if (self.merged_eq) |merged| self.allocator.free(merged);
             if (self.sparse_lookup) |*s| s.deinit();

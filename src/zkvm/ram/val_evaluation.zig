@@ -133,7 +133,22 @@ pub fn IncPolynomial(comptime F: type) type {
             initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
             memory_layout: ?*const jolt_device.MemoryLayout,
         ) !Self {
-            _ = memory_layout; // unused after removing synthetic write filter
+            return fromTraceParallel(allocator, trace, trace_len, start_address, k, initial_ram, memory_layout, null);
+        }
+
+        /// Parallel version using pre_value from trace (each access independent)
+        pub fn fromTraceParallel(
+            allocator: Allocator,
+            trace: *const MemoryTrace,
+            trace_len: usize,
+            start_address: u64,
+            k: usize,
+            initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
+            memory_layout: ?*const jolt_device.MemoryLayout,
+            pool: ?*ThreadPool,
+        ) !Self {
+            _ = memory_layout;
+            _ = initial_ram; // pre_value is in the trace; initial_ram was only for last_value tracking
             const effective_len = if (trace_len == 0) 1 else trace_len;
             const padded_len = std.math.ceilPowerOfTwo(usize, effective_len) catch effective_len;
             const num_vars = if (padded_len <= 1) 0 else std.math.log2_int_ceil(usize, padded_len);
@@ -141,43 +156,43 @@ pub fn IncPolynomial(comptime F: type) type {
             const evals = try allocator.alloc(F, padded_len);
             @memset(evals, F.zero());
 
-            // Dense array tracking last written value per remapped address (replaces HashMap).
-            // K entries × 8 bytes = 128KB for K=16384 — fits L2 cache.
-            const last_value = try allocator.alloc(u64, k);
-            defer allocator.free(last_value);
-            @memset(last_value, 0);
-
-            if (initial_ram) |ram| {
-                var iter = ram.iterator();
-                while (iter.next()) |entry| {
-                    const addr = entry.key_ptr.*;
-                    if (addr < start_address) continue;
-                    const idx = (addr - start_address) / 8;
-                    if (idx >= k) continue;
-                    last_value[idx] = entry.value_ptr.*;
+            // Parallel: each access computes inc = value - pre_value independently
+            const accesses = trace.accesses.items;
+            const IncCtx = struct {
+                items: []const mod.MemoryAccess,
+                ev: []F,
+                start: u64,
+                kk: usize,
+                tlen: usize,
+            };
+            const inc_ctx = IncCtx{
+                .items = accesses,
+                .ev = evals,
+                .start = start_address,
+                .kk = k,
+                .tlen = trace_len,
+            };
+            const incFn = struct {
+                fn f(ctx: IncCtx, idx: usize) void {
+                    const access = ctx.items[idx];
+                    if (access.op != .Write) return;
+                    if (access.address < ctx.start) return;
+                    const remapped = (access.address - ctx.start) / 8;
+                    if (remapped >= ctx.kk) return;
+                    const timestamp = @as(usize, @intCast(access.timestamp));
+                    if (timestamp >= ctx.tlen) return;
+                    if (access.value >= access.pre_value) {
+                        ctx.ev[timestamp] = F.fromU64(access.value - access.pre_value);
+                    } else {
+                        ctx.ev[timestamp] = F.zero().sub(F.fromU64(access.pre_value - access.value));
+                    }
                 }
-            }
+            }.f;
 
-            for (trace.accesses.items) |access| {
-                if (access.op != .Write) continue;
-                if (access.address < start_address) continue;
-
-                const idx = (access.address - start_address) / 8;
-                if (idx >= k) continue;
-
-                const timestamp = @as(usize, @intCast(access.timestamp));
-                if (timestamp >= trace_len) continue;
-
-                const old_val = last_value[idx];
-                const new_val = access.value;
-
-                if (new_val >= old_val) {
-                    evals[timestamp] = F.fromU64(new_val - old_val);
-                } else {
-                    evals[timestamp] = F.zero().sub(F.fromU64(old_val - new_val));
-                }
-
-                last_value[idx] = new_val;
+            if (pool != null and accesses.len >= 256) {
+                pool.?.parallelFor(accesses.len, inc_ctx, incFn);
+            } else {
+                for (0..accesses.len) |idx| incFn(inc_ctx, idx);
             }
 
             return Self{
@@ -627,7 +642,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
         ) !Self {
 
             // Build inc polynomial (filtering out synthetic writes if memory_layout provided)
-            var inc_poly = try IncPolynomial(F).fromTraceWithLayout(
+            var inc_poly = try IncPolynomial(F).fromTraceParallel(
                 allocator,
                 trace,
                 params.trace_len,
@@ -635,6 +650,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 params.k,
                 initial_ram,
                 memory_layout,
+                pool,
             );
             defer inc_poly.deinit();
 

@@ -368,7 +368,7 @@ pub fn PrefixSuffixDecomposition(comptime F: type, comptime ORDER: usize) type {
 // ============================================================================
 
 test "IdentityPolynomial evaluate" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
 
     const poly = IdentityPolynomial(F).init(4);
 
@@ -379,7 +379,7 @@ test "IdentityPolynomial evaluate" {
 }
 
 test "IdentityPolynomial bind HighToLow" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
 
     var poly = IdentityPolynomial(F).init(4);
 
@@ -394,7 +394,7 @@ test "IdentityPolynomial bind HighToLow" {
 }
 
 test "OperandPolynomial evaluate" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
 
     const left_poly = OperandPolynomial(F).init(8, .Left);
     const right_poly = OperandPolynomial(F).init(8, .Right);

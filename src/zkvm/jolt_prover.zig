@@ -18,17 +18,17 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../utils/thread_pool.zig").ThreadPool;
+const ThreadPool = @import("zolt_pool").ThreadPool;
 
 const jolt_types = @import("jolt_types.zig");
-const field_mod = @import("../field/mod.zig");
+const field_mod = @import("zolt_arith").field;
 const UnreducedProductAccum = field_mod.UnreducedProductAccum;
 const r1cs = @import("r1cs/mod.zig");
 const streaming_outer = @import("spartan/streaming_outer.zig");
 const product_remainder = @import("spartan/product_remainder.zig");
-const transcripts = @import("../transcripts/mod.zig");
+const transcripts = @import("zolt_arith").transcripts;
 const Blake2bTranscript = transcripts.Blake2bTranscript;
-const poly_mod = @import("../poly/mod.zig");
+const poly_mod = @import("zolt_arith").poly;
 const jolt_device = @import("jolt_device.zig");
 const constants = @import("../common/constants.zig");
 const ram = @import("ram/mod.zig");
@@ -39,7 +39,8 @@ const Stage5BatchedProver = spartan_mod.Stage5BatchedProver;
 const Stage6BatchedProver = spartan_mod.Stage6BatchedProver;
 const preprocessing = @import("preprocessing.zig");
 
-const debug_verbose = false;
+const zkvm_debug = @import("debug.zig");
+const debug_verbose = zkvm_debug.verbose;
 const stage_timing_enabled = false;
 
 /// Direct Jolt-compatible 7-stage prover
@@ -56,7 +57,7 @@ pub fn JoltProver(comptime F: type) type {
         const OpeningId = jolt_types.OpeningId;
         const VirtualPolynomial = jolt_types.VirtualPolynomial;
 
-        const gpu_mod = @import("../gpu/mod.zig");
+        const gpu_mod = @import("zolt_arith").gpu;
 
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
@@ -698,6 +699,64 @@ pub fn JoltProver(comptime F: type) type {
         }
 
 
+
+        // =================================================================
+        // Stage output structs — carry data between proveWithTranscript stages
+        // =================================================================
+
+        /// Data produced by Stage 1 and consumed by later stages.
+        const ProveStage1Output = struct {
+            stage1_result: ?Stage1Result,
+            /// r_spartan_original (BIG_ENDIAN) — used by Stages 3, 5, 6.
+            r_spartan_original: []F,
+        };
+
+        /// Data produced by Stage 2 and consumed by later stages.
+        const ProveStage2Output = struct {
+            stage2_result: Stage2Result,
+        };
+
+        /// Data produced by Stage 3 and consumed by later stages.
+        const ProveStage3Output = struct {
+            stage3_result: spartan_mod.Stage3Result(F),
+        };
+
+        /// Data produced by Stage 4 and consumed by later stages.
+        const ProveStage4Output = struct {
+            stage4_regs_r_address: ?[]F,
+            stage4_regs_r_cycle: ?[]F,
+            stage4_r_cycle_val: ?[]F,
+            r_reduction_be: ?[]F,
+            stage4_inc_poly_copy: ?[]F,
+            allocator: Allocator,
+
+            pub fn deinit(self: *ProveStage4Output) void {
+                if (self.stage4_regs_r_address) |arr| self.allocator.free(arr);
+                if (self.stage4_regs_r_cycle) |arr| self.allocator.free(arr);
+                if (self.stage4_r_cycle_val) |arr| self.allocator.free(arr);
+                if (self.r_reduction_be) |arr| self.allocator.free(arr);
+                if (self.stage4_inc_poly_copy) |arr| self.allocator.free(arr);
+            }
+        };
+
+        /// Data produced by Stage 5 and consumed by later stages.
+        const ProveStage5Output = struct {
+            stage5_result: spartan_mod.Stage5Result(F),
+            /// s_cycle_stage5 (BIG_ENDIAN) from RegistersValEvaluation opening point.
+            s_cycle_stage5: []F,
+            allocator: Allocator,
+
+            pub fn deinit(self: *ProveStage5Output) void {
+                self.stage5_result.deinit();
+                self.allocator.free(self.s_cycle_stage5);
+            }
+        };
+
+        /// Data produced by Stage 6 and consumed by Stage 7.
+        const ProveStage6Output = struct {
+            stage6_result: spartan_mod.Stage6Result(F),
+        };
+
         /// Convert with actual per-cycle witnesses and Fiat-Shamir transcript
         ///
         /// This method produces proofs with proper Az*Bz evaluations and uses
@@ -758,12 +817,57 @@ pub fn JoltProver(comptime F: type) type {
             // Per-stage timing
             var stage_timer = std.time.Timer.start() catch unreachable;
             var bench_timer = std.time.Timer.start() catch unreachable;
-            const bench = config.bench_output;
 
             // Use pre-built compact/raw witnesses from config (built during witness gen,
             // outside Stage 1 timing).
             const compact_witnesses = config.prebuilt_compact;
             const raw_r1cs_inputs = config.prebuilt_raw;
+
+
+            // ==================================================================
+            // Execute 7 proving stages, threading data through output structs
+            // ==================================================================
+
+            var s1_out = try self.executeStage1(&jolt_proof, transcript, &config, tau, compact_witnesses, raw_r1cs_inputs, n_cycle_vars, trace_length, &stage_timer, &bench_timer);
+            defer if (s1_out.stage1_result) |*r| r.deinit();
+            defer self.allocator.free(s1_out.r_spartan_original);
+
+            var s2_out = try self.executeStage2(&jolt_proof, transcript, &config, &s1_out, raw_r1cs_inputs, n_cycle_vars, log_ram_k, &stage_timer, &bench_timer);
+            defer s2_out.stage2_result.deinit();
+
+            var s3_out = try self.executeStage3(&jolt_proof, transcript, &config, &s2_out, &s1_out, raw_r1cs_inputs, n_cycle_vars, log_ram_k, &stage_timer, &bench_timer);
+            defer s3_out.stage3_result.deinit();
+
+            var s4_out = try self.executeStage4(&jolt_proof, transcript, &config, &s2_out, &s3_out, n_cycle_vars, log_ram_k, ram_K, trace_length, &stage_timer, &bench_timer);
+            defer s4_out.deinit();
+
+            var s5_out = try self.executeStage5(&jolt_proof, transcript, &config, &s1_out, &s2_out, &s4_out, n_cycle_vars, log_ram_k, ram_K, &stage_timer, &bench_timer);
+            defer s5_out.deinit();
+
+            var s6_out = try self.executeStage6(&jolt_proof, transcript, &config, &s1_out, &s2_out, &s3_out, &s4_out, &s5_out, n_cycle_vars, log_ram_k, ram_K, &stage_timer, &bench_timer);
+            defer s6_out.stage6_result.deinit();
+
+            try self.executeStage7(&jolt_proof, transcript, &config, &s2_out, &s5_out, &s6_out, n_cycle_vars, &stage_timer, &bench_timer);
+
+            return jolt_proof;
+        }
+
+
+        /// Stage 1: UniSkip + Outer Spartan sumcheck + opening claims.
+        fn executeStage1(
+            self: *Self,
+            jolt_proof: anytype,
+            transcript: *Blake2bTranscript(F),
+            config: *const JoltProverConfig,
+            tau: []const F,
+            compact_witnesses: []const @import("r1cs/evaluators.zig").CompactWitness,
+            raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
+            n_cycle_vars: usize,
+            trace_length: usize,
+            stage_timer: *std.time.Timer,
+            bench_timer: *std.time.Timer,
+        ) !ProveStage1Output {
+            const bench = config.bench_output;
 
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
                 tau,
@@ -853,7 +957,60 @@ pub fn JoltProver(comptime F: type) type {
                 }
             }
             stage_timer.reset();
-            bench_timer.reset();
+
+            // Compute r_spartan_original (BIG_ENDIAN) from Stage 1 challenges.
+            // Used by InstructionLookupsClaimReduction and later stages.
+            var r_spartan_original = try self.allocator.alloc(F, n_cycle_vars);
+
+            if (stage1_result) |result| {
+                const all_chals = result.challenges.items;
+                const cycle_chals = if (all_chals.len > 1)
+                    all_chals[1..]
+                else
+                    all_chals;
+
+                // Debug: print Stage 1 challenges
+                if (cycle_chals.len > 0) {
+                }
+
+                // Store r_spartan_original in BIG_ENDIAN order (like Jolt's opening point)
+                for (0..n_cycle_vars) |i| {
+                    const src_idx = n_cycle_vars - 1 - i;
+                    if (src_idx < cycle_chals.len) {
+                        r_spartan_original[i] = cycle_chals[src_idx];
+                    } else {
+                        r_spartan_original[i] = F.zero();
+                    }
+                }
+            } else {
+                for (0..n_cycle_vars) |i| {
+                    r_spartan_original[i] = F.zero();
+                }
+            }
+
+            return ProveStage1Output{
+                .stage1_result = stage1_result,
+                .r_spartan_original = r_spartan_original,
+            };
+        }
+
+
+        /// Stage 2: Product virtualization + RAM RAF + Read-Write + output + instruction claim reduction.
+        fn executeStage2(
+            self: *Self,
+            jolt_proof: anytype,
+            transcript: *Blake2bTranscript(F),
+            config: *const JoltProverConfig,
+            s1_out: *const ProveStage1Output,
+            raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
+            n_cycle_vars: usize,
+            log_ram_k: usize,
+            stage_timer: *std.time.Timer,
+            bench_timer: *std.time.Timer,
+        ) !ProveStage2Output {
+            const bench = config.bench_output;
+            const stage1_result = s1_out.stage1_result;
+            const r_spartan_original = s1_out.r_spartan_original;
 
             // Create UniSkip proof for Stage 2
             // Jolt samples a NEW tau_high for Stage 2 from the transcript (see ProductVirtualUniSkipParams::new)
@@ -966,54 +1123,13 @@ pub fn JoltProver(comptime F: type) type {
             // - r_cycle_stage1 = the sumcheck challenges from Stage 1 (opening point)
             // - tau_high_stage2 = freshly sampled challenge
             // See Jolt's ProductVirtualUniSkipParams::new
+
+            // Build tau_stage2 from Stage 1 challenges (r_spartan_original is already BIG_ENDIAN)
             var tau_stage2 = try self.allocator.alloc(F, n_cycle_vars + 1);
             defer self.allocator.free(tau_stage2);
-
-            // Build tau_stage2 from Stage 1 challenges
-            // Also compute r_spartan_original (non-reversed) for InstructionLookupsClaimReduction
-            var r_spartan_original = try self.allocator.alloc(F, n_cycle_vars);
-            defer self.allocator.free(r_spartan_original);
-
-            if (stage1_result) |result| {
-                const all_challenges = result.challenges.items;
-                // Skip the first challenge (r_stream) to get r_cycle
-                const cycle_challenges = if (all_challenges.len > 1)
-                    all_challenges[1..]
-                else
-                    all_challenges;
-
-                // Debug: print Stage 1 challenges
-                if (cycle_challenges.len > 0) {
-                }
-
-                // Store r_spartan_original in BIG_ENDIAN order (like Jolt's opening point)
-                // This is used by InstructionLookupsClaimReduction
-                for (0..n_cycle_vars) |i| {
-                    const src_idx = n_cycle_vars - 1 - i;
-                    if (src_idx < cycle_challenges.len) {
-                        r_spartan_original[i] = cycle_challenges[src_idx];
-                    } else {
-                        r_spartan_original[i] = F.zero();
-                    }
-                }
-
-                // CRITICAL: In Jolt, the opening point r_cycle is stored in BIG_ENDIAN order
-                // (reversed from sumcheck challenge order).
-                // See OuterRemainingSumcheckParams::normalize_opening_point which converts
-                // from LITTLE_ENDIAN to BIG_ENDIAN via match_endianness() (reverses the vector)
-                //
-                // So tau_stage2 = [r_cycle_reversed, tau_high] where r_cycle_reversed[i] = r_cycle[n-1-i]
-                for (0..n_cycle_vars) |i| {
-                    tau_stage2[i] = r_spartan_original[i];
-                }
-            } else {
-                // Fallback to zeros
-                for (0..n_cycle_vars) |i| {
-                    tau_stage2[i] = F.zero();
-                    r_spartan_original[i] = F.zero();
-                }
+            for (0..n_cycle_vars) |i| {
+                tau_stage2[i] = r_spartan_original[i];
             }
-            // Append tau_high_stage2 as the last element
             tau_stage2[n_cycle_vars] = tau_high_stage2;
 
             if (tau_stage2.len > 0) {
@@ -1033,7 +1149,7 @@ pub fn JoltProver(comptime F: type) type {
                 n_cycle_vars,
                 log_ram_k,
                 &jolt_proof.opening_claims,
-                config,
+                config.*,
             );
             const s2_sumcheck_ns = bench_timer.read();
             bench_timer.reset();
@@ -1206,6 +1322,31 @@ pub fn JoltProver(comptime F: type) type {
             stage_timer.reset();
             bench_timer.reset();
 
+            return ProveStage2Output{
+                .stage2_result = stage2_result,
+            };
+        }
+
+
+        /// Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction.
+        fn executeStage3(
+            self: *Self,
+            jolt_proof: anytype,
+            transcript: *Blake2bTranscript(F),
+            config: *const JoltProverConfig,
+            s2_out: *const ProveStage2Output,
+            s1_out: *const ProveStage1Output,
+            raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
+            n_cycle_vars: usize,
+            log_ram_k: usize,
+            stage_timer: *std.time.Timer,
+            bench_timer: *std.time.Timer,
+        ) !ProveStage3Output {
+            const bench = config.bench_output;
+            const stage2_result = &s2_out.stage2_result;
+            const r_spartan_original = s1_out.r_spartan_original;
+            _ = log_ram_k;
+
             // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction
             // Extract r_product from Stage 2 challenges (last n_cycle_vars in BIG_ENDIAN)
             var r_product = try self.allocator.alloc(F, n_cycle_vars);
@@ -1370,6 +1511,32 @@ pub fn JoltProver(comptime F: type) type {
             stage_timer.reset();
             bench_timer.reset();
 
+            return ProveStage3Output{
+                .stage3_result = stage3_result,
+            };
+        }
+
+
+        /// Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation.
+        fn executeStage4(
+            self: *Self,
+            jolt_proof: anytype,
+            transcript: *Blake2bTranscript(F),
+            config: *const JoltProverConfig,
+            s2_out: *const ProveStage2Output,
+            s3_out: *const ProveStage3Output,
+            n_cycle_vars: usize,
+            log_ram_k: usize,
+            ram_K: usize,
+            trace_length: usize,
+            stage_timer: *std.time.Timer,
+            bench_timer: *std.time.Timer,
+        ) !ProveStage4Output {
+            const bench = config.bench_output;
+            const stage2_result = &s2_out.stage2_result;
+            const stage3_result = &s3_out.stage3_result;
+            _ = trace_length;
+
             // Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation
             // RegistersReadWriteChecking has LOG_K + log2(T) rounds where LOG_K = log2(REGISTER_COUNT)
             // REGISTER_COUNT = 32 (RISCV) + 96 (Virtual) = 128, so LOG_K = 7
@@ -1397,20 +1564,10 @@ pub fn JoltProver(comptime F: type) type {
             // Variables to store Stage 4 opening point for Stage 5
             var stage4_regs_r_address: ?[]F = null;
             var stage4_regs_r_cycle: ?[]F = null;
-            var stage4_r_cycle_val: ?[]F = null; // r_cycle_val from RamValEvaluation (for RamRaClaimReduction)
-            // r_reduction from Stage 2 InstructionClaimReduction (for LookupsReadRaf in Stage 5)
-            // CRITICAL: InstructionClaimReduction is in Stage 2, NOT Stage 3!
-            // The challenges are the last n_cycle_vars challenges from Stage 2 (Instance 4).
+            var stage4_r_cycle_val: ?[]F = null;
             var r_reduction_be: ?[]F = null;
-            // Stage 4 inc_poly copy for Stage 6 diagnostic
             var stage4_inc_poly_copy: ?[]F = null;
-            defer {
-                if (stage4_regs_r_address) |arr| self.allocator.free(arr);
-                if (stage4_regs_r_cycle) |arr| self.allocator.free(arr);
-                if (stage4_r_cycle_val) |arr| self.allocator.free(arr);
-                if (r_reduction_be) |arr| self.allocator.free(arr);
-                if (stage4_inc_poly_copy) |arr| self.allocator.free(arr);
-            }
+            // NOTE: No defer blocks here — ownership transfers to caller via ProveStage4Output.
 
             // Compute r_reduction_be from Stage 2 challenges (InstructionClaimReduction)
             // Stage 2 has 5 instances with max_num_rounds = log_ram_k + n_cycle_vars
@@ -1910,6 +2067,41 @@ pub fn JoltProver(comptime F: type) type {
             stage_timer.reset();
             bench_timer.reset();
 
+            return ProveStage4Output{
+                .stage4_regs_r_address = stage4_regs_r_address,
+                .stage4_regs_r_cycle = stage4_regs_r_cycle,
+                .stage4_r_cycle_val = stage4_r_cycle_val,
+                .r_reduction_be = r_reduction_be,
+                .stage4_inc_poly_copy = stage4_inc_poly_copy,
+                .allocator = self.allocator,
+            };
+        }
+
+
+        /// Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf.
+        fn executeStage5(
+            self: *Self,
+            jolt_proof: anytype,
+            transcript: *Blake2bTranscript(F),
+            config: *const JoltProverConfig,
+            s1_out: *const ProveStage1Output,
+            s2_out: *const ProveStage2Output,
+            s4_out: *const ProveStage4Output,
+            n_cycle_vars: usize,
+            log_ram_k: usize,
+            ram_K: usize,
+            stage_timer: *std.time.Timer,
+            bench_timer: *std.time.Timer,
+        ) !ProveStage5Output {
+            const bench = config.bench_output;
+            const stage2_result = &s2_out.stage2_result;
+            const r_spartan_original = s1_out.r_spartan_original;
+            const stage4_regs_r_address = s4_out.stage4_regs_r_address;
+            const stage4_regs_r_cycle = s4_out.stage4_regs_r_cycle;
+            const stage4_r_cycle_val = s4_out.stage4_r_cycle_val;
+            const r_reduction_be = s4_out.r_reduction_be;
+            _ = ram_K;
+
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
             // LookupsReadRaf has max rounds: LOG_K + log_T where LOG_K = XLEN * 2 = 128
             // For RV64: max_num_rounds = 128 + log_T = 128 + 8 = 136
@@ -2065,28 +2257,60 @@ pub fn JoltProver(comptime F: type) type {
             stage_timer.reset();
             bench_timer.reset();
 
+            // Compute Stage 5 RegistersValEvaluation opening point (s_cycle_stage5)
+            const lookups_log_k_local: usize = 128;
+            const stage5_lookups_num_rounds = lookups_log_k_local + n_cycle_vars;
+            const stage5_regs_val_num_rounds = n_cycle_vars;
+            var s_cycle_stage5 = try self.allocator.alloc(F, n_cycle_vars);
+            for (0..n_cycle_vars) |i| {
+                const stage5_idx = stage5_lookups_num_rounds - stage5_regs_val_num_rounds + i;
+                s_cycle_stage5[n_cycle_vars - 1 - i] = stage5_result.challenges[stage5_idx];
+            }
+
+            return ProveStage5Output{
+                .stage5_result = stage5_result,
+                .s_cycle_stage5 = s_cycle_stage5,
+                .allocator = self.allocator,
+            };
+        }
+
+
+        /// Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction.
+        fn executeStage6(
+            self: *Self,
+            jolt_proof: anytype,
+            transcript: *Blake2bTranscript(F),
+            config: *const JoltProverConfig,
+            s1_out: *const ProveStage1Output,
+            s2_out: *const ProveStage2Output,
+            s3_out: *const ProveStage3Output,
+            s4_out: *const ProveStage4Output,
+            s5_out: *const ProveStage5Output,
+            n_cycle_vars: usize,
+            log_ram_k: usize,
+            ram_K: usize,
+            stage_timer: *std.time.Timer,
+            bench_timer: *std.time.Timer,
+        ) !ProveStage6Output {
+            const bench = config.bench_output;
+            const stage2_result = &s2_out.stage2_result;
+            const stage3_result = &s3_out.stage3_result;
+            const stage4_regs_r_address = s4_out.stage4_regs_r_address;
+            const stage4_regs_r_cycle = s4_out.stage4_regs_r_cycle;
+            const stage4_r_cycle_val = s4_out.stage4_r_cycle_val;
+            const stage4_inc_poly_copy = s4_out.stage4_inc_poly_copy;
+            const stage5_result = &s5_out.stage5_result;
+            const s_cycle_stage5 = s5_out.s_cycle_stage5;
+            const r_spartan_original = s1_out.r_spartan_original;
+            _ = log_ram_k;
+
             // Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction
+            const lookups_log_k: usize = 128; // XLEN * 2 for RV64
             const bytecode_log_k = std.math.log2_int(usize, config.bytecode_K);
             const ram_log_k = std.math.log2_int(usize, ram_K);
             const instruction_d: usize = (lookups_log_k + config.log_k_chunk - 1) / config.log_k_chunk;
             const bytecode_d_val: usize = (bytecode_log_k + config.log_k_chunk - 1) / config.log_k_chunk;
             const ram_d_val: usize = (ram_log_k + config.log_k_chunk - 1) / config.log_k_chunk;
-
-
-            // Compute Stage 5 RegistersValEvaluation opening point (s_cycle_stage5)
-            // Stage 5 max_rounds = 136 (128 address + 8 cycle for RV64)
-            // RegistersValEvaluation runs in the last n_cycle_vars rounds
-            // Opening point = challenges[128..136] reversed (LE → BE)
-            const stage5_lookups_num_rounds = lookups_log_k + n_cycle_vars; // 136
-            const stage5_regs_val_num_rounds = n_cycle_vars; // 8
-            var s_cycle_stage5 = try self.allocator.alloc(F, n_cycle_vars);
-            defer self.allocator.free(s_cycle_stage5);
-            for (0..n_cycle_vars) |i| {
-                // RegistersValEvaluation challenges are the last n_cycle_vars of Stage 5
-                const stage5_idx = stage5_lookups_num_rounds - stage5_regs_val_num_rounds + i;
-                // Reverse for BIG_ENDIAN
-                s_cycle_stage5[n_cycle_vars - 1 - i] = stage5_result.challenges[stage5_idx];
-            }
 
             // Generate Stage 6 proof using the batched sumcheck prover
             const the_trace = config.execution_trace orelse return error.ExecutionTraceRequired;
@@ -2259,6 +2483,35 @@ pub fn JoltProver(comptime F: type) type {
             }
             stage_timer.reset();
             bench_timer.reset();
+
+            return ProveStage6Output{
+                .stage6_result = stage6_result,
+            };
+        }
+
+
+        /// Stage 7: HammingWeightClaimReduction sumcheck.
+        fn executeStage7(
+            self: *Self,
+            jolt_proof: anytype,
+            transcript: *Blake2bTranscript(F),
+            config: *const JoltProverConfig,
+            s2_out: *const ProveStage2Output,
+            s5_out: *const ProveStage5Output,
+            s6_out: *const ProveStage6Output,
+            n_cycle_vars: usize,
+            stage_timer: *std.time.Timer,
+            bench_timer: *std.time.Timer,
+        ) !void {
+            const bench = config.bench_output;
+            const stage2_result = &s2_out.stage2_result;
+            const stage5_result = &s5_out.stage5_result;
+            const stage6_result = &s6_out.stage6_result;
+            const stage6_mod = @import("spartan/stage6_prover.zig");
+            const the_trace = config.execution_trace orelse return error.ExecutionTraceRequired;
+            const the_memory_layout = config.memory_layout orelse return error.MemoryLayoutRequired;
+            const pc_map_ptr = config.bytecode_pc_map orelse return error.MissingBytecodepcMap;
+            _ = n_cycle_vars;
 
             // ====================================================================
             // Stage 7: HammingWeightClaimReduction sumcheck
@@ -2885,71 +3138,14 @@ pub fn JoltProver(comptime F: type) type {
                     });
                 }
             }
-
-            return jolt_proof;
         }
 
-        /// Result of Stage 2 sumcheck including factor evaluations and challenges
-        const Stage2Result = struct {
-            /// The 8 factor polynomial evaluations at r_cycle
-            /// Order: LeftInstructionInput, RightInstructionInput, IsRdNotZero,
-            ///        WriteLookupOutputToRDFlag, JumpFlag, LookupOutput, BranchFlag, NextIsNoop
-            factor_evals: [8]F,
-            /// All sumcheck challenges (26 for max_num_rounds = log_ram_k + n_cycle_vars)
-            /// Used for computing OutputSumcheck's r_address_prime
-            challenges: []F,
-            /// Final claims from each prover (for opening claims)
-            raf_final_claim: F, // Instance 1: RamRafEvaluation
-            rwc_final_claim: F, // Instance 2: RamReadWriteChecking (combined claim)
-            output_final_claim: F, // Instance 3: RamOutputCheck sumcheck final claim
-            instr_final_claim: F, // Instance 4: InstructionLookupsClaimReduction (combined)
-            /// OutputSumcheck's Val_final polynomial evaluation at r_address_prime
-            /// This is the MLE evaluation Val_final(r'), needed for opening claim
-            output_val_final_claim: F, // Val_final(r') for RamValFinal opening
-            /// OutputSumcheck's Val_init polynomial evaluation at r_address_prime
-            output_val_init_claim: F, // Val_init(r') for RamValInit opening
-            /// OutputSumcheck's r_address challenges (big-endian order)
-            r_address_raf: []F,
-            /// RWC's r_address challenges (big-endian order) - for RamRaClaimReduction
-            r_address_rw: []F,
-            /// RWC's r_cycle challenges (big-endian order) - for RamRaClaimReduction
-            r_cycle_rw: []F,
-            /// ProductVirtualRemainder's r_cycle challenges (big-endian order) - for BytecodeReadRaf
-            r_cycle_product: []F,
-            /// Individual RWC opening claims (ra, val, inc)
-            rwc_ra_claim: F,
-            rwc_val_claim: F,
-            rwc_inc_claim: F,
-            /// Individual InstructionLookups opening claims (5 terms)
-            instr_lookup_output_claim: F,
-            instr_left_operand_claim: F,
-            instr_right_operand_claim: F,
-            instr_left_instr_input_claim: F,
-            instr_right_instr_input_claim: F,
-            allocator: Allocator,
+        const stage2_sumcheck = @import("stage2_sumcheck.zig").Stage2Sumcheck(F);
 
-            pub fn deinit(self: *Stage2Result) void {
-                self.allocator.free(self.challenges);
-                self.allocator.free(self.r_address_raf);
-                self.allocator.free(self.r_address_rw);
-                self.allocator.free(self.r_cycle_rw);
-                self.allocator.free(self.r_cycle_product);
-            }
-        };
+        /// Re-export from stage2_sumcheck.zig
+        const Stage2Result = stage2_sumcheck.Stage2Result;
 
-        /// Generate Stage 2 batched sumcheck proof
-        ///
-        /// Stage 2 batches 5 sumcheck instances:
-        /// 1. ProductVirtualRemainder: n_cycle_vars rounds, degree 3
-        /// 2. RamRafEvaluation: log_ram_k rounds, degree 2
-        /// 3. RamReadWriteChecking: log_ram_k + n_cycle_vars rounds, degree 3
-        /// 4. OutputSumcheck: log_ram_k rounds, degree 3
-        /// 5. InstructionLookupsClaimReduction: n_cycle_vars rounds, degree 2
-        ///
-        /// For programs without RAM/lookups, instances 2-5 have zero input claims
-        /// and contribute constant-zero polynomials.
-        ///
-        /// Returns the 8 factor polynomial evaluations at r_cycle for opening claims.
+        /// Generate Stage 2 batched sumcheck proof — delegates to stage2_sumcheck.zig
         fn generateStage2BatchedSumcheckProof(
             self: *Self,
             proof: *SumcheckInstanceProof(F),
@@ -2964,1021 +3160,26 @@ pub fn JoltProver(comptime F: type) type {
             opening_claims: *OpeningClaims(F),
             config: JoltProverConfig,
         ) !Stage2Result {
-            const max_num_rounds = log_ram_k + n_cycle_vars;
-
-            // Define the 5 instances with their input claims and round counts
-            // Instance 0: ProductVirtualRemainder (input = uni_skip_claim from SpartanProductVirtualization)
-            // Instance 1: RamRafEvaluation (input = RamAddress from SpartanOuter)
-            // Instance 2: RamReadWriteChecking (input = RamReadValue + gamma * RamWriteValue)
-            // Instance 3: OutputSumcheck (input = 0)
-            // Instance 4: InstructionLookupsClaimReduction (input = LookupOutput + gamma * LeftOperand + gamma^2 * RightOperand)
-
-            // Get opening claims from proof (these were set during Stage 1)
-            const ram_address_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RamAddress, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const ram_read_value_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RamReadValue, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const ram_write_value_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RamWriteValue, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const lookup_output_claim = opening_claims.get(.{ .Virtual = .{ .poly = .LookupOutput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const left_operand_claim = opening_claims.get(.{ .Virtual = .{ .poly = .LeftLookupOperand, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const right_operand_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RightLookupOperand, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const left_instr_input_claim = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const right_instr_input_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-
-
-            // Sample gammas from transcript in the same order as upstream Jolt verifier:
-            // 1. RamReadWriteChecking samples gamma first
-            // 2. InstructionLookupsClaimReduction samples gamma
-            // 3. OutputSumcheck samples r_address
-            //
-            // CRITICAL: gamma uses challenge_scalar (NO 125-bit masking) = challengeScalarFull()
-            // r_address uses challenge_scalar_optimized (HAS 125-bit masking) = challengeScalar()
-
-            // 1. RamReadWriteChecking gamma
-            const gamma_rwc = transcript.challengeScalarFull();
-
-            // 2. InstructionLookupsClaimReduction gamma (via challenge_scalar, NO masking)
-            const gamma_instr = transcript.challengeScalarFull();
-            const gamma_instr_sqr = gamma_instr.mul(gamma_instr);
-            const gamma_instr_cub = gamma_instr_sqr.mul(gamma_instr);
-            const gamma_instr_quart = gamma_instr_sqr.mul(gamma_instr_sqr);
-
-            // 3. OutputSumcheck samples r_address (log_ram_k challenges via challenge_vector_optimized)
-            const r_address_presampled = try self.allocator.alloc(F, log_ram_k);
-            defer self.allocator.free(r_address_presampled);
-            for (r_address_presampled) |*r| {
-                r.* = transcript.challengeScalar();
-            }
-
-            // Compute input_claims in UPSTREAM order:
-            // [0] RamReadWriteChecking: RamReadValue + gamma_rwc * RamWriteValue
-            // [1] ProductVirtualRemainder: uni_skip_claim
-            // [2] InstructionLookupsClaimReduction: LookupOutput + γ*LeftOp + γ²*RightOp + γ³*LeftInstr + γ⁴*RightInstr
-            // [3] RamRafEvaluation: RamAddress
-            // [4] OutputSumcheck: 0
-            const input_claim_rwc = ram_read_value_claim.add(gamma_rwc.mul(ram_write_value_claim));
-            const input_claim_instr = lookup_output_claim
-                .add(gamma_instr.mul(left_operand_claim))
-                .add(gamma_instr_sqr.mul(right_operand_claim))
-                .add(gamma_instr_cub.mul(left_instr_input_claim))
-                .add(gamma_instr_quart.mul(right_instr_input_claim));
-
-
-            const input_claims = [5]F{
-                input_claim_rwc, // [0] RamReadWriteChecking
-                uni_skip_claim_stage2, // [1] ProductVirtualRemainder
-                input_claim_instr, // [2] InstructionLookupsClaimReduction
-                ram_address_claim, // [3] RamRafEvaluation
-                F.zero(), // [4] OutputSumcheck
-            };
-
-            const rounds_per_instance = [5]usize{
-                log_ram_k + n_cycle_vars, // [0] RamReadWriteChecking
-                n_cycle_vars, // [1] ProductVirtualRemainder
-                n_cycle_vars, // [2] InstructionLookupsClaimReduction
-                log_ram_k, // [3] RamRafEvaluation
-                log_ram_k, // [4] OutputSumcheck
-            };
-
-            // Step 1: Append all input claims to transcript
-            for (input_claims) |claim| {
-                transcript.appendScalar("sumcheck_claim", claim);
-            }
-
-
-            // Step 2: Sample batching coefficients (input claims already appended at line 1747)
-            var batching_coeffs: [5]F = undefined;
-            for (0..5) |i| {
-                batching_coeffs[i] = transcript.challengeScalarFull();
-            }
-
-            // Debug: STAGE2_PRE batching coefficient logs for compare_sumcheck.py
-
-
-            // Step 3: Compute initial batched claim
-            // batched_claim = Σᵢ αᵢ * input_claim[i] * 2^(max_rounds - rounds[i])
-            var batched_claim = F.zero();
-            for (0..5) |i| {
-                const scale_power = max_num_rounds - rounds_per_instance[i];
-                var scaled_claim = input_claims[i];
-                for (0..scale_power) |_| {
-                    scaled_claim = scaled_claim.add(scaled_claim);
-                }
-                batched_claim = batched_claim.add(scaled_claim.mul(batching_coeffs[i]));
-            }
-
-
-            // Initialize provers for each instance (upstream ordering):
-            // [0] RamReadWriteChecking, [1] ProductVirtualRemainder,
-            // [2] InstructionLookupsClaimReduction, [3] RamRafEvaluation, [4] OutputSumcheck
-            const s2_fn_t0 = if (config.bench_output) std.time.nanoTimestamp() else 0;
-
-            // Instance 0: RamReadWriteChecking - starts at round 0 (max rounds)
-            const RWCProver = ram.RamReadWriteCheckingProver(F);
-            var rwc_prover: ?RWCProver = null;
-            var rwc_evals_this_round: ?[4]F = null;
-            const use_rwc_prover = !input_claims[0].eql(F.zero());
-            if (config.memory_trace != null and use_rwc_prover) {
-                const phase1_num_rounds = n_cycle_vars;
-                var rwc_params = ram.RamReadWriteCheckingParams(F).initWithPhaseConfig(
-                    self.allocator,
-                    gamma_rwc,
-                    tau[0..n_cycle_vars],
-                    log_ram_k,
-                    n_cycle_vars,
-                    phase1_num_rounds,
-                    if (config.memory_layout) |ml| ml.getLowestAddress() else 0x80000000,
-                ) catch null;
-
-                if (rwc_params) |*params| {
-                    rwc_prover = RWCProver.init(
-                        self.allocator,
-                        config.memory_trace.?,
-                        params.*,
-                        input_claims[0],
-                        config.initial_ram,
-                        config.memory_layout,
-                        config.is_panicking,
-                    ) catch null;
-
-                    if (rwc_prover != null) {
-                        rwc_prover.?.thread_pool = self.thread_pool;
-                    } else {
-                        params.deinit();
-                    }
-                }
-            }
-            defer if (rwc_prover) |*rp| rp.deinit();
-
-            // Instance 1: ProductVirtualRemainder
-            const ProductRemainderProver = product_remainder.ProductVirtualRemainderProver(F);
-            var product_prover: ?ProductRemainderProver = null;
-            if (raw_r1cs_inputs.len > 0 and tau.len > 0) {
-                product_prover = ProductRemainderProver.init(
-                    self.allocator,
-                    r0_stage2,
-                    tau,
-                    uni_skip_claim_stage2,
-                    raw_r1cs_inputs,
-                    self.thread_pool,
-                ) catch null;
-            }
-            if (product_prover != null) {
-                product_prover.?.thread_pool = self.thread_pool;
-                product_prover.?.gpu_ops = self.gpu_ops;
-                product_prover.?.initGpuShadows();
-            }
-            defer if (product_prover) |*p| p.deinit();
-
-            // Instance 2: InstructionLookupsClaimReduction - initialized lazily at start_round
-            const claim_reductions = @import("claim_reductions/mod.zig");
-            const InstrLookupsProver = claim_reductions.InstructionLookupsProver(F);
-            var instr_prover: ?InstrLookupsProver = null;
-            var instr_evals_this_round: ?[4]F = null;
-            defer if (instr_prover) |*ip| ip.deinit();
-
-            // Instance 3: RamRafEvaluation - initialized lazily at start_round
-            const RafProver = ram.RafEvaluationProver(F);
-            var raf_prover: ?RafProver = null;
-            var raf_evals_this_round: ?[4]F = null;
-            defer if (raf_prover) |*rp| rp.deinit();
-
-            // Instance 4: OutputSumcheck
-            const OutputProver = ram.OutputSumcheckProver(F);
-            var output_prover: ?OutputProver = null;
-            if (config.memory_layout != null and config.initial_ram != null and config.final_ram != null) {
-                output_prover = OutputProver.init(
-                    self.allocator,
-                    config.initial_ram.?,
-                    config.final_ram.?,
-                    r_address_presampled,
-                    config.memory_layout.?,
-                    config.program_inputs,
-                    config.program_outputs,
-                    config.is_panicking,
-                ) catch null;
-                if (output_prover != null) {
-                    output_prover.?.thread_pool = self.thread_pool;
-                }
-            }
-            defer if (output_prover) |*p| p.deinit();
-
-            // Track individual claims for each instance (needed for zero-poly instances)
-            var individual_claims: [5]F = undefined;
-            for (0..5) |i| {
-                const scale_power = max_num_rounds - rounds_per_instance[i];
-                var scaled = input_claims[i];
-                for (0..scale_power) |_| {
-                    scaled = scaled.add(scaled);
-                }
-                individual_claims[i] = scaled;
-            }
-
-            // Store challenges for opening claims computation
-            var challenges: std.ArrayListUnmanaged(F) = .{};
-            defer challenges.deinit(self.allocator);
-
-            // Per-instance timing accumulators (bench only)
-            const bench_s2 = config.bench_output;
-            var inst_compute_ns: [5]u64 = .{ 0, 0, 0, 0, 0 };
-            var inst_bind_ns: [5]u64 = .{ 0, 0, 0, 0, 0 };
-            var inst_active_rounds: [5]u64 = .{ 0, 0, 0, 0, 0 };
-
-            const s2_init_done_t = if (config.bench_output) std.time.nanoTimestamp() else 0;
-
-            // Step 4: Run batched sumcheck rounds
-            for (0..max_num_rounds) |round_idx| {
-                // Compute combined polynomial from all instances
-                var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
-                // Store ProductVirtualRemainder's evals for claim update
-                var product_evals_this_round: ?[4]F = null;
-                // Store OutputSumcheck's evals for claim update
-                var output_evals_this_round: ?[4]F = null;
-
-                for (0..5) |i| {
-                    const start_round = max_num_rounds - rounds_per_instance[i];
-                    const inst_t0 = if (bench_s2) std.time.nanoTimestamp() else 0;
-
-                    if (round_idx >= start_round) {
-                        // Instance is active
-                        if (i == 0) {
-                            // Instance 0: RamReadWriteChecking (max rounds, starts at round 0)
-                            if (rwc_prover) |*rwcp| {
-                                const rwc_evals = rwcp.computeRoundPolynomialCubic();
-                                rwc_evals_this_round = rwc_evals;
-                                for (0..4) |j| {
-                                    combined_evals[j] = combined_evals[j].add(rwc_evals[j].mul(batching_coeffs[i]));
-                                }
-                            } else {
-                                // Fallback: constant polynomial from scaled claim
-                                const instance_round = round_idx - start_round;
-                                const remaining_rounds = rounds_per_instance[i] - 1 - instance_round;
-                                var scaled = input_claims[i];
-                                for (0..remaining_rounds) |_| scaled = scaled.add(scaled);
-                                const weighted = scaled.mul(batching_coeffs[i]);
-                                for (0..4) |j| combined_evals[j] = combined_evals[j].add(weighted);
-                            }
-                        } else if (i == 1) {
-                            // Instance 1: ProductVirtualRemainder
-                            if (product_prover) |_| {
-                                const claim_before = product_prover.?.current_claim;
-                                const comp = product_prover.?.computeRoundPolynomial() catch [3]F{ F.zero(), F.zero(), F.zero() };
-                                const c0 = comp[0];
-                                const c2_p = comp[1];
-                                const c3_p = comp[2];
-                                const c1 = claim_before.sub(c0).sub(c0).sub(c2_p).sub(c3_p);
-                                const s0 = c0;
-                                const s1 = claim_before.sub(s0);
-                                const s2 = c0.add(c1.mul(F.fromU64(2))).add(c2_p.mul(F.fromU64(4))).add(c3_p.mul(F.fromU64(8)));
-                                const s3 = c0.add(c1.mul(F.fromU64(3))).add(c2_p.mul(F.fromU64(9))).add(c3_p.mul(F.fromU64(27)));
-                                product_evals_this_round = [4]F{ s0, s1, s2, s3 };
-                                for (0..4) |j| {
-                                    combined_evals[j] = combined_evals[j].add(product_evals_this_round.?[j].mul(batching_coeffs[i]));
-                                }
-                            } else {
-                                const instance_round = round_idx - start_round;
-                                const remaining_rounds = rounds_per_instance[i] - 1 - instance_round;
-                                var scaled = input_claims[i];
-                                for (0..remaining_rounds) |_| scaled = scaled.add(scaled);
-                                const weighted = scaled.mul(batching_coeffs[i]);
-                                for (0..4) |j| combined_evals[j] = combined_evals[j].add(weighted);
-                            }
-                        } else if (i == 2) {
-                            // Instance 2: InstructionLookupsClaimReduction
-                            if (round_idx == start_round and instr_prover == null and raw_r1cs_inputs.len > 0) {
-                                var instr_params = claim_reductions.InstructionLookupsParams(F).init(
-                                    self.allocator,
-                                    gamma_instr,
-                                    r_spartan_for_instr,
-                                    n_cycle_vars,
-                                ) catch null;
-
-                                if (instr_params) |*params| {
-                                    instr_prover = InstrLookupsProver.init(
-                                        self.allocator,
-                                        params.*,
-                                        input_claims[2],
-                                        raw_r1cs_inputs,
-                                        self.thread_pool,
-                                    ) catch blk: {
-                                        params.deinit();
-                                        break :blk null;
-                                    };
-                                }
-                            }
-
-                            if (instr_prover) |*ip| {
-                                const instr_evals = ip.computeRoundPolynomialCubic();
-                                instr_evals_this_round = instr_evals;
-                                for (0..4) |j| {
-                                    combined_evals[j] = combined_evals[j].add(instr_evals[j].mul(batching_coeffs[i]));
-                                }
-                            } else {
-                                const instance_round = round_idx - start_round;
-                                const remaining_rounds = rounds_per_instance[i] - 1 - instance_round;
-                                var scaled = input_claims[i];
-                                for (0..remaining_rounds) |_| scaled = scaled.add(scaled);
-                                const weighted = scaled.mul(batching_coeffs[i]);
-                                for (0..4) |j| combined_evals[j] = combined_evals[j].add(weighted);
-                            }
-                        } else if (i == 3) {
-                            // Instance 3: RamRafEvaluation
-                            const use_raf_prover = !input_claims[3].eql(F.zero());
-                            if (round_idx == start_round and raf_prover == null and config.memory_trace != null and use_raf_prover) {
-                                const r_cycle_slice = tau[0..n_cycle_vars];
-                                const r_cycle = try self.allocator.alloc(F, n_cycle_vars);
-                                @memcpy(r_cycle, r_cycle_slice);
-                                const start_addr: u64 = if (config.memory_layout) |ml| ml.getLowestAddress() else 0x80000000;
-                                var raf_params = try ram.RafEvaluationParams(F).init(self.allocator, log_ram_k, start_addr, r_cycle);
-                                self.allocator.free(r_cycle);
-
-                                const raf_initial_claim = input_claims[3];
-
-                                raf_prover = RafProver.init(self.allocator, config.memory_trace.?, raf_params, raf_initial_claim) catch blk: {
-                                    raf_params.deinit();
-                                    break :blk null;
-                                };
-                                if (raf_prover != null) raf_prover.?.thread_pool = self.thread_pool;
-                            }
-
-                            if (raf_prover) |*rp| {
-                                const raf_evals = rp.computeRoundPolynomialCubic();
-                                raf_evals_this_round = raf_evals;
-                                for (0..4) |j| {
-                                    combined_evals[j] = combined_evals[j].add(raf_evals[j].mul(batching_coeffs[i]));
-                                }
-                            } else {
-                                if (round_idx == start_round) {
-                                }
-                                const remaining_rounds = rounds_per_instance[i] - (round_idx - start_round);
-                                var scaled = individual_claims[i];
-                                for (0..remaining_rounds) |_| scaled = scaled.mul(F.fromU64(2));
-                                scaled = scaled.mul(poly_mod.UniPoly(F).INV2);
-                                const weighted = scaled.mul(batching_coeffs[i]);
-                                for (0..4) |j| combined_evals[j] = combined_evals[j].add(weighted);
-                            }
-                        } else if (i == 4) {
-                            // Instance 4: OutputSumcheck
-                            if (output_prover) |_| {
-                                const output_compressed = output_prover.?.computeRoundPolynomial();
-                                const c0 = output_compressed[0];
-                                const c2_o = output_compressed[1];
-                                const c3_o = output_compressed[2];
-                                const current_claim_output = output_prover.?.current_claim;
-                                const c1 = current_claim_output.sub(c0).sub(c0).sub(c2_o).sub(c3_o);
-                                const s0_out = c0;
-                                const s1_out = current_claim_output.sub(s0_out);
-                                const s2_out = c0.add(c1.mul(F.fromU64(2))).add(c2_o.mul(F.fromU64(4))).add(c3_o.mul(F.fromU64(8)));
-                                const s3_out = c0.add(c1.mul(F.fromU64(3))).add(c2_o.mul(F.fromU64(9))).add(c3_o.mul(F.fromU64(27)));
-                                output_evals_this_round = [4]F{ s0_out, s1_out, s2_out, s3_out };
-                                for (0..4) |j| {
-                                    combined_evals[j] = combined_evals[j].add(output_evals_this_round.?[j].mul(batching_coeffs[i]));
-                                }
-                            } else {
-                                // Zero input claim → zero polynomial
-                                const scale_power = rounds_per_instance[i] - 1 - (round_idx - start_round);
-                                var scaled = input_claims[i];
-                                for (0..scale_power) |_| scaled = scaled.add(scaled);
-                                const weighted = scaled.mul(batching_coeffs[i]);
-                                for (0..4) |j| combined_evals[j] = combined_evals[j].add(weighted);
-                            }
-                        }
-                    } else {
-                        // Instance hasn't started yet - contribute scaled input claim as constant
-                        const scale_power = max_num_rounds - rounds_per_instance[i] - round_idx - 1;
-                        var scaled = input_claims[i];
-                        for (0..scale_power) |_| scaled = scaled.add(scaled);
-                        const weighted = scaled.mul(batching_coeffs[i]);
-                        for (0..4) |j| combined_evals[j] = combined_evals[j].add(weighted);
-                    }
-
-                    if (bench_s2) {
-                        const inst_t1 = std.time.nanoTimestamp();
-                        inst_compute_ns[i] += @intCast(@as(i128, inst_t1 - inst_t0));
-                        if (round_idx >= start_round) inst_active_rounds[i] += 1;
-                    }
-                }
-
-                // Convert to compressed coefficients [c0, c2, c3]
-                const compressed = poly_mod.UniPoly(F).evalsToCompressed(combined_evals);
-
-                if (round_idx == 0 or round_idx == 16 or round_idx == max_num_rounds - 1) {
-                }
-
-                // Append to proof
-                const coeffs = try self.allocator.alloc(F, 3);
-                coeffs[0] = compressed[0];
-                coeffs[1] = compressed[1];
-                coeffs[2] = compressed[2];
-                try proof.compressed_polys.append(self.allocator, .{
-                    .coeffs_except_linear_term = coeffs,
+            return stage2_sumcheck.generateBatchedSumcheckProof(
+                .{
                     .allocator = self.allocator,
-                });
-
-                // Append to transcript: sumcheck polynomial coefficients
-                transcript.appendScalars("sumcheck_poly", compressed[0..3]);
-
-                // Sample round challenge
-                const challenge = transcript.challengeScalar();
-                try challenges.append(self.allocator, challenge);
-
-                // Update batched claim by evaluating at challenge
-                // CRITICAL: Must use evalFromHint (same as Jolt's verifier) to ensure
-                // the claim evolution matches. Using Lagrange interpolation from combined_evals
-                // would give different results because the evaluations may not be consistent
-                // with what Jolt expects (different s1, s2, s3 can produce the same c0, c2, c3).
-                const old_claim = batched_claim;
-                batched_claim = evalFromHint(compressed, old_claim, challenge);
-
-
-                // Debug: Print claim trajectory for first few and last few rounds
-                if (round_idx < 3 or round_idx >= max_num_rounds - 5) {
-                    // Check: s(0) + s(1) should equal old_claim for soundness
-                    const sum_check = combined_evals[0].add(combined_evals[1]);
-                    if (!sum_check.eql(old_claim)) {
-                        // Print individual instance contributions
-                        if (product_evals_this_round) |_| {
-                            // Note: pp.current_claim is ALREADY UPDATED for next round at this point!
-                        } else {
-                        }
-                        if (raf_evals_this_round) |_| {
-                        } else {
-                        }
-                        if (rwc_evals_this_round) |_| {
-                        } else {
-                        }
-                        if (output_evals_this_round) |_| {
-                        } else {
-                        }
-                        if (instr_evals_this_round) |_| {
-                        } else {
-                        }
-                    }
-                }
-
-                // Bind challenge in all active instances and update their claims
-                // Instance 0: RWC (starts at round 0)
-                if (rwc_prover) |*rwcp| {
-                    const bt0 = if (bench_s2) std.time.nanoTimestamp() else 0;
-                    if (rwc_evals_this_round) |evals| rwcp.updateClaim(evals, challenge);
-                    rwcp.bindChallenge(challenge) catch {};
-                    if (bench_s2) inst_bind_ns[0] += @intCast(@as(i128, std.time.nanoTimestamp() - bt0));
-                }
-
-                // Instance 1: ProductVirtualRemainder (starts at max_rounds - n_cycle_vars)
-                if (product_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
-                    const bt1 = if (bench_s2) std.time.nanoTimestamp() else 0;
-                    if (product_evals_this_round) |evals| product_prover.?.updateClaim(evals, challenge);
-                    product_prover.?.bindChallenge(challenge) catch {};
-                    if (bench_s2) inst_bind_ns[1] += @intCast(@as(i128, std.time.nanoTimestamp() - bt1));
-                }
-
-                // Instance 2: InstructionLookups (starts at max_rounds - n_cycle_vars)
-                if (instr_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
-                    const bt2 = if (bench_s2) std.time.nanoTimestamp() else 0;
-                    if (instr_evals_this_round) |evals| instr_prover.?.updateClaim(evals, challenge);
-                    instr_prover.?.bindChallenge(challenge) catch {};
-                    if (bench_s2) inst_bind_ns[2] += @intCast(@as(i128, std.time.nanoTimestamp() - bt2));
-                }
-
-                // Instance 3: RAF (starts at max_rounds - log_ram_k)
-                if (raf_prover != null and round_idx >= (max_num_rounds - log_ram_k)) {
-                    const bt3 = if (bench_s2) std.time.nanoTimestamp() else 0;
-                    if (raf_evals_this_round) |evals| raf_prover.?.updateClaim(evals, challenge);
-                    raf_prover.?.bindChallenge(challenge) catch {};
-                    if (bench_s2) inst_bind_ns[3] += @intCast(@as(i128, std.time.nanoTimestamp() - bt3));
-                }
-
-                // Instance 4: OutputSumcheck (starts at max_rounds - log_ram_k)
-                if (output_prover != null and round_idx >= (max_num_rounds - log_ram_k)) {
-                    const bt4 = if (bench_s2) std.time.nanoTimestamp() else 0;
-                    if (output_evals_this_round) |evals| output_prover.?.updateClaim(evals, challenge);
-                    output_prover.?.bindChallenge(challenge);
-                    if (bench_s2) inst_bind_ns[4] += @intCast(@as(i128, std.time.nanoTimestamp() - bt4));
-                }
-
-                // Reset per-round evals
-                raf_evals_this_round = null;
-                rwc_evals_this_round = null;
-                instr_evals_this_round = null;
-
-                // CRITICAL: Update individual_claims for each instance by evaluating at challenge
-                // This is required for the batched sumcheck to maintain correct claim tracking
-                // For inactive instances, the constant polynomial evaluates to the same scaled value
-                // For active instances, we update based on the polynomial evaluation
-                for (0..5) |i| {
-                    const start_round = max_num_rounds - rounds_per_instance[i];
-                    if (round_idx >= start_round) {
-                        // Instance was active - update claim from its prover
-                        if (i == 0 and rwc_prover != null) {
-                            individual_claims[i] = rwc_prover.?.current_claim;
-                        } else if (i == 1 and product_prover != null) {
-                            individual_claims[i] = product_prover.?.current_claim;
-                        } else if (i == 2 and instr_prover != null) {
-                            individual_claims[i] = instr_prover.?.current_claim;
-                        } else if (i == 3 and raf_prover != null) {
-                            individual_claims[i] = raf_prover.?.current_claim;
-                        } else if (i == 4 and output_prover != null) {
-                            individual_claims[i] = output_prover.?.current_claim;
-                        } else {
-                            // Fallback: for instances without provers, keep tracking manually
-                            // The claim after evaluating constant polynomial at r is just the constant
-                            const remaining = rounds_per_instance[i] - (round_idx - start_round) - 1;
-                            var scaled = input_claims[i];
-                            for (0..remaining) |_| {
-                                scaled = scaled.add(scaled);
-                            }
-                            individual_claims[i] = scaled;
-                        }
-                    } else {
-                        // Instance not yet active - constant polynomial evaluates to scaled claim
-                        // scale_power = remaining rounds until activation - 1
-                        // = (start_round - round_idx - 1) where start_round = max_num_rounds - rounds_per_instance[i]
-                        const start_round_i = max_num_rounds - rounds_per_instance[i];
-                        if (round_idx + 1 < start_round_i) {
-                            const scale_power = start_round_i - round_idx - 2;
-                            var scaled = input_claims[i];
-                            for (0..scale_power) |_| {
-                                scaled = scaled.add(scaled);
-                            }
-                            individual_claims[i] = scaled;
-                        } else {
-                            // At the round just before activation, scale_power = 0
-                            individual_claims[i] = input_claims[i];
-                        }
-                    }
-                }
-
-                // Debug: Check divergence between batched_claim and sum of individual claims
-                // Do this AFTER individual_claims update so they're in sync
-                if (round_idx == 15 or round_idx == 16 or round_idx == 25) {
-                    var should_be_batched = F.zero();
-                    for (0..5) |dbg_i| {
-                        should_be_batched = should_be_batched.add(individual_claims[dbg_i].mul(batching_coeffs[dbg_i]));
-                    }
-                }
-            }
-
-            const s2_loop_done_t = if (config.bench_output) std.time.nanoTimestamp() else 0;
-
-            // Print per-instance timing breakdown
-            if (bench_s2) {
-                const names = [5][]const u8{ "RWC", "Product", "InstrLookups", "RAF", "Output" };
-                const ms = 1_000_000.0;
-                for (0..5) |bi| {
-                    std.debug.print("[BENCH] stage=2 instance={d}({s}) compute={d:.1}ms bind={d:.1}ms rounds={d}\n", .{
-                        bi,
-                        names[bi],
-                        @as(f64, @floatFromInt(inst_compute_ns[bi])) / ms,
-                        @as(f64, @floatFromInt(inst_bind_ns[bi])) / ms,
-                        inst_active_rounds[bi],
-                    });
-                }
-            }
-
-            // Print prover's per-instance final claims for comparison with verifier
-            var expected_batched = F.zero();
-            // Instance 0: RWC
-            if (rwc_prover) |rp| {
-                expected_batched = expected_batched.add(rp.current_claim.mul(batching_coeffs[0]));
-            } else {
-                expected_batched = expected_batched.add(individual_claims[0].mul(batching_coeffs[0]));
-            }
-            // Instance 1: Product
-            if (product_prover) |pp| {
-                expected_batched = expected_batched.add(pp.current_claim.mul(batching_coeffs[1]));
-            } else {
-                expected_batched = expected_batched.add(individual_claims[1].mul(batching_coeffs[1]));
-            }
-            // Instance 2: InstrLookups
-            if (instr_prover) |*ip| {
-                expected_batched = expected_batched.add(ip.current_claim.mul(batching_coeffs[2]));
-            } else {
-                expected_batched = expected_batched.add(individual_claims[2].mul(batching_coeffs[2]));
-            }
-            // Instance 3: RAF
-            if (raf_prover) |rp| {
-                expected_batched = expected_batched.add(rp.current_claim.mul(batching_coeffs[3]));
-            } else {
-                expected_batched = expected_batched.add(individual_claims[3].mul(batching_coeffs[3]));
-            }
-            // Instance 4: Output
-            if (output_prover) |op| {
-                expected_batched = expected_batched.add(op.current_claim.mul(batching_coeffs[4]));
-            } else {
-                expected_batched = expected_batched.add(individual_claims[4].mul(batching_coeffs[4]));
-            }
-
-
-            // Debug: Print all challenges in LE format for comparison with Jolt
-
-            // Debug: Print prover's final left/right values
-            if (product_prover) |_| {
-            }
-
-            // Compute the 8 factor polynomial evaluations at r_cycle
-            // r_cycle is the last n_cycle_vars challenges from Stage 2
-            // ProductVirtualRemainder starts at round log_ram_k, so its r_cycle
-            // is challenges[log_ram_k..max_num_rounds]
-            const factor_evals = try self.computeProductFactorEvaluations(
+                    .thread_pool = self.thread_pool,
+                    .gpu_ops = self.gpu_ops,
+                },
+                proof,
+                transcript,
+                r0_stage2,
+                uni_skip_claim_stage2,
+                tau,
+                r_spartan_for_instr,
                 raw_r1cs_inputs,
-                challenges.items,
                 n_cycle_vars,
                 log_ram_k,
+                opening_claims,
+                config,
             );
-
-            // Debug: Compute fused_left and fused_right from factor_evals and compare
-            // Lagrange weights at r0_stage2
-            const LagrangePoly = r1cs.univariate_skip.LagrangePolynomial(F);
-            const w = try LagrangePoly.evals(3, r0_stage2, self.allocator);
-            defer self.allocator.free(w);
-
-            // fused_left = w[0]*l_inst + w[1]*lookup_out + w[2]*j_flag
-            // fused_right = w[0]*r_inst + w[1]*branch_flag + w[2]*(1 - next_is_noop)
-
-
-            // Compute tau_high_bound_r0 and tau_bound_r_tail_rev for expected_output_claim debug
-            // tau_high_bound_r0 = LagrangeKernel(5, tau_high, r0)
-
-            // tau_bound_r_tail_rev = eq(tau_low, r_cycle_reversed)
-            // tau_low = tau[0..n_cycle_vars]
-            // r_cycle_reversed = last n_cycle_vars challenges, reversed
-            // The challenges.items are the Stage 2 sumcheck challenges
-            // ProductVirtualRemainder starts at round (max_num_rounds - n_cycle_vars)
-            // Its challenges are the LAST n_cycle_vars of challenges.items
-            const product_start_round = max_num_rounds - n_cycle_vars;
-
-            // Extract ProductVirtualRemainder challenges (last n_cycle_vars)
-            var product_challenges = try self.allocator.alloc(F, n_cycle_vars);
-            defer self.allocator.free(product_challenges);
-            for (0..n_cycle_vars) |i| {
-                if (product_start_round + i < challenges.items.len) {
-                    product_challenges[i] = challenges.items[product_start_round + i];
-                } else {
-                    product_challenges[i] = F.zero();
-                }
-            }
-
-            // Reverse the product challenges (r_cycle_reversed)
-            var r_cycle_reversed = try self.allocator.alloc(F, n_cycle_vars);
-            defer self.allocator.free(r_cycle_reversed);
-            for (0..n_cycle_vars) |i| {
-                r_cycle_reversed[i] = product_challenges[n_cycle_vars - 1 - i];
-            }
-
-            // Compute eq(tau_low, r_cycle_reversed)
-
-
-            // Compute expected_output_claim
-
-
-            // Copy challenges to return them
-            const challenges_copy = try self.allocator.alloc(F, challenges.items.len);
-            @memcpy(challenges_copy, challenges.items);
-
-            // Get final claims from each prover
-            const raf_claim = if (raf_prover) |rp| rp.getFinalClaim() else F.zero();
-            const rwc_claim = if (rwc_prover) |*rp| rp.current_claim else F.zero();
-            const output_claim = if (output_prover) |op| op.current_claim else F.zero();
-            const instr_claim = if (instr_prover) |*ip| ip.current_claim else F.zero();
-
-            // Get individual RWC opening claims (ra, val, inc)
-            var rwc_ra_claim = F.zero();
-            var rwc_val_claim = F.zero();
-            var rwc_inc_claim = F.zero();
-            if (rwc_prover) |*rp| {
-                const rwc_opening_claims = rp.getOpeningClaims(challenges.items);
-                rwc_ra_claim = rwc_opening_claims.ra_claim;
-                rwc_val_claim = rwc_opening_claims.val_claim;
-                rwc_inc_claim = rwc_opening_claims.inc_claim;
-
-                // Verify: current_claim should equal eq_cycle * ra * (val + gamma * (val + inc))
-            } else {
-                // When rwc_prover is null (no RAM operations), the val polynomial equals val_init
-                // everywhere. So val(r_address, r_cycle) = val_init(r_address).
-                //
-                // Jolt's verifier computes: input_claim = rwc_val_claim - init_eval
-                // For this to equal 0 (what we want for no-RAM programs), rwc_val_claim must equal init_eval.
-                //
-                // We compute r_address from the Stage 2 challenges using normalize_opening_point logic.
-                if (config.initial_ram != null and config.memory_layout != null) {
-                    // RWC uses 3-phase structure:
-                    // - Phase 1: phase1_num_rounds cycle vars (ALL cycle vars for Jolt compat)
-                    // - Phase 2: log_k address vars
-                    // - Phase 3: remaining cycle + address vars
-                    const phase1 = n_cycle_vars; // ALL cycle vars in phase 1 (Jolt compat)
-                    const phase2 = log_ram_k;
-                    const phase3_cycle_len = n_cycle_vars - phase1;
-                    const phase3_address_len = log_ram_k - phase2; // = 0 for default config
-
-                    // Compute r_address_be = reverse(phase3_address) ++ reverse(phase2)
-                    var r_addr_be = try self.allocator.alloc(F, log_ram_k);
-                    defer self.allocator.free(r_addr_be);
-                    @memset(r_addr_be, F.zero());
-
-                    // Phase 2 address challenges are at indices [phase1..phase1+phase2)
-                    const phase2_start = phase1;
-                    for (0..phase2) |i| {
-                        const src_idx = phase2_start + i;
-                        if (src_idx < challenges.items.len) {
-                            const dest_idx = phase3_address_len + (phase2 - 1 - i);
-                            if (dest_idx < log_ram_k) {
-                                r_addr_be[dest_idx] = challenges.items[src_idx];
-                            }
-                        }
-                    }
-                    // Phase 3 address challenges are at indices [phase1+phase2+phase3_cycle..end)
-                    const phase3_addr_start = phase1 + phase2 + phase3_cycle_len;
-                    for (0..phase3_address_len) |i| {
-                        const src_idx = phase3_addr_start + i;
-                        if (src_idx < challenges.items.len) {
-                            const dest_idx = phase3_address_len - 1 - i;
-                            r_addr_be[dest_idx] = challenges.items[src_idx];
-                        }
-                    }
-
-                    // Debug: print r_address_be values
-                    // Also print the source challenges
-
-                    // Compute val_init(r_address_be) using bytecode_words (like Jolt does)
-                    rwc_val_claim = computeInitialRamEval(
-                        config.bytecode_words,
-                        config.min_bytecode_address,
-                        config.memory_layout.?,
-                        r_addr_be,
-                        log_ram_k,
-                        config.program_inputs,
-                    );
-                }
-            }
-
-            // Get individual InstructionLookups opening claims (5 terms)
-            var instr_lookup_output = F.zero();
-            var instr_left_operand = F.zero();
-            var instr_right_operand = F.zero();
-            var instr_left_instr_input = F.zero();
-            var instr_right_instr_input = F.zero();
-            if (instr_prover) |*ip| {
-                const instr_opening_claims = ip.getOpeningClaims();
-                instr_lookup_output = instr_opening_claims.lookup_output;
-                instr_left_operand = instr_opening_claims.left_operand;
-                instr_right_operand = instr_opening_claims.right_operand;
-                instr_left_instr_input = instr_opening_claims.left_instr_input;
-                instr_right_instr_input = instr_opening_claims.right_instr_input;
-            }
-
-
-            // Get Val_final(r') and Val_init(r') from the OutputSumcheck prover
-            // These are the MLE evaluations at the final opening point
-            var output_val_final = F.zero();
-            var output_val_init = F.zero();
-            if (output_prover) |op| {
-                const output_claims = op.getFinalClaims();
-                output_val_final = output_claims.val_final;
-                output_val_init = output_claims.val_init;
-            }
-
-            // Compute r_address_rw and r_cycle_rw from RWC challenges for RamRaClaimReduction
-            // RWC uses 3-phase structure:
-            // - Phase 1: n_cycle_vars cycle variables
-            // - Phase 2: log_ram_k address variables
-            // - Phase 3: 0 remaining variables (for default config)
-            // Opening point = [r_address, r_cycle] in BIG_ENDIAN
-            const phase1_rounds = n_cycle_vars;
-            const phase2_rounds = log_ram_k;
-
-            const r_address_rw = try self.allocator.alloc(F, log_ram_k);
-            const r_cycle_rw = try self.allocator.alloc(F, n_cycle_vars);
-
-            // r_address from phase 2 challenges, reversed to BIG_ENDIAN
-            // Phase 2 challenges are at indices [phase1..phase1+phase2)
-            for (0..phase2_rounds) |i| {
-                const src_idx = phase1_rounds + i;
-                if (src_idx < challenges.items.len) {
-                    r_address_rw[phase2_rounds - 1 - i] = challenges.items[src_idx];
-                } else {
-                    r_address_rw[phase2_rounds - 1 - i] = F.zero();
-                }
-            }
-
-            // r_cycle from phase 1 challenges, reversed to BIG_ENDIAN
-            // Phase 1 challenges are at indices [0..phase1)
-            for (0..phase1_rounds) |i| {
-                if (i < challenges.items.len) {
-                    r_cycle_rw[phase1_rounds - 1 - i] = challenges.items[i];
-                } else {
-                    r_cycle_rw[phase1_rounds - 1 - i] = F.zero();
-                }
-            }
-
-
-            // CRITICAL FIX: r_address_raf should be computed from sumcheck challenges, NOT the pre-sampled r_address!
-            //
-            // In Jolt's Stage 2 batched sumcheck:
-            // - RamRafEvaluation has 16 rounds, offset = 8, gets challenges[8..24]
-            // - RamReadWriteChecking has 24 rounds, offset = 0, gets challenges[0..24]
-            //   - Phase 1 (cycle): challenges[0..8]
-            //   - Phase 2 (address): challenges[8..24]
-            //
-            // Both instances' r_address = reverse(challenges[8..24]).
-            // So r_address_raf = r_address_rw!
-            //
-            // The pre-sampled r_address is used only for OutputSumcheck's eq polynomial,
-            // NOT for RamRafEvaluation's opening point.
-            //
-            // Compute r_address_raf from sumcheck challenges the same way as r_address_rw:
-            const r_address_raf = try self.allocator.alloc(F, log_ram_k);
-            for (0..phase2_rounds) |i| {
-                const src_idx = phase1_rounds + i;
-                if (src_idx < challenges.items.len) {
-                    r_address_raf[phase2_rounds - 1 - i] = challenges.items[src_idx];
-                } else {
-                    r_address_raf[phase2_rounds - 1 - i] = F.zero();
-                }
-            }
-
-            // Debug: compare r_address_raf and r_address_rw (they should now be identical)
-
-            // Compute ProductVirtualRemainder r_cycle from Stage 2 challenges
-            // ProductVirtualRemainder starts at round (max_num_rounds - n_cycle_vars)
-            // and runs for n_cycle_vars rounds. Reversed to BIG_ENDIAN.
-            const product_start = max_num_rounds - n_cycle_vars;
-            const r_cycle_product = try self.allocator.alloc(F, n_cycle_vars);
-            for (0..n_cycle_vars) |i| {
-                const src_idx = product_start + i;
-                if (src_idx < challenges.items.len) {
-                    r_cycle_product[n_cycle_vars - 1 - i] = challenges.items[src_idx];
-                } else {
-                    r_cycle_product[n_cycle_vars - 1 - i] = F.zero();
-                }
-            }
-
-            if (config.bench_output) {
-                const ms2 = 1_000_000.0;
-                const t_now = std.time.nanoTimestamp();
-                std.debug.print("[BENCH] stage=2 breakdown: prover_init={d:.1}ms round_loop={d:.1}ms post_loop={d:.1}ms\n", .{
-                    @as(f64, @floatFromInt(@as(i128, s2_init_done_t - s2_fn_t0))) / ms2,
-                    @as(f64, @floatFromInt(@as(i128, s2_loop_done_t - s2_init_done_t))) / ms2,
-                    @as(f64, @floatFromInt(@as(i128, t_now - s2_loop_done_t))) / ms2,
-                });
-            }
-
-            return Stage2Result{
-                .factor_evals = factor_evals,
-                .challenges = challenges_copy,
-                .raf_final_claim = raf_claim,
-                .rwc_final_claim = rwc_claim,
-                .output_final_claim = output_claim,
-                .instr_final_claim = instr_claim,
-                .output_val_final_claim = output_val_final,
-                .output_val_init_claim = output_val_init,
-                .r_address_raf = r_address_raf,
-                .r_address_rw = r_address_rw,
-                .r_cycle_rw = r_cycle_rw,
-                .r_cycle_product = r_cycle_product,
-                .rwc_ra_claim = rwc_ra_claim,
-                .rwc_val_claim = rwc_val_claim,
-                .rwc_inc_claim = rwc_inc_claim,
-                .instr_lookup_output_claim = instr_lookup_output,
-                .instr_left_operand_claim = instr_left_operand,
-                .instr_right_operand_claim = instr_right_operand,
-                .instr_left_instr_input_claim = instr_left_instr_input,
-                .instr_right_instr_input_claim = instr_right_instr_input,
-                .allocator = self.allocator,
-            };
         }
 
-        /// Compute MLE evaluations of the 8 factor polynomials at r_cycle
-        ///
-        /// The 8 factors are:
-        /// 0: LeftInstructionInput
-        /// 1: RightInstructionInput
-        /// 2: IsRdNotZero
-        /// 3: WriteLookupOutputToRDFlag
-        /// 4: JumpFlag
-        /// 5: LookupOutput
-        /// 6: BranchFlag
-        /// 7: NextIsNoop
-        ///
-        /// Returns MLE(factor_i, r_cycle) = Σ_t eq(r_cycle, t) * factor_value[t]
-        fn computeProductFactorEvaluations(
-            self: *Self,
-            raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
-            all_challenges: []const F,
-            n_cycle_vars: usize,
-            log_ram_k: usize,
-        ) ![8]F {
-            _ = log_ram_k;
-            // r_cycle is the last n_cycle_vars challenges
-            // In Jolt, ProductVirtualRemainder runs for n_cycle_vars rounds starting after log_ram_k rounds
-            // So r_cycle = all_challenges[log_ram_k..log_ram_k + n_cycle_vars]
-            // But the challenges are stored in order, so we take the last n_cycle_vars
-            if (all_challenges.len < n_cycle_vars) {
-                // Not enough challenges, return zeros
-                return [8]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
-            }
-
-            // Extract r_cycle (last n_cycle_vars challenges)
-            // These are the sumcheck challenges that were used to bind the ProductVirtualRemainder
-            // polynomial. Jolt uses normalize_opening_point which reverses the challenges to
-            // convert from LITTLE_ENDIAN to BIG_ENDIAN.
-            const r_cycle_start = all_challenges.len - n_cycle_vars;
-            const r_cycle_original = all_challenges[r_cycle_start..];
-
-            // Jolt's normalize_opening_point reverses the challenges to convert from LE to BE.
-            // The factor claims must be computed at this reversed point to match the verifier's
-            // expected_output_claim computation.
-            const r_cycle = try self.allocator.alloc(F, n_cycle_vars);
-            defer self.allocator.free(r_cycle);
-            for (0..n_cycle_vars) |i| {
-                r_cycle[i] = r_cycle_original[n_cycle_vars - 1 - i];
-            }
-
-            // Compute eq polynomial evaluations at r_cycle (using BIG_ENDIAN indexing like Jolt)
-            const EqPoly = poly_mod.EqPolynomial(F);
-            const eq_evals = try EqPoly.evalsSliceWithScaling(F, self.allocator, r_cycle, null);
-            defer self.allocator.free(eq_evals);
-
-            // Compute MLE evaluation: Σ_t eq(r_cycle, t) * factor_value[t]
-            // Parallelized with UnreducedProductAccum for deferred Montgomery reduction.
-            const num_cycles = @min(eq_evals.len, raw_r1cs_inputs.len);
-
-            const FactorCtx = struct {
-                eq: []const F,
-                raw: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
-            };
-            const fctx = FactorCtx{
-                .eq = eq_evals,
-                .raw = raw_r1cs_inputs,
-            };
-
-            // Use typed integer accumulators matching Jolt's compute_claimed_factors:
-            // u64 factors → fmaddU64 (4 integer muls), bool factors → fmaddBool (0 muls),
-            // i128 factors → fmaddI128 (8 integer muls). ~4x fewer ops than field×field.
-            const MedAccumS = field_mod.MedAccumS;
-            const factorMapFn = struct {
-                fn f(c: FactorCtx, start: usize, end: usize) [8]MedAccumS {
-                    @setEvalBranchQuota(10000);
-                    var acc: [8]MedAccumS = .{MedAccumS.zero()} ** 8;
-                    for (start..end) |t| {
-                        const eq_val = c.eq[t];
-                        const raw = &c.raw[t];
-
-                        // Factor 0: LeftInstructionInput (u64)
-                        acc[0].fmaddU64(eq_val, raw.u64_values[0]);
-                        // Factor 1: RightInstructionInput (i128)
-                        acc[1].fmaddI128(eq_val, raw.signed_values[0]);
-                        // Factor 2: FlagJump (bool)
-                        acc[2].fmaddBool(eq_val, raw.bool_flags[9]);
-                        // Factor 3: FlagWriteLookupOutputToRD (bool)
-                        acc[3].fmaddBool(eq_val, raw.bool_flags[10]);
-                        // Factor 4: LookupOutput (u64)
-                        acc[4].fmaddU64(eq_val, raw.u64_values[12]);
-                        // Factor 5: FlagBranch (bool)
-                        acc[5].fmaddBool(eq_val, raw.bool_flags[19]);
-                        // Factor 6: NextIsNoop (bool from next cycle)
-                        const next_is_noop: bool = if (t + 1 < c.raw.len)
-                            c.raw[t + 1].bool_flags[20]
-                        else
-                            true; // Last cycle: NextIsNoop = true
-                        acc[6].fmaddBool(eq_val, next_is_noop);
-                        // Factor 7: FlagVirtualInstruction (bool)
-                        acc[7].fmaddBool(eq_val, raw.bool_flags[11]);
-                    }
-                    return acc;
-                }
-            }.f;
-
-            const factorReduceFn = struct {
-                fn f(a: [8]MedAccumS, b: [8]MedAccumS) [8]MedAccumS {
-                    var result: [8]MedAccumS = undefined;
-                    inline for (0..8) |fi| {
-                        result[fi] = a[fi];
-                        result[fi].pos.addAssign(b[fi].pos);
-                        result[fi].neg.addAssign(b[fi].neg);
-                    }
-                    return result;
-                }
-            }.f;
-
-            const identity: [8]MedAccumS = .{MedAccumS.zero()} ** 8;
-            const accum = if (self.thread_pool) |tp|
-                tp.parallelReduce([8]MedAccumS, num_cycles, identity, fctx, factorMapFn, factorReduceFn)
-            else
-                factorMapFn(fctx, 0, num_cycles);
-
-            var factor_evals = [8]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
-            inline for (0..8) |fi| {
-                factor_evals[fi] = accum[fi].barrettReduce();
-            }
-
-            // Handle padding cycles (only NextIsNoop=1 for NoOp padding)
-            if (raw_r1cs_inputs.len < eq_evals.len) {
-                for (raw_r1cs_inputs.len..eq_evals.len) |t| {
-                    factor_evals[6] = factor_evals[6].add(eq_evals[t]);
-                }
-            }
-
-            return factor_evals;
-        }
 
         /// Evaluate polynomial at challenge using Jolt's eval_from_hint formula
         /// Delegates to the shared UniPoly implementation.
@@ -3987,33 +3188,14 @@ pub fn JoltProver(comptime F: type) type {
         }
 
         /// Compute eq(r, idx) where r is in BIG_ENDIAN order (MSB first).
-        fn computeEqAtPointBigEndian(r: []const F, idx: usize) F {
-            var result = F.one();
-            const n = r.len;
-            for (0..n) |i| {
-                const bit = (idx >> @intCast(n - 1 - i)) & 1;
-                if (bit == 1) {
-                    result = result.mul(r[i]);
-                } else {
-                    result = result.mul(F.one().sub(r[i]));
-                }
-            }
-            return result;
+        pub fn computeEqAtPointBigEndian(r: []const F, idx: usize) F {
+            return @import("eq_utils.zig").computeEqAtPointBE(F, r, idx);
         }
 
         /// Compute eq(r, idx) where r is in LITTLE_ENDIAN order (LSB first).
         /// bit i of idx corresponds to r[i].
         fn computeEqAtPointLE(r: []const F, idx: usize) F {
-            var result = F.one();
-            for (r, 0..) |ri, i| {
-                const bit = (idx >> @intCast(i)) & 1;
-                if (bit == 1) {
-                    result = result.mul(ri);
-                } else {
-                    result = result.mul(F.one().sub(ri));
-                }
-            }
-            return result;
+            return @import("eq_utils.zig").computeEqAtPointLE(F, r, idx);
         }
 
         /// Evaluate the initial RAM polynomial at r_address (BIG_ENDIAN).
@@ -4024,7 +3206,7 @@ pub fn JoltProver(comptime F: type) type {
         ///
         /// NOTE: Unlike the old implementation that used initial_ram hashmap (stack data),
         /// this now uses bytecode_words (program bytecode) like Jolt does.
-        fn computeInitialRamEval(
+        pub fn computeInitialRamEval(
             bytecode_words: ?[]const u64,
             min_bytecode_address: u64,
             memory_layout: *const jolt_device.MemoryLayout,
@@ -4221,51 +3403,8 @@ pub fn JoltProver(comptime F: type) type {
     };
 }
 
-/// Extract the 8 product factors from an R1CS cycle witness
-///
-/// The 8 factors are (matching upstream PRODUCT_UNIQUE_FACTOR_VIRTUALS):
-///   [0] LeftInstructionInput
-///   [1] RightInstructionInput
-///   [2] JumpFlag (OpFlags::Jump)
-///   [3] WriteLookupOutputToRDFlag (OpFlags::WriteLookupOutputToRD)
-///   [4] LookupOutput
-///   [5] BranchFlag (InstructionFlags::Branch)
-///   [6] NextIsNoop
-///   [7] VirtualInstructionFlag (OpFlags::VirtualInstruction)
-fn extractProductFactors(
-    comptime F: type,
-    witness: *const r1cs.R1CSCycleInputs(F),
-    all_witnesses: []const r1cs.R1CSCycleInputs(F),
-    cycle_idx: usize,
-) [8]F {
-    const R1CSInputIndex = r1cs.R1CSInputIndex;
-
-    return [8]F{
-        // 0: LeftInstructionInput
-        witness.values[R1CSInputIndex.LeftInstructionInput.toIndex()],
-        // 1: RightInstructionInput
-        witness.values[R1CSInputIndex.RightInstructionInput.toIndex()],
-        // 2: JumpFlag (OpFlags::Jump)
-        witness.values[R1CSInputIndex.FlagJump.toIndex()],
-        // 3: WriteLookupOutputToRDFlag (OpFlags::WriteLookupOutputToRD)
-        witness.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()],
-        // 4: LookupOutput
-        witness.values[R1CSInputIndex.LookupOutput.toIndex()],
-        // 5: BranchFlag (InstructionFlags::Branch)
-        witness.values[R1CSInputIndex.FlagBranch.toIndex()],
-        // 6: NextIsNoop - 1 if next instruction is a noop
-        blk: {
-            if (cycle_idx + 1 < all_witnesses.len) {
-                const next_witness = &all_witnesses[cycle_idx + 1];
-                break :blk next_witness.values[R1CSInputIndex.FlagIsNoop.toIndex()];
-            }
-            // Last cycle: NextIsNoop = true
-            break :blk F.one();
-        },
-        // 7: VirtualInstructionFlag (OpFlags::VirtualInstruction)
-        witness.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()],
-    };
-}
+/// Re-exported from stage2_sumcheck.zig
+const extractProductFactors = @import("stage2_sumcheck.zig").extractProductFactors;
 
 /// Configuration for proof conversion
 ///

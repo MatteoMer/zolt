@@ -15,17 +15,15 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
 const jolt_types = @import("jolt_types.zig");
-const commitment_mod = @import("../poly/commitment/mod.zig");
-const pairing = @import("../field/pairing.zig");
-const dory_mod = @import("../poly/commitment/dory.zig");
+const commitment_mod = @import("zolt_arith").poly.commitment;
+const pairing = @import("zolt_arith").field.pairing;
+const dory_mod = @import("zolt_arith").poly.commitment.dory;
 
 /// GT element (Dory commitment) type
 pub const GT = pairing.GT;
@@ -588,7 +586,7 @@ pub fn writeJoltProofToFile(
 // =============================================================================
 
 const testing = std.testing;
-const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
+const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
 
 test "arkworks serializer: field element format" {
     var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
@@ -964,7 +962,7 @@ test "dory commitment serialization" {
 
 test "dory commitment serialization roundtrip" {
     // Create a non-trivial GT element
-    const fp = @import("../field/mod.zig").BN254BaseField;
+    const fp = @import("zolt_arith").field.BN254BaseField;
     const Fp2 = pairing.Fp2;
     const Fp6 = pairing.Fp6;
 

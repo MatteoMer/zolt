@@ -22,15 +22,12 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const field_mod = @import("../../field/mod.zig");
+const ThreadPool = @import("zolt_pool").ThreadPool;
+const field_mod = @import("zolt_arith").field;
 const RawR1CSInputs = @import("evaluators.zig").RawR1CSInputs;
 
 /// Number of R1CS constraints
@@ -785,7 +782,7 @@ test "uniskip targets for stage 2 (DEGREE=4, DOMAIN_SIZE=5)" {
 }
 
 test "lagrange polynomial evaluation" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -811,7 +808,7 @@ test "lagrange polynomial evaluation" {
 }
 
 test "unipoly evaluation" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -831,7 +828,7 @@ test "unipoly evaluation" {
 }
 
 test "interpolation preserves zeros at base window" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -884,7 +881,7 @@ test "interpolation preserves zeros at base window" {
 }
 
 test "buildUniskipFirstRoundPoly domain sum is zero when base evals are zero" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -998,7 +995,7 @@ test "generalized binomial" {
 }
 
 test "shift_coeffs matches polynomial evaluation" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // p(x) = 2 - 3x + x^3

@@ -315,7 +315,7 @@ pub fn RaPolynomial(comptime F: type) type {
 // =============================================================================
 
 test "RaPolynomial round1 getBoundCoeff" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // eq_table with 4 entries
@@ -345,7 +345,7 @@ test "RaPolynomial round1 getBoundCoeff" {
 }
 
 test "RaPolynomial round1 bind matches dense computation" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Build a round1 poly with 8 elements
@@ -404,7 +404,7 @@ test "RaPolynomial round1 bind matches dense computation" {
 }
 
 test "RaPolynomial full sumcheck simulation" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // 4-element poly (2 rounds of bind to reach scalar)
@@ -466,7 +466,7 @@ test "RaPolynomial full sumcheck simulation" {
 }
 
 test "RaPolynomial deinit in round1 state" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var eq_table = try allocator.alloc(BN254Scalar, 2);
@@ -487,7 +487,7 @@ test "RaPolynomial deinit in round1 state" {
 }
 
 test "RaPolynomial scale zero returns all zeros" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var eq_table = try allocator.alloc(BN254Scalar, 2);
@@ -511,7 +511,7 @@ test "RaPolynomial scale zero returns all zeros" {
 }
 
 test "RaPolynomial multi-round dense bind (16 elements, 4 rounds)" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Build 16-element poly with 2-entry eq_table
@@ -563,7 +563,7 @@ test "RaPolynomial multi-round dense bind (16 elements, 4 rounds)" {
 }
 
 test "RaPolynomial single element finalClaim in round1 state" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var eq_table = try allocator.alloc(BN254Scalar, 2);
@@ -582,7 +582,7 @@ test "RaPolynomial single element finalClaim in round1 state" {
 }
 
 test "RaPolynomial non-unit scale full sumcheck to scalar" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // 8-element poly with scale=7, bind 3 rounds to a scalar, verify against direct MLE
@@ -641,7 +641,7 @@ test "RaPolynomial non-unit scale full sumcheck to scalar" {
 }
 
 test "RaPolynomial currentLen tracks through transitions" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var eq_table = try allocator.alloc(BN254Scalar, 2);
@@ -672,7 +672,7 @@ test "RaPolynomial currentLen tracks through transitions" {
 }
 
 test "RaPolynomial all null indices produces zero polynomial" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var eq_table = try allocator.alloc(BN254Scalar, 4);
@@ -708,7 +708,7 @@ test "RaPolynomial all null indices produces zero polynomial" {
 }
 
 test "RaPolynomial deinit in round2 state" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var eq_table = try allocator.alloc(BN254Scalar, 2);
@@ -729,7 +729,7 @@ test "RaPolynomial deinit in round2 state" {
 }
 
 test "RaPolynomial deinit in round3 state" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var eq_table = try allocator.alloc(BN254Scalar, 2);
@@ -751,7 +751,7 @@ test "RaPolynomial deinit in round3 state" {
 }
 
 test "RaPolynomial 32 elements (5 rounds) full sumcheck" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // 32-element poly with 4-entry eq_table

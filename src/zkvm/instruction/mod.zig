@@ -211,7 +211,7 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         VirtualAssertWordAlignment,
 
         const Self = @This();
-        const Table = lookup_table.LookupTable(@import("../../field/mod.zig").BN254Scalar, XLEN);
+        const Table = lookup_table.LookupTable(@import("zolt_arith").field.BN254Scalar, XLEN);
 
         /// Materialize an entry from this lookup table
         pub fn materializeEntry(self: Self, index: u128) u64 {

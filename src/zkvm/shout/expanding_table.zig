@@ -195,7 +195,7 @@ pub fn ExpandingTable(comptime F: type) type {
 }
 
 test "expanding table init and bind" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var table = try ExpandingTable(F).init(allocator, 3);
@@ -222,7 +222,7 @@ test "expanding table init and bind" {
 }
 
 test "expanding table multiple binds" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var table = try ExpandingTable(F).init(allocator, 4);
@@ -273,7 +273,7 @@ test "expanding table multiple binds" {
 }
 
 test "expanding table condense" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var table = try ExpandingTable(F).init(allocator, 4);

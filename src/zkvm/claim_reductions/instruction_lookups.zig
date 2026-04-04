@@ -12,15 +12,12 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const poly_mod = @import("../../poly/mod.zig");
+const ThreadPool = @import("zolt_pool").ThreadPool;
+const poly_mod = @import("zolt_arith").poly;
 const EqPolynomial = poly_mod.EqPolynomial;
 const UniPoly = poly_mod.UniPoly;
 const R1CSInputIndex = @import("../r1cs/constraints.zig").R1CSInputIndex;
@@ -660,7 +657,7 @@ fn bindLow(comptime F: type, arr: []F, r: F) void {
 
 test "instruction lookups prover initialization" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const constraints = @import("../r1cs/constraints.zig");
     const CycleInputs = constraints.R1CSCycleInputs(F);

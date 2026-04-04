@@ -14,14 +14,12 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const ThreadPool = @import("zolt_pool").ThreadPool;
 
 const prefixes_mod = @import("prefixes.zig");
 const suffixes_mod = @import("suffixes.zig");
@@ -223,7 +221,7 @@ pub fn AllSuffixPolys(comptime F: type) type {
                 // Per-table parallel path with UNREDUCED ARITHMETIC (matches Jolt's init_suffix_polys).
                 // Each table accumulates into FoldedMulU64 buffers (5 × u128 slots per entry),
                 // deferring Barrett reduction to the end. This avoids Montgomery mul per cycle.
-                const field_mod = @import("../../field/mod.zig");
+                const field_mod = @import("zolt_arith").field;
                 const FoldedMulU64 = field_mod.FoldedMulU64;
 
                 // Pre-allocate unreduced buffers: one flat array per table, sized [num_suffixes × m]
@@ -754,8 +752,8 @@ pub fn proverMsgReadChecking(
         .half_len = half_len,
     };
 
-    const FoldedMulU64 = @import("../../field/mod.zig").FoldedMulU64;
-    const reduceMulU64 = @import("../../field/mod.zig").reduceMulU64;
+    const FoldedMulU64 = @import("zolt_arith").field.FoldedMulU64;
+    const reduceMulU64 = @import("zolt_arith").field.reduceMulU64;
 
     const rc_map = struct {
         fn map(ctx: ReadCheckCtx, start: usize, end: usize) [3]F {
@@ -1555,7 +1553,7 @@ pub fn initQRaf(
     const T = lookup_indices.len;
 
     if (tp) |pool| {
-        const field_mod = @import("../../field/mod.zig");
+        const field_mod = @import("zolt_arith").field;
         const FoldedMulU64 = field_mod.FoldedMulU64;
 
         // Parallel path with unreduced accumulators (deferred Barrett reduction).
@@ -1945,8 +1943,8 @@ pub fn proverMsgRaf(
         .half_len = half_len,
     };
 
-    const FoldedMulU64_ = @import("../../field/mod.zig").FoldedMulU64;
-    const reduceMulU64_ = @import("../../field/mod.zig").reduceMulU64;
+    const FoldedMulU64_ = @import("zolt_arith").field.FoldedMulU64;
+    const reduceMulU64_ = @import("zolt_arith").field.reduceMulU64;
 
     const raf_map = struct {
         fn map(ctx: RafCtx, start: usize, end: usize) [6]F {
@@ -2316,7 +2314,7 @@ pub fn computeTableValuesAtRAddress(
 // ============================================================================
 
 test "ExpandingTable basic operations" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var table = try ExpandingTable(F).init(allocator, 16);
@@ -2339,7 +2337,7 @@ test "ExpandingTable basic operations" {
 }
 
 test "AllSuffixPolys init and deinit" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var polys = AllSuffixPolys(F).init(allocator);
@@ -2354,7 +2352,7 @@ test "AllSuffixPolys init and deinit" {
 }
 
 test "TableSuffixPolys bind" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var table = try TableSuffixPolys(F).init(allocator, 2, 4);
@@ -2375,7 +2373,7 @@ test "TableSuffixPolys bind" {
 }
 
 test "RafDecomposition init and deinit" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var raf = try RafDecomposition(F).init(allocator, 16, 16, 128, .LeftOperand);
@@ -2405,7 +2403,7 @@ test "uninterleaveBits" {
 }
 
 test "initQRaf basic" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var left = try RafDecomposition(F).init(allocator, 4, 2, 8, .LeftOperand);

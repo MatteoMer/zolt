@@ -206,7 +206,7 @@ pub fn RegistersClaimReductionSumcheckVerifier(comptime _: type) type {
 }
 
 test "claim_reductions module compiles" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var hw_prover = HammingWeightClaimReductionProver(F).init(allocator);

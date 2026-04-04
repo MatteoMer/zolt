@@ -1,8 +1,8 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
+const ThreadPool = @import("zolt_pool").ThreadPool;
+const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 const TraceStep = @import("../../tracer/mod.zig").TraceStep;
 const ExecutionTrace = @import("../../tracer/mod.zig").ExecutionTrace;
 const gruen_eq = @import("gruen_eq.zig");

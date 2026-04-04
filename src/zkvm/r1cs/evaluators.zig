@@ -17,7 +17,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const field_mod = @import("../../field/mod.zig");
+const field_mod = @import("zolt_arith").field;
 const constraints = @import("constraints.zig");
 const R1CSInputIndex = constraints.R1CSInputIndex;
 const UNIFORM_CONSTRAINTS = constraints.UNIFORM_CONSTRAINTS;
@@ -681,7 +681,7 @@ pub const RawR1CSInputs = struct {
     }
 };
 
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const ThreadPool = @import("zolt_pool").ThreadPool;
 
 /// Build compact witness array from field-form cycle witnesses.
 /// This performs Montgomery de-encoding once per value, then all subsequent
@@ -1069,7 +1069,7 @@ pub fn interpolateAzBzProductSecondGroupInt(
 // ============================================================================
 
 test "az first group from witness" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create a witness for a LOAD instruction
@@ -1095,7 +1095,7 @@ test "az first group from witness" {
 }
 
 test "bz first group from witness" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create a witness for a LOAD instruction with matching values
@@ -1116,7 +1116,7 @@ test "bz first group from witness" {
 }
 
 test "az*bz product for satisfied constraint is zero" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create a witness for a LOAD instruction with matching values
@@ -1135,7 +1135,7 @@ test "az*bz product for satisfied constraint is zero" {
 }
 
 test "domain point mapping" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
@@ -1158,7 +1158,7 @@ test "domain point mapping" {
 }
 
 test "field from i64" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     try std.testing.expect(fieldFromI64(F, 0).eql(F.zero()));
@@ -1172,7 +1172,7 @@ test "field from i64" {
 }
 
 test "fast Az int matches field Az for LOAD instruction" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
@@ -1189,7 +1189,7 @@ test "fast Az int matches field Az for LOAD instruction" {
 }
 
 test "fast Az int matches field Az for ADD instruction" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
@@ -1205,7 +1205,7 @@ test "fast Az int matches field Az for ADD instruction" {
 }
 
 test "fast Bz direct matches field Bz for first group" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
@@ -1231,7 +1231,7 @@ test "fast Bz direct matches field Bz for first group" {
 }
 
 test "fast second-group Az int matches field Az" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
@@ -1249,7 +1249,7 @@ test "fast second-group Az int matches field Az" {
 }
 
 test "fast second-group Bz direct matches field Bz" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Build 2^64 field element for the test
@@ -1318,7 +1318,7 @@ test "interpolateAzBzProductInt matches brute force for satisfied constraints" {
 }
 
 test "interpolateAzBzProductInt matches field path for satisfied constraints" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const univariate_skip = @import("univariate_skip.zig");
 
@@ -1364,7 +1364,7 @@ test "interpolateAzBzProductInt matches field path for satisfied constraints" {
 }
 
 test "compact witness az/bz match field witnesses" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
@@ -1400,7 +1400,7 @@ test "compact witness az/bz match field witnesses" {
 }
 
 test "compact witness bz_second with large u128 values" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create witness with RightLookupOperand > 2^127 to exercise @bitCast path

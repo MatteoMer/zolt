@@ -11,8 +11,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const poly = @import("../../poly/mod.zig");
-const subprotocols = @import("../../subprotocols/mod.zig");
+const poly = @import("zolt_arith").poly;
+const subprotocols = @import("zolt_arith").subprotocols;
 const r1cs = @import("../r1cs/mod.zig");
 
 
@@ -50,6 +50,9 @@ pub const Stage5Result = stage5_prover.Stage5Result;
 pub const stage6_prover = @import("stage6_prover.zig");
 pub const Stage6BatchedProver = stage6_prover.Stage6BatchedProver;
 pub const Stage6Result = stage6_prover.Stage6Result;
+
+// Shared sumcheck helper functions
+pub const sumcheck_helpers = @import("sumcheck_helpers.zig");
 
 
 /// Spartan proof for R1CS
@@ -142,7 +145,7 @@ pub fn R1CSShape(comptime F: type) type {
 }
 
 test "spartan types compile" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
 
     // Verify types compile
     _ = R1CSProof(F);
@@ -154,4 +157,6 @@ test {
     _ = @import("ra_poly.zig");
     _ = @import("stage6_prover.zig");
     _ = @import("stage5_prover.zig");
+    _ = @import("stage5_instances.zig");
+    _ = @import("sumcheck_helpers.zig");
 }

@@ -370,7 +370,7 @@ test {
 }
 
 test "r1cs constraint" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Create a simple constraint: x * y = z
@@ -397,7 +397,7 @@ test "r1cs constraint" {
 }
 
 test "r1cs instance" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var instance = R1CSInstance(F).init(allocator, 4, 1);

@@ -18,22 +18,19 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
+const ThreadPool = @import("zolt_pool").ThreadPool;
+const UnreducedProductAccum = @import("zolt_arith").field.UnreducedProductAccum;
 
 const mod = @import("mod.zig");
 const MemoryOp = mod.MemoryOp;
 const MemoryAccess = mod.MemoryAccess;
 const MemoryTrace = mod.MemoryTrace;
 
-const poly_mod = @import("../../poly/mod.zig");
+const poly_mod = @import("zolt_arith").poly;
 
 /// Parameters for RAF evaluation sumcheck
 pub fn RafEvaluationParams(comptime F: type) type {
@@ -482,7 +479,7 @@ pub fn RafEvaluationProver(comptime F: type) type {
             const L0 = c_minus_1.mul(c_minus_2).mul(c_minus_3).mul(neg6.inverse().?);
 
             // L1(c) = c(c-2)(c-3) / (1-0)(1-2)(1-3) = c(c-2)(c-3) / 2
-            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(@import("../../poly/mod.zig").UniPoly(F).INV2);
+            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(@import("zolt_arith").poly.UniPoly(F).INV2);
 
             // L2(c) = c(c-1)(c-3) / (2-0)(2-1)(2-3) = c(c-1)(c-3) / -2
             const neg2 = F.zero().sub(F.fromU64(2));
@@ -620,18 +617,7 @@ fn computeEqEvals(allocator: Allocator, comptime F: type, r: []const F, n: usize
 }
 
 /// Compute eq(r, k) for a specific index k
-fn computeEqAtPoint(comptime F: type, r: []const F, k: usize) F {
-    var result = F.one();
-    for (r, 0..) |ri, i| {
-        const ki = (k >> @intCast(i)) & 1;
-        if (ki == 1) {
-            result = result.mul(ri);
-        } else {
-            result = result.mul(F.one().sub(ri));
-        }
-    }
-    return result;
-}
+const computeEqAtPoint = @import("../eq_utils.zig").computeEqAtPointLE;
 
 // ============================================================================
 // Tests
@@ -639,7 +625,7 @@ fn computeEqAtPoint(comptime F: type, r: []const F, k: usize) F {
 
 test "ra polynomial from empty trace" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var trace = MemoryTrace.init(allocator);
@@ -663,7 +649,7 @@ test "ra polynomial from empty trace" {
 
 test "ra polynomial from trace with single access" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var trace = MemoryTrace.init(allocator);
@@ -690,7 +676,7 @@ test "ra polynomial from trace with single access" {
 }
 
 test "unmap polynomial evaluation" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     const unmap = UnmapPolynomial(F).init(4, 0x80000000);
@@ -707,7 +693,7 @@ test "unmap polynomial evaluation" {
 
 test "raf evaluation prover init" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var trace = MemoryTrace.init(allocator);
@@ -739,7 +725,7 @@ test "raf evaluation prover init" {
 
 test "eq polynomial computation" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Test with n=2: eq(r, j) for j in [0, 4)
@@ -756,7 +742,7 @@ test "eq polynomial computation" {
 
 test "raf prover claim tracking" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create a memory trace with multiple accesses

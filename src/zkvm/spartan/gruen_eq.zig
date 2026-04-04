@@ -1,13 +1,10 @@
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const poly = @import("../../poly/mod.zig");
+const poly = @import("zolt_arith").poly;
 
 /// Gruen Split Equality Polynomial
 ///
@@ -342,7 +339,7 @@ pub fn groupIndex(x_out: usize, x_in: usize, num_x_in_bits: usize) usize {
 }
 
 test "gruen eq polynomial initialization" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Test with 4 variables
@@ -362,7 +359,7 @@ test "gruen eq polynomial initialization" {
 }
 
 test "gruen eq polynomial bind" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     const w = [_]BN254Scalar{
@@ -390,7 +387,7 @@ test "gruen eq polynomial bind" {
 }
 
 test "gruen poly deg 3" {
-    const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+    const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     const w = [_]BN254Scalar{

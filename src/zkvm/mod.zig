@@ -9,19 +9,17 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
 const common = @import("../common/mod.zig");
-const field = @import("../field/mod.zig");
+const field = @import("zolt_arith").field;
 const tracer = @import("../tracer/mod.zig");
-const transcripts = @import("../transcripts/mod.zig");
-const msm = @import("../msm/mod.zig");
-const poly_commitment = @import("../poly/commitment/mod.zig");
+const transcripts = @import("zolt_arith").transcripts;
+const msm = @import("zolt_arith").msm;
+const poly_commitment = @import("zolt_arith").poly.commitment;
 const Dory = poly_commitment.dory;
 const Fp = field.BN254BaseField;
 const Fr = field.BN254Scalar;
@@ -30,7 +28,6 @@ pub const bytecode = @import("bytecode/mod.zig");
 pub const claim_reductions = @import("claim_reductions/mod.zig");
 pub const commitment_types = @import("commitment_types.zig");
 pub const instruction = @import("instruction/mod.zig");
-pub const instruction_lookups = @import("instruction_lookups/mod.zig");
 pub const jolt_device = @import("jolt_device.zig");
 pub const jolt_types = @import("jolt_types.zig");
 pub const jolt_serialization = @import("jolt_serialization.zig");
@@ -336,7 +333,7 @@ pub const VMState = struct {
 
 /// Jolt prover
 pub fn JoltProver(comptime F: type) type {
-    const ThreadPool = @import("../utils/thread_pool.zig").ThreadPool;
+    const ThreadPool = @import("zolt_pool").ThreadPool;
     return struct {
         const Self = @This();
 
@@ -530,7 +527,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Debug: print SRS key values for comparison with verifier
             {
-                const DoryMod = @import("../poly/commitment/dory.zig");
+                const DoryMod = @import("zolt_arith").poly.commitment.dory;
                 // g1_0 compressed
                 const g1_0_comp = DoryMod.compressG1(dory_srs.g1_vec[0]);
                 dbg("[SRS DEBUG] g1_0 compressed: ", .{});
@@ -736,7 +733,7 @@ pub fn JoltProver(comptime F: type) type {
 
                 // Phase 2: Dispatch all row MSMs in parallel
                 const g1_slice = dory_srs.g1_vec[0..dense_num_cols];
-                const gpu_msm_mod = @import("../gpu/mod.zig");
+                const gpu_msm_mod = @import("zolt_arith").gpu;
                 if (converter.gpu_msm) |gpu_msm| gpu_blk: {
                     // GPU batched MSM only worthwhile for 512+ rows (enough parallelism)
                     if (active_rows < 512) break :gpu_blk;
@@ -1803,4 +1800,5 @@ test "sparse onehot joint poly equivalence with dense witness" {
 test {
     // Force preprocessing tests to be included
     _ = preprocessing;
+    _ = preprocessing.dory_verifier_setup;
 }

@@ -25,11 +25,9 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
 
@@ -37,13 +35,13 @@ const constraints = @import("../r1cs/constraints.zig");
 const univariate_skip = @import("../r1cs/univariate_skip.zig");
 const evaluators = @import("../r1cs/evaluators.zig");
 const jolt_types = @import("../jolt_types.zig");
-const poly_mod = @import("../../poly/mod.zig");
-const multiquadratic = @import("../../poly/multiquadratic.zig");
-const field_mod = @import("../../field/mod.zig");
+const poly_mod = @import("zolt_arith").poly;
+const multiquadratic = @import("zolt_arith").poly.multiquadratic;
+const field_mod = @import("zolt_arith").field;
 const GruenSplitEqPolynomial = poly_mod.GruenSplitEqPolynomial;
 const MultiquadraticPolynomial = poly_mod.MultiquadraticPolynomial;
 const utils = @import("../../utils/mod.zig");
-const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
+const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 const ExpandingTable = utils.ExpandingTable;
 
 /// Streaming outer sumcheck prover for Jolt compatibility
@@ -126,7 +124,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
         allocator: Allocator,
 
         /// Thread pool for parallel operations
-        thread_pool: ?*@import("../../utils/thread_pool.zig").ThreadPool = null,
+        thread_pool: ?*@import("zolt_pool").ThreadPool = null,
         /// GPU accelerator for Metal compute (Apple Silicon)
         gpu_ops: ?*GpuPolyOps = null,
 
@@ -843,7 +841,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             allocator: Allocator,
             compact_witnesses_arg: []const evaluators.CompactWitness,
             tau: []const F,
-            thread_pool: ?*@import("../../utils/thread_pool.zig").ThreadPool,
+            thread_pool: ?*@import("zolt_pool").ThreadPool,
         ) ![FIRST_ROUND_NUM_COEFFS]F {
             const DEGREE = univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE;
             const EXTENDED_SIZE = univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE;
@@ -2647,7 +2645,7 @@ fn nextPowerOfTwo(n: usize) usize {
 // ============================================================================
 
 const testing = std.testing;
-const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
 
 test "StreamingOuterProver: initialization" {
     const F = BN254Scalar;
@@ -2767,8 +2765,8 @@ test "StreamingOuterProver: expected_output_claim cross-verification" {
     // This is the key formula that Jolt's verifier uses to check the sumcheck.
 
     const F = BN254Scalar;
-    const LagrangePoly = @import("../../poly/mod.zig").LagrangePolynomial(F);
-    const EqPolynomial = @import("../../poly/mod.zig").EqPolynomial(F);
+    const LagrangePoly = @import("zolt_arith").poly.LagrangePolynomial(F);
+    const EqPolynomial = @import("zolt_arith").poly.EqPolynomial(F);
     const r1cs_eval = @import("../r1cs/mod.zig").R1CSInputEvaluator(F);
 
     // Create 4 cycles with non-trivial values

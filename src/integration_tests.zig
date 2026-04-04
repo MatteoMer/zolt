@@ -6,14 +6,15 @@
 const std = @import("std");
 const testing = std.testing;
 
+const zolt_arith = @import("zolt_arith");
 const common = @import("common/mod.zig");
-const field = @import("field/mod.zig");
-const poly = @import("poly/mod.zig");
+const field = zolt_arith.field;
+const poly = zolt_arith.poly;
 const zkvm = @import("zkvm/mod.zig");
-const msm = @import("msm/mod.zig");
+const msm = zolt_arith.msm;
 const tracer = @import("tracer/mod.zig");
 const host = @import("host/mod.zig");
-const transcripts = @import("transcripts/mod.zig");
+const transcripts = zolt_arith.transcripts;
 
 const BN254Scalar = field.BN254Scalar;
 const Fp = field.BN254BaseField;

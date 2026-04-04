@@ -18,15 +18,12 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
+const ThreadPool = @import("zolt_pool").ThreadPool;
+const UnreducedProductAccum = @import("zolt_arith").field.UnreducedProductAccum;
 
 const mod = @import("mod.zig");
 const MemoryOp = mod.MemoryOp;
@@ -450,7 +447,7 @@ pub fn LtPolynomial(comptime F: type) type {
 ///
 /// Binding order: LowToHigh — binds lo vars first, then hi vars.
 pub fn SplitLtPolynomial(comptime F: type) type {
-    const EqPoly = @import("../../poly/mod.zig").EqPolynomial(F);
+    const EqPoly = @import("zolt_arith").poly.EqPolynomial(F);
     return struct {
         const Self = @This();
 
@@ -676,7 +673,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
 
             // Precompute K-element eq table for wa evaluation: eq_table[addr] = eq(r_address, addr).
             // Reverse r_address for LE indexing (buildEqTableInPlace uses BE convention).
-            const EqPoly = @import("../../poly/mod.zig").EqPolynomial(F);
+            const EqPoly = @import("zolt_arith").poly.EqPolynomial(F);
             const r_addr = params.r_address;
             const r_addr_rev = try allocator.alloc(F, r_addr.len);
             defer allocator.free(r_addr_rev);
@@ -1015,7 +1012,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
             // Update claim from round polynomial evaluation at challenge point.
             // This is O(1) (3 field muls) vs the previous O(T/2^round) full re-summation.
             // The caller already uses this same value for individual_claims[1].
-            const poly_mod = @import("../../poly/mod.zig");
+            const poly_mod = @import("zolt_arith").poly;
             self.current_claim = poly_mod.UniPoly(F).evaluateToomCookAt(round_poly, r);
         }
 
@@ -1144,17 +1141,7 @@ pub fn ValEvaluationVerifier(comptime F: type) type {
 
 /// Compute eq(r, k) for a specific index k
 pub fn computeEqAtPoint(comptime F: type, r: []const F, k: anytype) F {
-    const k_val: usize = @intCast(k);
-    var result = F.one();
-    for (r, 0..) |ri, i| {
-        const ki = (k_val >> @intCast(i)) & 1;
-        if (ki == 1) {
-            result = result.mul(ri);
-        } else {
-            result = result.mul(F.one().sub(ri));
-        }
-    }
-    return result;
+    return @import("../eq_utils.zig").computeEqAtPointLE(F, r, @intCast(k));
 }
 
 // ============================================================================
@@ -1163,7 +1150,7 @@ pub fn computeEqAtPoint(comptime F: type, r: []const F, k: anytype) F {
 
 test "inc polynomial from empty trace" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var trace = MemoryTrace.init(allocator);
@@ -1178,7 +1165,7 @@ test "inc polynomial from empty trace" {
 
 test "inc polynomial from trace with write" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var trace = MemoryTrace.init(allocator);
@@ -1200,7 +1187,7 @@ test "inc polynomial from trace with write" {
 
 test "wa polynomial initialization" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var trace = MemoryTrace.init(allocator);
@@ -1224,7 +1211,7 @@ test "wa polynomial initialization" {
 
 test "lt polynomial basic" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // r_cycle = [1, 0] represents cycle 1 in 2-bit representation
@@ -1247,7 +1234,7 @@ test "lt polynomial basic" {
 
 test "val evaluation params" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     const r_address = [_]F{ F.one(), F.zero() };
@@ -1269,7 +1256,7 @@ test "val evaluation params" {
 
 test "val prover sumcheck invariant: p(0) + p(1) = current_claim" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create a memory trace with some writes

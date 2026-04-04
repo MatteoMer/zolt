@@ -17,7 +17,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const poly_mod = @import("../../poly/mod.zig");
+const poly_mod = @import("zolt_arith").poly;
 const EqPolynomial = poly_mod.EqPolynomial;
 
 /// Constants
@@ -283,17 +283,7 @@ pub fn RegistersValEvaluationProver(comptime F: type) type {
 
 /// Compute eq(r, k) for a specific index k (LE bit order)
 fn computeEqAtPoint(comptime F: type, r: []const F, k: anytype) F {
-    const k_val: usize = @intCast(k);
-    var result = F.one();
-    for (r, 0..) |ri, i| {
-        const ki = (k_val >> @intCast(i)) & 1;
-        if (ki == 1) {
-            result = result.mul(ri);
-        } else {
-            result = result.mul(F.one().sub(ri));
-        }
-    }
-    return result;
+    return @import("../eq_utils.zig").computeEqAtPointLE(F, r, @intCast(k));
 }
 
 /// Compute LT(j, r_cycle) for index j
@@ -333,7 +323,7 @@ fn computeLtAtIndex(comptime F: type, r_cycle: []const F, j: usize) F {
 
 test "registers val evaluation params" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     const r_address = [_]F{ F.one(), F.zero(), F.one() };
@@ -352,7 +342,7 @@ test "registers val evaluation params" {
 }
 
 test "computeLtAtIndex basic" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // r_cycle = [1, 0] represents cycle 1 in binary: bit0=1, bit1=0

@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const field = @import("../../field/mod.zig");
+const field = @import("zolt_arith").field;
 const BN254Scalar = field.BN254Scalar;
 
 // Export prefix-suffix decomposition modules
@@ -46,61 +46,10 @@ pub const condenseUEvals = prefix_suffix_prover.condenseUEvals;
 pub const computeTableValuesAtRAddress = prefix_suffix_prover.computeTableValuesAtRAddress;
 pub const NUM_TABLES = prefix_suffix_prover.NUM_TABLES;
 
-/// Utility function to uninterleave bits from an interleaved index.
-/// For a 2*XLEN bit index where bits are interleaved as y[0], x[0], y[1], x[1], ...,
-/// returns (x, y) where each is an XLEN-bit value.
-///
-/// Note: This matches Jolt's convention where y bits are at even positions and x bits at odd.
-pub fn uninterleaveBits(index: u128) struct { x: u64, y: u64 } {
-    // Use Jolt's efficient bit manipulation algorithm
-    // x comes from odd bit positions, y from even
-    var x_bits: u128 = (index >> 1) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
-    var y_bits: u128 = index & 0x5555_5555_5555_5555_5555_5555_5555_5555;
-
-    // Compact x bits into lower half
-    x_bits = (x_bits | (x_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
-    x_bits = (x_bits | (x_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
-    x_bits = (x_bits | (x_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
-    x_bits = (x_bits | (x_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
-    x_bits = (x_bits | (x_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
-    x_bits = (x_bits | (x_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
-
-    // Compact y bits into lower half
-    y_bits = (y_bits | (y_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
-    y_bits = (y_bits | (y_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
-    y_bits = (y_bits | (y_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
-    y_bits = (y_bits | (y_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
-    y_bits = (y_bits | (y_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
-    y_bits = (y_bits | (y_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
-
-    return .{ .x = @truncate(x_bits), .y = @truncate(y_bits) };
-}
-
-/// Interleave bits of x and y into a single index.
-/// Produces a value where y bits are at even positions and x bits at odd positions.
-/// This matches Jolt's convention: result = (spread(x) << 1) | spread(y)
-pub fn interleaveBits(x: u64, y: u64) u128 {
-    // Use Jolt's efficient bit spreading algorithm
-    // Spread x_bits to odd positions
-    var x_bits: u128 = @as(u128, x);
-    x_bits = (x_bits | (x_bits << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
-    x_bits = (x_bits | (x_bits << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
-    x_bits = (x_bits | (x_bits << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
-    x_bits = (x_bits | (x_bits << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
-    x_bits = (x_bits | (x_bits << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
-    x_bits = (x_bits | (x_bits << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
-
-    // Spread y_bits to even positions
-    var y_bits: u128 = @as(u128, y);
-    y_bits = (y_bits | (y_bits << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
-    y_bits = (y_bits | (y_bits << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
-    y_bits = (y_bits | (y_bits << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
-    y_bits = (y_bits | (y_bits << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
-    y_bits = (y_bits | (y_bits << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
-    y_bits = (y_bits | (y_bits << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
-
-    return (x_bits << 1) | y_bits;
-}
+// Bit interleaving utilities — canonical source is zolt-arith package
+const bits_mod = @import("zolt_arith").bits;
+pub const uninterleaveBits = bits_mod.uninterleaveBits;
+pub const interleaveBits = bits_mod.interleaveBits;
 
 /// The JoltLookupTable interface for Zig.
 /// All lookup tables must implement these methods.

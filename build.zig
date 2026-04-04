@@ -15,6 +15,19 @@ pub fn build(b: *std.Build) void {
     const is_apple_silicon = target.result.os.tag == .macos and
         target.result.cpu.arch == .aarch64;
 
+    // Package dependencies
+    const zolt_pool_dep = b.dependency("zolt_pool", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zolt_pool_mod = zolt_pool_dep.module("zolt_pool");
+
+    const zolt_arith_dep = b.dependency("zolt_arith", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zolt_arith_mod = zolt_arith_dep.module("zolt_arith");
+
     // Main library
     const lib = b.addLibrary(.{
         .name = "zolt",
@@ -22,6 +35,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt_pool", .module = zolt_pool_mod },
+                .{ .name = "zolt_arith", .module = zolt_arith_mod },
+            },
         }),
     });
     if (is_apple_silicon) linkMetalFrameworks(lib.root_module);
@@ -32,6 +49,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zolt_pool", .module = zolt_pool_mod },
+        },
     });
 
     // Main executable (for testing/demo)
@@ -41,6 +61,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt_pool", .module = zolt_pool_mod },
+                .{ .name = "zolt_arith", .module = zolt_arith_mod },
+            },
         }),
     });
     if (is_apple_silicon) linkMetalFrameworks(exe.root_module);
@@ -61,6 +85,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt_pool", .module = zolt_pool_mod },
+                .{ .name = "zolt_arith", .module = zolt_arith_mod },
+            },
         }),
     });
     if (is_apple_silicon) linkMetalFrameworks(lib_unit_tests.root_module);
@@ -72,6 +100,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt_pool", .module = zolt_pool_mod },
+                .{ .name = "zolt_arith", .module = zolt_arith_mod },
+            },
         }),
     });
     if (is_apple_silicon) linkMetalFrameworks(exe_unit_tests.root_module);

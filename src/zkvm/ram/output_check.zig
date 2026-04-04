@@ -15,16 +15,13 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const ThreadPool = @import("zolt_pool").ThreadPool;
 
-const poly_mod = @import("../../poly/mod.zig");
+const poly_mod = @import("zolt_arith").poly;
 const jolt_device = @import("../jolt_device.zig");
 const constants = @import("../../common/constants.zig");
 
@@ -617,7 +614,7 @@ fn computeEqEvals(comptime F: type, eq_evals: []F, r: []const F) void {
 const testing = std.testing;
 
 test "output_sumcheck: basic init" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = testing.allocator;
 
     var initial_ram = std.AutoHashMapUnmanaged(u64, u64){};

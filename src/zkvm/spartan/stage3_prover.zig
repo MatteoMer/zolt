@@ -23,25 +23,24 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
-const poly_mod = @import("../../poly/mod.zig");
-const transcripts = @import("../../transcripts/mod.zig");
+const ThreadPool = @import("zolt_pool").ThreadPool;
+const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
+const poly_mod = @import("zolt_arith").poly;
+const transcripts = @import("zolt_arith").transcripts;
 const jolt_types = @import("../jolt_types.zig");
 const r1cs = @import("../r1cs/mod.zig");
 const R1CSInputIndex = r1cs.R1CSInputIndex;
 const instruction_mod = @import("../instruction/mod.zig");
-const field_mod = @import("../../field/mod.zig");
+const field_mod = @import("zolt_arith").field;
 const UnreducedProductAccum = field_mod.UnreducedProductAccum;
 const FoldedMulU64 = field_mod.FoldedMulU64;
 const RawR1CSInputs = @import("../r1cs/evaluators.zig").RawR1CSInputs;
+const sumcheck_helpers = @import("sumcheck_helpers.zig");
 
 /// Stage 3 prover result
 pub fn Stage3Result(comptime F: type) type {
@@ -102,7 +101,7 @@ pub fn Stage3Prover(comptime F: type) type {
         const REG_DEGREE: usize = 2; // RegistersClaimReduction is degree 2
 
         allocator: Allocator,
-        thread_pool: ?*@import("../../utils/thread_pool.zig").ThreadPool = null,
+        thread_pool: ?*@import("zolt_pool").ThreadPool = null,
         gpu_ops: ?*GpuPolyOps = null,
 
         pub fn init(allocator: Allocator) Self {
@@ -488,8 +487,8 @@ pub fn Stage3Prover(comptime F: type) type {
                 // NOTE: shift and reg are degree-2, but we need their values at x=3 via extrapolation
                 // Linear extrapolation: p(3) = 3*p(1) - 3*p(0) + p(-1) is wrong for degree-2
                 // Quadratic extrapolation: p(3) = 3*p(2) - 3*p(1) + p(0)
-                const shift_p3 = shift_evals[2].mul(F.fromU64(3)).sub(shift_evals[1].mul(F.fromU64(3))).add(shift_evals[0]);
-                const reg_p3 = reg_evals[2].mul(F.fromU64(3)).sub(reg_evals[1].mul(F.fromU64(3))).add(reg_evals[0]);
+                const shift_p3 = sumcheck_helpers.extrapolateDeg2(F, shift_evals);
+                const reg_p3 = sumcheck_helpers.extrapolateDeg2(F, reg_evals);
 
                 var combined_evals: [4]F = undefined;
                 for (0..4) |i| {
@@ -512,20 +511,12 @@ pub fn Stage3Prover(comptime F: type) type {
                 }
 
                 // Compress evaluations to [c0, c2, c3] using finite differences (no allocation for interp)
-                const inv2 = poly_mod.UniPoly(F).INV2;
-                const inv6 = F.fromU64(6).inverse().?;
-                const d1_c = combined_evals[1].sub(combined_evals[0]);
-                const d2_c = combined_evals[2].sub(combined_evals[1]);
-                const d3_c = combined_evals[3].sub(combined_evals[2]);
-                const dd1_c = d2_c.sub(d1_c);
-                const dd2_c = d3_c.sub(d2_c);
-                const c3_val = dd2_c.sub(dd1_c).mul(inv6);
-                const c2_val = dd1_c.mul(inv2).sub(c3_val.mul(F.fromU64(3)));
+                const fd = sumcheck_helpers.finiteDifferencesCompress(F, combined_evals);
 
                 const compressed = try self.allocator.alloc(F, 3);
-                compressed[0] = combined_evals[0]; // c0
-                compressed[1] = c2_val;
-                compressed[2] = c3_val;
+                compressed[0] = fd[0]; // c0
+                compressed[1] = fd[1]; // c2
+                compressed[2] = fd[2]; // c3
 
                 // Append to proof
                 try proof.compressed_polys.append(self.allocator, .{
@@ -1112,16 +1103,8 @@ pub fn Stage3Prover(comptime F: type) type {
         /// Derive n gamma powers from transcript (uses full 128-bit scalars)
         /// This matches Jolt's challenge_scalar_powers which calls challenge_scalar (not optimized)
         fn deriveGammaPowersFull(self: *Self, transcript: *Blake2bTranscript(F), n: usize) ![]F {
-            const powers = try self.allocator.alloc(F, n);
             const gamma = transcript.challengeScalarFull();
-            powers[0] = F.one();
-            if (n > 1) {
-                powers[1] = gamma;
-                for (2..n) |i| {
-                    powers[i] = powers[i - 1].mul(gamma);
-                }
-            }
-            return powers;
+            return sumcheck_helpers.deriveGammaPowers(F, self.allocator, gamma, n);
         }
 
         /// Compute ShiftSumcheck input claim from opening accumulator
@@ -1213,30 +1196,13 @@ pub fn Stage3Prover(comptime F: type) type {
                 coeffs[2] = c2;
                 coeffs[1] = p1.sub(p0).sub(c2);
             } else if (degree == 3) {
-                // For degree 3: use finite differences
-                const p0 = evals[0];
-                const p1 = evals[1];
-                const p2 = evals[2];
-                const p3 = evals[3];
-
-                const d1 = p1.sub(p0);
-                const d2 = p2.sub(p1);
-                const d3 = p3.sub(p2);
-                const dd1 = d2.sub(d1);
-                const dd2 = d3.sub(d2);
-                const ddd = dd2.sub(dd1);
-
-                const six_inv = F.fromU64(6).inverse() orelse F.one();
-                const two_inv = poly_mod.UniPoly(F).INV2;
-
-                const c3 = ddd.mul(six_inv);
-                const c2 = dd1.mul(two_inv).sub(c3.mul(F.fromU64(3)));
-                const c1 = d1.sub(c2).sub(c3);
-
-                coeffs[0] = p0;
-                coeffs[1] = c1;
-                coeffs[2] = c2;
-                coeffs[3] = c3;
+                // For degree 3: use finite differences via shared helper
+                const fd = sumcheck_helpers.finiteDifferencesCompress(F, .{ evals[0], evals[1], evals[2], evals[3] });
+                coeffs[0] = fd[0]; // c0
+                coeffs[2] = fd[1]; // c2
+                coeffs[3] = fd[2]; // c3
+                // Recover c1 from first forward difference: c1 = (p(1) - p(0)) - c2 - c3
+                coeffs[1] = evals[1].sub(evals[0]).sub(fd[1]).sub(fd[2]);
             } else {
                 // Fallback: linear
                 coeffs[0] = evals[0];

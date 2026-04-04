@@ -18,11 +18,8 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
 
@@ -300,7 +297,7 @@ pub fn JoltR1CS(comptime F: type) type {
 pub fn JoltSpartanInterface(comptime F: type) type {
     return struct {
         const Self = @This();
-        const poly = @import("../../poly/mod.zig");
+        const poly = @import("zolt_arith").poly;
 
         /// The Jolt R1CS system
         r1cs: *const JoltR1CS(F),
@@ -562,7 +559,7 @@ pub fn JoltSpartanInterface(comptime F: type) type {
 // ============================================================================
 
 test "jolt r1cs from empty trace" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -577,7 +574,7 @@ test "jolt r1cs from empty trace" {
 }
 
 test "jolt r1cs witness generation" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -613,12 +610,12 @@ test "jolt r1cs witness generation" {
     // First element should be 1
     try std.testing.expect(witness[0].eql(F.one()));
 
-    // Witness size should be 1 + 43 (NUM_INPUTS after adding instruction flags)
-    try std.testing.expectEqual(@as(usize, 44), witness.len);
+    // Witness size should be 1 + NUM_INPUTS (42) = 43
+    try std.testing.expectEqual(@as(usize, 1 + R1CSInputIndex.NUM_INPUTS), witness.len);
 }
 
 test "jolt r1cs Az Bz Cz computation" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const allocator = std.testing.allocator;
 
@@ -668,7 +665,7 @@ test "jolt r1cs Az Bz Cz computation" {
 }
 
 test "jolt spartan interface" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const allocator = std.testing.allocator;
 

@@ -12,18 +12,16 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const ThreadPool = @import("zolt_pool").ThreadPool;
 const MemoryTrace = @import("mod.zig").MemoryTrace;
 const MemoryAccess = @import("mod.zig").MemoryAccess;
 const MemoryOp = @import("mod.zig").MemoryOp;
-const split_eq = @import("../../poly/split_eq.zig");
+const split_eq = @import("zolt_arith").poly.split_eq;
 
 /// Parameters for RAM read/write checking
 pub fn RamReadWriteCheckingParams(comptime F: type) type {
@@ -360,7 +358,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // Initialize eq polynomial evaluations: eq(r_cycle, j) for each cycle j
             // r_cycle is in BIG_ENDIAN order (MSB first, as stored in tau)
             // Use O(T) table construction instead of O(T·logT) per-element computation
-            const poly_mod = @import("../../poly/mod.zig");
+            const poly_mod = @import("zolt_arith").poly;
             const EqPoly = poly_mod.EqPolynomial(F);
             const eq_evals = try EqPoly.evalsSliceWithScaling(F, allocator, params.r_cycle, null);
 
@@ -401,7 +399,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 dbg("[RWC INIT VERIFY] rv_sum = {any}\n", .{rv_sum.toBytesBE()});
                 dbg("[RWC INIT VERIFY] wv_sum = {any}\n", .{wv_sum.toBytesBE()});
                 dbg("[RWC INIT VERIFY] rv + gamma*wv = {any}\n", .{rv_sum.add(params.gamma.mul(wv_sum)).toBytesBE()});
-                const poly_mod_dbg = @import("../../poly/mod.zig");
+                const poly_mod_dbg = @import("zolt_arith").poly;
                 const EqPolyDbg = poly_mod_dbg.EqPolynomial(F);
                 const eq_le_evals = try EqPolyDbg.evalsSliceWithScaling(F, allocator, params.r_cycle, null);
                 defer allocator.free(eq_le_evals);
@@ -1313,7 +1311,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
 
             const neg6 = F.zero().sub(F.fromU64(6));
             const L0 = c_minus_1.mul(c_minus_2).mul(c_minus_3).mul(neg6.inverse().?);
-            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(@import("../../poly/mod.zig").UniPoly(F).INV2);
+            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(@import("zolt_arith").poly.UniPoly(F).INV2);
             const neg2 = F.zero().sub(F.fromU64(2));
             const L2 = c.mul(c_minus_1).mul(c_minus_3).mul(neg2.inverse().?);
             const L3 = c.mul(c_minus_1).mul(c_minus_2).mul(F.fromU64(6).inverse().?);
@@ -1455,7 +1453,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         /// where suffix_eq_cycle[c] = Σ_{j>=c} eq_cycle[j] accounts for the write at cycle c
         /// affecting all subsequent cycles.
         fn computeDenseValClaim(self: *const Self) !F {
-            const poly_mod = @import("../../poly/mod.zig");
+            const poly_mod = @import("zolt_arith").poly;
             const EqPoly = poly_mod.EqPolynomial(F);
 
             const phase1_end = self.params.phase1_num_rounds;
@@ -1556,34 +1554,13 @@ pub fn OpeningClaims(comptime F: type) type {
 /// and x is a binary index
 /// This matches Jolt's convention where tau is stored as [r_MSB, ..., r_LSB]
 fn computeEqBigEndian(comptime F: type, r: []const F, x: usize, n: usize) F {
-    var result = F.one();
-    for (0..n) |i| {
-        // r[i] corresponds to bit (n-1-i) of x (MSB to LSB)
-        const bit_pos = n - 1 - i;
-        const xi: u1 = @truncate(x >> @intCast(bit_pos));
-        if (xi == 1) {
-            result = result.mul(r[i]);
-        } else {
-            result = result.mul(F.one().sub(r[i]));
-        }
-    }
-    return result;
+    return @import("../eq_utils.zig").computeEqAtPointBE(F, r[0..n], x);
 }
 
 /// Compute eq(r, x) for a binary index x
 /// r is in BIG-ENDIAN order: r[0] is MSB, r[n-1] is LSB
 fn computeEq(comptime F: type, r: []const F, x: usize) F {
-    var result = F.one();
-    const n = r.len;
-    for (0..n) |i| {
-        const xi: u1 = @truncate(x >> @intCast(n - 1 - i));
-        if (xi == 1) {
-            result = result.mul(r[i]);
-        } else {
-            result = result.mul(F.one().sub(r[i]));
-        }
-    }
-    return result;
+    return @import("../eq_utils.zig").computeEqAtPointBE(F, r, x);
 }
 
 /// Remap address to index (matches logic from output_check.zig)
@@ -1602,7 +1579,7 @@ fn remapAddress(address: u64, memory_layout: *const @import("../jolt_device.zig"
 
 test "ram read write checking prover initialization" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     var trace = MemoryTrace.init(allocator);

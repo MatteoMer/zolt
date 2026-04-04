@@ -8,11 +8,8 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
 
@@ -320,7 +317,7 @@ pub fn fiatShamirPreamble(
     trace_length: usize,
     entry_address: u64,
 ) void {
-    const Blake2bTranscript = @import("../transcripts/blake2b.zig").Blake2bTranscript;
+    const Blake2bTranscript = @import("zolt_arith").transcripts.blake2b.Blake2bTranscript;
 
     transcript.appendU64("max_input_size", device.memory_layout.max_input_size);
     transcript.appendU64("max_output_size", device.memory_layout.max_output_size);

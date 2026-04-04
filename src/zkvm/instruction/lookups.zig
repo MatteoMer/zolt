@@ -22,581 +22,348 @@ const InstructionFlags = mod.InstructionFlags;
 const InstructionFlagSet = mod.InstructionFlagSet;
 const LookupTables = mod.LookupTables;
 
-/// ADD instruction lookup
-/// Computes rd = rs1 + rs2 using a single range check lookup
-pub fn AddLookup(comptime XLEN: comptime_int) type {
+/// Generic two-operand instruction lookup.
+/// Covers ALU, branch, shift, and multiply/divide instructions that take (rs1, rs2).
+pub fn BinaryLookup(comptime XLEN: comptime_int, comptime cfg: struct {
+    table: LookupTables(XLEN),
+    /// If true, toLookupIndex returns interleaveBits(rs1, rs2).
+    /// If false, returns @as(u128, computeResult(rs1, rs2)).
+    interleave: bool = true,
+    circuit_flags: CircuitFlagSet,
+    instruction_flags: InstructionFlagSet,
+    computeResult: *const fn (u64, u64) u64,
+    /// Custom index function, overrides interleave behavior if set
+    customIndex: ?*const fn (u64, u64, *const fn (u64, u64) u64) u128 = null,
+}) type {
     return struct {
         const Self = @This();
-
         rs1_val: u64,
         rs2_val: u64,
 
-        /// Create a new ADD lookup from operand values
         pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
+            return .{ .rs1_val = rs1_val, .rs2_val = rs2_val };
         }
-
-        /// Get the lookup table used by ADD
-        /// ADD doesn't need a complex lookup - just verifies the sum is in range
         pub fn lookupTable() LookupTables(XLEN) {
-            return .RangeCheck;
+            return cfg.table;
         }
-
-        /// Compute the lookup index (interleaved operands)
         pub fn toLookupIndex(self: Self) u128 {
-            // For ADD, we need to verify the result is in range
-            // The index is the interleaved result
-            const result = self.computeResult();
-            return @as(u128, result);
+            if (cfg.customIndex) |f| return f(self.rs1_val, self.rs2_val, cfg.computeResult);
+            if (cfg.interleave) return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
+            return @as(u128, cfg.computeResult(self.rs1_val, self.rs2_val));
         }
-
-        /// Compute the instruction result
         pub fn computeResult(self: Self) u64 {
-            // Wrapping add to handle overflow correctly
-            return self.rs1_val +% self.rs2_val;
+            return cfg.computeResult(self.rs1_val, self.rs2_val);
         }
-
-        /// Get circuit flags for ADD
         pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.AddOperands);
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
+            return cfg.circuit_flags;
         }
-
-        /// Get instruction flags for ADD
         pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
+            return cfg.instruction_flags;
         }
     };
+}
+
+/// ADD instruction lookup
+/// Computes rd = rs1 + rs2 using a single range check lookup
+pub fn AddLookup(comptime XLEN: comptime_int) type {
+    return BinaryLookup(XLEN, .{
+        .table = .RangeCheck,
+        .interleave = false,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.AddOperands);
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return a +% b;
+            }
+        }.f,
+    });
 }
 
 /// SUB instruction lookup
 /// Computes rd = rs1 - rs2 using the Sub lookup table
 pub fn SubLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .Sub;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            // Interleave x and y for lookup
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            return self.rs1_val -% self.rs2_val;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.SubtractOperands);
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .Sub,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.SubtractOperands);
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return a -% b;
+            }
+        }.f,
+    });
 }
 
 /// AND instruction lookup
 /// Computes rd = rs1 & rs2 using the And lookup table
 pub fn AndLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .And;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            return self.rs1_val & self.rs2_val;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .And,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return a & b;
+            }
+        }.f,
+    });
 }
 
 /// OR instruction lookup
 /// Computes rd = rs1 | rs2 using the Or lookup table
 pub fn OrLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .Or;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            return self.rs1_val | self.rs2_val;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .Or,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return a | b;
+            }
+        }.f,
+    });
 }
 
 /// XOR instruction lookup
 /// Computes rd = rs1 ^ rs2 using the Xor lookup table
 pub fn XorLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .Xor;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            return self.rs1_val ^ self.rs2_val;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .Xor,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return a ^ b;
+            }
+        }.f,
+    });
 }
 
 /// SLT (Set Less Than) instruction lookup
 /// Computes rd = (rs1 < rs2) ? 1 : 0 using SignedLessThan table
 pub fn SltLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .SignedLessThan;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            // Signed comparison
-            const signed_rs1 = @as(i64, @bitCast(self.rs1_val));
-            const signed_rs2 = @as(i64, @bitCast(self.rs2_val));
-            return if (signed_rs1 < signed_rs2) 1 else 0;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .SignedLessThan,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const sa: i64 = @bitCast(a);
+                const sb: i64 = @bitCast(b);
+                return if (sa < sb) 1 else 0;
+            }
+        }.f,
+    });
 }
 
 /// SLTU (Set Less Than Unsigned) instruction lookup
 /// Computes rd = (rs1 < rs2) ? 1 : 0 using UnsignedLessThan table
 pub fn SltuLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .UnsignedLessThan;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            return if (self.rs1_val < self.rs2_val) 1 else 0;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .UnsignedLessThan,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return if (a < b) 1 else 0;
+            }
+        }.f,
+    });
 }
 
 /// BEQ (Branch if Equal) instruction lookup
 /// Uses Equal table to check if rs1 == rs2
 pub fn BeqLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .Equal;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            return if (self.rs1_val == self.rs2_val) 1 else 0;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            // Branch doesn't write to RD, so no flags needed
-            return CircuitFlagSet.init();
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            flags.set(.Branch);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .Equal,
+        .circuit_flags = CircuitFlagSet.init(),
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            f.set(.Branch);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return if (a == b) 1 else 0;
+            }
+        }.f,
+    });
 }
 
 /// BNE (Branch if Not Equal) instruction lookup
 /// Uses NotEqual table
 pub fn BneLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .NotEqual;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            return if (self.rs1_val != self.rs2_val) 1 else 0;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            // Branch doesn't write to RD, so no flags needed
-            return CircuitFlagSet.init();
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            flags.set(.Branch);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .NotEqual,
+        .circuit_flags = CircuitFlagSet.init(),
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            f.set(.Branch);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return if (a != b) 1 else 0;
+            }
+        }.f,
+    });
 }
 
 /// BLT (Branch if Less Than - Signed) instruction lookup
 /// Uses SignedLessThan table
 pub fn BltLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .SignedLessThan;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            const rs1_signed: i64 = @bitCast(self.rs1_val);
-            const rs2_signed: i64 = @bitCast(self.rs2_val);
-            return if (rs1_signed < rs2_signed) 1 else 0;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            // Branch doesn't write to RD
-            return CircuitFlagSet.init();
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            flags.set(.Branch);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .SignedLessThan,
+        .circuit_flags = CircuitFlagSet.init(),
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            f.set(.Branch);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const sa: i64 = @bitCast(a);
+                const sb: i64 = @bitCast(b);
+                return if (sa < sb) 1 else 0;
+            }
+        }.f,
+    });
 }
 
 /// BGE (Branch if Greater Than or Equal - Signed) instruction lookup
 /// Uses SignedGreaterThanEqual table
 pub fn BgeLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .SignedGreaterThanEqual;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            const rs1_signed: i64 = @bitCast(self.rs1_val);
-            const rs2_signed: i64 = @bitCast(self.rs2_val);
-            return if (rs1_signed >= rs2_signed) 1 else 0;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            return CircuitFlagSet.init();
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            flags.set(.Branch);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .SignedGreaterThanEqual,
+        .circuit_flags = CircuitFlagSet.init(),
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            f.set(.Branch);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const sa: i64 = @bitCast(a);
+                const sb: i64 = @bitCast(b);
+                return if (sa >= sb) 1 else 0;
+            }
+        }.f,
+    });
 }
 
 /// BLTU (Branch if Less Than Unsigned) instruction lookup
 /// Uses UnsignedLessThan table
 pub fn BltuLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .UnsignedLessThan;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            return if (self.rs1_val < self.rs2_val) 1 else 0;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            return CircuitFlagSet.init();
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            flags.set(.Branch);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .UnsignedLessThan,
+        .circuit_flags = CircuitFlagSet.init(),
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            f.set(.Branch);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return if (a < b) 1 else 0;
+            }
+        }.f,
+    });
 }
 
 /// BGEU (Branch if Greater Than or Equal Unsigned) instruction lookup
 /// Uses UnsignedGreaterThanEqual table
 pub fn BgeuLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .UnsignedGreaterThanEqual;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            return if (self.rs1_val >= self.rs2_val) 1 else 0;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            return CircuitFlagSet.init();
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            flags.set(.Branch);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .UnsignedGreaterThanEqual,
+        .circuit_flags = CircuitFlagSet.init(),
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            f.set(.Branch);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return if (a >= b) 1 else 0;
+            }
+        }.f,
+    });
 }
 
 /// LUI (Load Upper Immediate) instruction lookup
@@ -811,536 +578,318 @@ pub fn JalrLookup(comptime XLEN: comptime_int) type {
 /// SLL (Shift Left Logical) instruction lookup
 /// Computes rd = rs1 << (rs2 & (XLEN-1))
 pub fn SllLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .LeftShift;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            const shift_mask: u6 = XLEN - 1;
-            const shift: u6 = @truncate(self.rs2_val & @as(u64, shift_mask));
-            const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
-            return (self.rs1_val << shift) & mask;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .LeftShift,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const shift_mask: u6 = XLEN - 1;
+                const shift: u6 = @truncate(b & @as(u64, shift_mask));
+                const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+                return (a << shift) & mask;
+            }
+        }.f,
+    });
 }
 
 /// SRL (Shift Right Logical) instruction lookup
 /// Computes rd = rs1 >> (rs2 & (XLEN-1)) (logical shift)
 pub fn SrlLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RightShift;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            const shift_mask: u6 = XLEN - 1;
-            const shift: u6 = @truncate(self.rs2_val & @as(u64, shift_mask));
-            const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
-            return (self.rs1_val & mask) >> shift;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .RightShift,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const shift_mask: u6 = XLEN - 1;
+                const shift: u6 = @truncate(b & @as(u64, shift_mask));
+                const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+                return (a & mask) >> shift;
+            }
+        }.f,
+    });
 }
 
 /// SRA (Shift Right Arithmetic) instruction lookup
 /// Computes rd = rs1 >> (rs2 & (XLEN-1)) (arithmetic shift, sign-extending)
 pub fn SraLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RightShiftArithmetic;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            const shift_mask: u6 = XLEN - 1;
-            const shift: u6 = @truncate(self.rs2_val & @as(u64, shift_mask));
-
-            if (XLEN == 64) {
-                const signed_val: i64 = @bitCast(self.rs1_val);
-                const shifted: i64 = signed_val >> shift;
-                return @bitCast(shifted);
-            } else {
-                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
-                const masked = self.rs1_val & mask;
-                // Sign extend to full 64 bits, then shift
-                const shift_for_sign = 64 - XLEN;
-                const signed_val: i64 = @as(i64, @bitCast(masked << @truncate(shift_for_sign))) >> @truncate(shift_for_sign);
-                const shifted: i64 = signed_val >> shift;
-                return @as(u64, @bitCast(shifted)) & mask;
+    return BinaryLookup(XLEN, .{
+        .table = .RightShiftArithmetic,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const shift_mask: u6 = XLEN - 1;
+                const shift: u6 = @truncate(b & @as(u64, shift_mask));
+                if (XLEN == 64) {
+                    const signed_val: i64 = @bitCast(a);
+                    return @bitCast(signed_val >> shift);
+                } else {
+                    const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                    const masked = a & mask;
+                    const shift_for_sign = 64 - XLEN;
+                    const signed_val: i64 = @as(i64, @bitCast(masked << @truncate(shift_for_sign))) >> @truncate(shift_for_sign);
+                    return @as(u64, @bitCast(signed_val >> shift)) & mask;
+                }
             }
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+    });
 }
 
 /// SLLI (Shift Left Logical Immediate) instruction lookup
 /// Computes rd = rs1 << imm
 pub fn SlliLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        imm: u64,
-
-        pub fn init(rs1_val: u64, imm: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .imm = imm,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .LeftShift;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.imm);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            const shift_mask: u6 = XLEN - 1;
-            const shift: u6 = @truncate(self.imm & @as(u64, shift_mask));
-            const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
-            return (self.rs1_val << shift) & mask;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsImm);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .LeftShift,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsImm);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const shift_mask: u6 = XLEN - 1;
+                const shift: u6 = @truncate(b & @as(u64, shift_mask));
+                const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+                return (a << shift) & mask;
+            }
+        }.f,
+    });
 }
 
 /// SRLI (Shift Right Logical Immediate) instruction lookup
 /// Computes rd = rs1 >> imm (logical shift)
 pub fn SrliLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        imm: u64,
-
-        pub fn init(rs1_val: u64, imm: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .imm = imm,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RightShift;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.imm);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            const shift_mask: u6 = XLEN - 1;
-            const shift: u6 = @truncate(self.imm & @as(u64, shift_mask));
-            const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
-            return (self.rs1_val & mask) >> shift;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsImm);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .RightShift,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsImm);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const shift_mask: u6 = XLEN - 1;
+                const shift: u6 = @truncate(b & @as(u64, shift_mask));
+                const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+                return (a & mask) >> shift;
+            }
+        }.f,
+    });
 }
 
 /// SRAI (Shift Right Arithmetic Immediate) instruction lookup
 /// Computes rd = rs1 >> imm (arithmetic shift, sign-extending)
 pub fn SraiLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        imm: u64,
-
-        pub fn init(rs1_val: u64, imm: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .imm = imm,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RightShiftArithmetic;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val, self.imm);
-        }
-
-        pub fn computeResult(self: Self) u64 {
-            const shift_mask: u6 = XLEN - 1;
-            const shift: u6 = @truncate(self.imm & @as(u64, shift_mask));
-
-            if (XLEN == 64) {
-                const signed_val: i64 = @bitCast(self.rs1_val);
-                const shifted: i64 = signed_val >> shift;
-                return @bitCast(shifted);
-            } else {
-                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
-                const masked = self.rs1_val & mask;
-                const shift_for_sign = 64 - XLEN;
-                const signed_val: i64 = @as(i64, @bitCast(masked << @truncate(shift_for_sign))) >> @truncate(shift_for_sign);
-                const shifted: i64 = signed_val >> shift;
-                return @as(u64, @bitCast(shifted)) & mask;
+    return BinaryLookup(XLEN, .{
+        .table = .RightShiftArithmetic,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsImm);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const shift_mask: u6 = XLEN - 1;
+                const shift: u6 = @truncate(b & @as(u64, shift_mask));
+                if (XLEN == 64) {
+                    const signed_val: i64 = @bitCast(a);
+                    return @bitCast(signed_val >> shift);
+                } else {
+                    const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                    const masked = a & mask;
+                    const shift_for_sign = 64 - XLEN;
+                    const signed_val: i64 = @as(i64, @bitCast(masked << @truncate(shift_for_sign))) >> @truncate(shift_for_sign);
+                    return @as(u64, @bitCast(signed_val >> shift)) & mask;
+                }
             }
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsImm);
-            return flags;
-        }
-    };
+        }.f,
+    });
 }
 
 /// MUL (Multiply) instruction lookup
 /// Computes rd = (rs1 * rs2)[XLEN-1:0] (low bits of product)
 pub fn MulLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        /// MUL uses RangeCheck to verify the result fits
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RangeCheck;
-        }
-
-        /// The lookup index is the result (to range check it)
-        pub fn toLookupIndex(self: Self) u128 {
-            return @as(u128, self.computeResult());
-        }
-
-        /// Compute the product (low XLEN bits)
-        pub fn computeResult(self: Self) u64 {
-            // Wrapping multiply to get low bits
-            return self.rs1_val *% self.rs2_val;
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.MultiplyOperands); // This tells the circuit to multiply
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .RangeCheck,
+        .interleave = false,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.MultiplyOperands);
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                return a *% b;
+            }
+        }.f,
+    });
 }
 
 /// MULH (Multiply High Signed) instruction lookup
 /// Computes rd = (rs1 * rs2)[2*XLEN-1:XLEN] (high bits of signed product)
 pub fn MulhLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RangeCheck;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return @as(u128, self.computeResult());
-        }
-
-        /// Compute the high bits of signed multiply
-        pub fn computeResult(self: Self) u64 {
-            if (XLEN == 64) {
-                const a: i64 = @bitCast(self.rs1_val);
-                const b: i64 = @bitCast(self.rs2_val);
-                // Use 128-bit multiply
-                const product: i128 = @as(i128, a) * @as(i128, b);
-                const high_bits: i64 = @truncate(product >> 64);
-                return @bitCast(high_bits);
-            } else {
-                // For 32-bit or smaller XLEN
-                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
-                const a_masked = self.rs1_val & mask;
-                const b_masked = self.rs2_val & mask;
-
-                // Sign-extend to full 64-bit
-                const shift = 64 - XLEN;
-                const a_signed: i64 = @as(i64, @bitCast(a_masked << @truncate(shift))) >> @truncate(shift);
-                const b_signed: i64 = @as(i64, @bitCast(b_masked << @truncate(shift))) >> @truncate(shift);
-
-                // Multiply and get high bits
-                const product: i128 = @as(i128, a_signed) * @as(i128, b_signed);
-                const high_bits: i64 = @truncate(product >> XLEN);
-                return @as(u64, @bitCast(high_bits)) & mask;
+    return BinaryLookup(XLEN, .{
+        .table = .RangeCheck,
+        .interleave = false,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.MultiplyOperands);
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                if (XLEN == 64) {
+                    const sa: i64 = @bitCast(a);
+                    const sb: i64 = @bitCast(b);
+                    const product: i128 = @as(i128, sa) * @as(i128, sb);
+                    const high_bits: i64 = @truncate(product >> 64);
+                    return @bitCast(high_bits);
+                } else {
+                    const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                    const a_masked = a & mask;
+                    const b_masked = b & mask;
+                    const shift = 64 - XLEN;
+                    const a_signed: i64 = @as(i64, @bitCast(a_masked << @truncate(shift))) >> @truncate(shift);
+                    const b_signed: i64 = @as(i64, @bitCast(b_masked << @truncate(shift))) >> @truncate(shift);
+                    const product: i128 = @as(i128, a_signed) * @as(i128, b_signed);
+                    const high_bits: i64 = @truncate(product >> XLEN);
+                    return @as(u64, @bitCast(high_bits)) & mask;
+                }
             }
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.MultiplyOperands);
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+    });
 }
 
 /// MULHU (Multiply High Unsigned) instruction lookup
 /// Computes rd = (rs1 * rs2)[2*XLEN-1:XLEN] (high bits of unsigned product)
 pub fn MulhuLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RangeCheck; // MULHU uses the multiplication product, evaluated via RangeCheck table in Zolt's implementation
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return @as(u128, self.computeResult());
-        }
-
-        /// Compute the high bits of unsigned multiply
-        pub fn computeResult(self: Self) u64 {
-            if (XLEN == 64) {
-                // Use 128-bit unsigned multiply
-                const product: u128 = @as(u128, self.rs1_val) * @as(u128, self.rs2_val);
-                return @truncate(product >> 64);
-            } else {
-                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
-                const a_masked = self.rs1_val & mask;
-                const b_masked = self.rs2_val & mask;
-
-                const product: u128 = @as(u128, a_masked) * @as(u128, b_masked);
-                return @as(u64, @truncate(product >> XLEN)) & mask;
+    return BinaryLookup(XLEN, .{
+        .table = .RangeCheck,
+        .interleave = false,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.MultiplyOperands);
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                if (XLEN == 64) {
+                    const product: u128 = @as(u128, a) * @as(u128, b);
+                    return @truncate(product >> 64);
+                } else {
+                    const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                    const product: u128 = @as(u128, a & mask) * @as(u128, b & mask);
+                    return @as(u64, @truncate(product >> XLEN)) & mask;
+                }
             }
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.MultiplyOperands);
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+    });
 }
 
 /// MULHSU (Multiply High Signed-Unsigned) instruction lookup
 /// Computes rd = (signed(rs1) * unsigned(rs2))[2*XLEN-1:XLEN]
 pub fn MulhsuLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RangeCheck;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return @as(u128, self.computeResult());
-        }
-
-        /// Compute the high bits of signed*unsigned multiply
-        pub fn computeResult(self: Self) u64 {
-            if (XLEN == 64) {
-                const a: i64 = @bitCast(self.rs1_val);
-                const b: u64 = self.rs2_val;
-                // signed * unsigned -> signed 128-bit result
-                const product: i128 = @as(i128, a) * @as(i128, @as(i64, @bitCast(b)));
-                const high_bits: i64 = @truncate(product >> 64);
-                return @bitCast(high_bits);
-            } else {
-                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
-                const a_masked = self.rs1_val & mask;
-                const b_masked = self.rs2_val & mask;
-
-                // Sign-extend rs1, keep rs2 unsigned
-                const shift = 64 - XLEN;
-                const a_signed: i64 = @as(i64, @bitCast(a_masked << @truncate(shift))) >> @truncate(shift);
-
-                // signed * unsigned
-                const product: i128 = @as(i128, a_signed) * @as(i128, @as(i64, @bitCast(b_masked)));
-                const high_bits: i64 = @truncate(product >> XLEN);
-                return @as(u64, @bitCast(high_bits)) & mask;
+    return BinaryLookup(XLEN, .{
+        .table = .RangeCheck,
+        .interleave = false,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.MultiplyOperands);
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                if (XLEN == 64) {
+                    const sa: i64 = @bitCast(a);
+                    const product: i128 = @as(i128, sa) * @as(i128, @as(i64, @bitCast(b)));
+                    const high_bits: i64 = @truncate(product >> 64);
+                    return @bitCast(high_bits);
+                } else {
+                    const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                    const shift = 64 - XLEN;
+                    const a_signed: i64 = @as(i64, @bitCast((a & mask) << @truncate(shift))) >> @truncate(shift);
+                    const product: i128 = @as(i128, a_signed) * @as(i128, @as(i64, @bitCast(b & mask)));
+                    const high_bits: i64 = @truncate(product >> XLEN);
+                    return @as(u64, @bitCast(high_bits)) & mask;
+                }
             }
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.MultiplyOperands);
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+    });
 }
 
 // ============================================================================
@@ -1353,165 +902,99 @@ pub fn MulhsuLookup(comptime XLEN: comptime_int) type {
 /// - Division by zero: returns -1 (all bits set)
 /// - Overflow (MIN_INT / -1): returns MIN_INT
 pub fn DivLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .ValidDiv0;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            // For validation, interleave divisor and quotient
-            return lookup_table.interleaveBits(self.rs2_val, self.computeResult());
-        }
-
-        /// Compute the signed division result
-        pub fn computeResult(self: Self) u64 {
-            if (XLEN == 64) {
-                const dividend: i64 = @bitCast(self.rs1_val);
-                const divisor: i64 = @bitCast(self.rs2_val);
-
-                // Division by zero: return -1
-                if (divisor == 0) {
-                    return @as(u64, @bitCast(@as(i64, -1)));
+    return BinaryLookup(XLEN, .{
+        .table = .ValidDiv0,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                if (XLEN == 64) {
+                    const dividend: i64 = @bitCast(a);
+                    const divisor: i64 = @bitCast(b);
+                    if (divisor == 0) return @as(u64, @bitCast(@as(i64, -1)));
+                    const min_int: i64 = @bitCast(@as(u64, 0x8000000000000000));
+                    if (dividend == min_int and divisor == -1) return a;
+                    return @bitCast(@divTrunc(dividend, divisor));
+                } else if (XLEN == 32) {
+                    const mask: u64 = 0xFFFFFFFF;
+                    const dividend: i32 = @bitCast(@as(u32, @truncate(a & mask)));
+                    const divisor: i32 = @bitCast(@as(u32, @truncate(b & mask)));
+                    if (divisor == 0) return 0xFFFFFFFF;
+                    const min_int: i32 = @bitCast(@as(u32, 0x80000000));
+                    if (dividend == min_int and divisor == -1) return @as(u64, @bitCast(@as(u32, @bitCast(dividend))));
+                    return @as(u64, @as(u32, @bitCast(@divTrunc(dividend, divisor))));
+                } else {
+                    const mask: u64 = 0xFF;
+                    const dividend: i8 = @bitCast(@as(u8, @truncate(a & mask)));
+                    const divisor: i8 = @bitCast(@as(u8, @truncate(b & mask)));
+                    if (divisor == 0) return 0xFF;
+                    const min_int: i8 = @bitCast(@as(u8, 0x80));
+                    if (dividend == min_int and divisor == -1) return @as(u64, @bitCast(@as(u8, @bitCast(dividend))));
+                    return @as(u64, @as(u8, @bitCast(@divTrunc(dividend, divisor))));
                 }
-
-                // Overflow case: MIN_INT / -1 = MIN_INT
-                const min_int: i64 = @bitCast(@as(u64, 0x8000000000000000));
-                if (dividend == min_int and divisor == -1) {
-                    return self.rs1_val; // Return MIN_INT
-                }
-
-                // Normal division
-                const quotient: i64 = @divTrunc(dividend, divisor);
-                return @bitCast(quotient);
-            } else if (XLEN == 32) {
-                const mask: u64 = 0xFFFFFFFF;
-                const dividend: i32 = @bitCast(@as(u32, @truncate(self.rs1_val & mask)));
-                const divisor: i32 = @bitCast(@as(u32, @truncate(self.rs2_val & mask)));
-
-                if (divisor == 0) {
-                    return 0xFFFFFFFF; // -1 for 32-bit
-                }
-
-                const min_int: i32 = @bitCast(@as(u32, 0x80000000));
-                if (dividend == min_int and divisor == -1) {
-                    return @as(u64, @bitCast(@as(u32, @bitCast(dividend))));
-                }
-
-                const quotient: i32 = @divTrunc(dividend, divisor);
-                return @as(u64, @as(u32, @bitCast(quotient)));
-            } else {
-                // 8-bit for testing
-                const mask: u64 = 0xFF;
-                const dividend: i8 = @bitCast(@as(u8, @truncate(self.rs1_val & mask)));
-                const divisor: i8 = @bitCast(@as(u8, @truncate(self.rs2_val & mask)));
-
-                if (divisor == 0) {
-                    return 0xFF;
-                }
-
-                const min_int: i8 = @bitCast(@as(u8, 0x80));
-                if (dividend == min_int and divisor == -1) {
-                    return @as(u64, @bitCast(@as(u8, @bitCast(dividend))));
-                }
-
-                const quotient: i8 = @divTrunc(dividend, divisor);
-                return @as(u64, @as(u8, @bitCast(quotient)));
             }
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, compute: *const fn (u64, u64) u64) u128 {
+                // Interleave divisor and quotient
+                return lookup_table.interleaveBits(rs2, compute(rs1, rs2));
+            }
+        }.f,
+    });
 }
 
 /// DIVU instruction lookup - unsigned integer division
 /// Computes rd = rs1 / rs2 (unsigned)
 /// Division by zero returns MAX_VALUE (all bits set)
 pub fn DivuLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .ValidDiv0;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs2_val, self.computeResult());
-        }
-
-        /// Compute the unsigned division result
-        pub fn computeResult(self: Self) u64 {
-            if (XLEN == 64) {
-                if (self.rs2_val == 0) {
-                    return 0xFFFFFFFFFFFFFFFF; // MAX for 64-bit
+    return BinaryLookup(XLEN, .{
+        .table = .ValidDiv0,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                if (XLEN == 64) {
+                    if (b == 0) return 0xFFFFFFFFFFFFFFFF;
+                    return a / b;
+                } else if (XLEN == 32) {
+                    const mask: u64 = 0xFFFFFFFF;
+                    const dividend: u32 = @truncate(a & mask);
+                    const divisor: u32 = @truncate(b & mask);
+                    if (divisor == 0) return 0xFFFFFFFF;
+                    return @as(u64, dividend / divisor);
+                } else {
+                    const mask: u64 = 0xFF;
+                    const dividend: u8 = @truncate(a & mask);
+                    const divisor: u8 = @truncate(b & mask);
+                    if (divisor == 0) return 0xFF;
+                    return @as(u64, dividend / divisor);
                 }
-                return self.rs1_val / self.rs2_val;
-            } else if (XLEN == 32) {
-                const mask: u64 = 0xFFFFFFFF;
-                const dividend: u32 = @truncate(self.rs1_val & mask);
-                const divisor: u32 = @truncate(self.rs2_val & mask);
-
-                if (divisor == 0) {
-                    return 0xFFFFFFFF;
-                }
-                return @as(u64, dividend / divisor);
-            } else {
-                const mask: u64 = 0xFF;
-                const dividend: u8 = @truncate(self.rs1_val & mask);
-                const divisor: u8 = @truncate(self.rs2_val & mask);
-
-                if (divisor == 0) {
-                    return 0xFF;
-                }
-                return @as(u64, dividend / divisor);
             }
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, compute: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(rs2, compute(rs1, rs2));
+            }
+        }.f,
+    });
 }
 
 /// REM instruction lookup - signed integer remainder
@@ -1519,164 +1002,99 @@ pub fn DivuLookup(comptime XLEN: comptime_int) type {
 /// Division by zero returns the dividend
 /// Overflow (MIN_INT % -1) returns 0
 pub fn RemLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .ValidSignedRemainder;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            // Interleave remainder and divisor for validation
-            return lookup_table.interleaveBits(self.computeResult(), self.rs2_val);
-        }
-
-        /// Compute the signed remainder result
-        pub fn computeResult(self: Self) u64 {
-            if (XLEN == 64) {
-                const dividend: i64 = @bitCast(self.rs1_val);
-                const divisor: i64 = @bitCast(self.rs2_val);
-
-                // Division by zero: return dividend
-                if (divisor == 0) {
-                    return self.rs1_val;
+    return BinaryLookup(XLEN, .{
+        .table = .ValidSignedRemainder,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                if (XLEN == 64) {
+                    const dividend: i64 = @bitCast(a);
+                    const divisor: i64 = @bitCast(b);
+                    if (divisor == 0) return a;
+                    const min_int: i64 = @bitCast(@as(u64, 0x8000000000000000));
+                    if (dividend == min_int and divisor == -1) return 0;
+                    return @bitCast(@rem(dividend, divisor));
+                } else if (XLEN == 32) {
+                    const mask: u64 = 0xFFFFFFFF;
+                    const dividend: i32 = @bitCast(@as(u32, @truncate(a & mask)));
+                    const divisor: i32 = @bitCast(@as(u32, @truncate(b & mask)));
+                    if (divisor == 0) return a & mask;
+                    const min_int: i32 = @bitCast(@as(u32, 0x80000000));
+                    if (dividend == min_int and divisor == -1) return 0;
+                    return @as(u64, @as(u32, @bitCast(@rem(dividend, divisor))));
+                } else {
+                    const mask: u64 = 0xFF;
+                    const dividend: i8 = @bitCast(@as(u8, @truncate(a & mask)));
+                    const divisor: i8 = @bitCast(@as(u8, @truncate(b & mask)));
+                    if (divisor == 0) return a & mask;
+                    const min_int: i8 = @bitCast(@as(u8, 0x80));
+                    if (dividend == min_int and divisor == -1) return 0;
+                    return @as(u64, @as(u8, @bitCast(@rem(dividend, divisor))));
                 }
-
-                // Overflow case: MIN_INT % -1 = 0
-                const min_int: i64 = @bitCast(@as(u64, 0x8000000000000000));
-                if (dividend == min_int and divisor == -1) {
-                    return 0;
-                }
-
-                // Normal remainder
-                const remainder: i64 = @rem(dividend, divisor);
-                return @bitCast(remainder);
-            } else if (XLEN == 32) {
-                const mask: u64 = 0xFFFFFFFF;
-                const dividend: i32 = @bitCast(@as(u32, @truncate(self.rs1_val & mask)));
-                const divisor: i32 = @bitCast(@as(u32, @truncate(self.rs2_val & mask)));
-
-                if (divisor == 0) {
-                    return self.rs1_val & mask;
-                }
-
-                const min_int: i32 = @bitCast(@as(u32, 0x80000000));
-                if (dividend == min_int and divisor == -1) {
-                    return 0;
-                }
-
-                const remainder: i32 = @rem(dividend, divisor);
-                return @as(u64, @as(u32, @bitCast(remainder)));
-            } else {
-                const mask: u64 = 0xFF;
-                const dividend: i8 = @bitCast(@as(u8, @truncate(self.rs1_val & mask)));
-                const divisor: i8 = @bitCast(@as(u8, @truncate(self.rs2_val & mask)));
-
-                if (divisor == 0) {
-                    return self.rs1_val & mask;
-                }
-
-                const min_int: i8 = @bitCast(@as(u8, 0x80));
-                if (dividend == min_int and divisor == -1) {
-                    return 0;
-                }
-
-                const remainder: i8 = @rem(dividend, divisor);
-                return @as(u64, @as(u8, @bitCast(remainder)));
             }
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, compute: *const fn (u64, u64) u64) u128 {
+                // Interleave remainder and divisor
+                return lookup_table.interleaveBits(compute(rs1, rs2), rs2);
+            }
+        }.f,
+    });
 }
 
 /// REMU instruction lookup - unsigned integer remainder
 /// Computes rd = rs1 % rs2 (unsigned)
 /// Division by zero returns the dividend
 pub fn RemuLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .ValidUnsignedRemainder;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.computeResult(), self.rs2_val);
-        }
-
-        /// Compute the unsigned remainder result
-        pub fn computeResult(self: Self) u64 {
-            if (XLEN == 64) {
-                if (self.rs2_val == 0) {
-                    return self.rs1_val;
+    return BinaryLookup(XLEN, .{
+        .table = .ValidUnsignedRemainder,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                if (XLEN == 64) {
+                    if (b == 0) return a;
+                    return a % b;
+                } else if (XLEN == 32) {
+                    const mask: u64 = 0xFFFFFFFF;
+                    const dividend: u32 = @truncate(a & mask);
+                    const divisor: u32 = @truncate(b & mask);
+                    if (divisor == 0) return a & mask;
+                    return @as(u64, dividend % divisor);
+                } else {
+                    const mask: u64 = 0xFF;
+                    const dividend: u8 = @truncate(a & mask);
+                    const divisor: u8 = @truncate(b & mask);
+                    if (divisor == 0) return a & mask;
+                    return @as(u64, dividend % divisor);
                 }
-                return self.rs1_val % self.rs2_val;
-            } else if (XLEN == 32) {
-                const mask: u64 = 0xFFFFFFFF;
-                const dividend: u32 = @truncate(self.rs1_val & mask);
-                const divisor: u32 = @truncate(self.rs2_val & mask);
-
-                if (divisor == 0) {
-                    return self.rs1_val & mask;
-                }
-                return @as(u64, dividend % divisor);
-            } else {
-                const mask: u64 = 0xFF;
-                const dividend: u8 = @truncate(self.rs1_val & mask);
-                const divisor: u8 = @truncate(self.rs2_val & mask);
-
-                if (divisor == 0) {
-                    return self.rs1_val & mask;
-                }
-                return @as(u64, dividend % divisor);
             }
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, compute: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(compute(rs1, rs2), rs2);
+            }
+        }.f,
+    });
 }
 
 // ============================================================================
@@ -1686,247 +1104,154 @@ pub fn RemuLookup(comptime XLEN: comptime_int) type {
 /// ADDW instruction lookup - add 32-bit values, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] + rs2[31:0])[31:0])
 pub fn AddwLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RangeCheck;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return @as(u128, self.computeResult());
-        }
-
-        /// Compute ADDW result: add lower 32 bits, sign-extend to 64
-        pub fn computeResult(self: Self) u64 {
-            const a32: u32 = @truncate(self.rs1_val);
-            const b32: u32 = @truncate(self.rs2_val);
-            const sum32: u32 = a32 +% b32;
-            const signed32: i32 = @bitCast(sum32);
-            const extended: i64 = @as(i64, signed32);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.AddOperands);
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .RangeCheck,
+        .interleave = false,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.AddOperands);
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const sum32: u32 = @as(u32, @truncate(a)) +% @as(u32, @truncate(b));
+                return @bitCast(@as(i64, @as(i32, @bitCast(sum32))));
+            }
+        }.f,
+    });
 }
 
 /// SUBW instruction lookup - subtract 32-bit values, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] - rs2[31:0])[31:0])
 pub fn SubwLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .Sub;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, self.rs2_val & 0xFFFFFFFF);
-        }
-
-        /// Compute SUBW result: subtract lower 32 bits, sign-extend to 64
-        pub fn computeResult(self: Self) u64 {
-            const a32: u32 = @truncate(self.rs1_val);
-            const b32: u32 = @truncate(self.rs2_val);
-            const diff32: u32 = a32 -% b32;
-            const signed32: i32 = @bitCast(diff32);
-            const extended: i64 = @as(i64, signed32);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.SubtractOperands);
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .Sub,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.SubtractOperands);
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const diff32: u32 = @as(u32, @truncate(a)) -% @as(u32, @truncate(b));
+                return @bitCast(@as(i64, @as(i32, @bitCast(diff32))));
+            }
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, _: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(rs1 & 0xFFFFFFFF, rs2 & 0xFFFFFFFF);
+            }
+        }.f,
+    });
 }
 
 /// SLLW instruction lookup - shift left 32-bit, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] << (rs2[4:0]))[31:0])
 pub fn SllwLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .LeftShift;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, self.rs2_val & 0x1F);
-        }
-
-        /// Compute SLLW result
-        pub fn computeResult(self: Self) u64 {
-            const a32: u32 = @truncate(self.rs1_val);
-            const shift: u5 = @truncate(self.rs2_val);
-            const result32: u32 = a32 << shift;
-            const signed32: i32 = @bitCast(result32);
-            const extended: i64 = @as(i64, signed32);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .LeftShift,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const a32: u32 = @truncate(a);
+                const shift: u5 = @truncate(b);
+                const result32: u32 = a32 << shift;
+                return @bitCast(@as(i64, @as(i32, @bitCast(result32))));
+            }
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, _: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(rs1 & 0xFFFFFFFF, rs2 & 0x1F);
+            }
+        }.f,
+    });
 }
 
 /// SRLW instruction lookup - logical shift right 32-bit, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] >> (rs2[4:0]))[31:0])
 pub fn SrlwLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RightShift;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, self.rs2_val & 0x1F);
-        }
-
-        /// Compute SRLW result
-        pub fn computeResult(self: Self) u64 {
-            const a32: u32 = @truncate(self.rs1_val);
-            const shift: u5 = @truncate(self.rs2_val);
-            const result32: u32 = a32 >> shift;
-            const signed32: i32 = @bitCast(result32);
-            const extended: i64 = @as(i64, signed32);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .RightShift,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const a32: u32 = @truncate(a);
+                const shift: u5 = @truncate(b);
+                const result32: u32 = a32 >> shift;
+                return @bitCast(@as(i64, @as(i32, @bitCast(result32))));
+            }
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, _: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(rs1 & 0xFFFFFFFF, rs2 & 0x1F);
+            }
+        }.f,
+    });
 }
 
 /// SRAW instruction lookup - arithmetic shift right 32-bit, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] >>s (rs2[4:0]))[31:0])
 pub fn SrawLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RightShiftArithmetic;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, self.rs2_val & 0x1F);
-        }
-
-        /// Compute SRAW result
-        pub fn computeResult(self: Self) u64 {
-            const a32: i32 = @bitCast(@as(u32, @truncate(self.rs1_val)));
-            const shift: u5 = @truncate(self.rs2_val);
-            const result32: i32 = a32 >> shift;
-            const extended: i64 = @as(i64, result32);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .RightShiftArithmetic,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const a32: i32 = @bitCast(@as(u32, @truncate(a)));
+                const shift: u5 = @truncate(b);
+                return @bitCast(@as(i64, a32 >> shift));
+            }
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, _: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(rs1 & 0xFFFFFFFF, rs2 & 0x1F);
+            }
+        }.f,
+    });
 }
 
 // ============================================================================
@@ -2127,284 +1452,162 @@ pub fn SraiwLookup(comptime XLEN: comptime_int) type {
 /// MULW instruction lookup - multiply 32-bit values, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] * rs2[31:0])[31:0])
 pub fn MulwLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .RangeCheck;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return @as(u128, self.computeResult());
-        }
-
-        /// Compute MULW result
-        pub fn computeResult(self: Self) u64 {
-            const a32: u32 = @truncate(self.rs1_val);
-            const b32: u32 = @truncate(self.rs2_val);
-            const product32: u32 = a32 *% b32;
-            const signed32: i32 = @bitCast(product32);
-            const extended: i64 = @as(i64, signed32);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.MultiplyOperands);
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+    return BinaryLookup(XLEN, .{
+        .table = .RangeCheck,
+        .interleave = false,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.MultiplyOperands);
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const product32: u32 = @as(u32, @truncate(a)) *% @as(u32, @truncate(b));
+                return @bitCast(@as(i64, @as(i32, @bitCast(product32))));
+            }
+        }.f,
+    });
 }
 
 /// DIVW instruction lookup - signed division 32-bit, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] /s rs2[31:0])[31:0])
 pub fn DivwLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .ValidDiv0;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs2_val & 0xFFFFFFFF, self.computeResult() & 0xFFFFFFFF);
-        }
-
-        /// Compute DIVW result
-        pub fn computeResult(self: Self) u64 {
-            const dividend: i32 = @bitCast(@as(u32, @truncate(self.rs1_val)));
-            const divisor: i32 = @bitCast(@as(u32, @truncate(self.rs2_val)));
-
-            if (divisor == 0) {
-                // Division by zero: return -1
-                return @as(u64, @bitCast(@as(i64, -1)));
+    return BinaryLookup(XLEN, .{
+        .table = .ValidDiv0,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const dividend: i32 = @bitCast(@as(u32, @truncate(a)));
+                const divisor: i32 = @bitCast(@as(u32, @truncate(b)));
+                if (divisor == 0) return @as(u64, @bitCast(@as(i64, -1)));
+                const min_int: i32 = @bitCast(@as(u32, 0x80000000));
+                if (dividend == min_int and divisor == -1) return @as(u64, @bitCast(@as(i64, @as(i32, min_int))));
+                return @bitCast(@as(i64, @divTrunc(dividend, divisor)));
             }
-
-            const min_int: i32 = @bitCast(@as(u32, 0x80000000));
-            if (dividend == min_int and divisor == -1) {
-                // Overflow: return MIN_INT sign-extended
-                return @as(u64, @bitCast(@as(i64, @as(i32, min_int))));
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, compute: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(rs2 & 0xFFFFFFFF, compute(rs1, rs2) & 0xFFFFFFFF);
             }
-
-            const quotient: i32 = @divTrunc(dividend, divisor);
-            const extended: i64 = @as(i64, quotient);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+    });
 }
 
 /// DIVUW instruction lookup - unsigned division 32-bit, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] /u rs2[31:0])[31:0])
 pub fn DivuwLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .ValidDiv0;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.rs2_val & 0xFFFFFFFF, self.computeResult() & 0xFFFFFFFF);
-        }
-
-        /// Compute DIVUW result
-        pub fn computeResult(self: Self) u64 {
-            const dividend: u32 = @truncate(self.rs1_val);
-            const divisor: u32 = @truncate(self.rs2_val);
-
-            if (divisor == 0) {
-                // Division by zero: return -1 sign-extended (MAX for 32-bit)
-                return @as(u64, @bitCast(@as(i64, -1)));
+    return BinaryLookup(XLEN, .{
+        .table = .ValidDiv0,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const dividend: u32 = @truncate(a);
+                const divisor: u32 = @truncate(b);
+                if (divisor == 0) return @as(u64, @bitCast(@as(i64, -1)));
+                const quotient: u32 = dividend / divisor;
+                return @bitCast(@as(i64, @as(i32, @bitCast(quotient))));
             }
-
-            const quotient: u32 = dividend / divisor;
-            const signed32: i32 = @bitCast(quotient);
-            const extended: i64 = @as(i64, signed32);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, compute: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(rs2 & 0xFFFFFFFF, compute(rs1, rs2) & 0xFFFFFFFF);
+            }
+        }.f,
+    });
 }
 
 /// REMW instruction lookup - signed remainder 32-bit, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] %s rs2[31:0])[31:0])
 pub fn RemwLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .ValidSignedRemainder;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.computeResult() & 0xFFFFFFFF, self.rs2_val & 0xFFFFFFFF);
-        }
-
-        /// Compute REMW result
-        pub fn computeResult(self: Self) u64 {
-            const dividend: i32 = @bitCast(@as(u32, @truncate(self.rs1_val)));
-            const divisor: i32 = @bitCast(@as(u32, @truncate(self.rs2_val)));
-
-            if (divisor == 0) {
-                // Division by zero: return dividend sign-extended
-                const extended: i64 = @as(i64, dividend);
-                return @bitCast(extended);
+    return BinaryLookup(XLEN, .{
+        .table = .ValidSignedRemainder,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const dividend: i32 = @bitCast(@as(u32, @truncate(a)));
+                const divisor: i32 = @bitCast(@as(u32, @truncate(b)));
+                if (divisor == 0) return @bitCast(@as(i64, dividend));
+                const min_int: i32 = @bitCast(@as(u32, 0x80000000));
+                if (dividend == min_int and divisor == -1) return 0;
+                return @bitCast(@as(i64, @rem(dividend, divisor)));
             }
-
-            const min_int: i32 = @bitCast(@as(u32, 0x80000000));
-            if (dividend == min_int and divisor == -1) {
-                // Overflow: return 0
-                return 0;
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, compute: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(compute(rs1, rs2) & 0xFFFFFFFF, rs2 & 0xFFFFFFFF);
             }
-
-            const remainder: i32 = @rem(dividend, divisor);
-            const extended: i64 = @as(i64, remainder);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+    });
 }
 
 /// REMUW instruction lookup - unsigned remainder 32-bit, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] %u rs2[31:0])[31:0])
 pub fn RemuwLookup(comptime XLEN: comptime_int) type {
-    return struct {
-        const Self = @This();
-
-        rs1_val: u64,
-        rs2_val: u64,
-
-        pub fn init(rs1_val: u64, rs2_val: u64) Self {
-            return Self{
-                .rs1_val = rs1_val,
-                .rs2_val = rs2_val,
-            };
-        }
-
-        pub fn lookupTable() LookupTables(XLEN) {
-            return .ValidUnsignedRemainder;
-        }
-
-        pub fn toLookupIndex(self: Self) u128 {
-            return lookup_table.interleaveBits(self.computeResult() & 0xFFFFFFFF, self.rs2_val & 0xFFFFFFFF);
-        }
-
-        /// Compute REMUW result
-        pub fn computeResult(self: Self) u64 {
-            const dividend: u32 = @truncate(self.rs1_val);
-            const divisor: u32 = @truncate(self.rs2_val);
-
-            if (divisor == 0) {
-                // Division by zero: return dividend sign-extended
-                const signed32: i32 = @bitCast(dividend);
-                const extended: i64 = @as(i64, signed32);
-                return @bitCast(extended);
+    return BinaryLookup(XLEN, .{
+        .table = .ValidUnsignedRemainder,
+        .circuit_flags = comptime blk: {
+            var f = CircuitFlagSet.init();
+            f.set(.WriteLookupOutputToRD);
+            break :blk f;
+        },
+        .instruction_flags = comptime blk: {
+            var f = InstructionFlagSet.init();
+            f.set(.LeftOperandIsRs1Value);
+            f.set(.RightOperandIsRs2Value);
+            break :blk f;
+        },
+        .computeResult = struct {
+            fn f(a: u64, b: u64) u64 {
+                const dividend: u32 = @truncate(a);
+                const divisor: u32 = @truncate(b);
+                if (divisor == 0) return @bitCast(@as(i64, @as(i32, @bitCast(dividend))));
+                const remainder: u32 = dividend % divisor;
+                return @bitCast(@as(i64, @as(i32, @bitCast(remainder))));
             }
-
-            const remainder: u32 = dividend % divisor;
-            const signed32: i32 = @bitCast(remainder);
-            const extended: i64 = @as(i64, signed32);
-            return @bitCast(extended);
-        }
-
-        pub fn circuitFlags() CircuitFlagSet {
-            var flags = CircuitFlagSet.init();
-            flags.set(.WriteLookupOutputToRD);
-            return flags;
-        }
-
-        pub fn instructionFlags() InstructionFlagSet {
-            var flags = InstructionFlagSet.init();
-            flags.set(.LeftOperandIsRs1Value);
-            flags.set(.RightOperandIsRs2Value);
-            return flags;
-        }
-    };
+        }.f,
+        .customIndex = struct {
+            fn f(rs1: u64, rs2: u64, compute: *const fn (u64, u64) u64) u128 {
+                return lookup_table.interleaveBits(compute(rs1, rs2) & 0xFFFFFFFF, rs2 & 0xFFFFFFFF);
+            }
+        }.f,
+    });
 }
 
 /// Instruction lookup trace entry

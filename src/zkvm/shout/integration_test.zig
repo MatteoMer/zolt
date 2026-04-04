@@ -10,7 +10,7 @@ const prover = @import("prover.zig");
 const verifier = @import("verifier.zig");
 const expanding_table = @import("expanding_table.zig");
 const split_eq = @import("split_eq.zig");
-const poly = @import("../../poly/mod.zig");
+const poly = @import("zolt_arith").poly;
 
 const ShoutProver = prover.ShoutProver;
 const ShoutParams = prover.ShoutParams;
@@ -66,7 +66,7 @@ fn runShoutProtocol(
 }
 
 test "shout end-to-end simple case" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Simple case: 4 lookups into table of 8 entries
@@ -120,7 +120,7 @@ test "shout end-to-end simple case" {
 }
 
 test "shout expanding table accumulation" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Test that ExpandingTable correctly accumulates EQ values
@@ -152,7 +152,7 @@ test "shout expanding table accumulation" {
 }
 
 test "shout split eq optimization" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Test SplitEqPolynomial computes correct EQ values
@@ -200,7 +200,7 @@ test "shout split eq optimization" {
 }
 
 test "shout verifier rejects invalid proof" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     const r_reduction = [_]F{
@@ -237,7 +237,7 @@ test "shout verifier rejects invalid proof" {
 }
 
 test "shout verifier accepts valid proof" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     const r_reduction = [_]F{
@@ -280,7 +280,7 @@ test "shout verifier accepts valid proof" {
 }
 
 test "shout multiple rounds consistent" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     const lookup_indices = [_]u128{ 0, 1, 2, 3 };

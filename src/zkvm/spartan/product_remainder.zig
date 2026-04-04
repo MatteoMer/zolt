@@ -31,23 +31,20 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const GpuPolyOps = @import("../../gpu/mod.zig").GpuPolyOps;
-const field_mod = @import("../../field/mod.zig");
+const ThreadPool = @import("zolt_pool").ThreadPool;
+const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
+const field_mod = @import("zolt_arith").field;
 const UnreducedProductAccum = field_mod.UnreducedProductAccum;
 
 const constraints = @import("../r1cs/constraints.zig");
 const r1cs_evaluators = @import("../r1cs/evaluators.zig");
 const RawR1CSInputs = r1cs_evaluators.RawR1CSInputs;
 const univariate_skip = @import("../r1cs/univariate_skip.zig");
-const poly_mod = @import("../../poly/mod.zig");
+const poly_mod = @import("zolt_arith").poly;
 const GruenSplitEqPolynomial = poly_mod.GruenSplitEqPolynomial;
 const DensePolynomial = poly_mod.DensePolynomial;
 const utils = @import("../../utils/mod.zig");
@@ -161,8 +158,8 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
         /// GPU accelerator for Metal compute (Apple Silicon)
         gpu_ops: ?*GpuPolyOps = null,
         /// GPU-resident shadow buffers for left/right polynomials (persistent)
-        left_gpu: ?@import("../../gpu/mod.zig").GpuPolynomial = null,
-        right_gpu: ?@import("../../gpu/mod.zig").GpuPolynomial = null,
+        left_gpu: ?@import("zolt_arith").gpu.GpuPolynomial = null,
+        right_gpu: ?@import("zolt_arith").gpu.GpuPolynomial = null,
 
         /// Initialize the prover after univariate skip
         ///
@@ -294,7 +291,7 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
         /// Call after gpu_ops is set. Safe to call if gpu_ops is null (no-op).
         pub fn initGpuShadows(self: *Self) void {
             const gpu = self.gpu_ops orelse return;
-            const GpuPoly = @import("../../gpu/mod.zig").GpuPolynomial;
+            const GpuPoly = @import("zolt_arith").gpu.GpuPolynomial;
             self.left_gpu = GpuPoly.initFromCpu(gpu.gpu.device, self.left_poly.evaluations) catch return;
             self.right_gpu = GpuPoly.initFromCpu(gpu.gpu.device, self.right_poly.evaluations) catch {
                 self.left_gpu.?.deinit();
@@ -495,7 +492,7 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 // If next round will fall below GPU threshold, sync GPU → CPU
                 const next_groups = self.left_gpu.?.len / 2;
                 if (next_groups < 4096) {
-                    const GpuPoly = @import("../../gpu/mod.zig").GpuPolynomial;
+                    const GpuPoly = @import("zolt_arith").gpu.GpuPolynomial;
                     const left_len = self.left_gpu.?.len;
                     const right_len = self.right_gpu.?.len;
                     self.left_gpu.?.readAll(self.left_poly.evaluations[0..left_len]);
@@ -725,7 +722,7 @@ fn nextPowerOfTwo(n: usize) usize {
 // ============================================================================
 
 const testing = std.testing;
-const BN254Scalar = @import("../../field/mod.zig").BN254Scalar;
+const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
 
 test "product remainder prover: lagrange weights computation" {
     const F = BN254Scalar;

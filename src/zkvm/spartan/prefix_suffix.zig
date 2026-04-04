@@ -27,7 +27,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const poly_mod = @import("../../poly/mod.zig");
+const poly_mod = @import("zolt_arith").poly;
 
 /// Phase 1 Prover for prefix-suffix sumcheck optimization
 ///
@@ -244,7 +244,7 @@ pub fn combinePBuffers(
 }
 
 test "Phase1Prover basic" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();

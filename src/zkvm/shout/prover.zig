@@ -34,7 +34,7 @@ const Allocator = std.mem.Allocator;
 const expanding_table = @import("expanding_table.zig");
 const prefix_suffix = @import("prefix_suffix.zig");
 const split_eq = @import("split_eq.zig");
-const poly = @import("../../poly/mod.zig");
+const poly = @import("zolt_arith").poly;
 
 const ExpandingTable = expanding_table.ExpandingTable;
 const PrefixSuffixDecomposition = prefix_suffix.PrefixSuffixDecomposition;
@@ -558,7 +558,7 @@ fn deriveChallenge(comptime F: type, round_poly: poly.UniPoly(F), round: usize) 
 }
 
 test "shout prover basic" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Simple test case: 4 lookups, 8 table entries
@@ -593,7 +593,7 @@ test "shout prover basic" {
 }
 
 test "shout prover rounds" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     const lookup_indices = [_]u128{ 0, 1, 2, 3 };
@@ -634,7 +634,7 @@ test "shout prover rounds" {
 }
 
 test "shout prover claim tracking" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // 4 lookups - indices 0, 1, 2, 3

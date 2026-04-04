@@ -18,17 +18,17 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../utils/thread_pool.zig").ThreadPool;
+const ThreadPool = @import("zolt_pool").ThreadPool;
 
 const jolt_types = @import("jolt_types.zig");
-const field_mod = @import("../field/mod.zig");
+const field_mod = @import("zolt_arith").field;
 const UnreducedProductAccum = field_mod.UnreducedProductAccum;
 const r1cs = @import("r1cs/mod.zig");
 const streaming_outer = @import("spartan/streaming_outer.zig");
 const product_remainder = @import("spartan/product_remainder.zig");
-const transcripts = @import("../transcripts/mod.zig");
+const transcripts = @import("zolt_arith").transcripts;
 const Blake2bTranscript = transcripts.Blake2bTranscript;
-const poly_mod = @import("../poly/mod.zig");
+const poly_mod = @import("zolt_arith").poly;
 const jolt_device = @import("jolt_device.zig");
 const constants = @import("../common/constants.zig");
 const ram = @import("ram/mod.zig");
@@ -56,7 +56,7 @@ pub fn JoltProver(comptime F: type) type {
         const OpeningId = jolt_types.OpeningId;
         const VirtualPolynomial = jolt_types.VirtualPolynomial;
 
-        const gpu_mod = @import("../gpu/mod.zig");
+        const gpu_mod = @import("zolt_arith").gpu;
 
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,

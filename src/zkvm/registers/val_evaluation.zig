@@ -17,7 +17,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const poly_mod = @import("../../poly/mod.zig");
+const poly_mod = @import("zolt_arith").poly;
 const EqPolynomial = poly_mod.EqPolynomial;
 
 /// Constants
@@ -333,7 +333,7 @@ fn computeLtAtIndex(comptime F: type, r_cycle: []const F, j: usize) F {
 
 test "registers val evaluation params" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     const r_address = [_]F{ F.one(), F.zero(), F.one() };
@@ -352,7 +352,7 @@ test "registers val evaluation params" {
 }
 
 test "computeLtAtIndex basic" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // r_cycle = [1, 0] represents cycle 1 in binary: bit0=1, bit1=0

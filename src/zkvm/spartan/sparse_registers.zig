@@ -5,8 +5,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const UnreducedProductAccum = @import("../../field/mod.zig").UnreducedProductAccum;
+const ThreadPool = @import("zolt_pool").ThreadPool;
+const UnreducedProductAccum = @import("zolt_arith").field.UnreducedProductAccum;
 const one_hot = @import("one_hot_coeffs.zig");
 const OneHotCoeffLookupTable = one_hot.OneHotCoeffLookupTable;
 const LookupTableIndex = one_hot.LookupTableIndex;

@@ -293,7 +293,7 @@ pub fn SplitEqPolynomial(comptime F: type) type {
 }
 
 test "split eq basic" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Create with 2 outer and 2 inner variables
@@ -326,7 +326,7 @@ test "split eq basic" {
 }
 
 test "split eq inner product" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // Simple case: 1 outer, 1 inner
@@ -365,7 +365,7 @@ test "split eq inner product" {
 }
 
 test "split eq binding" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     // 2 outer, 2 inner variables

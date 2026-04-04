@@ -7,27 +7,29 @@
 
 const std = @import("std");
 
-// Core modules
-pub const common = @import("common/mod.zig");
-pub const field = @import("field/mod.zig");
-pub const poly = @import("poly/mod.zig");
-pub const subprotocols = @import("subprotocols/mod.zig");
-pub const utils = @import("utils/mod.zig");
-pub const zkvm = @import("zkvm/mod.zig");
-pub const msm = @import("msm/mod.zig");
-pub const host = @import("host/mod.zig");
-pub const transcripts = @import("transcripts/mod.zig");
-pub const guest = @import("guest/mod.zig");
+// Package re-exports
+const zolt_arith = @import("zolt_arith");
+const zolt_pool = @import("zolt_pool");
 
-// Tracer module
-pub const tracer = @import("tracer/mod.zig");
-
-// GPU acceleration (Metal on Apple Silicon, stubs elsewhere)
-pub const gpu = @import("gpu/mod.zig");
+// Arithmetic modules (from zolt-arith package)
+pub const field = zolt_arith.field;
+pub const poly = zolt_arith.poly;
+pub const msm = zolt_arith.msm;
+pub const gpu = zolt_arith.gpu;
+pub const transcripts = zolt_arith.transcripts;
+pub const subprotocols = zolt_arith.subprotocols;
 
 // Re-export commonly used types
 pub const JoltField = field.JoltField;
 pub const BN254Scalar = field.BN254Scalar;
+
+// zkVM modules
+pub const common = @import("common/mod.zig");
+pub const zkvm = @import("zkvm/mod.zig");
+pub const host = @import("host/mod.zig");
+pub const guest = @import("guest/mod.zig");
+pub const tracer = @import("tracer/mod.zig");
+pub const utils = @import("utils/mod.zig");
 
 /// Library version
 pub const version = "0.1.0";

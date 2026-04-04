@@ -2312,7 +2312,7 @@ pub fn R1CSWitnessGenerator(comptime F: type) type {
 // ============================================================================
 
 test "linear combination evaluation" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create a simple LC: 2*x + 3*y + 5
@@ -2333,7 +2333,7 @@ test "linear combination evaluation" {
 }
 
 test "uniform constraint satisfied" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Test constraint 2: If Load, then RamReadValue == RamWriteValue
@@ -2350,7 +2350,7 @@ test "uniform constraint satisfied" {
 }
 
 test "uniform constraint violated" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Test constraint 2: If Load, then RamReadValue == RamWriteValue
@@ -2367,7 +2367,7 @@ test "uniform constraint violated" {
 }
 
 test "conditional constraint bypass" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Test constraint 2: If Load, then RamReadValue == RamWriteValue

@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("thread_pool.zig").ThreadPool;
+const ThreadPool = @import("zolt_pool").ThreadPool;
 
 /// Table containing the evaluations `EQ(x_1, ..., x_j, r_1, ..., r_j)`,
 /// built up incrementally as we receive random challenges `r_j` over the
@@ -174,7 +174,7 @@ pub fn ExpandingTable(comptime F: type) type {
 const testing = std.testing;
 
 test "ExpandingTable: basic initialization" {
-    const F = @import("../field/mod.zig").BN254Scalar;
+    const F = @import("field/mod.zig").BN254Scalar;
 
     var table = try ExpandingTable(F).init(testing.allocator, 16, .LowToHigh);
     defer table.deinit();
@@ -187,7 +187,7 @@ test "ExpandingTable: basic initialization" {
 }
 
 test "ExpandingTable: update doubles size" {
-    const F = @import("../field/mod.zig").BN254Scalar;
+    const F = @import("field/mod.zig").BN254Scalar;
 
     var table = try ExpandingTable(F).init(testing.allocator, 16, .LowToHigh);
     defer table.deinit();
@@ -208,7 +208,7 @@ test "ExpandingTable: update doubles size" {
 }
 
 test "ExpandingTable: multiple updates" {
-    const F = @import("../field/mod.zig").BN254Scalar;
+    const F = @import("field/mod.zig").BN254Scalar;
 
     var table = try ExpandingTable(F).init(testing.allocator, 16, .LowToHigh);
     defer table.deinit();
@@ -252,7 +252,7 @@ test "ExpandingTable: multiple updates" {
 }
 
 test "ExpandingTable: eq polynomial property" {
-    const F = @import("../field/mod.zig").BN254Scalar;
+    const F = @import("field/mod.zig").BN254Scalar;
 
     var table = try ExpandingTable(F).init(testing.allocator, 16, .LowToHigh);
     defer table.deinit();

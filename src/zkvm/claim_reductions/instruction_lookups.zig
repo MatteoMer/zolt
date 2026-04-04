@@ -19,8 +19,8 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
-const poly_mod = @import("../../poly/mod.zig");
+const ThreadPool = @import("zolt_pool").ThreadPool;
+const poly_mod = @import("zolt_arith").poly;
 const EqPolynomial = poly_mod.EqPolynomial;
 const UniPoly = poly_mod.UniPoly;
 const R1CSInputIndex = @import("../r1cs/constraints.zig").R1CSInputIndex;
@@ -660,7 +660,7 @@ fn bindLow(comptime F: type, arr: []F, r: F) void {
 
 test "instruction lookups prover initialization" {
     const allocator = std.testing.allocator;
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const constraints = @import("../r1cs/constraints.zig");
     const CycleInputs = constraints.R1CSCycleInputs(F);

@@ -15,7 +15,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const prover = @import("prover.zig");
-const poly = @import("../../poly/mod.zig");
+const poly = @import("zolt_arith").poly;
 
 const ShoutParams = prover.ShoutParams;
 const ShoutProof = prover.ShoutProof;
@@ -198,7 +198,7 @@ pub fn batchVerifyShoutProofs(
 }
 
 test "shout verifier basic" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     const r_reduction = [_]F{
@@ -221,7 +221,7 @@ test "shout verifier basic" {
 }
 
 test "shout verifier round check" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     const r_reduction = [_]F{
@@ -261,7 +261,7 @@ test "shout verifier round check" {
 }
 
 test "shout verifier invalid round" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     const r_reduction = [_]F{

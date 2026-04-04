@@ -819,7 +819,7 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
 /// that were computed during proving. This ensures the same commitments
 /// are used for both the transcript and the serialized proof.
 pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime Proof: type) type {
-    const Dory = @import("../poly/commitment/dory.zig");
+    const Dory = @import("zolt_arith").poly.commitment.dory;
     const GT = Dory.GT;
     const G1Point = Dory.G1Point;
 
@@ -927,7 +927,7 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
 // =============================================================================
 
 const testing = std.testing;
-const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
+const BN254Scalar = @import("zolt_arith").field.BN254Scalar;
 
 test "SumcheckId count" {
     try testing.expectEqual(@as(u8, 23), SumcheckId.COUNT);

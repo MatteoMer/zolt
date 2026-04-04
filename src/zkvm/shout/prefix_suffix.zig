@@ -449,7 +449,7 @@ pub fn PrefixRegistry(comptime F: type) type {
 }
 
 test "suffix type evaluation" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
 
     const x = F.fromU64(3);
     const y = F.fromU64(5);
@@ -472,7 +472,7 @@ test "suffix type evaluation" {
 }
 
 test "prefix polynomial basic" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var prefix = try PrefixPolynomial(F).init(allocator, 2, .And);
@@ -489,7 +489,7 @@ test "prefix polynomial basic" {
 }
 
 test "prefix polynomial bind" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var prefix = try PrefixPolynomial(F).init(allocator, 2, .And);
@@ -515,7 +515,7 @@ test "prefix polynomial bind" {
 }
 
 test "prefix suffix decomposition basic" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var decomp = try PrefixSuffixDecomposition(F, 2).init(allocator, 2, 2);
@@ -527,7 +527,7 @@ test "prefix suffix decomposition basic" {
 }
 
 test "prefix registry" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     const allocator = std.testing.allocator;
 
     var registry = PrefixRegistry(F).init(allocator);

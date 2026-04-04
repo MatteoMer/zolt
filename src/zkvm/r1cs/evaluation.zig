@@ -39,10 +39,10 @@ const constraints = @import("constraints.zig");
 const R1CSInputIndex = constraints.R1CSInputIndex;
 const R1CSCycleInputs = constraints.R1CSCycleInputs;
 
-const poly = @import("../../poly/mod.zig");
+const poly = @import("zolt_arith").poly;
 const EqPolynomial = poly.EqPolynomial;
-const field_mod = @import("../../field/mod.zig");
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const field_mod = @import("zolt_arith").field;
+const ThreadPool = @import("zolt_pool").ThreadPool;
 const evaluators = @import("evaluators.zig");
 
 /// Number of R1CS inputs per cycle
@@ -438,7 +438,7 @@ pub const R1CSConstraintGenerator = constraints.R1CSWitnessGenerator;
 // ============================================================================
 
 test "R1CS input evaluation: empty trace" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     const witnesses: []const R1CSCycleInputs(F) = &[_]R1CSCycleInputs(F){};
@@ -457,7 +457,7 @@ test "R1CS input evaluation: empty trace" {
 }
 
 test "R1CS input evaluation: single cycle" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create a single cycle witness with some non-zero values
@@ -483,7 +483,7 @@ test "R1CS input evaluation: single cycle" {
 }
 
 test "R1CS input evaluation: two cycles" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create two cycle witnesses
@@ -517,7 +517,7 @@ test "R1CS input evaluation: two cycles" {
 }
 
 test "R1CS input evaluation: four cycles" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create four cycle witnesses
@@ -556,7 +556,7 @@ test "R1CS input evaluation: four cycles" {
 }
 
 test "R1CS input evaluation: all inputs populated" {
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
 
     // Create two witnesses with all inputs populated
@@ -569,7 +569,7 @@ test "R1CS input evaluation: all inputs populated" {
     }
 
     const witnesses = [_]R1CSCycleInputs(F){ witness0, witness1 };
-    const r = [_]F{F.fromU64(1).mul(@import("../../poly/mod.zig").UniPoly(F).INV2)}; // r0 = 1/2
+    const r = [_]F{F.fromU64(1).mul(@import("zolt_arith").poly.UniPoly(F).INV2)}; // r0 = 1/2
 
     const result = try R1CSInputEvaluator(F).computeClaimedInputs(
         std.testing.allocator,
@@ -582,7 +582,7 @@ test "R1CS input evaluation: all inputs populated" {
     //          = (witness0[i] + witness1[i]) / 2
     for (0..NUM_R1CS_INPUTS) |i| {
         const expected = witness0.values[i].add(witness1.values[i])
-            .mul(@import("../../poly/mod.zig").UniPoly(F).INV2);
+            .mul(@import("zolt_arith").poly.UniPoly(F).INV2);
         try std.testing.expect(result[i].eql(expected));
     }
 }
@@ -593,7 +593,7 @@ test "inner_sum_prod: prover vs verifier computation" {
     //
     // This is the key consistency check for Stage 1 verification.
 
-    const field = @import("../../field/mod.zig");
+    const field = @import("zolt_arith").field;
     const F = field.BN254Scalar;
     const univariate_skip = @import("univariate_skip.zig");
     const LagrangePoly = univariate_skip.LagrangePolynomial(F);

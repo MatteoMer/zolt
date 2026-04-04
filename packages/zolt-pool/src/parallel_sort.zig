@@ -164,26 +164,6 @@ pub fn parallelSort(
     };
     defer pool.allocator.free(output);
 
-    const ScatterCtx = struct {
-        items_ptr: []const T,
-        splitters_ptr: []const T,
-        out: []T,
-        w_pos: [][]usize,
-        chunk_sz: usize,
-        ctx: Context,
-
-        fn scatter(self: @This(), chunk_idx: usize) void {
-            const start = chunk_idx * self.chunk_sz;
-            const end = @min(start + self.chunk_sz, self.items_ptr.len);
-            const wp = self.w_pos[chunk_idx];
-
-            for (start..end) |i| {
-                const bucket = binarySearchBucket(T, Context, self.splitters_ptr, self.items_ptr[i], self.ctx, lessThanFn);
-                self.out[wp[bucket]] = self.items_ptr[i];
-                wp[bucket] += 1;
-            }
-        }
-    };
     // Scatter is sequential per-chunk to avoid atomic writes (each chunk has unique write positions)
     for (0..n_chunks) |c| {
         const start = c * chunk_size;

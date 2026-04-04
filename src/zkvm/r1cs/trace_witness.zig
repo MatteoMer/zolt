@@ -19,9 +19,9 @@ const constraints = @import("constraints.zig");
 const evaluators = @import("evaluators.zig");
 const CompactWitness = evaluators.CompactWitness;
 const RawR1CSInputs = evaluators.RawR1CSInputs;
-const field_mod = @import("../../field/mod.zig");
+const field_mod = @import("zolt_arith").field;
 const S192 = field_mod.S192;
-const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
+const ThreadPool = @import("zolt_pool").ThreadPool;
 
 const FIRST_GROUP_SIZE = evaluators.FIRST_GROUP_SIZE;
 const SECOND_GROUP_SIZE = evaluators.SECOND_GROUP_SIZE;

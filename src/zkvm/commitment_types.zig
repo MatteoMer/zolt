@@ -4,8 +4,8 @@
 //! These wrap the underlying polynomial commitment scheme (Dory).
 
 const std = @import("std");
-const msm = @import("../msm/mod.zig");
-const field = @import("../field/mod.zig");
+const msm = @import("zolt_arith").msm;
+const field = @import("zolt_arith").field;
 
 /// Base field for G1 point coordinates
 pub const Fp = field.BN254BaseField;

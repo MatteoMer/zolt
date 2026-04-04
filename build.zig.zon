@@ -3,10 +3,14 @@
     .version = "0.1.0",
     .fingerprint = 0xf86d8277555b2d1e,
     .minimum_zig_version = "0.15.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .zolt_pool = .{ .path = "packages/zolt-pool" },
+        .zolt_arith = .{ .path = "packages/zolt-arith" },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "packages",
     },
 }

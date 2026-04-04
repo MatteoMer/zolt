@@ -2603,7 +2603,7 @@ test "LookupBits uninterleave" {
     try std.testing.expectEqual(@as(u64, 1), result.right);
 }
 test "EqPrefix basic" {
-    const F = @import("../../field/mod.zig").BN254Scalar;
+    const F = @import("zolt_arith").field.BN254Scalar;
     var checkpoints: PrefixCheckpoints(F) = .{null} ** Prefixes.COUNT;
     // Test eq(0, 0) should be 1, eq(0, 1) should be 0
     var b = LookupBits(128).new(0, 0);

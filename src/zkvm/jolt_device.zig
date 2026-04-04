@@ -320,7 +320,7 @@ pub fn fiatShamirPreamble(
     trace_length: usize,
     entry_address: u64,
 ) void {
-    const Blake2bTranscript = @import("../transcripts/blake2b.zig").Blake2bTranscript;
+    const Blake2bTranscript = @import("zolt_arith").transcripts.blake2b.Blake2bTranscript;
 
     transcript.appendU64("max_input_size", device.memory_layout.max_input_size);
     transcript.appendU64("max_output_size", device.memory_layout.max_output_size);

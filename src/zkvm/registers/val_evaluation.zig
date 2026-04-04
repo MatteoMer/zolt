@@ -283,17 +283,7 @@ pub fn RegistersValEvaluationProver(comptime F: type) type {
 
 /// Compute eq(r, k) for a specific index k (LE bit order)
 fn computeEqAtPoint(comptime F: type, r: []const F, k: anytype) F {
-    const k_val: usize = @intCast(k);
-    var result = F.one();
-    for (r, 0..) |ri, i| {
-        const ki = (k_val >> @intCast(i)) & 1;
-        if (ki == 1) {
-            result = result.mul(ri);
-        } else {
-            result = result.mul(F.one().sub(ri));
-        }
-    }
-    return result;
+    return @import("../eq_utils.zig").computeEqAtPointLE(F, r, @intCast(k));
 }
 
 /// Compute LT(j, r_cycle) for index j

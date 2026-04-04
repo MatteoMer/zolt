@@ -13,20 +13,19 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 // Stage 6 fine-grained bench timing — enabled at runtime via ZOLT_BENCH=1
 const s6_bench_timing = true;
 
 // Maximum evaluation points for parallelReduce accumulator.
 // Covers all sub-provers: LookupsRa (M+2 ≤ 10), RamRa (d+2 ≤ 6), BytecodeReadRaf (d+2 ≤ 4).
 const MAX_RA_EVALS = 16;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 
 const poly_mod = @import("zolt_arith").poly;
@@ -330,11 +329,7 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                     }
                 }
             }.f;
-            if (init_pool) |p| {
-                p.parallelForForce(T, lk_ra_ctx, lkRaInitFn);
-            } else {
-                for (0..T) |j| lkRaInitFn(lk_ra_ctx, j);
-            }
+            pool_helpers.parallelForOptional(init_pool, T, lk_ra_ctx, lkRaInitFn);
 
             // Build eq tables and create RaPolynomials
             for (0..total_committed) |i| {

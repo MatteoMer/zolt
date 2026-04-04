@@ -12,11 +12,9 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
@@ -1556,34 +1554,13 @@ pub fn OpeningClaims(comptime F: type) type {
 /// and x is a binary index
 /// This matches Jolt's convention where tau is stored as [r_MSB, ..., r_LSB]
 fn computeEqBigEndian(comptime F: type, r: []const F, x: usize, n: usize) F {
-    var result = F.one();
-    for (0..n) |i| {
-        // r[i] corresponds to bit (n-1-i) of x (MSB to LSB)
-        const bit_pos = n - 1 - i;
-        const xi: u1 = @truncate(x >> @intCast(bit_pos));
-        if (xi == 1) {
-            result = result.mul(r[i]);
-        } else {
-            result = result.mul(F.one().sub(r[i]));
-        }
-    }
-    return result;
+    return @import("../eq_utils.zig").computeEqAtPointBE(F, r[0..n], x);
 }
 
 /// Compute eq(r, x) for a binary index x
 /// r is in BIG-ENDIAN order: r[0] is MSB, r[n-1] is LSB
 fn computeEq(comptime F: type, r: []const F, x: usize) F {
-    var result = F.one();
-    const n = r.len;
-    for (0..n) |i| {
-        const xi: u1 = @truncate(x >> @intCast(n - 1 - i));
-        if (xi == 1) {
-            result = result.mul(r[i]);
-        } else {
-            result = result.mul(F.one().sub(r[i]));
-        }
-    }
-    return result;
+    return @import("../eq_utils.zig").computeEqAtPointBE(F, r, x);
 }
 
 /// Remap address to index (matches logic from output_check.zig)

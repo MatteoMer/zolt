@@ -14,11 +14,8 @@ const preprocessing = @import("../preprocessing.zig");
 const BytecodePCMapper = preprocessing.BytecodePCMapper;
 const tracer = @import("../../tracer/mod.zig");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 /// Bytecode entry properties needed for BytecodeReadRaf Val polynomial computation.
 /// One entry per bytecode address k. Indexed by the expanded PC (bytecode array index).

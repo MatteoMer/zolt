@@ -11,11 +11,8 @@
 //! Reference: jolt-core/src/zkvm/lookup_table/prefixes/*.rs
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
 /// LOG_K = 128 for RV64 (2*XLEN for interleaved operands)
@@ -553,10 +550,20 @@ fn upperWordUpdateCheckpoint(
     return updated;
 }
 // ============================================================================
-// And Prefix Implementation
+// Generic bitwise binary prefix scaffold
 // ============================================================================
-fn andPrefixMle(
+// Shared by And, Or, Xor, Andn — prefixes that accumulate
+//   result += 2^shift * evalFn(x_i, y_i)
+// per interleaved bit-pair, where shift = XLEN-1 - (j/2).
+
+/// Generic MLE for bitwise binary prefixes.
+/// `evalFn` computes the field-level contribution from two challenge values.
+/// `suffixFn` computes the integer bitwise operation on uninterleaved suffix operands.
+fn bitwiseBinaryPrefixMle(
     comptime F: type,
+    comptime evalFn: fn (F, F) F,
+    comptime suffixFn: fn (u64, u64) u64,
+    comptime prefix_idx: Prefixes,
     checkpoints: *const PrefixCheckpoints(F),
     r_x: ?F,
     c: u32,
@@ -567,145 +574,105 @@ fn andPrefixMle(
     const original_b_len = b.len;
     const suffix_len_opt = safeSuffixLen(j, original_b_len);
 
-    var result = checkpoints[@intFromEnum(Prefixes.And)] orelse F.zero();
+    var result = checkpoints[@intFromEnum(prefix_idx)] orelse F.zero();
+    const x_shift = XLEN - 1 - (j / 2);
+    const coeff = F.fromU128(@as(u128, 1) << @intCast(x_shift));
     if (r_x) |rx| {
         const y = F.fromU64(@as(u64, c));
-        const x_shift = XLEN - 1 - (j / 2);
-        // AND(r_x, c) = r_x * c
-        const and_contrib = F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(rx.mul(y));
-        result = result.add(and_contrib);
+        result = result.add(coeff.mul(evalFn(rx, y)));
     } else {
         const x = F.fromU64(@as(u64, c));
-        const y_msb = b.popMsb();
-        const x_shift = XLEN - 1 - (j / 2);
-        // AND(c, y_msb) = c * y_msb
-        const and_contrib = F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(x.mul(F.fromU64(@as(u64, y_msb))));
-        result = result.add(and_contrib);
+        const y_msb_val = F.fromU64(@as(u64, b.popMsb()));
+        result = result.add(coeff.mul(evalFn(x, y_msb_val)));
     }
-    // Process remaining bits in b using suffix_len computed with ORIGINAL b.len
+    // Process remaining bits using suffix_len computed with ORIGINAL b.len
     const suffix_len = suffix_len_opt orelse return result;
     const uninterleaved = b.uninterleave();
-    const and_suffix = uninterleaved.left & uninterleaved.right;
-    result = result.add(F.fromU128(@as(u128, and_suffix) << @intCast(suffix_len / 2)));
+    const suffix_val = suffixFn(uninterleaved.left, uninterleaved.right);
+    result = result.add(F.fromU128(@as(u128, suffix_val) << @intCast(suffix_len / 2)));
     return result;
 }
-fn andUpdateCheckpoint(
+
+/// Generic checkpoint update for bitwise binary prefixes.
+fn bitwiseBinaryUpdateCheckpoint(
     comptime F: type,
+    comptime evalFn: fn (F, F) F,
+    comptime prefix_idx: Prefixes,
     checkpoints: *const PrefixCheckpoints(F),
     r_x: F,
     r_y: F,
     j: usize,
-    _: usize,
 ) PrefixCheckpoint(F) {
     const x_shift = XLEN - 1 - (j / 2);
-    var updated = checkpoints[@intFromEnum(Prefixes.And)] orelse F.zero();
-    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(r_x.mul(r_y)));
+    var updated = checkpoints[@intFromEnum(prefix_idx)] orelse F.zero();
+    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(evalFn(r_x, r_y)));
     return updated;
+}
+
+// ============================================================================
+// And Prefix Implementation
+// ============================================================================
+fn andPrefixMle(comptime F: type, checkpoints: *const PrefixCheckpoints(F), r_x: ?F, c: u32, b: *LookupBits(128), j: usize) F {
+    return bitwiseBinaryPrefixMle(F, struct {
+        fn eval(a: F, b_val: F) F {
+            return a.mul(b_val);
+        }
+    }.eval, struct {
+        fn f(l: u64, r: u64) u64 {
+            return l & r;
+        }
+    }.f, .And, checkpoints, r_x, c, b, j);
+}
+fn andUpdateCheckpoint(comptime F: type, checkpoints: *const PrefixCheckpoints(F), r_x: F, r_y: F, j: usize, _: usize) PrefixCheckpoint(F) {
+    return bitwiseBinaryUpdateCheckpoint(F, struct {
+        fn eval(a: F, b_val: F) F {
+            return a.mul(b_val);
+        }
+    }.eval, .And, checkpoints, r_x, r_y, j);
 }
 // ============================================================================
 // Or Prefix Implementation
 // ============================================================================
-fn orPrefixMle(
-    comptime F: type,
-    checkpoints: *const PrefixCheckpoints(F),
-    r_x: ?F,
-    c: u32,
-    b: *LookupBits(128),
-    j: usize,
-) F {
-    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
-    const original_b_len = b.len;
-    const suffix_len_opt = safeSuffixLen(j, original_b_len);
-
-    var result = checkpoints[@intFromEnum(Prefixes.Or)] orelse F.zero();
-    if (r_x) |rx| {
-        const y = F.fromU64(@as(u64, c));
-        const x_shift = XLEN - 1 - (j / 2);
-        // OR(r_x, c) = r_x + c - r_x * c
-        const or_contrib = rx.add(y).sub(rx.mul(y));
-        result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(or_contrib));
-    } else {
-        const x = F.fromU64(@as(u64, c));
-        const y_msb_val = F.fromU64(@as(u64, b.popMsb()));
-        const x_shift = XLEN - 1 - (j / 2);
-        // OR(c, y_msb) = c + y_msb - c * y_msb
-        const or_contrib = x.add(y_msb_val).sub(x.mul(y_msb_val));
-        result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(or_contrib));
-    }
-    // Process remaining bits using suffix_len computed with ORIGINAL b.len
-    const suffix_len = suffix_len_opt orelse return result;
-    const uninterleaved = b.uninterleave();
-    const or_suffix = uninterleaved.left | uninterleaved.right;
-    result = result.add(F.fromU128(@as(u128, or_suffix) << @intCast(suffix_len / 2)));
-    return result;
+fn orPrefixMle(comptime F: type, checkpoints: *const PrefixCheckpoints(F), r_x: ?F, c: u32, b: *LookupBits(128), j: usize) F {
+    return bitwiseBinaryPrefixMle(F, struct {
+        fn eval(a: F, b_val: F) F {
+            return a.add(b_val).sub(a.mul(b_val));
+        }
+    }.eval, struct {
+        fn f(l: u64, r: u64) u64 {
+            return l | r;
+        }
+    }.f, .Or, checkpoints, r_x, c, b, j);
 }
-fn orUpdateCheckpoint(
-    comptime F: type,
-    checkpoints: *const PrefixCheckpoints(F),
-    r_x: F,
-    r_y: F,
-    j: usize,
-    _: usize,
-) PrefixCheckpoint(F) {
-    const x_shift = XLEN - 1 - (j / 2);
-    var updated = checkpoints[@intFromEnum(Prefixes.Or)] orelse F.zero();
-    // OR(r_x, r_y) = r_x + r_y - r_x * r_y
-    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(r_x.add(r_y).sub(r_x.mul(r_y))));
-    return updated;
+fn orUpdateCheckpoint(comptime F: type, checkpoints: *const PrefixCheckpoints(F), r_x: F, r_y: F, j: usize, _: usize) PrefixCheckpoint(F) {
+    return bitwiseBinaryUpdateCheckpoint(F, struct {
+        fn eval(a: F, b_val: F) F {
+            return a.add(b_val).sub(a.mul(b_val));
+        }
+    }.eval, .Or, checkpoints, r_x, r_y, j);
 }
 // ============================================================================
 // Xor Prefix Implementation
 // ============================================================================
-fn xorPrefixMle(
-    comptime F: type,
-    checkpoints: *const PrefixCheckpoints(F),
-    r_x: ?F,
-    c: u32,
-    b: *LookupBits(128),
-    j: usize,
-) F {
-    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
-    const original_b_len = b.len;
-    const suffix_len_opt = safeSuffixLen(j, original_b_len);
-
-    var result = checkpoints[@intFromEnum(Prefixes.Xor)] orelse F.zero();
-    if (r_x) |rx| {
-        const y = F.fromU64(@as(u64, c));
-        const x_shift = XLEN - 1 - (j / 2);
-        // XOR(r_x, c) = r_x + c - 2 * r_x * c
-        const two = F.fromU64(2);
-        const xor_contrib = rx.add(y).sub(two.mul(rx.mul(y)));
-        result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(xor_contrib));
-    } else {
-        const x = F.fromU64(@as(u64, c));
-        const y_msb_val = F.fromU64(@as(u64, b.popMsb()));
-        const x_shift = XLEN - 1 - (j / 2);
-        // XOR(c, y_msb) = c + y_msb - 2 * c * y_msb
-        const two = F.fromU64(2);
-        const xor_contrib = x.add(y_msb_val).sub(two.mul(x.mul(y_msb_val)));
-        result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(xor_contrib));
-    }
-    // Process remaining bits using suffix_len computed with ORIGINAL b.len
-    const suffix_len = suffix_len_opt orelse return result;
-    const uninterleaved = b.uninterleave();
-    const xor_suffix = uninterleaved.left ^ uninterleaved.right;
-    result = result.add(F.fromU128(@as(u128, xor_suffix) << @intCast(suffix_len / 2)));
-    return result;
+fn xorPrefixMle(comptime F: type, checkpoints: *const PrefixCheckpoints(F), r_x: ?F, c: u32, b: *LookupBits(128), j: usize) F {
+    return bitwiseBinaryPrefixMle(F, struct {
+        fn eval(a: F, b_val: F) F {
+            const two = F.fromU64(2);
+            return a.add(b_val).sub(two.mul(a.mul(b_val)));
+        }
+    }.eval, struct {
+        fn f(l: u64, r: u64) u64 {
+            return l ^ r;
+        }
+    }.f, .Xor, checkpoints, r_x, c, b, j);
 }
-fn xorUpdateCheckpoint(
-    comptime F: type,
-    checkpoints: *const PrefixCheckpoints(F),
-    r_x: F,
-    r_y: F,
-    j: usize,
-    _: usize,
-) PrefixCheckpoint(F) {
-    const x_shift = XLEN - 1 - (j / 2);
-    var updated = checkpoints[@intFromEnum(Prefixes.Xor)] orelse F.zero();
-    // XOR(r_x, r_y) = r_x + r_y - 2 * r_x * r_y
-    const two = F.fromU64(2);
-    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(r_x.add(r_y).sub(two.mul(r_x.mul(r_y)))));
-    return updated;
+fn xorUpdateCheckpoint(comptime F: type, checkpoints: *const PrefixCheckpoints(F), r_x: F, r_y: F, j: usize, _: usize) PrefixCheckpoint(F) {
+    return bitwiseBinaryUpdateCheckpoint(F, struct {
+        fn eval(a: F, b_val: F) F {
+            const two = F.fromU64(2);
+            return a.add(b_val).sub(two.mul(a.mul(b_val)));
+        }
+    }.eval, .Xor, checkpoints, r_x, r_y, j);
 }
 // ============================================================================
 // LessThan Prefix Implementation
@@ -932,49 +899,23 @@ fn rightMsbUpdateCheckpoint(
 // ============================================================================
 // Andn Prefix Implementation
 // ============================================================================
-fn andnPrefixMle(
-    comptime F: type,
-    checkpoints: *const PrefixCheckpoints(F),
-    r_x: ?F,
-    c: u32,
-    b: *LookupBits(128),
-    j: usize,
-) F {
-    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
-    const original_b_len = b.len;
-    const suffix_len_opt = safeSuffixLen(j, original_b_len);
-
-    var result = checkpoints[@intFromEnum(Prefixes.Andn)] orelse F.zero();
-    // ANDN high-order variables: x_i * (1 - y_i)
-    if (r_x) |rx| {
-        const y = F.fromU64(@as(u64, c));
-        const shift = XLEN - 1 - j / 2;
-        result = result.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(rx).mul(F.one().sub(y)));
-    } else {
-        const y_msb = b.popMsb();
-        const shift = XLEN - 1 - j / 2;
-        // c * (1 - y_msb)
-        result = result.add(F.fromU64(@as(u64, c) * (1 - @as(u64, y_msb))).mul(F.fromU64(@as(u64, 1) << @intCast(shift))));
-    }
-    // ANDN remaining x and y bits using suffix_len computed with ORIGINAL b.len
-    const uninterleaved = b.uninterleave();
-    const suffix_len = suffix_len_opt orelse return result;
-    result = result.add(F.fromU128(@as(u128, uninterleaved.left & ~uninterleaved.right) << @intCast(suffix_len / 2)));
-    return result;
+fn andnPrefixMle(comptime F: type, checkpoints: *const PrefixCheckpoints(F), r_x: ?F, c: u32, b: *LookupBits(128), j: usize) F {
+    return bitwiseBinaryPrefixMle(F, struct {
+        fn eval(a: F, b_val: F) F {
+            return a.mul(F.one().sub(b_val));
+        }
+    }.eval, struct {
+        fn f(l: u64, r: u64) u64 {
+            return l & ~r;
+        }
+    }.f, .Andn, checkpoints, r_x, c, b, j);
 }
-fn andnUpdateCheckpoint(
-    comptime F: type,
-    checkpoints: *const PrefixCheckpoints(F),
-    r_x: F,
-    r_y: F,
-    j: usize,
-    _: usize,
-) PrefixCheckpoint(F) {
-    const shift = XLEN - 1 - j / 2;
-    // checkpoint += 2^shift * r_x * (1 - r_y)
-    var updated = checkpoints[@intFromEnum(Prefixes.Andn)] orelse F.zero();
-    updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(r_x).mul(F.one().sub(r_y)));
-    return updated;
+fn andnUpdateCheckpoint(comptime F: type, checkpoints: *const PrefixCheckpoints(F), r_x: F, r_y: F, j: usize, _: usize) PrefixCheckpoint(F) {
+    return bitwiseBinaryUpdateCheckpoint(F, struct {
+        fn eval(a: F, b_val: F) F {
+            return a.mul(F.one().sub(b_val));
+        }
+    }.eval, .Andn, checkpoints, r_x, r_y, j);
 }
 // ============================================================================
 // LowerHalfWord Prefix Implementation

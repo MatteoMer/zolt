@@ -10,6 +10,7 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 
 const poly_mod = @import("zolt_arith").poly;
@@ -33,11 +34,9 @@ const dropInBackground = stage6.dropInBackground;
 // Covers all sub-provers: LookupsRa (M+2 <= 10), RamRa (d+2 <= 6), BytecodeReadRaf (d+2 <= 4).
 const MAX_RA_EVALS = 16;
 
-// Debug output control
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 
 // =============================================================================
 // IncClaimReduction Sumcheck Instance (Instance 5)
@@ -204,11 +203,7 @@ pub fn IncClaimReductionProver(comptime F: type) type {
                 }
             }.f;
 
-            if (pool) |p| {
-                p.parallelFor(prefix_len, q_ctx, qFn);
-            } else {
-                for (0..prefix_len) |x_lo| qFn(q_ctx, x_lo);
-            }
+            pool_helpers.parallelForOptional(pool, prefix_len, q_ctx, qFn);
 
             const challenges_buf = try allocator.alloc(F, prefix_n_vars);
             @memset(challenges_buf, F.zero());
@@ -309,10 +304,7 @@ pub fn IncClaimReductionProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.pool) |p| {
-                return p.parallelReduce([3]F, half, [3]F{ F.zero(), F.zero(), F.zero() }, ctx, mapFn, reduceFn);
-            }
-            return mapFn(ctx, 0, half);
+            return pool_helpers.parallelReduceOptional([3]F, self.pool, half, [3]F{ F.zero(), F.zero(), F.zero() }, ctx, mapFn, reduceFn);
         }
 
         /// Phase 2 round polynomial: ram_inc·eq_ram + γ²·rd_inc·eq_rd
@@ -368,10 +360,7 @@ pub fn IncClaimReductionProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.pool) |p| {
-                return p.parallelReduce([3]F, half, [3]F{ F.zero(), F.zero(), F.zero() }, ctx, mapFn, reduceFn);
-            }
-            return mapFn(ctx, 0, half);
+            return pool_helpers.parallelReduceOptional([3]F, self.pool, half, [3]F{ F.zero(), F.zero(), F.zero() }, ctx, mapFn, reduceFn);
         }
 
         pub fn computeRoundPoly(self: *Self) [3]F {
@@ -453,11 +442,7 @@ pub fn IncClaimReductionProver(comptime F: type) type {
                     c.eq_rd_out[x_hi] = c.scale_s4.mul(c.eq_hi_2[x_hi]).add(c.gamma.mul(c.scale_s5.mul(c.eq_hi_3[x_hi])));
                 }
             }.f;
-            if (self.pool) |p| {
-                p.parallelFor(suffix_len, eq_ctx, eqP2Fn);
-            } else {
-                for (0..suffix_len) |x_hi| eqP2Fn(eq_ctx, x_hi);
-            }
+            pool_helpers.parallelForOptional(self.pool, suffix_len, eq_ctx, eqP2Fn);
 
             // Materialize ram_inc and rd_inc by folding trace over prefix dimension
             const ram_inc_arr = try self.allocator.alloc(F, suffix_len);
@@ -503,11 +488,7 @@ pub fn IncClaimReductionProver(comptime F: type) type {
                     c.rd_inc_out[x_hi] = acc_rd;
                 }
             }.f;
-            if (self.pool) |p| {
-                p.parallelFor(suffix_len, inc_ctx, incP2Fn);
-            } else {
-                for (0..suffix_len) |x_hi| incP2Fn(inc_ctx, x_hi);
-            }
+            pool_helpers.parallelForOptional(self.pool, suffix_len, inc_ctx, incP2Fn);
 
             // Free Phase 1 arrays
             for (0..4) |i| {
@@ -680,11 +661,7 @@ pub fn HammingBooleanityProver(comptime F: type) type {
                     }
                 }
             }.f;
-            if (pool) |p| {
-                p.parallelFor(T, h_init_ctx, hInitFn);
-            } else {
-                for (0..T) |j| hInitFn(h_init_ctx, j);
-            }
+            pool_helpers.parallelForOptional(pool, T, h_init_ctx, hInitFn);
 
             // r_cycle is in BE order; reverse for LE
             var r_cycle_rev = try allocator.alloc(F, n_vars);
@@ -1092,11 +1069,7 @@ pub fn RamRaVirtualProver(comptime F: type) type {
                     }
                 }
             }.f;
-            if (init_pool) |p| {
-                p.parallelForForce(d, ram_ra_ctx, ramRaInitFn);
-            } else {
-                for (0..d) |i| ramRaInitFn(ram_ra_ctx, i);
-            }
+            pool_helpers.parallelForOptional(init_pool, d, ram_ra_ctx, ramRaInitFn);
 
             // Assemble RaPolynomials (prescales eq_table by scale=1, validates invariants).
             // Ownership of indices_arr[i] and eq_tables[i] transfers to the RaPoly;

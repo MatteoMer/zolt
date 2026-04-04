@@ -18,11 +18,8 @@ pub const G1Point = dory.G1Point;
 pub const G2Point = dory.G2Point;
 pub const DorySRS = dory.DorySRS;
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("debug.zig");
+const dbg = zkvm_debug.dbg;
 
 /// Convert G1Point x-coordinate to Fp
 /// G1Point stores x,y in BN254Scalar (Fr) Montgomery form

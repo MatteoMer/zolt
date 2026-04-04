@@ -13,11 +13,9 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
+const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
@@ -1382,19 +1380,7 @@ pub fn computeEqPolynomial(comptime F: type, r: []const F, s: []const F) F {
 /// - evals[k] = Π_j (bit_{n-1-j}(k) ? r[j] : (1-r[j]))
 /// - Equivalently: bit j of k ↔ r[n-1-j]
 pub fn computeEqAtPoint(comptime F: type, r: []const F, k: u64) F {
-    const n = r.len;
-    var result = F.one();
-    for (0..n) |j| {
-        // Extract bit (n-1-j) of k: b_j = (k >> (n-1-j)) & 1
-        const bj: u1 = @truncate(k >> @intCast(n - 1 - j));
-        const rj = r[j]; // r[j] corresponds to bit (n-1-j) of k
-        if (bj == 1) {
-            result = result.mul(rj);
-        } else {
-            result = result.mul(F.one().sub(rj));
-        }
-    }
-    return result;
+    return @import("../eq_utils.zig").computeEqAtPointBE(F, r, @intCast(k));
 }
 
 /// Interleave bits of two 64-bit values into a 128-bit value

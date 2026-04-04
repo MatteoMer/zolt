@@ -18,11 +18,8 @@
 
 const std = @import("std");
 
-// Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
-fn dbg(comptime fmt: []const u8, args: anytype) void {
-    if (debug_verbose) std.debug.print(fmt, args);
-}
+const zkvm_debug = @import("../debug.zig");
+const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
@@ -1144,17 +1141,7 @@ pub fn ValEvaluationVerifier(comptime F: type) type {
 
 /// Compute eq(r, k) for a specific index k
 pub fn computeEqAtPoint(comptime F: type, r: []const F, k: anytype) F {
-    const k_val: usize = @intCast(k);
-    var result = F.one();
-    for (r, 0..) |ri, i| {
-        const ki = (k_val >> @intCast(i)) & 1;
-        if (ki == 1) {
-            result = result.mul(ri);
-        } else {
-            result = result.mul(F.one().sub(ri));
-        }
-    }
-    return result;
+    return @import("../eq_utils.zig").computeEqAtPointLE(F, r, @intCast(k));
 }
 
 // ============================================================================

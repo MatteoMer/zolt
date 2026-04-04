@@ -93,32 +93,65 @@ The `jolt-verifier/` crate is pinned to upstream commit [`2e05fe88`](https://git
 
 ## Project Structure
 
+The codebase is split into 3 packages with explicit dependencies:
+
 ```
 zolt/
-├── build.zig / build.zig.zon
-├── examples/              # Pre-built RISC-V ELF binaries + C sources
-├── jolt-verifier/         # Standalone upstream Jolt verifier (Rust)
-└── src/
-    ├── main.zig           # CLI
-    ├── field/             # BN254 scalar field arithmetic
-    ├── poly/              # Polynomials + commitment schemes (HyperKZG, Dory)
-    ├── subprotocols/      # Sumcheck protocol
-    ├── msm/               # Multi-scalar multiplication (Pippenger)
-    ├── transcripts/       # Fiat-Shamir (Blake2b)
-    ├── host/              # ELF loader
-    ├── tracer/            # RISC-V emulator
-    └── zkvm/              # Core proving logic
-        ├── jolt_prover.zig       # 7-stage Jolt-compatible prover
-        ├── jolt_types.zig        # Proof types, sumcheck IDs
-        ├── jolt_serialization.zig
-        ├── preprocessing.zig
-        ├── spartan/       # Spartan R1CS prover
-        ├── shout/         # Shout lookup argument
-        ├── r1cs/          # R1CS constraints
-        ├── bytecode/      # Bytecode handling
-        ├── instruction/   # RISC-V instruction decoder
-        ├── ram/           # Memory checking
-        └── registers/     # Register file
+├── packages/
+│   ├── zolt-pool/                 # Thread pool + parallel primitives (0 deps)
+│   │   └── src/
+│   │       ├── thread_pool.zig    # Chase-Lev work-stealing deque
+│   │       ├── parallel_sort.zig  # Parallel sample sort
+│   │       └── helpers.zig        # parallelReduceOptional, parallelForOptional
+│   │
+│   └── zolt-arith/                # Arithmetic library (depends on: zolt-pool)
+│       └── src/
+│           ├── field/             # BN254 scalar/base fields, Montgomery mul, extensions (Fp2/6/12), pairings, G2
+│           ├── poly/              # Polynomials, Dory commitment scheme, interpolation, product trees
+│           ├── msm/               # Multi-scalar multiplication (Pippenger + GLV)
+│           ├── gpu/               # Metal GPU acceleration (Apple Silicon, optional)
+│           ├── transcripts/       # Fiat-Shamir (Blake2b, Keccak, Poseidon)
+│           └── subprotocols/      # Sumcheck protocol
+│
+├── src/                           # zkVM package (depends on: zolt-arith, zolt-pool)
+│   ├── main.zig                   # CLI dispatcher
+│   ├── cli/                       # Argument parsing
+│   ├── commands/                  # run + prove command implementations
+│   ├── common/                    # Constants, device config
+│   ├── host/                      # ELF loader
+│   ├── tracer/                    # RISC-V emulator + witness generation
+│   └── zkvm/                      # Core proving logic
+│       ├── jolt_prover.zig        # 7-stage Jolt-compatible prover (orchestrator)
+│       ├── stage2_sumcheck.zig    # Stage 2 batched sumcheck
+│       ├── jolt_types.zig         # Proof types, sumcheck IDs
+│       ├── jolt_serialization.zig # Arkworks-compatible serialization
+│       ├── preprocessing.zig      # Bytecode preprocessing
+│       ├── instruction_decoder.zig # RISC-V instruction decoding
+│       ├── eq_utils.zig           # Shared EQ polynomial evaluation (BE + LE)
+│       ├── debug.zig              # Shared debug output flag
+│       ├── spartan/               # Spartan prover stages (3-6) + sumcheck helpers
+│       ├── shout/                 # Shout lookup argument
+│       ├── r1cs/                  # R1CS constraints + evaluation
+│       ├── instruction/           # Instruction lookups (BinaryLookup comptime generic)
+│       ├── lookup_table/          # Lookup table MLEs + prefix/suffix decomposition
+│       ├── ram/                   # Memory checking
+│       └── registers/             # Register file checking
+│
+├── examples/                      # Pre-built RISC-V ELF binaries + C sources
+├── jolt-verifier/                 # Standalone upstream Jolt verifier (Rust)
+└── docs/research/                 # Refactoring plan + analysis
+```
+
+### Dependency graph
+
+```
+zolt-pool           (leaf — zero deps, only Zig std)
+    │
+    ▼
+zolt-arith          (depends on: zolt-pool)
+    │
+    ▼
+zolt                (depends on: zolt-arith, zolt-pool)
 ```
 
 ## Prerequisites

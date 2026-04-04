@@ -11,17 +11,17 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
 
-const jolt_types = @import("jolt_types.zig");
+const jolt_types = @import("../jolt_types.zig");
 const field_mod = @import("zolt_arith").field;
-const r1cs = @import("r1cs/mod.zig");
-const product_remainder = @import("spartan/product_remainder.zig");
+const r1cs = @import("../r1cs/mod.zig");
+const product_remainder = @import("product_remainder.zig");
 const transcripts = @import("zolt_arith").transcripts;
 const Blake2bTranscript = transcripts.Blake2bTranscript;
 const poly_mod = @import("zolt_arith").poly;
-const jolt_device = @import("jolt_device.zig");
-const ram = @import("ram/mod.zig");
-const claim_reductions = @import("claim_reductions/mod.zig");
-const jolt_prover = @import("jolt_prover.zig");
+const jolt_device = @import("../jolt_device.zig");
+const ram = @import("../ram/mod.zig");
+const claim_reductions = @import("../claim_reductions/mod.zig");
+const jolt_prover = @import("../jolt_prover.zig");
 
 /// Generic Stage 2 sumcheck namespace, parameterised on the field.
 pub fn Stage2Sumcheck(comptime F: type) type {
@@ -123,7 +123,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
             uni_skip_claim_stage2: F,
             tau: []const F,
             r_spartan_for_instr: []const F,
-            raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
+            raw_r1cs_inputs: []const @import("../r1cs/evaluators.zig").RawR1CSInputs,
             n_cycle_vars: usize,
             log_ram_k: usize,
             opening_claims: *OpeningClaims(F),
@@ -1025,7 +1025,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
         /// Returns MLE(factor_i, r_cycle) = Σ_t eq(r_cycle, t) * factor_value[t]
         pub fn computeProductFactorEvaluations(
             ctx: Context,
-            raw_r1cs_inputs: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
+            raw_r1cs_inputs: []const @import("../r1cs/evaluators.zig").RawR1CSInputs,
             all_challenges: []const F,
             n_cycle_vars: usize,
             log_ram_k: usize,
@@ -1068,7 +1068,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
 
             const FactorCtx = struct {
                 eq: []const F,
-                raw: []const @import("r1cs/evaluators.zig").RawR1CSInputs,
+                raw: []const @import("../r1cs/evaluators.zig").RawR1CSInputs,
             };
             const fctx = FactorCtx{
                 .eq = eq_evals,

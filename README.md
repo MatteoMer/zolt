@@ -122,14 +122,13 @@ zolt/
 │   ├── tracer/                    # RISC-V emulator + witness generation
 │   └── zkvm/                      # Core proving logic
 │       ├── jolt_prover.zig        # 7-stage Jolt-compatible prover (orchestrator)
-│       ├── stage2_sumcheck.zig    # Stage 2 batched sumcheck
 │       ├── jolt_types.zig         # Proof types, sumcheck IDs
 │       ├── jolt_serialization.zig # Arkworks-compatible serialization
 │       ├── preprocessing.zig      # Bytecode preprocessing
 │       ├── instruction_decoder.zig # RISC-V instruction decoding
 │       ├── eq_utils.zig           # Shared EQ polynomial evaluation (BE + LE)
 │       ├── debug.zig              # Shared debug output flag
-│       ├── spartan/               # Spartan prover stages (3-6) + sumcheck helpers
+│       ├── spartan/               # Spartan prover stages (2-6) + sumcheck helpers
 │       ├── shout/                 # Shout lookup argument
 │       ├── r1cs/                  # R1CS constraints + evaluation
 │       ├── instruction/           # Instruction lookups (BinaryLookup comptime generic)

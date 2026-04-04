@@ -3140,7 +3140,7 @@ pub fn JoltProver(comptime F: type) type {
             }
         }
 
-        const stage2_sumcheck = @import("stage2_sumcheck.zig").Stage2Sumcheck(F);
+        const stage2_sumcheck = @import("spartan/stage2_sumcheck.zig").Stage2Sumcheck(F);
 
         /// Re-export from stage2_sumcheck.zig
         const Stage2Result = stage2_sumcheck.Stage2Result;
@@ -3404,7 +3404,7 @@ pub fn JoltProver(comptime F: type) type {
 }
 
 /// Re-exported from stage2_sumcheck.zig
-const extractProductFactors = @import("stage2_sumcheck.zig").extractProductFactors;
+const extractProductFactors = @import("spartan/stage2_sumcheck.zig").extractProductFactors;
 
 /// Configuration for proof conversion
 ///

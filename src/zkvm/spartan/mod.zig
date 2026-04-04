@@ -29,6 +29,11 @@ pub const stage3_prover = @import("stage3_prover.zig");
 pub const Stage3Prover = stage3_prover.Stage3Prover;
 pub const Stage3Result = stage3_prover.Stage3Result;
 
+// Stage 4 orchestrating prover (RegistersRWC + RamValCheck batched sumcheck)
+pub const stage4_prover_mod = @import("stage4_prover.zig");
+pub const Stage4Prover = stage4_prover_mod.Stage4Prover;
+pub const Stage4Result = stage4_prover_mod.Stage4Result;
+
 // Stage 4 Gruen prover (matches Jolt's algorithm exactly)
 pub const stage4_gruen_prover = @import("stage4_gruen_prover.zig");
 pub const Stage4GruenProver = stage4_gruen_prover.Stage4GruenProver;
@@ -50,6 +55,11 @@ pub const Stage5Result = stage5_prover.Stage5Result;
 pub const stage6_prover = @import("stage6_prover.zig");
 pub const Stage6BatchedProver = stage6_prover.Stage6BatchedProver;
 pub const Stage6Result = stage6_prover.Stage6Result;
+
+// Stage 7 prover (HammingWeightClaimReduction)
+pub const stage7_prover_mod = @import("stage7_prover.zig");
+pub const Stage7Prover = stage7_prover_mod.Stage7Prover;
+pub const Stage7Result = stage7_prover_mod.Stage7Result;
 
 // Shared sumcheck helper functions
 pub const sumcheck_helpers = @import("sumcheck_helpers.zig");

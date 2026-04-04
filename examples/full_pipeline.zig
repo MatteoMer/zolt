@@ -62,6 +62,7 @@ pub fn main() !void {
         .bytecode = &bytecode,
         .entry_point = constants.RAM_START_ADDRESS,
         .base_address = constants.RAM_START_ADDRESS,
+        .text_size = bytecode.len,
         .memory_layout = MemoryLayout.init(&config),
         .allocator = allocator,
     };

@@ -51,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zolt_pool", .module = zolt_pool_mod },
+            .{ .name = "zolt_arith", .module = zolt_arith_mod },
         },
     });
 

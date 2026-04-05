@@ -2347,7 +2347,7 @@ test "AllSuffixPolys init and deinit" {
     const empty_indices = [_]u128{};
     const empty_tables = [_]i8{};
 
-    try polys.initPhase(0, 8, &empty_u_evals, &empty_indices, &empty_tables);
+    try polys.initPhase(0, 8, &empty_u_evals, &empty_indices, &empty_tables, null, std.testing.allocator, null);
 }
 
 test "TableSuffixPolys bind" {
@@ -2357,18 +2357,34 @@ test "TableSuffixPolys bind" {
     var table = try TableSuffixPolys(F).init(allocator, 2, 4);
     defer table.deinit();
 
-    // Set some values
+    // Set some values: polys[0] = [1, 2, 3, 4]
     table.polys[0][0] = F.fromU64(1);
     table.polys[0][1] = F.fromU64(2);
     table.polys[0][2] = F.fromU64(3);
     table.polys[0][3] = F.fromU64(4);
 
-    // Bind with r = 0 (should select low values)
+    // Bind with r = 0 (HighToLow: left=[0..half], right=[half..len])
+    // new[j] = left[j] + 0*(right[j] - left[j]) = left[j]
     table.bind(F.zero());
 
-    // After binding: poly[0] = (1-0)*1 + 0*2 = 1, poly[1] = (1-0)*3 + 0*4 = 3
+    // After binding: effective_len halved to 2, poly[0] = 1, poly[1] = 2
     try std.testing.expect(table.polys[0][0].eql(F.fromU64(1)));
-    try std.testing.expect(table.polys[0][1].eql(F.fromU64(3)));
+    try std.testing.expect(table.polys[0][1].eql(F.fromU64(2)));
+    try std.testing.expectEqual(@as(usize, 2), table.effective_len);
+
+    // Also test with r = 1: should select right half
+    // Reset
+    table.effective_len = 4;
+    table.polys[0][0] = F.fromU64(1);
+    table.polys[0][1] = F.fromU64(2);
+    table.polys[0][2] = F.fromU64(3);
+    table.polys[0][3] = F.fromU64(4);
+
+    table.bind(F.one());
+
+    // new[j] = left[j] + 1*(right[j] - left[j]) = right[j]
+    try std.testing.expect(table.polys[0][0].eql(F.fromU64(3)));
+    try std.testing.expect(table.polys[0][1].eql(F.fromU64(4)));
 }
 
 test "RafDecomposition init and deinit" {

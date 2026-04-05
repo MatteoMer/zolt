@@ -1,10 +1,11 @@
 //! Stage 6 Sumcheck Instance Provers (extracted from stage6_prover.zig)
 //!
-//! Contains 4 of the 6 sumcheck instance provers:
+//! Contains 5 of the 6 sumcheck instance provers:
 //! - IncClaimReductionProver (Instance 5): two-phase prefix-suffix prover
 //! - HammingBooleanityProver (Instance 1): split-eq + GruenSplitEq
 //! - RamRaVirtualProver (Instance 3): compressed RaPolynomial + GruenSplitEq
 //! - BooleanityProver (Instance 2): expanding table + lazy/dense phases
+//! - LookupsRaVirtualProver (Instance 4): compressed RaPolynomial + GruenSplitEq + Toom-Cook
 
 const std = @import("std");
 
@@ -22,13 +23,13 @@ const BytecodePCMapper = preprocessing.BytecodePCMapper;
 const ra_poly_mod = @import("ra_poly.zig");
 const UnreducedProductAccum = @import("zolt_arith").field.UnreducedProductAccum;
 
-const stage6 = @import("stage6_prover.zig");
-const computeEqTable = stage6.computeEqTable;
-const computeEqTableParallel = stage6.computeEqTableParallel;
-const fieldFromI128 = stage6.fieldFromI128;
-const extractChunkMSB = stage6.extractChunkMSB;
-const computeLookupIndex = stage6.computeLookupIndex;
-const dropInBackground = stage6.dropInBackground;
+const stage6_helpers = @import("stage6_helpers.zig");
+const computeEqTable = stage6_helpers.computeEqTable;
+const computeEqTableParallel = stage6_helpers.computeEqTableParallel;
+const fieldFromI128 = stage6_helpers.fieldFromI128;
+const extractChunkMSB = stage6_helpers.extractChunkMSB;
+const computeLookupIndex = stage6_helpers.computeLookupIndex;
+const dropInBackground = stage6_helpers.dropInBackground;
 
 // Maximum evaluation points for parallelReduce accumulator.
 // Covers all sub-provers: LookupsRa (M+2 <= 10), RamRa (d+2 <= 6), BytecodeReadRaf (d+2 <= 4).
@@ -2318,4 +2319,653 @@ pub fn BooleanityProver(comptime F: type) type {
             dbg(", lazy_num_tables={}\n", .{self.lazy_num_tables});
         }
     };
+}
+
+// =============================================================================
+// LookupsRaVirtual Sumcheck Instance (Instance 4)
+// =============================================================================
+// Proves: Sigma_c eq(r_cycle, c) * Sum_{v=0}^{N-1} gamma^v * Prod_{j=0}^{M-1} ra_{v*M+j}(c)
+// Variables: n_cycle_vars
+// Degree: M+1 (product of M linear ra polys * one linear eq)
+//
+// NOTE: Unlike RamRaVirtualProver, this uses dense []F arrays rather than RaPolynomial
+// compression. The gamma scale is baked into the first poly of each virtual batch at
+// init time (ra_bound[v*M] *= gamma^v), so the compressed representation would need
+// per-index scaling, not a single shared eq_table scale. Future optimization could
+// store separate gamma-scaled and unscaled eq_tables per batch.
+/// Evaluate the product of 4 linear polynomials at the grid {1, 2, 3, ∞}.
+/// Each pair[i] = { p_i(0), p_i(1) }. Returns { P(1), P(2), P(3), P(∞) }
+/// where P(x) = p_0(x) * p_1(x) * p_2(x) * p_3(x).
+/// Uses Toom-Cook factoring: 10 field muls total.
+/// Ported from Jolt's eval_prod_4_assign (mles_product_sum.rs:453-462).
+fn evalLinearProd4(comptime F: type, pairs: [4][2]F) [4]F {
+    // eval_linear_prod_2_internal on first pair (p[0], p[1]):
+    // For linear poly p(x) = p0 + (p1-p0)*x: p(1)=p1, p(∞)=p1-p0, p(2)=p1+(p1-p0)
+    const p0_inf = pairs[0][1].sub(pairs[0][0]); // slope of p0
+    const p1_inf = pairs[1][1].sub(pairs[1][0]); // slope of p1
+    const a1 = pairs[0][1].mul(pairs[1][1]); // A(1) = p0(1)*p1(1)
+    const a2 = p0_inf.add(pairs[0][1]).mul(p1_inf.add(pairs[1][1])); // A(2) = p0(2)*p1(2)
+    const a_inf = p0_inf.mul(p1_inf); // A(∞) = leading coeff
+
+    // ex2 extrapolation: A(3) = 2*(A(2) + A(∞)) - A(1)  (0 muls, pure adds)
+    const a3 = a2.add(a_inf).add(a2.add(a_inf)).sub(a1);
+
+    // eval_linear_prod_2_internal on second pair (p[2], p[3]):
+    const p2_inf = pairs[2][1].sub(pairs[2][0]);
+    const p3_inf = pairs[3][1].sub(pairs[3][0]);
+    const b1 = pairs[2][1].mul(pairs[3][1]);
+    const b2 = p2_inf.add(pairs[2][1]).mul(p3_inf.add(pairs[3][1]));
+    const b_inf = p2_inf.mul(p3_inf);
+    const b3 = b2.add(b_inf).add(b2.add(b_inf)).sub(b1);
+
+    // Pointwise multiply: 4 muls
+    return .{
+        a1.mul(b1), // P(1)
+        a2.mul(b2), // P(2)
+        a3.mul(b3), // P(3)
+        a_inf.mul(b_inf), // P(∞)
+    };
+}
+
+pub fn LookupsRaVirtualProver(comptime F: type) type {
+    const RaPoly = ra_poly_mod.RaPolynomial(F);
+
+    return struct {
+        const Self = @This();
+
+        /// In-place MLE bind (same as RamRaVirtualProver.bindSlice).
+        fn bindSlice(arr: []F, h: usize, challenge: F) void {
+            if (challenge.limbs[0] == 0 and challenge.limbs[1] == 0) {
+                for (0..h) |j| {
+                    arr[j] = arr[2 * j].add(arr[2 * j + 1].sub(arr[2 * j]).mulHiBigIntU128(challenge.limbs));
+                }
+            } else {
+                for (0..h) |j| {
+                    arr[j] = arr[2 * j].add(challenge.mul(arr[2 * j + 1].sub(arr[2 * j])));
+                }
+            }
+        }
+
+        /// Compressed RA polynomials (lazy materialization through round1→round2→round3→dense)
+        ra_polys: []RaPoly,
+        /// GruenSplitEq for eq(r_cycle, .) — O(1) bind
+        gruen_eq: poly_mod.GruenSplitEqPolynomial(F),
+        M: usize,
+        N: usize,
+        total_committed: usize,
+        current_len: usize,
+        allocator: Allocator,
+        pool: ?*ThreadPool = null,
+        gpu: ?*GpuPolyOps = null,
+
+        pub fn init(
+            allocator: Allocator,
+            trace: *const ExecutionTrace,
+            r_cycle: []const F, // BIG_ENDIAN
+            r_addr_chunks: []const []const F, // r_addr_chunks[i] for each committed poly
+            gamma_powers: []const F, // gamma^v for v in 0..N
+            M: usize,
+            N: usize,
+            log_k_chunk: usize,
+            instruction_d: usize,
+            init_pool: ?*ThreadPool,
+        ) !Self {
+            std.debug.assert(log_k_chunk <= ra_poly_mod.MAX_LOG_K_CHUNK);
+            const T = trace.steps.items.len;
+            const total_committed = M * N;
+            const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
+
+            // Build RaPolynomials with compressed u8 indices + small eq tables
+            var ra_polys_arr = try allocator.alloc(RaPoly, total_committed);
+            errdefer allocator.free(ra_polys_arr);
+
+            // Pre-allocate index arrays for all committed polys
+            var indices_arr = try allocator.alloc([]?u8, total_committed);
+            defer allocator.free(indices_arr);
+
+            for (0..total_committed) |i| {
+                indices_arr[i] = try allocator.alloc(?u8, T);
+            }
+
+            // Parallel fill: compute ALL index arrays in a single pass over trace.
+            // For each step j, compute lookup_index ONCE, then extract all total_committed chunks.
+            // This is ~32x fewer computeLookupIndex calls vs the old per-poly approach.
+            const LkRaInitCtx = struct {
+                steps: []const tracer.TraceStep,
+                indices: [][]?u8,
+                log_k_chunk: usize,
+                k_chunk: usize,
+                instruction_d: usize,
+                total_committed: usize,
+            };
+            const lk_ra_ctx = LkRaInitCtx{
+                .steps = trace.steps.items,
+                .indices = indices_arr,
+                .log_k_chunk = log_k_chunk,
+                .k_chunk = k_chunk,
+                .instruction_d = instruction_d,
+                .total_committed = total_committed,
+            };
+            const lkRaInitFn = struct {
+                fn f(c: LkRaInitCtx, j: usize) void {
+                    const step = c.steps[j];
+                    const lookup_index = computeLookupIndex(step);
+                    const mask: u128 = (@as(u128, 1) << @intCast(c.log_k_chunk)) - 1;
+                    for (0..c.total_committed) |i| {
+                        // MSB-first: shift = log_k_chunk * (instruction_d - 1 - i)
+                        const shift_amount = c.log_k_chunk * (c.instruction_d - 1 - i);
+                        const chunk_val: usize = if (shift_amount < 128) @intCast((lookup_index >> @intCast(shift_amount)) & mask) else 0;
+                        c.indices[i][j] = if (chunk_val < c.k_chunk) @intCast(chunk_val) else null;
+                    }
+                }
+            }.f;
+            pool_helpers.parallelForOptional(init_pool, T, lk_ra_ctx, lkRaInitFn);
+
+            // Build eq tables and create RaPolynomials
+            for (0..total_committed) |i| {
+                var r_chunk_rev = try allocator.alloc(F, log_k_chunk);
+                defer allocator.free(r_chunk_rev);
+                for (0..log_k_chunk) |ci| r_chunk_rev[ci] = r_addr_chunks[i][log_k_chunk - 1 - ci];
+                const eq_table = try computeEqTable(F, allocator, r_chunk_rev, log_k_chunk);
+
+                const virtual_batch = i / M;
+                const is_first_in_batch = (i % M == 0);
+                const gamma_scale = if (is_first_in_batch) gamma_powers[virtual_batch] else F.one();
+
+                // initRound1 takes ownership of indices and eq_table, prescales by gamma_scale
+                ra_polys_arr[i] = RaPoly.initRound1(indices_arr[i], eq_table, gamma_scale);
+            }
+
+            // r_cycle is in BE order; pass directly to GruenSplitEq (same as Stage 3)
+            const n_vars = std.math.log2_int(usize, T);
+            const gruen_eq = try poly_mod.GruenSplitEqPolynomial(F).init(allocator, r_cycle[0..n_vars]);
+
+            return Self{
+                .ra_polys = ra_polys_arr,
+                .gruen_eq = gruen_eq,
+                .M = M,
+                .N = N,
+                .total_committed = total_committed,
+                .current_len = T,
+                .allocator = allocator,
+                .pool = init_pool,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (self.ra_polys) |*p| p.deinit(self.allocator);
+            self.allocator.free(self.ra_polys);
+            self.gruen_eq.deinit();
+        }
+
+        /// f(x) = eq(x,r) * Sum_v Prod_{j=0}^{M-1} ra_{v*M+j}(x)
+        /// Uses quotient polynomial approach: compute q(x) = f(x)/eq(x,r) at Toom points {1,2,3,∞}
+        /// via evalLinearProd4, then reconstruct f(x) via finishMlesProductSumFromEvals.
+        /// Returns monomial coefficients (degree M+1, i.e. 6 coefficients for M=4).
+        pub fn computeRoundPoly(self: *Self, allocator: Allocator, claim: F) ![]F {
+            const half = self.current_len / 2;
+
+            // Get factored eq tables from GruenSplitEq (same pattern as Stage 3)
+            const eq_tables = self.gruen_eq.getWindowEqTables(self.gruen_eq.current_index, 1);
+            const E_out = eq_tables.E_out;
+            const E_in = eq_tables.E_in;
+            const head_in_bits = eq_tables.head_in_bits;
+            const in_mask = (@as(usize, 1) << @intCast(head_in_bits)) -| 1;
+
+            const Ctx = struct {
+                ra_polys: []RaPoly,
+                E_out: []const F,
+                E_in: []const F,
+                in_mask: usize,
+                head_in_bits: usize,
+                M: usize,
+                N: usize,
+            };
+            const ctx = Ctx{
+                .ra_polys = self.ra_polys,
+                .E_out = E_out,
+                .E_in = E_in,
+                .in_mask = in_mask,
+                .head_in_bits = head_in_bits,
+                .M = self.M,
+                .N = self.N,
+            };
+
+            // Compute quotient q(x) = Σ_j E_prefix(j) * Σ_v Π_k ra_{v*M+k}(x)
+            // at 4 Toom points {1, 2, 3, ∞}
+            // Uses deferred E_out pattern: accumulate E_in*val as unreduced within each x_out
+            // block, then reduce and scale by E_out once per block (saves 1 mul per j).
+            const UPA = UnreducedProductAccum;
+            const mapFn = struct {
+                fn f(c: Ctx, start: usize, end: usize) [4]F {
+                    var outer_acc: [4]UPA = .{UPA.zero()} ** 4;
+                    var inner_acc: [4]UPA = .{UPA.zero()} ** 4;
+                    var prev_x_out: usize = if (start > 0) start >> @intCast(c.head_in_bits) else 0;
+                    var started = false;
+
+                    for (start..end) |j| {
+                        const x_out = j >> @intCast(c.head_in_bits);
+                        const x_in = j & c.in_mask;
+
+                        // Flush inner_acc when x_out changes
+                        if (started and x_out != prev_x_out) {
+                            const e_out = if (prev_x_out < c.E_out.len) c.E_out[prev_x_out] else F.one();
+                            for (0..4) |k| {
+                                outer_acc[k].addAssign(e_out.mulToProductAccum(inner_acc[k].reduce()));
+                                inner_acc[k] = UPA.zero();
+                            }
+                        }
+                        prev_x_out = x_out;
+                        started = true;
+
+                        const e_in = if (x_in < c.E_in.len) c.E_in[x_in] else F.one();
+
+                        // Accumulate sum of products across all virtual batches
+                        var virtual_sum = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                        for (0..c.N) |v| {
+                            var pairs: [4][2]F = undefined;
+                            for (0..c.M) |m_idx| {
+                                const idx = v * c.M + m_idx;
+                                pairs[m_idx] = .{
+                                    c.ra_polys[idx].getBoundCoeff(2 * j),
+                                    c.ra_polys[idx].getBoundCoeff(2 * j + 1),
+                                };
+                            }
+                            const prod_evals = evalLinearProd4(F, pairs);
+                            for (0..4) |k| virtual_sum[k] = virtual_sum[k].add(prod_evals[k]);
+                        }
+
+                        // Accumulate with E_in only (defer E_out to block boundary)
+                        for (0..4) |k| {
+                            inner_acc[k].addAssign(e_in.mulToProductAccum(virtual_sum[k]));
+                        }
+                    }
+                    // Flush final block
+                    if (started) {
+                        const e_out = if (prev_x_out < c.E_out.len) c.E_out[prev_x_out] else F.one();
+                        for (0..4) |k| {
+                            outer_acc[k].addAssign(e_out.mulToProductAccum(inner_acc[k].reduce()));
+                        }
+                    }
+                    return .{ outer_acc[0].reduce(), outer_acc[1].reduce(), outer_acc[2].reduce(), outer_acc[3].reduce() };
+                }
+            }.f;
+
+            const reduceFn = struct {
+                fn f(a: [4]F, b: [4]F) [4]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]), a[3].add(b[3]) };
+                }
+            }.f;
+
+            const sum_evals = if (self.pool) |pool|
+                pool.parallelReduce([4]F, half, .{F.zero()} ** 4, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
+
+            // Scale by current_scalar (accumulated eq from all previously bound variables)
+            // The inner loop computed quotient' = Σ E_out*E_in*product (without current_scalar).
+            // The actual quotient = current_scalar * quotient'.
+            const scalar = self.gruen_eq.current_scalar;
+            var scaled_evals = [4]F{
+                sum_evals[0].mul(scalar),
+                sum_evals[1].mul(scalar),
+                sum_evals[2].mul(scalar),
+                sum_evals[3].mul(scalar),
+            };
+
+            // Extract r_round from gruen_eq and reconstruct full polynomial
+            const r_round = self.gruen_eq.tau[self.gruen_eq.current_index - 1];
+            return poly_mod.UniPoly(F).finishMlesProductSumFromEvals(allocator, &scaled_evals, claim, r_round);
+        }
+
+        pub fn bindChallenge(self: *Self, r: F) !void {
+            const half = self.current_len / 2;
+
+            // Bind RA polynomials — O(K) for compressed states, O(T/2^round) for dense
+            const all_dense = self.ra_polys[0].isDense();
+            if (all_dense and self.gpu != null and half >= 16384) {
+                // GPU bind: total_committed ra_poly dense arrays
+                const gpu = self.gpu.?;
+                for (self.ra_polys) |*rp| {
+                    const dense = &rp.dense;
+                    const h = dense.current_len / 2;
+                    gpu.polyBindLow(dense.coeffs[0 .. h * 2], r, dense.coeffs[0..h]) catch {
+                        for (0..h) |jj| {
+                            dense.coeffs[jj] = dense.coeffs[2 * jj].add(r.mul(dense.coeffs[2 * jj + 1].sub(dense.coeffs[2 * jj])));
+                        }
+                    };
+                    dense.current_len = h;
+                }
+            } else if (all_dense) {
+                if (self.pool) |pool| {
+                    const BindCtx = struct { ra: []RaPoly, tc: usize, half: usize, r: F };
+                    const ctx = BindCtx{ .ra = self.ra_polys, .tc = self.total_committed, .half = half, .r = r };
+                    pool.parallelForForce(self.total_committed, ctx, struct {
+                        fn f(c: BindCtx, idx: usize) void {
+                            const dense = &c.ra[idx].dense;
+                            const h = dense.current_len / 2;
+                            for (0..h) |jj| {
+                                dense.coeffs[jj] = dense.coeffs[2 * jj].add(c.r.mul(dense.coeffs[2 * jj + 1].sub(dense.coeffs[2 * jj])));
+                            }
+                            dense.current_len = h;
+                        }
+                    }.f);
+                } else {
+                    for (self.ra_polys) |*p| try p.bind(r, self.allocator);
+                }
+            } else {
+                for (self.ra_polys) |*p| try p.bind(r, self.allocator);
+            }
+
+            // GruenSplitEq bind — O(1) instead of O(T/2^round)
+            self.gruen_eq.bind(r);
+
+            self.current_len = half;
+        }
+
+        pub fn getOpeningClaims(self: *const Self, allocator: Allocator, gamma_powers: []const F) ![]F {
+            var claims = try allocator.alloc(F, self.total_committed);
+            for (0..self.total_committed) |i| {
+                var claim = self.ra_polys[i].finalClaim();
+                // Undo gamma pre-scaling for first poly in each batch
+                const is_first_in_batch = (i % self.M == 0);
+                if (is_first_in_batch) {
+                    const virtual_batch = i / self.M;
+                    claim = claim.mul(gamma_powers[virtual_batch].inverse().?);
+                }
+                claims[i] = claim;
+            }
+            return claims;
+        }
+    };
+}
+
+// =============================================================================
+// Booleanity Prover Factory (extracted from stage6_prover.generateStage6Proof)
+// =============================================================================
+// Builds G-tables, eq-tables, and creates a BooleanityProver in a single call.
+// This was previously an ~1180-line inline block in generateStage6Proof.
+
+/// Initialize a BooleanityProver by building G-tables, eq-tables, and all
+/// supporting data structures from execution trace and Stage 5 challenge data.
+///
+/// Ownership: `booleanity_gammas_sq` and `booleanity_gammas_unsq` ownership
+/// transfers to the returned BooleanityProver (freed by its deinit).
+pub fn initBooleanityProver(
+    comptime F: type,
+    allocator: std.mem.Allocator,
+    thread_pool: ?*ThreadPool,
+    gpu_ops: ?*GpuPolyOps,
+    trace: *const ExecutionTrace,
+    stage5_challenges: []const F,
+    lookups_ra_r_cycle: []const F,
+    booleanity_gammas_sq: []F,
+    booleanity_gammas_unsq: []F,
+    instruction_d: usize,
+    bytecode_d: usize,
+    ram_d: usize,
+    log_k_chunk: usize,
+    n_cycle_vars: usize,
+    memory_layout: *const jolt_device.MemoryLayout,
+    pc_map: *const BytecodePCMapper,
+) !BooleanityProver(F) {
+    const total_bool_polys = instruction_d + bytecode_d + ram_d;
+
+    // r_address_bool: last log_k_chunk of Stage 5 address in LE
+    // Stage 5 address in BE: stage5_challenges[0..128] (MSB first since HighToLow binding)
+    // Reverse to LE: [ch[127], ch[126], ..., ch[0]]
+    // Last log_k_chunk: [ch[log_k_chunk-1], ..., ch[0]] = MSB bits in LE
+    var r_address_bool_le = try allocator.alloc(F, log_k_chunk);
+    // No defer free - BooleanityProver takes ownership of r_address_bool_le
+    for (0..log_k_chunk) |i| {
+        // In LE, element i corresponds to Stage5 address challenge (LOOKUPS_LOG_K - 1 - (LOOKUPS_LOG_K - log_k_chunk + i))
+        // = log_k_chunk - 1 - i
+        r_address_bool_le[i] = stage5_challenges[log_k_chunk - 1 - i];
+    }
+
+    // r_cycle_bool_le: same as lookups_ra_r_cycle (already LE)
+    // lookups_ra_r_cycle[i] = stage5_challenges[LOOKUPS_LOG_K + n_cycle_vars - 1 - i]
+
+    // Build eq_addr table for Phase 1 (LowToHigh binding)
+    // computeEqTable expects BE input (MSB-first) for its internal convention.
+    // Since r_address_bool_le is LE and we want LowToHigh binding,
+    // the eq table should be indexed such that eq_addr[k] = eq(r_addr_le, k)
+    // where bit 0 of k is the LSB, bound first.
+    // Jolt's LowToHigh EqPolynomial: eq(r, k) = Π_i (r[i]*k_i + (1-r[i])*(1-k_i))
+    // where r[0] corresponds to the LSB of k.
+    // For computeEqTable: it expects r in "BE" (MSB first), so reverse LE to BE.
+    var r_addr_bool_be_for_eq = try allocator.alloc(F, log_k_chunk);
+    defer allocator.free(r_addr_bool_be_for_eq);
+    for (0..log_k_chunk) |i| {
+        r_addr_bool_be_for_eq[i] = r_address_bool_le[log_k_chunk - 1 - i];
+    }
+    const eq_addr_bool_phase1 = try computeEqTable(F, allocator, r_addr_bool_be_for_eq, log_k_chunk);
+    defer allocator.free(eq_addr_bool_phase1); // Only used for debug verification below
+
+    // Build a SINGLE eq_cycle table used for BOTH G construction AND Phase 2 halving.
+    //
+    // The table ordering must match Jolt's evals_parallel which iterates .rev():
+    //   bit 0 of index j -> r_cycle[n-1] (MSB)
+    // For our computeEqTable (forward iteration), input[0] must be MSB = lookups[0].
+    // So input = lookups_ra_r_cycle directly (BE, MSB first).
+    //
+    // Using the SAME table for G construction and Phase 2 ensures consistency:
+    // Phase 1 reduces address variables with G tables weighted by eq_cycle[j],
+    // and Phase 2 halves the same eq_cycle[j] table. The running claim from Phase 1
+    // equals the initial Phase 2 polynomial sum, satisfying the transition.
+    //
+    // After Phase 2 halving with LowToHigh binding, the final eq value equals
+    // eq(challenges, r_cycle_BE) = eq(challenges, rev(r_cycle_LE)), matching
+    // Jolt's verifier which computes combined_r_cycle = rev(r_cycle_LE).
+    // Build GruenSplitEq for Booleanity Phase 2 (O(1) bind)
+    // Build flat eq table (LE convention, proven correct for G-tables)
+    const eq_cycle_bool_phase2 = try computeEqTableParallel(F, allocator, lookups_ra_r_cycle, n_cycle_vars, thread_pool);
+    // Build GruenSplitEq with REVERSED r_cycle so its binding order matches
+    // the LE flat table: GruenSplitEq binds tau[n-1] first, which is
+    // reversed[n-1] = lookups_ra_r_cycle[0] = challenge MSB = bit 0 in LE.
+    var r_cycle_for_gruen = try allocator.alloc(F, n_cycle_vars);
+    defer allocator.free(r_cycle_for_gruen);
+    for (0..n_cycle_vars) |ri| r_cycle_for_gruen[ri] = lookups_ra_r_cycle[n_cycle_vars - 1 - ri];
+    const bool_gruen_eq = try poly_mod.GruenSplitEqPolynomial(F).init(allocator, r_cycle_for_gruen);
+    // eq_cycle_bool_phase2 is NOT deferred - shared with BooleanityProver
+
+    // Build G tables: G_i[k] = Sigma_j eq(r_cycle_fixed, j) * [chunk_i(j) == k]
+    const T_val: usize = @as(usize, 1) << @intCast(n_cycle_vars);
+    const K_val: usize = @as(usize, 1) << @intCast(log_k_chunk);
+    var G_tables = try allocator.alloc([]F, total_bool_polys);
+    for (0..total_bool_polys) |i| {
+        G_tables[i] = try allocator.alloc(F, K_val);
+        @memset(G_tables[i], F.zero());
+    }
+
+    // OPTIMIZATION: Pre-compute chunk indices for all T steps in ONE parallel pass.
+    // This avoids calling computeLookupIndex 38 times per step (once per poly).
+    // Each step produces: instruction chunks [0..instr_d], bytecode chunks [0..bc_d], ram chunks [0..ram_d]
+    // Stored as u8 per chunk (K < 256).
+    const MAX_BOOL_POLYS = 48; // instruction_d(32) + bytecode_d(~3-5) + ram_d(~2-3)
+    std.debug.assert(total_bool_polys <= MAX_BOOL_POLYS);
+
+    // Allocate per-step chunk index arrays: chunk_idx[j][poly_i] = chunk value (or K_val for invalid)
+    const chunk_idx = try allocator.alloc([MAX_BOOL_POLYS]u8, T_val);
+    defer allocator.free(chunk_idx);
+
+    // Phase 1: Single-pass pre-compute all chunk indices (parallel over T)
+    {
+        const ChunkPreCtx = struct {
+            steps: []const tracer.TraceStep,
+            pc_map_ptr: *const BytecodePCMapper,
+            mem_layout: *const jolt_device.MemoryLayout,
+            instr_d: usize,
+            bc_d: usize,
+            rm_d: usize,
+            lkc: usize,
+            K: usize,
+            total_polys: usize,
+            chunk_idx: [][MAX_BOOL_POLYS]u8,
+        };
+        const pre_ctx = ChunkPreCtx{
+            .steps = trace.steps.items,
+            .pc_map_ptr = pc_map,
+            .mem_layout = memory_layout,
+            .instr_d = instruction_d,
+            .bc_d = bytecode_d,
+            .rm_d = ram_d,
+            .lkc = log_k_chunk,
+            .K = K_val,
+            .total_polys = total_bool_polys,
+            .chunk_idx = chunk_idx,
+        };
+        const precomputeFn = struct {
+            fn f(c: ChunkPreCtx, j: usize) void {
+                const step = c.steps[j];
+                const sentinel: u8 = @intCast(c.K); // K < 256, use K as "invalid" sentinel
+
+                // InstructionRa: compute lookup_idx ONCE, extract all chunks
+                const lookup_idx = computeLookupIndex(step);
+                const mask: u128 = (@as(u128, 1) << @intCast(c.lkc)) - 1;
+                for (0..c.instr_d) |i| {
+                    const shift = c.lkc * (c.instr_d - 1 - i);
+                    const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
+                    c.chunk_idx[j][i] = if (chunk_val < c.K) @intCast(chunk_val) else sentinel;
+                }
+
+                // BytecodeRa: compute PC ONCE, extract all chunks
+                const pc_idx: u64 = @intCast(c.pc_map_ptr.getPCForStep(step));
+                for (0..c.bc_d) |i| {
+                    const chunk_val = extractChunkMSB(pc_idx, i, c.bc_d, c.lkc);
+                    c.chunk_idx[j][c.instr_d + i] = if (chunk_val < c.K) @intCast(chunk_val) else sentinel;
+                }
+
+                // RamRa: compute address ONCE, extract all chunks
+                if (step.memory_addr) |addr| {
+                    if (addr != 0) {
+                        if (c.mem_layout.remapAddress(addr)) |raddr| {
+                            for (0..c.rm_d) |i| {
+                                const chunk_val = extractChunkMSB(raddr, i, c.rm_d, c.lkc);
+                                c.chunk_idx[j][c.instr_d + c.bc_d + i] = if (chunk_val < c.K) @intCast(chunk_val) else sentinel;
+                            }
+                        } else {
+                            for (0..c.rm_d) |i| c.chunk_idx[j][c.instr_d + c.bc_d + i] = sentinel;
+                        }
+                    } else {
+                        for (0..c.rm_d) |i| c.chunk_idx[j][c.instr_d + c.bc_d + i] = sentinel;
+                    }
+                } else {
+                    for (0..c.rm_d) |i| c.chunk_idx[j][c.instr_d + c.bc_d + i] = sentinel;
+                }
+            }
+        }.f;
+        if (thread_pool) |pool| {
+            pool.parallelForForce(T_val, pre_ctx, precomputeFn);
+        } else {
+            for (0..T_val) |j| precomputeFn(pre_ctx, j);
+        }
+    }
+
+    // Phase 2: Build G tables using pre-computed indices (parallel over polys)
+    // Each poly's inner loop is now a simple scatter-add with O(1) index lookup.
+    if (thread_pool) |pool| {
+        const GBuildCtx = struct {
+            eq_cycle: []const F,
+            chunk_idx: [][MAX_BOOL_POLYS]u8,
+            K: usize,
+            T: usize,
+            G_out: [][]F,
+        };
+        const g_ctx = GBuildCtx{
+            .eq_cycle = eq_cycle_bool_phase2,
+            .chunk_idx = chunk_idx,
+            .K = K_val,
+            .T = T_val,
+            .G_out = G_tables,
+        };
+        pool.parallelForForce(total_bool_polys, g_ctx, struct {
+            fn f(c: GBuildCtx, poly_i: usize) void {
+                const G_i = c.G_out[poly_i];
+                const sentinel: u8 = @intCast(c.K);
+                for (0..c.T) |j| {
+                    const cv = c.chunk_idx[j][poly_i];
+                    if (cv != sentinel) {
+                        const eq_j = c.eq_cycle[j];
+                        G_i[cv] = G_i[cv].add(eq_j);
+                    }
+                }
+            }
+        }.f);
+    } else {
+        // Sequential: single pass over T, scatter to all polys per step
+        for (0..T_val) |j| {
+            const eq_j = eq_cycle_bool_phase2[j];
+            if (eq_j.eql(F.zero())) continue;
+            const sentinel: u8 = @intCast(K_val);
+            for (0..total_bool_polys) |i| {
+                const cv = chunk_idx[j][i];
+                if (cv != sentinel) {
+                    G_tables[i][cv] = G_tables[i][cv].add(eq_j);
+                }
+            }
+        }
+    }
+
+    // Use the independently sampled gammas directly (matching Jolt's challenge_vector_optimized)
+    // Jolt formula: Sigma_i gamma_i * (ra_i^2 - ra_i), where gamma_i are independent challenges
+    // booleanity_gammas ownership transfers to BooleanityProver (freed by deinit)
+    const gamma_sq = booleanity_gammas_sq;
+
+    // Verify G tables: Sigma_k G_i[k] should equal Sigma_j eq(r_cycle, j) = 1
+    // Actually Sigma_k G_i[k] = Sigma_j eq(r_cycle, j) * Sigma_k [chunk_i(j)==k]
+    //                     = Sigma_j eq(r_cycle, j) * 1 = 1 (since chunk_i(j) always hits exactly one k)
+    // Wait no: only if all j have valid chunks. Noop steps may have chunk_val=0 added.
+    // Let's just print the first few G tables for debug.
+    dbg("[BOOL_PROVER] G tables built: N={}, K={}, T={}\n", .{ total_bool_polys, K_val, T_val });
+    for (0..@min(3, total_bool_polys)) |i| {
+        var g_sum = F.zero();
+        for (0..K_val) |k| g_sum = g_sum.add(G_tables[i][k]);
+        const gs_be = g_sum.toBytesBE();
+        dbg("  G[{}] sum_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+            i, gs_be[31], gs_be[30], gs_be[29], gs_be[28], gs_be[27], gs_be[26], gs_be[25], gs_be[24],
+        });
+    }
+
+    // Initial claim verification: Sigma_k eq_addr[k] * Sigma_i gamma^{2i} * (G_i[k]^2 - G_i[k])
+    // This should be zero since ra_i(k,j) is binary.
+    // Actually that's the FULL sum; at random r it won't be zero for individual terms.
+    // But the initial claim IS zero.
+    {
+        var init_sum = F.zero();
+        for (0..K_val) |k| {
+            var q_val = F.zero();
+            for (0..total_bool_polys) |i| {
+                const g_k = G_tables[i][k];
+                q_val = q_val.add(gamma_sq[i].mul(g_k.mul(g_k).sub(g_k)));
+            }
+            init_sum = init_sum.add(eq_addr_bool_phase1[k].mul(q_val));
+        }
+        const is_be = init_sum.toBytesBE();
+        dbg("[BOOL_PROVER] Initial sum (should be ~0) LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+            is_be[31], is_be[30], is_be[29], is_be[28], is_be[27], is_be[26], is_be[25], is_be[24],
+        });
+    }
+
+    var prover = try BooleanityProver(F).init(
+        allocator,
+        G_tables,
+        r_address_bool_le,
+        bool_gruen_eq,
+        eq_cycle_bool_phase2,
+        gamma_sq,
+        booleanity_gammas_unsq,
+        total_bool_polys,
+        log_k_chunk,
+        n_cycle_vars,
+        trace,
+        instruction_d,
+        bytecode_d,
+        ram_d,
+        memory_layout,
+        pc_map,
+    );
+    prover.pool = thread_pool;
+    prover.gpu = gpu_ops;
+    return prover;
 }

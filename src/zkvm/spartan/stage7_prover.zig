@@ -18,7 +18,7 @@ const poly_mod = @import("zolt_arith").poly;
 const transcripts = @import("zolt_arith").transcripts;
 const jolt_types = @import("../jolt_types.zig");
 
-const stage6_mod = @import("stage6_prover.zig");
+const stage6_helpers = @import("stage6_helpers.zig");
 
 pub fn Stage7Result(comptime F: type) type {
     return struct {
@@ -232,7 +232,7 @@ pub fn Stage7Prover(comptime F: type) type {
             for (0..s6_n_cycle_vars) |i| {
                 r_cycle_le[i] = s6_challenges[s6_bool_start + s6_log_k_chunk + i];
             }
-            const eq_cycle = try stage6_mod.computeEqTableParallel(F, self.allocator, r_cycle_le, s6_n_cycle_vars, self.thread_pool);
+            const eq_cycle = try stage6_helpers.computeEqTableParallel(F, self.allocator, r_cycle_le, s6_n_cycle_vars, self.thread_pool);
             defer self.allocator.free(eq_cycle);
 
             // Compute G_i polynomials: G_i(k) = Σ_j eq(r_cycle, j) · (addr_chunk_i(j) == k ? 1 : 0)
@@ -296,7 +296,7 @@ pub fn Stage7Prover(comptime F: type) type {
                             const eq_j = c.eq_cycle_inner[j];
                             // InstructionRa
                             {
-                                const lookup_idx = stage6_mod.computeLookupIndex(step);
+                                const lookup_idx = stage6_helpers.computeLookupIndex(step);
                                 for (0..c.instruction_d_inner) |i| {
                                     const shift = c.log_k_chunk_inner * (c.instruction_d_inner - 1 - i);
                                     const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & c.mask128_inner);
@@ -309,7 +309,7 @@ pub fn Stage7Prover(comptime F: type) type {
                             {
                                 const pc_idx = c.pc_map_inner.getPCForStep(step);
                                 for (0..c.bytecode_d_inner) |i| {
-                                    const chunk_val = stage6_mod.extractChunkMSB(@intCast(pc_idx), i, c.bytecode_d_inner, c.log_k_chunk_inner);
+                                    const chunk_val = stage6_helpers.extractChunkMSB(@intCast(pc_idx), i, c.bytecode_d_inner, c.log_k_chunk_inner);
                                     const ra_idx = c.instruction_d_inner + i;
                                     if (chunk_val < c.k_chunk_inner) {
                                         local_G[ra_idx][chunk_val] = local_G[ra_idx][chunk_val].add(eq_j);
@@ -322,7 +322,7 @@ pub fn Stage7Prover(comptime F: type) type {
                                     if (addr != 0) {
                                         if (c.mem_layout_inner.remapAddress(addr)) |raddr| {
                                             for (0..c.ram_d_inner) |i| {
-                                                const chunk_val = stage6_mod.extractChunkMSB(raddr, i, c.ram_d_inner, c.log_k_chunk_inner);
+                                                const chunk_val = stage6_helpers.extractChunkMSB(raddr, i, c.ram_d_inner, c.log_k_chunk_inner);
                                                 const ra_idx = c.instruction_d_inner + c.bytecode_d_inner + i;
                                                 if (chunk_val < c.k_chunk_inner) {
                                                     local_G[ra_idx][chunk_val] = local_G[ra_idx][chunk_val].add(eq_j);
@@ -365,7 +365,7 @@ pub fn Stage7Prover(comptime F: type) type {
                     const step = trace.steps.items[j];
                     const eq_j = eq_cycle[j];
                     {
-                        const lookup_idx = stage6_mod.computeLookupIndex(step);
+                        const lookup_idx = stage6_helpers.computeLookupIndex(step);
                         for (0..s6_instruction_d) |i| {
                             const shift = s6_log_k_chunk * (s6_instruction_d - 1 - i);
                             const mask: u128 = (@as(u128, 1) << @intCast(s6_log_k_chunk)) - 1;
@@ -378,7 +378,7 @@ pub fn Stage7Prover(comptime F: type) type {
                     {
                         const pc_idx = pc_map.getPCForStep(step);
                         for (0..s6_bytecode_d) |i| {
-                            const chunk_val = stage6_mod.extractChunkMSB(@intCast(pc_idx), i, s6_bytecode_d, s6_log_k_chunk);
+                            const chunk_val = stage6_helpers.extractChunkMSB(@intCast(pc_idx), i, s6_bytecode_d, s6_log_k_chunk);
                             const ra_idx = s6_instruction_d + i;
                             if (chunk_val < k_chunk) {
                                 G[ra_idx][chunk_val] = G[ra_idx][chunk_val].add(eq_j);
@@ -390,7 +390,7 @@ pub fn Stage7Prover(comptime F: type) type {
                             if (addr != 0) {
                                 if (memory_layout.remapAddress(addr)) |raddr| {
                                     for (0..s6_ram_d) |i| {
-                                        const chunk_val = stage6_mod.extractChunkMSB(raddr, i, s6_ram_d, s6_log_k_chunk);
+                                        const chunk_val = stage6_helpers.extractChunkMSB(raddr, i, s6_ram_d, s6_log_k_chunk);
                                         const ra_idx = s6_instruction_d + s6_bytecode_d + i;
                                         if (chunk_val < k_chunk) {
                                             G[ra_idx][chunk_val] = G[ra_idx][chunk_val].add(eq_j);
@@ -419,7 +419,7 @@ pub fn Stage7Prover(comptime F: type) type {
             for (0..s6_log_k_chunk) |i| {
                 r_addr_bool_le[i] = r_addr_bool_be[s6_log_k_chunk - 1 - i];
             }
-            var eq_bool = try stage6_mod.computeEqTableParallel(F, self.allocator, r_addr_bool_le, s6_log_k_chunk, self.thread_pool);
+            var eq_bool = try stage6_helpers.computeEqTableParallel(F, self.allocator, r_addr_bool_le, s6_log_k_chunk, self.thread_pool);
             defer self.allocator.free(eq_bool);
 
             var eq_virt = try self.allocator.alloc([]F, N);
@@ -433,7 +433,7 @@ pub fn Stage7Prover(comptime F: type) type {
                 for (0..s6_log_k_chunk) |ci| {
                     r_virt_le[ci] = r_addr_virt[i][s6_log_k_chunk - 1 - ci];
                 }
-                eq_virt[i] = try stage6_mod.computeEqTableParallel(F, self.allocator, r_virt_le, s6_log_k_chunk, self.thread_pool);
+                eq_virt[i] = try stage6_helpers.computeEqTableParallel(F, self.allocator, r_virt_le, s6_log_k_chunk, self.thread_pool);
                 self.allocator.free(r_virt_le);
             }
 
@@ -605,7 +605,7 @@ pub fn Stage7Prover(comptime F: type) type {
                     // rho_rev = reversed sumcheck challenges
 
                     // Print initial eq table values for first few entries
-                    const eq_bool_check = try stage6_mod.computeEqTable(F, self.allocator, r_addr_bool_be, s6_log_k_chunk);
+                    const eq_bool_check = try stage6_helpers.computeEqTable(F, self.allocator, r_addr_bool_be, s6_log_k_chunk);
                     defer self.allocator.free(eq_bool_check);
                 }
 

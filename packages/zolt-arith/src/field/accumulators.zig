@@ -1297,8 +1297,8 @@ test "Barrett reduce round-trip: mulU64Unreduced STRESS (large N, large values)"
 
     for (0..N) |i| {
         // Use large field values (close to modulus) and large scalars
-        const w = BN254Scalar.fromU64(@as(u64, i) * 0x123456789ABCDEF + 0xFEDCBA9876543210);
-        const scalar: u64 = @as(u64, i) * 0xABCD + 0xFFFF;
+        const w = BN254Scalar.fromU64(@as(u64, i) *% 0x123456789ABCDEF +% 0xFEDCBA9876543210);
+        const scalar: u64 = @as(u64, i) *% 0xABCD +% 0xFFFF;
         folded.addAssign(mulU64Unreduced(w, scalar));
         expected = expected.add(w.mul(BN254Scalar.fromU64(scalar)));
     }
@@ -1313,8 +1313,8 @@ test "Barrett reduce round-trip: mulU64Unreduced STRESS (large N, large values)"
         var folded2 = FoldedMulU64.zero();
         var expected2 = BN254Scalar.zero();
         for (0..N) |i| {
-            const w = BN254Scalar.fromU64(@as(u64, i) * 0x123456789ABCDEF + 0xFEDCBA9876543210);
-            const scalar: u64 = @as(u64, i) * 0xABCD + 0xFFFF;
+            const w = BN254Scalar.fromU64(@as(u64, i) *% 0x123456789ABCDEF +% 0xFEDCBA9876543210);
+            const scalar: u64 = @as(u64, i) *% 0xABCD +% 0xFFFF;
             folded2.addAssign(mulU64Unreduced(w, scalar));
             expected2 = expected2.add(w.mul(BN254Scalar.fromU64(scalar)));
             const check = reduceMulU64(folded2);

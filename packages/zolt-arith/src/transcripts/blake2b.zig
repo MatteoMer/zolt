@@ -13,6 +13,7 @@
 //! - Challenges are 128-bit (16 bytes)
 
 const std = @import("std");
+const testdata = @import("../testdata.zig");
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
@@ -350,6 +351,88 @@ pub fn Blake2bTranscript(comptime F: type) type {
 const testing = std.testing;
 const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
 
+test "blake2b rfc7693 vectors" {
+    const fixture_text = @embedFile("../testdata/transcripts/blake2b_rfc7693.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(3, line, '|');
+
+        var input_buf: [256]u8 = undefined;
+        const input = try testdata.parseHexIntoBuffer(fields[1], &input_buf);
+        const expected_digest = try testdata.parseHexBytesExact(32, fields[2]);
+
+        var hasher = Blake2b256.init(.{});
+        hasher.update(input);
+
+        var actual_digest: [32]u8 = undefined;
+        hasher.final(&actual_digest);
+        try testing.expectEqualSlices(u8, &expected_digest, &actual_digest);
+    }
+}
+
+test "jolt compatibility: fixture-backed state vectors" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+    const fixture_text = @embedFile("../testdata/transcripts/blake2b_jolt_state_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(6, line, '|');
+
+        var transcript = Transcript.init(fields[1]);
+        const op_kind = fields[2];
+        const op_arg = fields[3];
+
+        if (mem.eql(u8, op_kind, "init")) {
+            // No-op: expected state is the initialized transcript state.
+        } else if (mem.eql(u8, op_kind, "raw_label")) {
+            transcript.rawAppendLabel(op_arg);
+        } else if (mem.eql(u8, op_kind, "raw_bytes_hex")) {
+            var bytes_buf: [256]u8 = undefined;
+            const bytes = try testdata.parseHexIntoBuffer(op_arg, &bytes_buf);
+            transcript.rawAppendBytes(bytes);
+        } else if (mem.eql(u8, op_kind, "raw_scalar_u64")) {
+            transcript.rawAppendScalar(BN254Scalar.fromU64(try testdata.parseDecimal(u64, op_arg)));
+        } else {
+            return error.UnknownTranscriptVectorOperation;
+        }
+
+        const expected_state = try testdata.parseHexBytesExact(32, fields[4]);
+        try testing.expectEqualSlices(u8, &expected_state, &transcript.state);
+        try testing.expectEqual(try testdata.parseDecimal(u32, fields[5]), transcript.n_rounds);
+    }
+}
+
+test "jolt compatibility: fixture-backed challenge vectors" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+    const fixture_text = @embedFile("../testdata/transcripts/blake2b_jolt_challenge_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(6, line, '|');
+
+        if (!mem.eql(u8, fields[3], "-")) {
+            var transcript_u128 = Transcript.init(fields[1]);
+            transcript_u128.rawAppendLabel(fields[2]);
+            try testing.expectEqual(try testdata.parseDecimal(u128, fields[3]), transcript_u128.challengeU128());
+        }
+
+        if (!mem.eql(u8, fields[4], "-") and !mem.eql(u8, fields[5], "-")) {
+            var transcript_limbs = Transcript.init(fields[1]);
+            transcript_limbs.rawAppendLabel(fields[2]);
+            const challenge = transcript_limbs.challengeScalar128Bits();
+
+            try testing.expectEqual(@as(u64, 0), challenge.limbs[0]);
+            try testing.expectEqual(@as(u64, 0), challenge.limbs[1]);
+            try testing.expectEqual(try std.fmt.parseInt(u64, fields[4], 16), challenge.limbs[2]);
+            try testing.expectEqual(try std.fmt.parseInt(u64, fields[5], 16), challenge.limbs[3]);
+        }
+    }
+}
+
 test "blake2b transcript: basic initialization" {
     const Transcript = Blake2bTranscript(BN254Scalar);
     const t = Transcript.init("test_label");
@@ -495,10 +578,10 @@ test "jolt compatibility: rawAppendLabel matches old appendMessage" {
     t.rawAppendLabel("hello");
 
     const expected_state = [_]u8{
-        0x04, 0x5d, 0xb7, 0x95, 0xb0, 0x5d, 0x42, 0xb5,
-        0xc7, 0x9d, 0x6d, 0xbb, 0xf2, 0x0c, 0xbe, 0x09,
-        0x26, 0x36, 0xdf, 0x45, 0xbb, 0x1c, 0x80, 0xf2,
-        0xa4, 0xbe, 0x9b, 0x66, 0x4b, 0xad, 0x5e, 0x0d,
+        0x3a, 0x25, 0x86, 0x87, 0x9f, 0x2c, 0x7b, 0x91,
+        0x1e, 0x0f, 0x00, 0x6e, 0x6c, 0x3c, 0xc9, 0xee,
+        0x03, 0x50, 0x7c, 0x28, 0xb8, 0x18, 0x13, 0x82,
+        0x83, 0x50, 0x8b, 0x19, 0x2d, 0x43, 0x16, 0x8c,
     };
 
     try testing.expectEqualSlices(u8, &expected_state, &t.state);
@@ -538,10 +621,10 @@ test "jolt compatibility: rawAppendBytes" {
     t.rawAppendBytes(&[_]u8{ 0x01, 0x02, 0x03 });
 
     const expected_after_bytes = [_]u8{
-        0xc4, 0x21, 0x29, 0xc2, 0x59, 0x57, 0x65, 0x9c,
-        0xf7, 0x63, 0x38, 0xf5, 0xd2, 0xcb, 0xad, 0xd9,
-        0x5d, 0x1b, 0xf5, 0xd3, 0x57, 0xfc, 0xf9, 0xa1,
-        0xe9, 0x62, 0xc3, 0xc6, 0xb5, 0xed, 0x37, 0x27,
+        0xd5, 0x23, 0x1a, 0x0c, 0x53, 0xbf, 0x96, 0xca,
+        0x56, 0x3e, 0x5d, 0x13, 0xae, 0x11, 0x09, 0x01,
+        0xfb, 0xe8, 0x06, 0xe2, 0x2f, 0x0e, 0xbb, 0x52,
+        0xc7, 0x0f, 0xed, 0xf7, 0x8f, 0xb2, 0x6f, 0x82,
     };
 
     try testing.expectEqualSlices(u8, &expected_after_bytes, &t.state);
@@ -569,10 +652,10 @@ test "jolt compatibility: rawAppendU64 and rawAppendLabel" {
     t.rawAppendU64(12345);
 
     const expected_state = [_]u8{
-        0x14, 0x1b, 0xf2, 0x3f, 0x43, 0x6f, 0x74, 0x1b,
-        0x0f, 0x9d, 0x78, 0x0f, 0xac, 0x3e, 0x62, 0x93,
-        0x62, 0x74, 0x78, 0x7c, 0xde, 0x4f, 0x59, 0x55,
-        0x73, 0xa5, 0x32, 0x6c, 0x5a, 0x75, 0x5d, 0x85,
+        0x71, 0xbe, 0x51, 0xcf, 0x72, 0x3b, 0xed, 0x98,
+        0xc6, 0x6e, 0x2f, 0x6f, 0x85, 0xe4, 0x05, 0xf8,
+        0x65, 0x69, 0x4e, 0xa8, 0x17, 0x5a, 0x74, 0x97,
+        0xb4, 0x7b, 0xbe, 0x0e, 0x99, 0x50, 0x94, 0xc5,
     };
 
     try testing.expectEqualSlices(u8, &expected_state, &t.state);
@@ -587,10 +670,10 @@ test "jolt compatibility: rawAppendScalar" {
     t.rawAppendScalar(scalar);
 
     const expected_state = [_]u8{
-        0x0d, 0x8c, 0x5a, 0x29, 0x4a, 0x38, 0x74, 0x89,
-        0x89, 0xe3, 0x60, 0x61, 0x7d, 0x26, 0x1a, 0x04,
-        0x73, 0x5a, 0x30, 0x54, 0xff, 0xf0, 0xf2, 0x9c,
-        0xa3, 0x6c, 0x9d, 0x32, 0x28, 0x4e, 0x3a, 0x7c,
+        0xe6, 0x5e, 0x77, 0x8c, 0x52, 0x61, 0xda, 0x8b,
+        0x62, 0xcb, 0x73, 0x8c, 0xbc, 0x54, 0x03, 0x3e,
+        0xc4, 0x33, 0xd0, 0xcb, 0xe7, 0x3e, 0xf3, 0x7d,
+        0xad, 0x13, 0x37, 0xc0, 0x60, 0xbe, 0xad, 0x31,
     };
 
     try testing.expectEqualSlices(u8, &expected_state, &t.state);

@@ -9,4 +9,5 @@ node_modules/
 jolt/
 bench/results/
 jolt-bench/target/
+tools/zolt-arith-diff/arkworks-fixtures/target/
 flamegraph.svg

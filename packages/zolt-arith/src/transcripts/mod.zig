@@ -375,6 +375,10 @@ pub fn PoseidonTranscript(comptime F: type) type {
     };
 }
 
+test {
+    _ = @import("blake2b.zig");
+}
+
 test "transcript basic" {
     const F = @import("../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;

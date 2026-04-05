@@ -265,59 +265,39 @@ pub fn decompressG2(bytes: *const [64]u8) ?G2Point {
     return G2Point.fromCoords(x, y);
 }
 
-/// Compute square root in Fp2
-/// Uses the algorithm for extension fields
+/// Compute square root in Fp2 = Fp[u]/(u^2 + 1).
+///
+/// Given n = a + bu, finds x = c + du such that x^2 = n.
+/// Uses the identity c^2 = (a + t)/2 where t = sqrt(a^2 + b^2),
+/// with fallback to c^2 = (a - t)/2. Exactly one of these is a QR
+/// in Fp when b != 0 (since p ≡ 3 mod 4 for BN254).
 pub fn fp2Sqrt(n: Fp2) ?Fp2 {
     if (n.isZero()) return Fp2.zero();
 
-    // For Fp2 = Fp[u]/(u^2 + 1), we use a specialized algorithm.
-    // Let n = a + bu. We want to find x = c + du such that x^2 = n.
-    // (c + du)^2 = c^2 - d^2 + 2cdu = a + bu
-    // So: c^2 - d^2 = a, 2cd = b
-
-    // If b = 0: n = a is in Fp, so sqrt(n) = sqrt(a) or sqrt(a)*u
+    // If b = 0: n = a is in Fp, so sqrt(n) = sqrt(a) or sqrt(-a)*u
     if (n.c1.isZero()) {
-        const sqrt_c0 = tonelliShanks(n.c0);
-        if (sqrt_c0) |s| {
-            return Fp2.init(s, Fp.zero());
-        }
-        // Try sqrt(-a) * u
-        const neg_c0 = n.c0.neg();
-        const sqrt_neg_c0 = tonelliShanks(neg_c0);
-        if (sqrt_neg_c0) |s| {
-            return Fp2.init(Fp.zero(), s);
-        }
+        if (tonelliShanks(n.c0)) |s| return Fp2.init(s, Fp.zero());
+        if (tonelliShanks(n.c0.neg())) |s| return Fp2.init(Fp.zero(), s);
         return null;
     }
 
-    // General case: use the formula
-    // |n| = sqrt(a^2 + b^2) (in Fp, this is n * n.conjugate())
+    // General case: t = sqrt(a^2 + b^2) in Fp
     const norm = n.c0.square().add(n.c1.square());
-    const norm_sqrt = tonelliShanks(norm) orelse return null;
-
-    // alpha = (a + |n|) / 2
+    const t = tonelliShanks(norm) orelse return null;
     const two_inv = Fp.fromU64(2).inverse() orelse return null;
-    const alpha = n.c0.add(norm_sqrt).mul(two_inv);
-    const alpha_sqrt = tonelliShanks(alpha);
 
-    if (alpha_sqrt) |c| {
-        // d = b / (2c)
-        const two_c_inv = c.add(c).inverse() orelse return null;
-        const d = n.c1.mul(two_c_inv);
-        return Fp2.init(c, d);
+    // Try c^2 = (a + t) / 2; if not QR, try c^2 = (a - t) / 2
+    var x0 = n.c0.add(t).mul(two_inv);
+    var c_opt = tonelliShanks(x0);
+    if (c_opt == null) {
+        x0 = n.c0.sub(t).mul(two_inv);
+        c_opt = tonelliShanks(x0);
     }
 
-    // Try the other case: alpha = (a - |n|) / 2
-    const alpha2 = n.c0.sub(norm_sqrt).mul(two_inv);
-    const alpha2_sqrt = tonelliShanks(alpha2.neg());
-    if (alpha2_sqrt) |d| {
-        // c = b / (2d)
-        const two_d_inv = d.add(d).inverse() orelse return null;
-        const c = n.c1.mul(two_d_inv);
-        return Fp2.init(c, d);
-    }
-
-    return null;
+    // d = b / (2c)
+    const c = c_opt orelse return null;
+    const d = n.c1.mul(c.add(c).inverse() orelse return null);
+    return Fp2.init(c, d);
 }
 
 /// Check if Fp2 element a is "positive" compared to b
@@ -399,21 +379,21 @@ test "g1 point compression identity" {
 }
 
 test "g2 point compression roundtrip" {
-    // Test with generator point - G2 decompression requires precise curve constants
-    // Skip the sqrt verification for now, just test that compression/decompression
-    // works for identity
+    // Identity roundtrip
     const identity = G2Point.identity();
     const compressed_id = compressG2(identity);
     const decompressed_id = decompressG2(&compressed_id);
     try std.testing.expect(decompressed_id != null);
     try std.testing.expect(decompressed_id.?.infinity);
 
-    // For non-identity points, just verify compression produces correct format
+    // Generator roundtrip
     const g2_gen = G2Point.generator();
     const compressed = compressG2(g2_gen);
-
-    // Should have flag bits set correctly (not infinity)
-    try std.testing.expect(compressed[63] & 0x40 == 0); // Not infinity
+    const decompressed = decompressG2(&compressed);
+    try std.testing.expect(decompressed != null);
+    try std.testing.expect(!decompressed.?.infinity);
+    try std.testing.expect(decompressed.?.x.eql(g2_gen.x));
+    try std.testing.expect(decompressed.?.y.eql(g2_gen.y));
 }
 
 test "g2 point compression identity" {
@@ -468,4 +448,140 @@ test "g2 compressed bytes for arkworks validation" {
     file.writeAll(&two_compressed) catch return;
     file.writeAll(&compressed_42) catch return;
     std.debug.print("Wrote 3 compressed G2 points to /tmp/zolt_g2_test_points.bin\n", .{});
+}
+
+fn fpToBytesLE(value: Fp) [32]u8 {
+    const standard = value.fromMontgomery();
+    var bytes: [32]u8 = undefined;
+    inline for (0..4) |i| {
+        std.mem.writeInt(u64, bytes[i * 8 ..][0..8], standard.limbs[i], .little);
+    }
+    return bytes;
+}
+
+fn fpFromBytesLE(bytes: *const [32]u8) Fp {
+    var limbs: [4]u64 = undefined;
+    inline for (0..4) |i| {
+        limbs[i] = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .little);
+    }
+    const raw = Fp{ .limbs = limbs };
+    return raw.toMontgomery();
+}
+
+test "g1 point compression fixture vectors" {
+    const testdata = @import("../../testdata.zig");
+    const fixture_text = @embedFile("../../testdata/point_compression/g1_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(4, line, '|');
+
+        const expected_compressed = try testdata.parseHexBytesExact(32, fields[3]);
+
+        if (fields[1].len == 0) {
+            const identity = G1Point.identity();
+            const actual_compressed = compressG1(identity);
+            try std.testing.expectEqualSlices(u8, &expected_compressed, &actual_compressed);
+        } else {
+            const x_bytes = try testdata.parseHexBytesExact(32, fields[1]);
+            const y_bytes = try testdata.parseHexBytesExact(32, fields[2]);
+            const point = G1Point{ .x = fpFromBytesLE(&x_bytes), .y = fpFromBytesLE(&y_bytes), .infinity = false };
+
+            const actual_compressed = compressG1(point);
+            try std.testing.expectEqualSlices(u8, &expected_compressed, &actual_compressed);
+
+            const decompressed = decompressG1(&actual_compressed);
+            try std.testing.expect(decompressed != null);
+            try std.testing.expectEqualSlices(u8, &x_bytes, &fpToBytesLE(decompressed.?.x));
+            try std.testing.expectEqualSlices(u8, &y_bytes, &fpToBytesLE(decompressed.?.y));
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 6);
+}
+
+test "g2 point compression fixture vectors" {
+    const testdata = @import("../../testdata.zig");
+    const fixture_text = @embedFile("../../testdata/point_compression/g2_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(6, line, '|');
+
+        if (fields[1].len == 0) {
+            const identity = pairing.G2Point.identity();
+            const compressed = compressG2(identity);
+            const decompressed = decompressG2(&compressed);
+            try std.testing.expect(decompressed != null);
+            try std.testing.expect(decompressed.?.infinity);
+        } else {
+            const x_c0 = try testdata.parseHexBytesExact(32, fields[1]);
+            const x_c1 = try testdata.parseHexBytesExact(32, fields[2]);
+            const y_c0 = try testdata.parseHexBytesExact(32, fields[3]);
+            const y_c1 = try testdata.parseHexBytesExact(32, fields[4]);
+            const point = pairing.G2Point{
+                .x = Fp2.init(fpFromBytesLE(&x_c0), fpFromBytesLE(&x_c1)),
+                .y = Fp2.init(fpFromBytesLE(&y_c0), fpFromBytesLE(&y_c1)),
+                .infinity = false,
+            };
+
+            // Verify full compress → decompress roundtrip
+            const compressed = compressG2(point);
+            const decompressed = decompressG2(&compressed);
+            try std.testing.expect(decompressed != null);
+            try std.testing.expect(!decompressed.?.infinity);
+            try std.testing.expectEqualSlices(u8, &x_c0, &fpToBytesLE(decompressed.?.x.c0));
+            try std.testing.expectEqualSlices(u8, &x_c1, &fpToBytesLE(decompressed.?.x.c1));
+            try std.testing.expectEqualSlices(u8, &y_c0, &fpToBytesLE(decompressed.?.y.c0));
+            try std.testing.expectEqualSlices(u8, &y_c1, &fpToBytesLE(decompressed.?.y.c1));
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 6);
+}
+
+test "fp2Sqrt correctness" {
+    const g2_gen = G2Point.generator();
+
+    // sqrt(y²) should give back ±y for the G2 generator
+    const y_squared = g2_gen.y.square();
+    const sqrt_result = fp2Sqrt(y_squared);
+    try std.testing.expect(sqrt_result != null);
+    const s = sqrt_result.?;
+    try std.testing.expect(s.square().eql(y_squared));
+    try std.testing.expect(s.eql(g2_gen.y) or s.eql(g2_gen.y.neg()));
+
+    // sqrt(0) = 0
+    const zero_sqrt = fp2Sqrt(Fp2.zero());
+    try std.testing.expect(zero_sqrt != null);
+    try std.testing.expect(zero_sqrt.?.isZero());
+
+    // Pure real: sqrt(4) = 2
+    const four = Fp2.init(Fp.fromU64(4), Fp.zero());
+    const sqrt_four = fp2Sqrt(four);
+    try std.testing.expect(sqrt_four != null);
+    try std.testing.expect(sqrt_four.?.square().eql(four));
+
+    // Pure real, non-QR: sqrt(-1) should give purely imaginary result
+    const neg_one = Fp2.init(Fp.one().neg(), Fp.zero());
+    const sqrt_neg_one = fp2Sqrt(neg_one);
+    try std.testing.expect(sqrt_neg_one != null);
+    try std.testing.expect(sqrt_neg_one.?.square().eql(neg_one));
+
+    // Multiple G2 points: verify y² roundtrip for [2]G, [42]G
+    const two_g = g2_gen.scalarMulU64(2);
+    const ys2 = two_g.y.square();
+    const s2 = fp2Sqrt(ys2);
+    try std.testing.expect(s2 != null);
+    try std.testing.expect(s2.?.square().eql(ys2));
+
+    const g42 = g2_gen.scalarMulU64(42);
+    const ys42 = g42.y.square();
+    const s42 = fp2Sqrt(ys42);
+    try std.testing.expect(s42 != null);
+    try std.testing.expect(s42.?.square().eql(ys42));
 }

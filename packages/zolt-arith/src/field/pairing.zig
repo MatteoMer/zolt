@@ -1175,6 +1175,42 @@ test "batchedMillerLoopAffine matches prepared" {
     try std.testing.expect(fe_prep.eql(fe_affine));
 }
 
+// ============================================================================
+// Fixture-backed vector tests (arkworks-validated)
+// ============================================================================
+
+const testdata = @import("../testdata.zig");
+const msm_mod = @import("../msm/mod.zig");
+const G1MSM = msm_mod.MSM(BN254Scalar, Fp);
+
+test "pairing fixture vectors" {
+    const fixture_text = @embedFile("../testdata/pairing/generator_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    var case_count: usize = 0;
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(4, line, '|');
+
+        const g1_scalar = BN254Scalar.fromU64(try testdata.parseDecimal(u64, fields[1]));
+        const g2_scalar = BN254Scalar.fromU64(try testdata.parseDecimal(u64, fields[2]));
+
+        const g1_affine = G1MSM.scalarMul(G1PointInFp.generator(), g1_scalar).toAffine();
+        const g1 = G1PointFp{
+            .x = g1_affine.x,
+            .y = g1_affine.y,
+            .infinity = g1_affine.infinity,
+        };
+        const g2_pt = G2Point.generator().scalarMul(g2_scalar);
+
+        const expected = try testdata.parseHexBytesExact(384, fields[3]);
+        const actual = pairingFp(g1, g2_pt).toBytes();
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 5);
+}
+
 test {
     // Run tests from sub-modules
     _ = extensions;

@@ -1092,7 +1092,6 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                 .raf_flag = computed_raf_flag,
             };
         }
-
     };
 }
 

@@ -1683,7 +1683,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 .allocator = self.allocator,
             };
         }
-
     };
 }
 

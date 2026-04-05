@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const testdata = @import("../testdata.zig");
 
 /// LLVM carry/borrow intrinsics — map to single adc/sbb instructions on x86-64.
 /// Wrapped in a comptime-conditional struct so they are not emitted on non-x86 targets.
@@ -174,6 +175,206 @@ pub inline fn arm64Sub192(a: [3]u64, b: [3]u64) [3]u64 {
           [b2] "r" (b[2]),
         : .{ .nzcv = true });
     return .{ r0, r1, r2 };
+}
+
+/// ARM64 4-limb Montgomery squaring.
+/// Computes a^2 * R^{-1} mod p using the "product then reduce" approach:
+///   Phase 1: compute the 8-limb product a^2 using 10 muls (6 cross + 4 diagonal)
+///            instead of the 16 muls required for generic a*b.
+///   Phase 2: 4 iterations of Montgomery reduction (same as CIOS mul).
+/// Total: ~52 multiply instructions vs ~68 for generic mul(a, a).
+fn arm64MontgomerySquare256(a: *const [4]u64, mod: *const [4]u64, inv: u64) [4]u64 {
+    if (comptime builtin.cpu.arch != .aarch64) unreachable;
+    var r0: u64 = undefined;
+    var r1: u64 = undefined;
+    var r2: u64 = undefined;
+    var r3: u64 = undefined;
+    asm volatile (
+    // ── Load a[0..3] into x4-x7 ──
+        \\ ldp x4, x5, [x13]
+        \\ ldp x6, x7, [x13, #16]
+        //
+        // ════════════════════════════════════════════════
+        // Phase 1: Compute 8-limb product a^2
+        // Strategy: compute cross products (i<j), accumulate,
+        //           double, then add diagonal products.
+        // Accumulator: P[0..7] in {x0, x1, x2, x3, x14, x15, x16, x17}
+        // ════════════════════════════════════════════════
+        //
+        // Cross products accumulated column by column with proper carry:
+        //
+        // a0*a1 → P[1], P[2]
+        \\ mul  x1, x4, x5
+        \\ umulh x2, x4, x5
+        //
+        // a0*a2 → P[2], P[3]
+        \\ mul  x19, x4, x6
+        \\ umulh x3, x4, x6
+        \\ adds x2, x2, x19
+        \\ adc  x3, x3, xzr
+        //
+        // a0*a3 → P[3], P[4]
+        \\ mul  x19, x4, x7
+        \\ umulh x14, x4, x7
+        \\ adds x3, x3, x19
+        \\ adc  x14, x14, xzr
+        //
+        // a1*a2 → P[3], P[4], carry→P[5]
+        \\ mul  x19, x5, x6
+        \\ umulh x20, x5, x6
+        \\ adds x3, x3, x19
+        \\ adcs x14, x14, x20
+        \\ adc  x15, xzr, xzr
+        //
+        // a1*a3 → P[4], P[5], carry→P[6]
+        \\ mul  x19, x5, x7
+        \\ umulh x20, x5, x7
+        \\ adds x14, x14, x19
+        \\ adcs x15, x15, x20
+        \\ adc  x16, xzr, xzr
+        //
+        // a2*a3 → P[5], P[6], carry→P[7]
+        \\ mul  x19, x6, x7
+        \\ umulh x20, x6, x7
+        \\ adds x15, x15, x19
+        \\ adcs x16, x16, x20
+        \\ adc  x17, xzr, xzr
+        //
+        // Step 2: Double cross products (shift left by 1 bit)
+        \\ adds x1, x1, x1
+        \\ adcs x2, x2, x2
+        \\ adcs x3, x3, x3
+        \\ adcs x14, x14, x14
+        \\ adcs x15, x15, x15
+        \\ adcs x16, x16, x16
+        \\ adc  x17, x17, x17
+        //
+        // Step 3: Add diagonal products a[i]^2
+        // a[0]^2 → P[0..1]
+        \\ mul  x0, x4, x4       // lo(a0^2) → P[0]
+        \\ umulh x19, x4, x4     // hi(a0^2)
+        \\ adds x1, x1, x19
+        // a[1]^2 → P[2..3]
+        \\ mul  x19, x5, x5
+        \\ umulh x20, x5, x5
+        \\ adcs x2, x2, x19
+        \\ adcs x3, x3, x20
+        // a[2]^2 → P[4..5]
+        \\ mul  x19, x6, x6
+        \\ umulh x20, x6, x6
+        \\ adcs x14, x14, x19
+        \\ adcs x15, x15, x20
+        // a[3]^2 → P[6..7]
+        \\ mul  x19, x7, x7
+        \\ umulh x20, x7, x7
+        \\ adcs x16, x16, x19
+        \\ adc  x17, x17, x20
+        //
+        // Full product: P[0..7] = {x0, x1, x2, x3, x14, x15, x16, x17}
+        //
+        // ════════════════════════════════════════════════
+        // Phase 2: Montgomery reduction (4 iterations)
+        // Each iteration: k = P[0]*inv, add k*mod, shift right by 64
+        // Load mod[0..3] into x8-x11
+        // ════════════════════════════════════════════════
+        \\ ldp x8, x9, [x26]
+        \\ ldp x10, x11, [x26, #16]
+        //
+        // Iteration 0: window {x0,x1,x2,x3,x14}, carry→x15
+        \\ mul  x4, x0, x12
+        \\ mul  x19, x4, x8
+        \\ umulh x20, x4, x8
+        \\ mul  x21, x4, x9
+        \\ umulh x22, x4, x9
+        \\ mul  x23, x4, x10
+        \\ umulh x24, x4, x10
+        \\ mul  x25, x4, x11
+        \\ umulh x5, x4, x11
+        \\ adds x0, x0, x19
+        \\ adcs x1, x1, x20
+        \\ adcs x2, x2, x22
+        \\ adcs x3, x3, x24
+        \\ adcs x14, x14, x5
+        \\ adc  x15, x15, xzr
+        \\ adds x1, x1, x21
+        \\ adcs x2, x2, x23
+        \\ adcs x3, x3, x25
+        \\ adcs x14, x14, xzr
+        \\ adc  x15, x15, xzr
+        //
+        // Iteration 1: window {x1,x2,x3,x14,x15}, carry→x16
+        \\ mul  x4, x1, x12
+        \\ mul  x19, x4, x8
+        \\ umulh x20, x4, x8
+        \\ mul  x21, x4, x9
+        \\ umulh x22, x4, x9
+        \\ mul  x23, x4, x10
+        \\ umulh x24, x4, x10
+        \\ mul  x25, x4, x11
+        \\ umulh x5, x4, x11
+        \\ adds x1, x1, x19
+        \\ adcs x2, x2, x20
+        \\ adcs x3, x3, x22
+        \\ adcs x14, x14, x24
+        \\ adcs x15, x15, x5
+        \\ adc  x16, x16, xzr
+        \\ adds x2, x2, x21
+        \\ adcs x3, x3, x23
+        \\ adcs x14, x14, x25
+        \\ adcs x15, x15, xzr
+        \\ adc  x16, x16, xzr
+        //
+        // Iteration 2: window {x2,x3,x14,x15,x16}, carry→x17
+        \\ mul  x4, x2, x12
+        \\ mul  x19, x4, x8
+        \\ umulh x20, x4, x8
+        \\ mul  x21, x4, x9
+        \\ umulh x22, x4, x9
+        \\ mul  x23, x4, x10
+        \\ umulh x24, x4, x10
+        \\ mul  x25, x4, x11
+        \\ umulh x5, x4, x11
+        \\ adds x2, x2, x19
+        \\ adcs x3, x3, x20
+        \\ adcs x14, x14, x22
+        \\ adcs x15, x15, x24
+        \\ adcs x16, x16, x5
+        \\ adc  x17, x17, xzr
+        \\ adds x3, x3, x21
+        \\ adcs x14, x14, x23
+        \\ adcs x15, x15, x25
+        \\ adcs x16, x16, xzr
+        \\ adc  x17, x17, xzr
+        //
+        // Iteration 3
+        \\ mul  x4, x3, x12
+        \\ mul  x19, x4, x8
+        \\ umulh x20, x4, x8
+        \\ mul  x21, x4, x9
+        \\ umulh x22, x4, x9
+        \\ mul  x23, x4, x10
+        \\ umulh x24, x4, x10
+        \\ mul  x25, x4, x11
+        \\ umulh x5, x4, x11
+        \\ adds x3, x3, x19
+        \\ adcs x14, x14, x20
+        \\ adcs x15, x15, x22
+        \\ adcs x16, x16, x24
+        \\ adc  x17, x17, x5
+        \\ adds x14, x14, x21
+        \\ adcs x15, x15, x23
+        \\ adcs x16, x16, x25
+        \\ adc  x17, x17, xzr
+        // Final result: {x14, x15, x16, x17}
+        : [_r0] "={x14}" (r0),
+          [_r1] "={x15}" (r1),
+          [_r2] "={x16}" (r2),
+          [_r3] "={x17}" (r3),
+        : [_a] "{x13}" (a),
+          [_mod] "{x26}" (mod),
+          [_inv] "{x12}" (inv),
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x8 = true, .x9 = true, .x10 = true, .x11 = true, .x14 = true, .x15 = true, .x16 = true, .x17 = true, .x19 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .x25 = true, .x26 = true, .nzcv = true, .memory = true });
+    return .{ r0, r1, r2, r3 };
 }
 
 /// ARM64 4-limb CIOS Montgomery multiplication.
@@ -1098,12 +1299,203 @@ pub fn MontgomeryField(
         pub inline fn square(self: Self) Self {
             if (!@inComptime() and comptime use_arm64_asm) {
                 const mod_arr: [4]u64 = modulus;
-                var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &self.limbs, &mod_arr, montgomery_inv) };
+                var r = Self{ .limbs = arm64MontgomerySquare256(&self.limbs, &mod_arr, montgomery_inv) };
                 if (!r.lessThanModulus()) r = r.subtractModulus();
                 return r;
             }
-            if (!@inComptime() and comptime use_asm_mul) return self.montgomeryMulX86(self);
+            if (!@inComptime() and comptime use_asm_mul) return self.montgomerySquareX86();
             return self.montgomeryMul(self);
+        }
+
+        /// x86-64 dedicated Montgomery squaring using ADX (mulxq/adcxq/adoxq).
+        /// Product-then-reduce: 10 multiplies for a^2, then 4 CIOS reduction iterations.
+        fn montgomerySquareX86(self: Self) Self {
+            const a = self.limbs;
+            const mod_arr: [4]u64 = modulus;
+
+            var r0: u64 = undefined;
+            var r1: u64 = undefined;
+            var r2: u64 = undefined;
+            var r3: u64 = undefined;
+
+            asm volatile (
+            // ═════════════════════════��═════════════
+            // Phase 1: 8-limb product a^2
+            // P[0..7] in r8,r9,r10,r11,r12,r13,r15,rcx
+            // ═══════════════════════════════════════
+            //
+            // Cross products, column by column:
+            //
+            // a[0]*a[1] → P[1],P[2]
+                \\movq (%%rdi), %%rdx
+                \\mulxq 8(%%rdi), %%r9, %%r10
+                //
+                // a[0]*a[2] → P[2],P[3]
+                \\mulxq 16(%%rdi), %%rax, %%r11
+                \\addq %%rax, %%r10
+                \\adcq $0, %%r11
+                //
+                // a[0]*a[3] → P[3],P[4]
+                \\mulxq 24(%%rdi), %%rax, %%r12
+                \\addq %%rax, %%r11
+                \\adcq $0, %%r12
+                //
+                // a[1]*a[2] → P[3],P[4],carry→P[5]
+                \\movq 8(%%rdi), %%rdx
+                \\mulxq 16(%%rdi), %%rax, %%rcx
+                \\addq %%rax, %%r11
+                \\adcq %%rcx, %%r12
+                \\movq $0, %%r13
+                \\adcq $0, %%r13
+                //
+                // a[1]*a[3] → P[4],P[5],carry→P[6]
+                \\mulxq 24(%%rdi), %%rax, %%rcx
+                \\addq %%rax, %%r12
+                \\adcq %%rcx, %%r13
+                \\movq $0, %%r15
+                \\adcq $0, %%r15
+                //
+                // a[2]*a[3] → P[5],P[6],carry→P[7]
+                \\movq 16(%%rdi), %%rdx
+                \\mulxq 24(%%rdi), %%rax, %%rcx
+                \\addq %%rax, %%r13
+                \\adcq %%rcx, %%r15
+                \\movq $0, %%rsi
+                \\adcq $0, %%rsi
+                //
+                // Double cross products: P[1..7] *= 2
+                \\addq %%r9, %%r9
+                \\adcq %%r10, %%r10
+                \\adcq %%r11, %%r11
+                \\adcq %%r12, %%r12
+                \\adcq %%r13, %%r13
+                \\adcq %%r15, %%r15
+                \\adcq %%rsi, %%rsi
+                //
+                // Add diagonal products with carry chain
+                // a[0]^2 → P[0],P[1]
+                \\movq (%%rdi), %%rdx
+                \\mulxq %%rdx, %%r8, %%rax
+                \\addq %%rax, %%r9
+                // a[1]^2 → P[2],P[3]
+                \\movq 8(%%rdi), %%rdx
+                \\mulxq %%rdx, %%rax, %%rcx
+                \\adcq %%rax, %%r10
+                \\adcq %%rcx, %%r11
+                // a[2]^2 → P[4],P[5]
+                \\movq 16(%%rdi), %%rdx
+                \\mulxq %%rdx, %%rax, %%rcx
+                \\adcq %%rax, %%r12
+                \\adcq %%rcx, %%r13
+                // a[3]^2 → P[6],P[7]
+                \\movq 24(%%rdi), %%rdx
+                \\mulxq %%rdx, %%rax, %%rcx
+                \\adcq %%rax, %%r15
+                \\adcq %%rcx, %%rsi
+                //
+                // Product: P[0..7] = {r8,r9,r10,r11,r12,r13,r15,rsi}
+                //
+                // ═══════════════════════════════════════
+                // Phase 2: Montgomery reduction (4 iterations)
+                // Uses ADX dual carry chains (adcxq/adoxq)
+                // ═══════════════════════════════════════
+                //
+                // Iteration 0: k = P[0]*inv, window {r8..r12}, carry→r13
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r8, %%rdx, %%rax
+                \\xorq %%rcx, %%rcx
+                \\mulxq (%%r14), %%rax, %%rcx
+                \\adcxq %%r8, %%rax
+                \\adoxq %%rcx, %%r9
+                \\mulxq 8(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r9
+                \\adoxq %%rcx, %%r10
+                \\mulxq 16(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r10
+                \\adoxq %%rcx, %%r11
+                \\mulxq 24(%%r14), %%rax, %%rcx
+                \\movq $0, %%r8
+                \\adcxq %%rax, %%r11
+                \\adoxq %%rcx, %%r12
+                \\adcxq %%r8, %%r12
+                \\adoxq %%r8, %%r13
+                \\adcxq %%r8, %%r13
+                //
+                // Iteration 1: window {r9..r13}, carry→r15
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r9, %%rdx, %%rax
+                \\xorq %%rcx, %%rcx
+                \\mulxq (%%r14), %%rax, %%rcx
+                \\adcxq %%r9, %%rax
+                \\adoxq %%rcx, %%r10
+                \\mulxq 8(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r10
+                \\adoxq %%rcx, %%r11
+                \\mulxq 16(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r11
+                \\adoxq %%rcx, %%r12
+                \\mulxq 24(%%r14), %%rax, %%rcx
+                \\movq $0, %%r9
+                \\adcxq %%rax, %%r12
+                \\adoxq %%rcx, %%r13
+                \\adcxq %%r9, %%r13
+                \\adoxq %%r9, %%r15
+                \\adcxq %%r9, %%r15
+                //
+                // Iteration 2: window {r10..r15}, carry→rsi
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r10, %%rdx, %%rax
+                \\xorq %%rcx, %%rcx
+                \\mulxq (%%r14), %%rax, %%rcx
+                \\adcxq %%r10, %%rax
+                \\adoxq %%rcx, %%r11
+                \\mulxq 8(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r11
+                \\adoxq %%rcx, %%r12
+                \\mulxq 16(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r12
+                \\adoxq %%rcx, %%r13
+                \\mulxq 24(%%r14), %%rax, %%rcx
+                \\movq $0, %%r10
+                \\adcxq %%rax, %%r13
+                \\adoxq %%rcx, %%r15
+                \\adcxq %%r10, %%r15
+                \\adoxq %%r10, %%rsi
+                \\adcxq %%r10, %%rsi
+                //
+                // Iteration 3: window {r11..rsi} (last)
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r11, %%rdx, %%rax
+                \\xorq %%rcx, %%rcx
+                \\mulxq (%%r14), %%rax, %%rcx
+                \\adcxq %%r11, %%rax
+                \\adoxq %%rcx, %%r12
+                \\mulxq 8(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r12
+                \\adoxq %%rcx, %%r13
+                \\mulxq 16(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r13
+                \\adoxq %%rcx, %%r15
+                \\mulxq 24(%%r14), %%rax, %%rcx
+                \\movq $0, %%r11
+                \\adcxq %%rax, %%r15
+                \\adoxq %%rcx, %%rsi
+                \\adcxq %%r11, %%rsi
+                // Result: {r12, r13, r15, rsi}
+                : [_r0] "={r12}" (r0),
+                  [_r1] "={r13}" (r1),
+                  [_r2] "={r15}" (r2),
+                  [_r3] "={rsi}" (r3),
+                : [_a] "{rdi}" (&a),
+                  [_mod] "{r14}" (&mod_arr),
+                  [_inv] "{rbx}" (montgomery_inv),
+                : .{ .rax = true, .rcx = true, .rdx = true, .rsi = true, .r8 = true, .r9 = true, .r10 = true, .r11 = true, .r12 = true, .r13 = true, .r15 = true, .cc = true, .memory = true });
+
+            var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
+            if (!result.lessThanModulus()) {
+                result = result.subtractModulus();
+            }
+            return result;
         }
 
         /// Multiply by a signed 128-bit integer
@@ -1676,6 +2068,172 @@ pub const BN254Scalar = struct {
         return result;
     }
 
+    /// x86-64 dedicated Montgomery squaring for BN254Scalar.
+    fn montgomerySquareX86(self: Self) Self {
+        const a = self.limbs;
+        const mod_arr: [4]u64 = BN254_MODULUS;
+
+        var r0: u64 = undefined;
+        var r1: u64 = undefined;
+        var r2: u64 = undefined;
+        var r3: u64 = undefined;
+
+        asm volatile (
+        // Phase 1: 8-limb product a^2
+        // P[0..7] in r8,r9,r10,r11,r12,r13,r15,rsi
+        //
+        // Cross products, column by column:
+            \\movq (%%rdi), %%rdx
+            \\mulxq 8(%%rdi), %%r9, %%r10
+            \\mulxq 16(%%rdi), %%rax, %%r11
+            \\addq %%rax, %%r10
+            \\adcq $0, %%r11
+            \\mulxq 24(%%rdi), %%rax, %%r12
+            \\addq %%rax, %%r11
+            \\adcq $0, %%r12
+            \\movq 8(%%rdi), %%rdx
+            \\mulxq 16(%%rdi), %%rax, %%rcx
+            \\addq %%rax, %%r11
+            \\adcq %%rcx, %%r12
+            \\movq $0, %%r13
+            \\adcq $0, %%r13
+            \\mulxq 24(%%rdi), %%rax, %%rcx
+            \\addq %%rax, %%r12
+            \\adcq %%rcx, %%r13
+            \\movq $0, %%r15
+            \\adcq $0, %%r15
+            \\movq 16(%%rdi), %%rdx
+            \\mulxq 24(%%rdi), %%rax, %%rcx
+            \\addq %%rax, %%r13
+            \\adcq %%rcx, %%r15
+            \\movq $0, %%rsi
+            \\adcq $0, %%rsi
+            //
+            // Double cross products
+            \\addq %%r9, %%r9
+            \\adcq %%r10, %%r10
+            \\adcq %%r11, %%r11
+            \\adcq %%r12, %%r12
+            \\adcq %%r13, %%r13
+            \\adcq %%r15, %%r15
+            \\adcq %%rsi, %%rsi
+            //
+            // Add diagonal products
+            \\movq (%%rdi), %%rdx
+            \\mulxq %%rdx, %%r8, %%rax
+            \\addq %%rax, %%r9
+            \\movq 8(%%rdi), %%rdx
+            \\mulxq %%rdx, %%rax, %%rcx
+            \\adcq %%rax, %%r10
+            \\adcq %%rcx, %%r11
+            \\movq 16(%%rdi), %%rdx
+            \\mulxq %%rdx, %%rax, %%rcx
+            \\adcq %%rax, %%r12
+            \\adcq %%rcx, %%r13
+            \\movq 24(%%rdi), %%rdx
+            \\mulxq %%rdx, %%rax, %%rcx
+            \\adcq %%rax, %%r15
+            \\adcq %%rcx, %%rsi
+            //
+            // Phase 2: Montgomery reduction with ADX dual carry chains
+            //
+            // Iteration 0
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r8, %%rdx, %%rax
+            \\xorq %%rcx, %%rcx
+            \\mulxq (%%r14), %%rax, %%rcx
+            \\adcxq %%r8, %%rax
+            \\adoxq %%rcx, %%r9
+            \\mulxq 8(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r9
+            \\adoxq %%rcx, %%r10
+            \\mulxq 16(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r10
+            \\adoxq %%rcx, %%r11
+            \\mulxq 24(%%r14), %%rax, %%rcx
+            \\movq $0, %%r8
+            \\adcxq %%rax, %%r11
+            \\adoxq %%rcx, %%r12
+            \\adcxq %%r8, %%r12
+            \\adoxq %%r8, %%r13
+            \\adcxq %%r8, %%r13
+            //
+            // Iteration 1
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r9, %%rdx, %%rax
+            \\xorq %%rcx, %%rcx
+            \\mulxq (%%r14), %%rax, %%rcx
+            \\adcxq %%r9, %%rax
+            \\adoxq %%rcx, %%r10
+            \\mulxq 8(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r10
+            \\adoxq %%rcx, %%r11
+            \\mulxq 16(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r11
+            \\adoxq %%rcx, %%r12
+            \\mulxq 24(%%r14), %%rax, %%rcx
+            \\movq $0, %%r9
+            \\adcxq %%rax, %%r12
+            \\adoxq %%rcx, %%r13
+            \\adcxq %%r9, %%r13
+            \\adoxq %%r9, %%r15
+            \\adcxq %%r9, %%r15
+            //
+            // Iteration 2
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r10, %%rdx, %%rax
+            \\xorq %%rcx, %%rcx
+            \\mulxq (%%r14), %%rax, %%rcx
+            \\adcxq %%r10, %%rax
+            \\adoxq %%rcx, %%r11
+            \\mulxq 8(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r11
+            \\adoxq %%rcx, %%r12
+            \\mulxq 16(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r12
+            \\adoxq %%rcx, %%r13
+            \\mulxq 24(%%r14), %%rax, %%rcx
+            \\movq $0, %%r10
+            \\adcxq %%rax, %%r13
+            \\adoxq %%rcx, %%r15
+            \\adcxq %%r10, %%r15
+            \\adoxq %%r10, %%rsi
+            \\adcxq %%r10, %%rsi
+            //
+            // Iteration 3 (last, no carry beyond)
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r11, %%rdx, %%rax
+            \\xorq %%rcx, %%rcx
+            \\mulxq (%%r14), %%rax, %%rcx
+            \\adcxq %%r11, %%rax
+            \\adoxq %%rcx, %%r12
+            \\mulxq 8(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r12
+            \\adoxq %%rcx, %%r13
+            \\mulxq 16(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r13
+            \\adoxq %%rcx, %%r15
+            \\mulxq 24(%%r14), %%rax, %%rcx
+            \\movq $0, %%r11
+            \\adcxq %%rax, %%r15
+            \\adoxq %%rcx, %%rsi
+            \\adcxq %%r11, %%rsi
+            : [_r0] "={r12}" (r0),
+              [_r1] "={r13}" (r1),
+              [_r2] "={r15}" (r2),
+              [_r3] "={rsi}" (r3),
+            : [_a] "{rdi}" (&a),
+              [_mod] "{r14}" (&mod_arr),
+              [_inv] "{rbx}" (BN254_INV),
+            : .{ .rax = true, .rcx = true, .rdx = true, .rsi = true, .r8 = true, .r9 = true, .r10 = true, .r11 = true, .r12 = true, .r13 = true, .r15 = true, .cc = true, .memory = true });
+
+        var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
+        if (!result.lessThanModulus()) {
+            result = result.subtractModulus();
+        }
+        return result;
+    }
+
     /// Fused multiply-accumulate: computes a[0]*b[0] + a[1]*b[1] with only
     /// 2 Montgomery reductions instead of 3 (vs separate mul + mul + add).
     pub fn sumOfProducts(a: [2]Self, b: [2]Self) Self {
@@ -1964,11 +2522,11 @@ pub const BN254Scalar = struct {
     /// Saves ~25% multiplications compared to naive multiplication
     pub inline fn square(self: Self) Self {
         if (!@inComptime() and comptime use_arm64_asm) {
-            var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &self.limbs, &BN254_MODULUS, BN254_INV) };
+            var r = Self{ .limbs = arm64MontgomerySquare256(&self.limbs, &BN254_MODULUS, BN254_INV) };
             if (!r.lessThanModulus()) r = r.subtractModulus();
             return r;
         }
-        if (!@inComptime() and comptime use_asm_mul) return self.montgomeryMulX86(self);
+        if (!@inComptime() and comptime use_asm_mul) return self.montgomerySquareX86();
         // Optimized squaring: we can compute a^2 with fewer multiplications
         // Since (a0 + a1*2^64 + a2*2^128 + a3*2^192)^2 has symmetric terms
         // For example: 2*a0*a1 instead of a0*a1 + a1*a0
@@ -2198,6 +2756,54 @@ pub const SimdOps = simd_ops.SimdOps;
 // Verify BN254Scalar implements JoltField interface
 comptime {
     _ = JoltField(BN254Scalar);
+}
+
+fn scalarFromFixtureValue(value: u128) BN254Scalar {
+    if (value <= std.math.maxInt(u64)) {
+        return BN254Scalar.fromU64(@intCast(value));
+    }
+    return BN254Scalar.fromU128(value);
+}
+
+test "bn254 scalar arithmetic vectors" {
+    const fixture_text = @embedFile("../testdata/field/bn254_scalar_arithmetic.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(6, line, '|');
+
+        const a = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[1]));
+        const b = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[2]));
+        const expected_sum = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[3]));
+        const expected_diff = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[4]));
+        const expected_product = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[5]));
+
+        try std.testing.expect(a.add(b).eql(expected_sum));
+        try std.testing.expect(a.sub(b).eql(expected_diff));
+        try std.testing.expect(a.mul(b).eql(expected_product));
+    }
+}
+
+test "bn254 scalar serialization vectors" {
+    const fixture_text = @embedFile("../testdata/field/bn254_scalar_serialization.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(4, line, '|');
+
+        const value = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[1]));
+        const expected_le = try testdata.parseHexBytesExact(32, fields[2]);
+        const expected_be = try testdata.parseHexBytesExact(32, fields[3]);
+
+        const actual_le = value.toBytes();
+        const actual_be = value.toBytesBE();
+        try std.testing.expectEqualSlices(u8, &expected_le, &actual_le);
+        try std.testing.expectEqualSlices(u8, &expected_be, &actual_be);
+        try std.testing.expect(value.eql(BN254Scalar.fromBytes(&expected_le)));
+        try std.testing.expect(value.eql(BN254Scalar.fromBytesBE(&expected_be)));
+    }
 }
 
 test "bn254 scalar basic operations" {

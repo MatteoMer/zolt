@@ -2347,7 +2347,7 @@ test "AllSuffixPolys init and deinit" {
     const empty_indices = [_]u128{};
     const empty_tables = [_]i8{};
 
-    try polys.initPhase(0, 8, &empty_u_evals, &empty_indices, &empty_tables);
+    try polys.initPhase(0, 8, &empty_u_evals, &empty_indices, &empty_tables, null, std.testing.allocator, null);
 }
 
 test "TableSuffixPolys bind" {

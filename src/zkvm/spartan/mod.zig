@@ -50,6 +50,14 @@ pub const stage5_prover = @import("stage5_prover.zig");
 pub const Stage5BatchedProver = stage5_prover.Stage5BatchedProver;
 pub const Stage5Result = stage5_prover.Stage5Result;
 
+// Stage 5 RamRaClaimReduction prover (Instance 1, extracted from stage5_prover)
+pub const stage5_ram_ra = @import("stage5_ram_ra.zig");
+pub const RamRaClaimReductionProver = stage5_ram_ra.RamRaClaimReductionProver;
+
+// Stage 5 LookupsReadRaf prover (Instance 2, extracted from stage5_prover)
+pub const stage5_lookups = @import("stage5_lookups.zig");
+pub const LookupsReadRafProver = stage5_lookups.LookupsReadRafProver;
+
 // Stage 6 prover (BytecodeReadRaf, HammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction)
 pub const stage6_prover = @import("stage6_prover.zig");
 pub const Stage6BatchedProver = stage6_prover.Stage6BatchedProver;
@@ -163,8 +171,11 @@ test "spartan types compile" {
 test {
     // Discover tests in sub-modules (refAllDecls doesn't traverse @import'd modules)
     _ = @import("ra_poly.zig");
+    _ = @import("stage6_bytecode_raf.zig");
+    _ = @import("stage6_helpers.zig");
     _ = @import("stage6_prover.zig");
     _ = @import("stage5_prover.zig");
     _ = @import("stage5_instances.zig");
+    _ = @import("stage5_lookups.zig");
     _ = @import("sumcheck_helpers.zig");
 }

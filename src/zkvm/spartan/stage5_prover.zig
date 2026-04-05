@@ -43,6 +43,14 @@ const UnreducedProductAccum = @import("zolt_arith").field.UnreducedProductAccum;
 // Import extracted instance helpers
 const stage5_inst = @import("stage5_instances.zig");
 
+// Import extracted RamRaClaimReduction prover (Instance 1)
+const stage5_ram_ra = @import("stage5_ram_ra.zig");
+pub const RamRaClaimReductionProver = stage5_ram_ra.RamRaClaimReductionProver;
+
+// Import extracted LookupsReadRaf prover (Instance 2)
+const stage5_lookups_mod = @import("stage5_lookups.zig");
+pub const LookupsReadRafProver = stage5_lookups_mod.LookupsReadRafProver;
+
 // Import prefix-suffix decomposition modules
 const lookup_table_mod = @import("../lookup_table/mod.zig");
 const AllSuffixPolys = lookup_table_mod.AllSuffixPolys;
@@ -1597,8 +1605,26 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // During inactive rounds, the claim halves each round.
             // By the time the instance becomes active, claim = unscaled input.
             var regs_val_current_claim = regs_scaled; // Instance 0: RegistersValEvaluation (scaled by 2^128)
-            // Instance 1: RamRaClaimReduction - initialized later after computed_ram_ra_input is computed
-            var ram_ra_current_claim: F = undefined;
+            // Instance 1: RamRaClaimReduction - uses extracted prover
+            var ram_ra_prover = try RamRaClaimReductionProver(F).init(
+                self.allocator,
+                self.thread_pool,
+                self.gpu_ops,
+                gamma,
+                claim_raf,
+                claim_rw,
+                claim_val,
+                n_cycle_vars,
+                log_ram_k,
+                memory_trace,
+                memory_layout,
+                r_address_raf,
+                r_address_rw,
+                r_cycle_raf,
+                r_cycle_rw,
+                r_cycle_val,
+            );
+            defer ram_ra_prover.deinit();
             var lookups_claim = lookups_input; // Instance 2: LookupsReadRaf (no scaling, active from round 0)
             const batch2_inv = if (comptime debug_verbose) batch2.inverse().? else F.zero(); // Only needed for debug diagnostics
 
@@ -1614,325 +1640,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // ===================================================================
-            // RamRaClaimReduction State Initialization
+            // RamRaClaimReduction State Initialization (via extracted prover)
             // ===================================================================
-            // For sparse traces (like Fibonacci with few RAM accesses), we compute
-            // the sumcheck polynomial directly from the RAM trace.
-            //
-            // The sumcheck proves: Σ_{k,c} eq_combined(k,c) · ra(k,c) = input_claim
-            // where:
-            //   eq_combined(k, c) = eq(r_addr_1, k)·(eq_raf(c) + γ·eq_val(c))
-            //                     + γ²·eq(r_addr_2, k)·(eq_rw(c) + γ·eq_val(c))
-            //   ra(k,c) = 1 iff there's a RAM access at (address=k, cycle=c)
-            //
-            // Since ra(k,c) is sparse (only 1s at actual RAM accesses), we compute:
-            //   input_claim = Σ_{accesses} eq_combined(addr, cycle)
-            //
-            // The sumcheck has 3 phases:
-            //   - PhaseAddress: log_K rounds binding address variables k
-            //   - PhaseCycle1: first half of cycle rounds using prefix-suffix
-            //   - PhaseCycle2: second half of cycle rounds using dense sumcheck
-            //
-            // For each RAM access at (addr, cycle), we precompute:
-            //   G_A[access] = eq(r_cycle_raf, cycle) + γ · eq(r_cycle_val, cycle)
-            //   G_B[access] = eq(r_cycle_rw, cycle) + γ · eq(r_cycle_val, cycle)
-            //
-            // Then during PhaseAddress, for each access:
-            //   contribution = eq(r_addr_1, k)·G_A + γ²·eq(r_addr_2, k)·G_B
+            // ram_ra_prover was initialized above (near ram_ra_prover.current_claim replacement).
+            // Set the scaled initial claim now.
+            ram_ra_prover.setScaledClaim(ram_ra_scaled);
 
-            // K = 2^log_ram_k is the RAM domain size
-            const K = @as(usize, 1) << @intCast(log_ram_k);
-
-            // Build sparse RAM access list and precompute G_A, G_B for each access
-            const ram_access_count = if (memory_trace) |mt| mt.accesses.items.len else 0;
-            if (comptime debug_verbose) {
-                dbg("[STAGE5 RAM_RA] Initializing with {} RAM accesses\n", .{ram_access_count});
-            }
-
-            // Allocate sparse access arrays
-            var ram_addresses = try self.allocator.alloc(u64, ram_access_count);
-            defer self.allocator.free(ram_addresses);
-            var ram_cycles = try self.allocator.alloc(u64, ram_access_count);
-            defer self.allocator.free(ram_cycles);
-            var ram_G_A = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(ram_G_A);
-            var ram_G_B = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(ram_G_B);
-            // Precompute per-access eq(r_cycle_*, cycle) values once (used by G_A/G_B and cycle rounds)
-            var eq_raf_access = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_raf_access);
-            var eq_rw_access = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_rw_access);
-            var eq_val_access = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_val_access);
-
-            if (memory_trace) |mt| {
-                for (mt.accesses.items, 0..) |access, i| {
-                    const cycle = access.timestamp;
-                    eq_raf_access[i] = computeEqAtPoint(F, r_cycle_raf, cycle);
-                    eq_rw_access[i] = computeEqAtPoint(F, r_cycle_rw, cycle);
-                    eq_val_access[i] = computeEqAtPoint(F, r_cycle_val, cycle);
-                }
-            }
-
-            // Precompute G_A and G_B for each RAM access using precomputed eq values
-            // G_A[i] = eq(r_cycle_raf, c_i) + γ · eq(r_cycle_val, c_i)
-            // G_B[i] = eq(r_cycle_rw, c_i) + γ · eq(r_cycle_val, c_i)
-            //
-            // Remap addresses to polynomial index space using memory_layout
-            if (memory_trace) |mt| {
-                for (mt.accesses.items, 0..) |access, i| {
-                    const remapped_addr: u64 = if (memory_layout) |ml|
-                        ml.remapAddress(access.address) orelse 0
-                    else
-                        access.address & (@as(u64, K) - 1);
-
-                    ram_addresses[i] = remapped_addr;
-                    ram_cycles[i] = access.timestamp;
-
-                    // Reuse precomputed eq values
-                    const eq_raf_c = eq_raf_access[i];
-                    const eq_rw_c = eq_rw_access[i];
-                    const eq_val_c = eq_val_access[i];
-
-                    // G_A = eq_raf + γ · eq_val
-                    // G_B = eq_rw + γ · eq_val
-                    ram_G_A[i] = eq_raf_c.add(gamma.mul(eq_val_c));
-                    ram_G_B[i] = eq_rw_c.add(gamma.mul(eq_val_c));
-
-                    if (comptime debug_verbose) {
-                        dbg("[STAGE5 RAM_RA] Access {}: raw_addr=0x{x}, remapped_addr={}, cycle={}\n", .{ i, access.address, remapped_addr, access.timestamp });
-                        dbg("  eq_raf_c={any}, eq_rw_c={any}, eq_val_c={any}\n", .{
-                            eq_raf_c.toBytesBE()[16..32].*,
-                            eq_rw_c.toBytesBE()[16..32].*,
-                            eq_val_c.toBytesBE()[16..32].*,
-                        });
-                        dbg("  G_A={any}, G_B={any}\n", .{
-                            ram_G_A[i].toBytesBE()[16..32].*,
-                            ram_G_B[i].toBytesBE()[16..32].*,
-                        });
-                    }
-                }
-            }
-
-            // Full-size G_A and G_B arrays (size K, mostly zeros)
-            // G_A_full[k] = G_A for the access at address k, or 0 if no access at k
-            // G_B_full[k] = G_B for the access at address k, or 0 if no access at k
-            // This allows us to iterate densely over all K addresses (like Jolt does)
-            var G_A_full = try self.allocator.alloc(F, K);
-            defer self.allocator.free(G_A_full);
-            var G_B_full = try self.allocator.alloc(F, K);
-            defer self.allocator.free(G_B_full);
-            @memset(G_A_full, F.zero());
-            @memset(G_B_full, F.zero());
-            for (0..ram_access_count) |i| {
-                const addr_usize: usize = @intCast(ram_addresses[i]);
-                G_A_full[addr_usize] = ram_G_A[i];
-                G_B_full[addr_usize] = ram_G_B[i];
-            }
-            if (comptime debug_verbose) {
-                dbg("[STAGE5 RAM_RA] Created full-size G_A/G_B arrays (K={}), {} non-zero entries\n", .{ K, ram_access_count });
-            }
-
-            // Initialize B_1 and B_2 polynomials for address rounds
-            // B_1 = eq(r_address_raf, k) - this is bound during address rounds
-            // B_2 = eq(r_address_rw, k) - this is bound during address rounds
-            // These are multilinear polynomials over log_ram_k variables
-            var B_1 = try self.allocator.alloc(F, K);
-            defer self.allocator.free(B_1);
-            var B_2 = try self.allocator.alloc(F, K);
-            defer self.allocator.free(B_2);
-
-            // Compute B_1[k] = eq(r_address_raf, k) and B_2[k] = eq(r_address_rw, k) for all k
-            // Uses O(2^n) butterfly construction instead of O(n * 2^n) per-element computation
-            Inst.buildFullEqTable(r_address_raf, B_1[0..K], self.thread_pool);
-            Inst.buildFullEqTable(r_address_rw, B_2[0..K], self.thread_pool);
-
-            // Debug: print B_1 and B_2 for first few addresses
-            if (comptime debug_verbose) {
-                dbg("[STAGE5 RAM_RA] B_1/B_2 eq polynomials (first 4 and last 4 of {}):\n", .{K});
-            }
-            for (0..@min(4, K)) |k| {
-                if (comptime debug_verbose) {
-                    dbg("  B_1[{}]={any}, B_2[{}]={any}\n", .{
-                        k, B_1[k].toBytesBE()[16..32].*, k, B_2[k].toBytesBE()[16..32].*,
-                    });
-                }
-            }
-            if (K > 8) {
-                for (K - 4..K) |k| {
-                    if (comptime debug_verbose) {
-                        dbg("  B_1[{}]={any}, B_2[{}]={any}\n", .{
-                            k, B_1[k].toBytesBE()[16..32].*, k, B_2[k].toBytesBE()[16..32].*,
-                        });
-                    }
-                }
-            }
-
-            // Initialize Instance 1 claim tracking with SCALED value
-            ram_ra_current_claim = ram_ra_scaled;
-
-            // Expanding table to track eq(r_addr_reduced_so_far, k_bound_bits)
-            // This accumulates the eq value as we bind address bits
-            var ram_ra_F = try ExpandingTable(F).init(self.allocator, K);
-            defer ram_ra_F.deinit();
-            ram_ra_F.reset(F.one());
-
-            // Track bound address challenges for RamRaClaimReduction
-            // ram_ra_bound_challenges removed — no PhaseAddress binding in upstream cycle-only reduction
-
-            // Track per-access eq_cycle_bound factor during cycle rounds
-            // eq_cycle_bound[i] = product of eq terms for bound cycle bits
-            // Initially 1.0, then after binding bit m with challenge r:
-            //   eq_cycle_bound[i] *= (c_m == 0) ? (1 - r) : r
-            var eq_cycle_bound = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_cycle_bound);
-            for (0..ram_access_count) |i| {
-                eq_cycle_bound[i] = F.one();
-            }
-
-            // ===================================================================
-            // Separate eq tracking for PhaseCycle correction
-            // ===================================================================
-            // The verifier expects eq(r_cycle_*, r_cycle_reduced) where r_cycle_reduced
-            // is the sumcheck challenges. But G_A/G_B have eq(r_cycle_*, c_i) where c_i
-            // is the access's cycle.
-            //
-            // We need to track:
-            // - eq_*_bound: product of eq_bit(r_cycle_*[j], r_j) for bound bits j < m
-            // - eq_*_remaining[i]: product of eq_bit(r_cycle_*[j], c_i[j]) for remaining bits j >= m
-            //
-            // The contribution should be eq_*_bound * eq_*_remaining * eq_bit(r_cycle_*[m], c_i[m])
-            // instead of eq(r_cycle_*, c_i).
-
-            // Bound factors (shared for all accesses) - eq(r_cycle_*, r_cycle_reduced_so_far)
-            // These track the product of eq_bit(r_cycle_*[j], r_j) for j < current_round
-            var eq_raf_bound: F = F.one();
-            var eq_rw_bound: F = F.one();
-            var eq_val_bound: F = F.one();
-
-            // Remaining factors (per-access) - product of eq_bit(r_cycle_*[j], c_i[j]) for j >= current_round
-            // Initially equals the full eq values, then we divide out bound bits as they're processed
-            var eq_raf_remaining = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_raf_remaining);
-            var eq_rw_remaining = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_rw_remaining);
-            var eq_val_remaining = try self.allocator.alloc(F, ram_access_count);
-            defer self.allocator.free(eq_val_remaining);
-
-            // Initialize remaining factors to full eq values
-            for (0..ram_access_count) |i| {
-                eq_raf_remaining[i] = eq_raf_access[i];
-                eq_rw_remaining[i] = eq_rw_access[i];
-                eq_val_remaining[i] = eq_val_access[i];
-            }
-
-            // ===================================================================
-            // P*Q Decomposition for PhaseCycle (Jolt's approach)
-            // ===================================================================
-            // For cycle sumcheck, we use prefix-suffix decomposition:
-            //   P_x[c_lo] = eq(r_cycle_x_lo, c_lo)  -- eq evaluations for prefix bits
-            //   Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] · eq(r_cycle_x_hi, c_hi)  -- suffix sums
-            // where H[c] = F_values[address[c]] = eq(r_addr_reduced, address[c])
-            //
-            // The polynomial contribution is: Σ_j coeff * P_x[j] * Q_x[j]
-            // This correctly captures binding: P gets bound during sumcheck, Q contains
-            // the already-computed suffix weights.
-            //
-            // Split: log_T = prefix_n_vars + suffix_n_vars
-            // In Jolt: prefix_n_vars = log_T / 2, suffix_n_vars = log_T - prefix_n_vars
-
-            const prefix_n_vars = n_cycle_vars / 2;
-            const suffix_n_vars = n_cycle_vars - prefix_n_vars;
-            const prefix_size = @as(usize, 1) << @intCast(prefix_n_vars);
-            const suffix_size = @as(usize, 1) << @intCast(suffix_n_vars);
-
-            if (comptime debug_verbose) {
-                dbg("[STAGE5 PQ] PhaseCycle P*Q setup: n_cycle={}, prefix={}, suffix={}\n", .{
-                    n_cycle_vars, prefix_n_vars, suffix_n_vars,
-                });
-                dbg("[STAGE5 PQ] prefix_size={}, suffix_size={}\n", .{ prefix_size, suffix_size });
-            }
-
-            // P arrays: eq evaluations for prefix (low) bits
-            // P_x[c_lo] = eq(r_cycle_x_lo, c_lo)
-            // r_cycle vectors are BIG_ENDIAN: first suffix_n_vars are high bits, last prefix_n_vars are low
-            var P_raf = try self.allocator.alloc(F, prefix_size);
-            defer self.allocator.free(P_raf);
-            var P_rw = try self.allocator.alloc(F, prefix_size);
-            defer self.allocator.free(P_rw);
-            var P_val = try self.allocator.alloc(F, prefix_size);
-            defer self.allocator.free(P_val);
-
-            // Q arrays: suffix-weighted sums
-            // Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] · eq(r_cycle_x_hi, c_hi)
-            var Q_raf = try self.allocator.alloc(F, prefix_size);
-            defer self.allocator.free(Q_raf);
-            var Q_rw = try self.allocator.alloc(F, prefix_size);
-            defer self.allocator.free(Q_rw);
-            var Q_val = try self.allocator.alloc(F, prefix_size);
-            defer self.allocator.free(Q_val);
-
-            // Precompute eq evaluations for suffix (high) bits: eq(r_cycle_x_hi, c_hi)
-            // r_cycle_*[0..suffix_n_vars] are the high bits (BIG_ENDIAN)
-            var eq_raf_hi = try self.allocator.alloc(F, suffix_size);
-            defer self.allocator.free(eq_raf_hi);
-            var eq_rw_hi = try self.allocator.alloc(F, suffix_size);
-            defer self.allocator.free(eq_rw_hi);
-            var eq_val_hi = try self.allocator.alloc(F, suffix_size);
-            defer self.allocator.free(eq_val_hi);
-
-            // Compute eq_x_hi for all c_hi values
-            // r_cycle_*[0..suffix_n_vars] contains the HIGH bits
-            for (0..suffix_size) |c_hi| {
-                eq_raf_hi[c_hi] = computeEqAtPoint(F, r_cycle_raf[0..suffix_n_vars], c_hi);
-                eq_rw_hi[c_hi] = computeEqAtPoint(F, r_cycle_rw[0..suffix_n_vars], c_hi);
-                eq_val_hi[c_hi] = computeEqAtPoint(F, r_cycle_val[0..suffix_n_vars], c_hi);
-            }
-
-            // Initialize P arrays from prefix bits: P_x[c_lo] = eq(r_cycle_x_lo, c_lo)
-            // r_cycle_*[suffix_n_vars..] contains the LOW bits
-            for (0..prefix_size) |c_lo| {
-                P_raf[c_lo] = computeEqAtPoint(F, r_cycle_raf[suffix_n_vars..], c_lo);
-                P_rw[c_lo] = computeEqAtPoint(F, r_cycle_rw[suffix_n_vars..], c_lo);
-                P_val[c_lo] = computeEqAtPoint(F, r_cycle_val[suffix_n_vars..], c_lo);
-            }
-
-            // Initialize Q arrays to zero
-            @memset(Q_raf, F.zero());
-            @memset(Q_rw, F.zero());
-            @memset(Q_val, F.zero());
-
-            // Note: Q arrays will be computed at the start of PhaseCycle when we have
-            // the F_values from PhaseAddress (ram_ra_F after all address rounds).
-            // This is deferred because F_values evolve during address rounds.
-
-            // Flag to track if Q has been initialized
-            var phase_cycle_q_initialized = false;
-
-            // For PhaseCycle2: H'[c_hi] = Σ_{c_lo} H[c_lo,c_hi] * eq_prefix[c_lo]
-            var H_prime = try self.allocator.alloc(F, suffix_size);
-            defer self.allocator.free(H_prime);
-            @memset(H_prime, F.zero());
-
-            // Track cycle sumcheck challenges for computing eq_prefix during PhaseCycle2 transition
-            var cycle_challenges = try self.allocator.alloc(F, n_cycle_vars);
-            defer self.allocator.free(cycle_challenges);
-            @memset(cycle_challenges, F.zero());
-
-            // Flag to track if H_prime has been initialized (for PhaseCycle2)
-            var phase_cycle2_initialized = false;
-            // Scale factors for PhaseCycle2: eq(r_cycle_x_lo, r_cycle_prefix_reduced)
-            // These are computed during PhaseCycle2 initialization and used in every PhaseCycle2 round
-            var scale_raf: F = F.one();
-            var scale_rw: F = F.one();
-            var scale_val: F = F.one();
-
-            // Store Instance 1 polynomial evaluations for claim update after challenge
-            // These are set in the polynomial computation section and used in the binding section
-            var inst1_eval_0: F = F.zero();
-            var inst1_eval_1: F = F.zero();
-            var inst1_eval_2: F = F.zero();
+            // NOTE: ExpandingTable (ram_ra_F) was previously used for PhaseAddress tracking
+            // but is no longer needed since RamRaClaimReduction uses cycle-only binding.
+            // The state is now fully encapsulated in ram_ra_prover.
 
             // ===================================================================
             // Prefix-Suffix Decomposition Initialization for LookupsReadRaf
@@ -2561,306 +2277,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Instance is active - compute RamRaClaimReduction sumcheck polynomial
                     if (comptime bench_timing) bench_timer.reset();
 
-                    const ram_ra_round = ram_ra_num_rounds - remaining_rounds; // 0 to n_cycle_vars-1
+                    const ram_ra_round = ram_ra_num_rounds - remaining_rounds;
+                    const poly_evals = ram_ra_prover.computeRoundPoly(ram_ra_round);
 
-                    // Upstream RamRaClaimReduction: cycle-only binding (no PhaseAddress)
-                    // All ram_ra rounds are cycle rounds.
-                    {
-                        // ============================================================
-                        // PhaseCycle (Jolt's approach) — cycle-only binding
-                        // ============================================================
-                        // Using prefix-suffix decomposition:
-                        //   P_x[c_lo] = eq(r_cycle_x_lo, c_lo)  -- prefix eq evaluations
-                        //   Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] · eq(r_cycle_x_hi, c_hi)  -- suffix sums
-                        //
-                        // H[c] = F_values[address[c]] = B_1[address[c]] = eq(r_address, address[c])
-                        // Coefficients: 1, gamma, gamma^2 (upstream cycle-only reduction)
-                        //
-                        // PhaseCycle1: rounds 0 to prefix_n_vars-1 (bind prefix bits using P*Q)
-                        // PhaseCycle2: rounds prefix_n_vars to n_cycle_vars-1 (bind suffix using H'*eq_hi)
+                    combined_poly[0] = combined_poly[0].add(batch1.mul(poly_evals[0]));
+                    combined_poly[1] = combined_poly[1].add(batch1.mul(poly_evals[1]));
+                    combined_poly[2] = combined_poly[2].add(batch1.mul(poly_evals[2]));
 
-                        const cycle_round = ram_ra_round; // 0 to n_cycle_vars-1
-
-                        // Initialize Q arrays at the start of PhaseCycle (round 0)
-                        if (!phase_cycle_q_initialized) {
-                            phase_cycle_q_initialized = true;
-
-                            if (comptime debug_verbose) {
-                                dbg("[STAGE5 PQ] prefix_n_vars={}, suffix_n_vars={}\n", .{
-                                    prefix_n_vars, suffix_n_vars,
-                                });
-                            }
-
-                            // Compute Q arrays: Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] · eq_x_hi(c_hi)
-                            // where H[c] = F_values[address[c]] = B_1[address[c]] = eq(r_address, addr)
-                            @memset(Q_raf, F.zero());
-                            @memset(Q_rw, F.zero());
-                            @memset(Q_val, F.zero());
-
-                            for (0..ram_access_count) |access_idx| {
-                                const cycle = ram_cycles[access_idx];
-                                const cycle_usize: usize = @intCast(cycle);
-                                const addr = ram_addresses[access_idx];
-                                const addr_usize: usize = @intCast(addr);
-
-                                // H[c] = F_values[address[c]] = eq(r_address, addr)
-                                // B_1[k] = eq(r_address_raf, k) serves as F_values (upstream uses single r_address)
-                                const H_c = B_1[addr_usize];
-
-                                // Split cycle into c_lo (prefix) and c_hi (suffix)
-                                const c_lo = cycle_usize & (prefix_size - 1);
-                                const c_hi = cycle_usize >> @intCast(prefix_n_vars);
-
-                                // Q_x[c_lo] += H[c] * eq_x_hi(c_hi)
-                                Q_raf[c_lo] = Q_raf[c_lo].add(H_c.mul(eq_raf_hi[c_hi]));
-                                Q_rw[c_lo] = Q_rw[c_lo].add(H_c.mul(eq_rw_hi[c_hi]));
-                                Q_val[c_lo] = Q_val[c_lo].add(H_c.mul(eq_val_hi[c_hi]));
-                            }
-
-                            if (comptime debug_verbose) {
-                                dbg("[STAGE5 PQ] Q arrays initialized with {} accesses\n", .{ram_access_count});
-                            }
-                        }
-
-                        // Upstream coefficients: 1, γ, γ² (address pre-evaluated via F_values)
-                        const coeff_raf = F.one();
-                        const coeff_rw = gamma;
-                        const coeff_val = gamma2;
-
-                        // Current P polynomial length (P_raf initially has prefix_size elements)
-                        // After cycle_round bindings, effective length is prefix_size >> cycle_round
-                        const current_P_len = prefix_size >> @intCast(cycle_round);
-                        const half_len = current_P_len / 2;
-
-                        if (cycle_round < prefix_n_vars and half_len > 0) {
-                            // PhaseCycle1: Bind prefix bits using P*Q decomposition
-                            // CRITICAL: Use hint mechanism - only compute eval_1 and eval_2 directly
-                            // Then derive eval_0 = claim - eval_1 to guarantee sumcheck property
-
-                            // DEBUG: Print claim at start of polynomial computation
-                            if (comptime debug_verbose) {
-                                dbg("[INST1 HINT DEBUG] Round {}: ram_ra_current_claim at poly start = {x}\n", .{
-                                    round,
-                                    ram_ra_current_claim.toBytesBE()[16..32].*,
-                                });
-                            }
-
-                            var eval_1 = F.zero();
-
-                            // Compute sumcheck polynomial using P * Q products
-                            // Only compute eval_1 (sum over odd indices P[2j+1] * Q[2j+1])
-                            for (0..half_len) |j| {
-                                // P values at odd indices
-                                const p_raf_1 = P_raf[2 * j + 1];
-                                const p_rw_1 = P_rw[2 * j + 1];
-                                const p_val_1 = P_val[2 * j + 1];
-
-                                // Q values at odd indices
-                                const q_raf_1 = Q_raf[2 * j + 1];
-                                const q_rw_1 = Q_rw[2 * j + 1];
-                                const q_val_1 = Q_val[2 * j + 1];
-
-                                // eval_1 contribution: P[2j+1] * Q[2j+1]
-                                const contrib_1 = coeff_raf.mul(p_raf_1.mul(q_raf_1))
-                                    .add(coeff_rw.mul(p_rw_1.mul(q_rw_1)))
-                                    .add(coeff_val.mul(p_val_1.mul(q_val_1)));
-                                eval_1 = eval_1.add(contrib_1);
-                            }
-
-                            // HINT MECHANISM: derive eval_0 from claim
-                            // p(0) + p(1) = claim => p(0) = claim - p(1)
-                            const eval_0 = ram_ra_current_claim.sub(eval_1);
-
-                            // Compute eval_2 = p(2) for degree-2 polynomial
-                            var eval_2 = F.zero();
-                            for (0..half_len) |j| {
-                                const p_raf_at_2 = P_raf[2 * j + 1].add(P_raf[2 * j + 1]).sub(P_raf[2 * j]);
-                                const q_raf_at_2 = Q_raf[2 * j + 1].add(Q_raf[2 * j + 1]).sub(Q_raf[2 * j]);
-                                const p_rw_at_2 = P_rw[2 * j + 1].add(P_rw[2 * j + 1]).sub(P_rw[2 * j]);
-                                const q_rw_at_2 = Q_rw[2 * j + 1].add(Q_rw[2 * j + 1]).sub(Q_rw[2 * j]);
-                                const p_val_at_2 = P_val[2 * j + 1].add(P_val[2 * j + 1]).sub(P_val[2 * j]);
-                                const q_val_at_2 = Q_val[2 * j + 1].add(Q_val[2 * j + 1]).sub(Q_val[2 * j]);
-
-                                const contrib_2 = coeff_raf.mul(p_raf_at_2.mul(q_raf_at_2))
-                                    .add(coeff_rw.mul(p_rw_at_2.mul(q_rw_at_2)))
-                                    .add(coeff_val.mul(p_val_at_2.mul(q_val_at_2)));
-                                eval_2 = eval_2.add(contrib_2);
-                            }
-
-                            combined_poly[0] = combined_poly[0].add(batch1.mul(eval_0));
-                            combined_poly[1] = combined_poly[1].add(batch1.mul(eval_1));
-                            combined_poly[2] = combined_poly[2].add(batch1.mul(eval_2));
-
-                            // Store evaluations for claim update after challenge is generated
-                            inst1_eval_0 = eval_0;
-                            inst1_eval_1 = eval_1;
-                            inst1_eval_2 = eval_2;
-
-                            if (comptime debug_verbose) {
-                                dbg("[STAGE5 RAM_RA] PhaseCycle1 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
-                                    cycle_round,
-                                    eval_0.toBytesBE()[16..32].*,
-                                    eval_1.toBytesBE()[16..32].*,
-                                    eval_2.toBytesBE()[16..32].*,
-                                });
-                            }
-
-                            // Debug: Print Instance 1 contribution for Round 128-129
-                            if (round >= LOOKUPS_LOG_K and round <= LOOKUPS_LOG_K + 1) {
-                                const inst1_evals = [4]F{ eval_0, eval_1, eval_2, F.zero() };
-                                const inst1_coeffs = UniPoly(F).toomCookToCoeffs(inst1_evals);
-                                if (comptime debug_verbose) {
-                                    dbg("[ZOLT INST1] Round {}: ram_ra_round={}, cycle_round={}\n", .{ round, ram_ra_round, cycle_round });
-                                    dbg("  inst1_evals (Toom) = [{any}, {any}, {any}, {any}]\n", .{
-                                        inst1_evals[0].toBytes(), inst1_evals[1].toBytes(),
-                                        inst1_evals[2].toBytes(), inst1_evals[3].toBytes(),
-                                    });
-                                    dbg("  inst1_coeffs (coeffs) = [{any}, {any}, {any}, {any}]\n", .{
-                                        inst1_coeffs[0].toBytes(), inst1_coeffs[1].toBytes(),
-                                        inst1_coeffs[2].toBytes(), inst1_coeffs[3].toBytes(),
-                                    });
-                                    dbg("  batch1 = {any}\n", .{batch1.toBytes()});
-                                }
-                            }
-                        } else {
-                            // PhaseCycle2: After prefix rounds, use H' * eq_hi for suffix
-                            const suffix_round = cycle_round - prefix_n_vars;
-
-                            // Initialize H_prime at the start of PhaseCycle2
-                            if (!phase_cycle2_initialized) {
-                                phase_cycle2_initialized = true;
-
-                                // Compute eq_prefix[c_lo] = eq(r_cycle_prefix_challenges, c_lo)
-                                // The prefix challenges are cycle_challenges[0..prefix_n_vars]
-                                var eq_prefix = try self.allocator.alloc(F, prefix_size);
-                                defer self.allocator.free(eq_prefix);
-
-                                for (0..prefix_size) |c_lo| {
-                                    // eq_prefix[c_lo] = Π_j eq_bit(r_j, c_lo_j)
-                                    // cycle_challenges are in LowToHigh order (challenge[0] = LSB)
-                                    var eq_val_local = F.one();
-                                    var c_lo_var = c_lo;
-                                    for (0..prefix_n_vars) |j| {
-                                        const bit: u1 = @truncate(c_lo_var);
-                                        c_lo_var >>= 1;
-                                        const r_j = cycle_challenges[j];
-                                        // eq_bit(r, b) = (1-r) if b=0, else r
-                                        const eq_bit_val = if (bit == 0) F.one().sub(r_j) else r_j;
-                                        eq_val_local = eq_val_local.mul(eq_bit_val);
-                                    }
-                                    eq_prefix[c_lo] = eq_val_local;
-                                }
-
-                                // Compute H_prime[c_hi] = Σ_{c_lo} H[c_lo,c_hi] * eq_prefix[c_lo]
-                                // where H[c] = F_values[address[c]] = eq(r_addr_reduced, address[c])
-                                @memset(H_prime, F.zero());
-                                for (0..ram_access_count) |access_idx| {
-                                    const cycle = ram_cycles[access_idx];
-                                    const cycle_usize: usize = @intCast(cycle);
-                                    const addr = ram_addresses[access_idx];
-                                    const addr_usize: usize = @intCast(addr);
-
-                                    // H[c] = B_1[address[c]] = eq(r_address, addr)
-                                    const H_c = B_1[addr_usize];
-                                    const c_lo = cycle_usize & (prefix_size - 1);
-                                    const c_hi = cycle_usize >> @intCast(prefix_n_vars);
-
-                                    H_prime[c_hi] = H_prime[c_hi].add(H_c.mul(eq_prefix[c_lo]));
-                                }
-
-                                // Compute scaling factors: eq(r_cycle_x_lo, r_cycle_prefix_reduced)
-                                // r_cycle_*[suffix_n_vars..] are the LOW bits (BIG_ENDIAN)
-                                // cycle_challenges[0..prefix_n_vars] are the prefix challenges (LowToHigh)
-                                scale_raf = F.one();
-                                scale_rw = F.one();
-                                scale_val = F.one();
-                                for (0..prefix_n_vars) |j| {
-                                    // r_cycle_* is BIG_ENDIAN: index suffix_n_vars + j corresponds to prefix bit j
-                                    const r_raf_j = r_cycle_raf[suffix_n_vars + prefix_n_vars - 1 - j];
-                                    const r_rw_j = r_cycle_rw[suffix_n_vars + prefix_n_vars - 1 - j];
-                                    const r_val_j = r_cycle_val[suffix_n_vars + prefix_n_vars - 1 - j];
-                                    const chal_j = cycle_challenges[j];
-                                    // eq_bit(r, chal) = (1-r)(1-chal) + r*chal
-                                    scale_raf = scale_raf.mul(F.one().sub(r_raf_j).mul(F.one().sub(chal_j)).add(r_raf_j.mul(chal_j)));
-                                    scale_rw = scale_rw.mul(F.one().sub(r_rw_j).mul(F.one().sub(chal_j)).add(r_rw_j.mul(chal_j)));
-                                    scale_val = scale_val.mul(F.one().sub(r_val_j).mul(F.one().sub(chal_j)).add(r_val_j.mul(chal_j)));
-                                }
-
-                                if (comptime debug_verbose) {
-                                    dbg("[STAGE5 RAM_RA] PhaseCycle2 starting at suffix_round={}\n", .{suffix_round});
-                                }
-                            }
-
-                            // Compute polynomial using H_prime * eq_hi products
-                            const current_len = suffix_size >> @intCast(suffix_round);
-                            const half_len_suffix = current_len / 2;
-
-                            // Upstream coefficients with scale factors: 1*scale_raf, γ*scale_rw, γ²*scale_val
-                            const coeff_raf_scaled = scale_raf;
-                            const coeff_rw_scaled = gamma.mul(scale_rw);
-                            const coeff_val_scaled = gamma2.mul(scale_val);
-
-                            // CRITICAL: Use hint mechanism - only compute eval_1 directly
-                            // Then derive eval_0 = claim - eval_1 to guarantee sumcheck property
-                            var eval_1 = F.zero();
-
-                            for (0..half_len_suffix) |j| {
-                                // H_prime values (only need odd indices for eval_1)
-                                const h_1 = H_prime[2 * j + 1];
-
-                                // eq_hi values (only need odd indices for eval_1)
-                                const eq_raf_1 = eq_raf_hi[2 * j + 1];
-                                const eq_rw_1 = eq_rw_hi[2 * j + 1];
-                                const eq_val_1 = eq_val_hi[2 * j + 1];
-
-                                // Contribution for X=1
-                                const contrib_1 = h_1.mul(
-                                    coeff_raf_scaled.mul(eq_raf_1)
-                                        .add(coeff_rw_scaled.mul(eq_rw_1))
-                                        .add(coeff_val_scaled.mul(eq_val_1)),
-                                );
-                                eval_1 = eval_1.add(contrib_1);
-                            }
-
-                            // HINT MECHANISM: derive eval_0 from claim
-                            // p(0) + p(1) = claim => p(0) = claim - p(1)
-                            const eval_0 = ram_ra_current_claim.sub(eval_1);
-
-                            // Compute eval_2 = p(2)
-                            var eval_2 = F.zero();
-                            for (0..half_len_suffix) |j| {
-                                const h_at_2 = H_prime[2 * j + 1].add(H_prime[2 * j + 1]).sub(H_prime[2 * j]);
-                                const eq_raf_at_2 = eq_raf_hi[2 * j + 1].add(eq_raf_hi[2 * j + 1]).sub(eq_raf_hi[2 * j]);
-                                const eq_rw_at_2 = eq_rw_hi[2 * j + 1].add(eq_rw_hi[2 * j + 1]).sub(eq_rw_hi[2 * j]);
-                                const eq_val_at_2 = eq_val_hi[2 * j + 1].add(eq_val_hi[2 * j + 1]).sub(eq_val_hi[2 * j]);
-
-                                const contrib_2 = h_at_2.mul(
-                                    coeff_raf_scaled.mul(eq_raf_at_2)
-                                        .add(coeff_rw_scaled.mul(eq_rw_at_2))
-                                        .add(coeff_val_scaled.mul(eq_val_at_2)),
-                                );
-                                eval_2 = eval_2.add(contrib_2);
-                            }
-
-                            combined_poly[0] = combined_poly[0].add(batch1.mul(eval_0));
-                            combined_poly[1] = combined_poly[1].add(batch1.mul(eval_1));
-                            combined_poly[2] = combined_poly[2].add(batch1.mul(eval_2));
-
-                            // Store evaluations for claim update after challenge is generated
-                            inst1_eval_0 = eval_0;
-                            inst1_eval_1 = eval_1;
-                            inst1_eval_2 = eval_2;
-
-                            if (comptime debug_verbose) {
-                                dbg("[STAGE5 RAM_RA] PhaseCycle2 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
-                                    cycle_round,
-                                    eval_0.toBytesBE()[16..32].*,
-                                    eval_1.toBytesBE()[16..32].*,
-                                    eval_2.toBytesBE()[16..32].*,
-                                });
-                            }
-                        }
-                    }
                     if (comptime bench_timing) bench_inst1_compute_ns += bench_timer.read();
                 }
                 if (comptime bench_timing) bench_timer.reset(); // Start timing untimed gap
@@ -3646,10 +3069,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     if (remaining_rounds > ram_ra_num_rounds) {
                         // Instance 1 is inactive - claim halves
-                        ram_ra_current_claim = ram_ra_current_claim.mul(UniPoly(F).INV2);
+                        ram_ra_prover.current_claim = ram_ra_prover.current_claim.mul(UniPoly(F).INV2);
                     }
                     // NOTE: Instance 1 active case (address rounds 112-127) is handled below after
-                    // the RamRaClaimReduction binding section, where ram_ra_current_claim is updated.
+                    // the RamRaClaimReduction binding section, where ram_ra_prover.current_claim is updated.
                     // The batched claim recomputation is also moved to after the RamRaClaimReduction binding.
 
                     // NOTE: Consistency check moved to after Instance 1 claim update (below)
@@ -3657,220 +3080,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // ===================================================================
                     // Update RamRaClaimReduction state after receiving challenge
                     // ===================================================================
-                    // RamRaClaimReduction is active in rounds 112-135 (remaining_rounds <= 24)
-                    // NOTE: We use (remaining_rounds - 1) because we already computed the polynomial
-                    // for this round and are now handling the challenge binding for it
-                    if (round >= 126 and round <= 131) {
-                        if (comptime debug_verbose) {
-                            dbg("[DEBUG BINDING R{}] remaining={}, ram_ra_num_rounds={}, check={}\n", .{
-                                round,
-                                remaining_rounds,
-                                ram_ra_num_rounds,
-                                remaining_rounds <= ram_ra_num_rounds,
-                            });
-                        }
-                    }
                     if (remaining_rounds <= ram_ra_num_rounds) {
                         const ram_ra_round = ram_ra_num_rounds - remaining_rounds;
-
-                        if (round >= 126 and round <= 130) {
-                            if (comptime debug_verbose) {
-                                dbg("[DEBUG R{} IN] ram_ra_round={}, log_ram_k={}, is_phase_cycle={}\n", .{
-                                    round,
-                                    ram_ra_round,
-                                    log_ram_k,
-                                    ram_ra_round >= log_ram_k,
-                                });
-                            }
-                        }
-
-                        {
-                            // PhaseCycle: bind polynomials (cycle-only, no PhaseAddress)
-                            const cycle_round = ram_ra_round; // 0 to n_cycle_vars-1
-                            // Store cycle challenge for PhaseCycle2 eq_prefix computation
-                            cycle_challenges[cycle_round] = challenge;
-
-                            if (cycle_round < prefix_n_vars) {
-                                // PhaseCycle1: bind P and Q polynomials
-                                const current_len = prefix_size >> @intCast(cycle_round);
-                                const half_len = current_len / 2;
-
-                                // Bind P and Q arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
-                                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
-                                // Parallelize across the 6 independent arrays
-                                if (self.gpu_ops) |gpu| {
-                                    if (half_len >= 16384) {
-                                        const pq_arrays = [_][]F{ P_raf, P_rw, P_val, Q_raf, Q_rw, Q_val };
-                                        for (pq_arrays) |arr| {
-                                            gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
-                                                for (0..half_len) |j| {
-                                                    const lo = arr[2 * j];
-                                                    arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(challenge.limbs));
-                                                }
-                                            };
-                                        }
-                                    } else {
-                                        for (0..half_len) |j| {
-                                            P_raf[j] = P_raf[2 * j].add(P_raf[2 * j + 1].sub(P_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            P_rw[j] = P_rw[2 * j].add(P_rw[2 * j + 1].sub(P_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            P_val[j] = P_val[2 * j].add(P_val[2 * j + 1].sub(P_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        }
-                                        for (0..half_len) |j| {
-                                            Q_raf[j] = Q_raf[2 * j].add(Q_raf[2 * j + 1].sub(Q_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            Q_rw[j] = Q_rw[2 * j].add(Q_rw[2 * j + 1].sub(Q_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            Q_val[j] = Q_val[2 * j].add(Q_val[2 * j + 1].sub(Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        }
-                                    }
-                                } else if (self.thread_pool) |tp| {
-                                    const BindCtx = struct {
-                                        p_raf: []F,
-                                        p_rw: []F,
-                                        p_val: []F,
-                                        q_raf: []F,
-                                        q_rw: []F,
-                                        q_val: []F,
-                                        chal_limbs: [4]u64,
-                                        h: usize,
-                                    };
-                                    const bctx = BindCtx{ .p_raf = P_raf, .p_rw = P_rw, .p_val = P_val, .q_raf = Q_raf, .q_rw = Q_rw, .q_val = Q_val, .chal_limbs = challenge.limbs, .h = half_len };
-                                    tp.parallelForForce(6, bctx, struct {
-                                        fn f(c: BindCtx, arr_idx: usize) void {
-                                            const arr = switch (arr_idx) {
-                                                0 => c.p_raf,
-                                                1 => c.p_rw,
-                                                2 => c.p_val,
-                                                3 => c.q_raf,
-                                                4 => c.q_rw,
-                                                5 => c.q_val,
-                                                else => unreachable,
-                                            };
-                                            for (0..c.h) |j| {
-                                                const lo = arr[2 * j];
-                                                arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(c.chal_limbs));
-                                            }
-                                        }
-                                    }.f);
-                                } else {
-                                    for (0..half_len) |j| {
-                                        P_raf[j] = P_raf[2 * j].add(P_raf[2 * j + 1].sub(P_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        P_rw[j] = P_rw[2 * j].add(P_rw[2 * j + 1].sub(P_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        P_val[j] = P_val[2 * j].add(P_val[2 * j + 1].sub(P_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                    }
-                                    for (0..half_len) |j| {
-                                        Q_raf[j] = Q_raf[2 * j].add(Q_raf[2 * j + 1].sub(Q_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        Q_rw[j] = Q_rw[2 * j].add(Q_rw[2 * j + 1].sub(Q_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        Q_val[j] = Q_val[2 * j].add(Q_val[2 * j + 1].sub(Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                    }
-                                }
-
-                                if (cycle_round < 3) {
-                                    if (comptime debug_verbose) {
-                                        dbg("[STAGE5 RAM_RA] Bound PhaseCycle1 round {}: challenge={x}, new_len={}\n", .{
-                                            cycle_round,
-                                            challenge.toBytesBE()[16..32].*,
-                                            half_len,
-                                        });
-                                    }
-                                    if (half_len > 0) {
-                                        if (comptime debug_verbose) {
-                                            dbg("  P_raf[0]={x}, Q_raf[0]={x}\n", .{
-                                                P_raf[0].toBytesBE()[16..32].*,
-                                                Q_raf[0].toBytesBE()[16..32].*,
-                                            });
-                                        }
-                                    }
-                                }
-                            } else {
-                                // PhaseCycle2: bind H_prime and eq_hi arrays
-                                const suffix_round = cycle_round - prefix_n_vars;
-                                const current_len = suffix_size >> @intCast(suffix_round);
-                                const half_len = current_len / 2;
-
-                                // Bind H_prime and eq_hi arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
-                                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
-                                // Parallelize across the 4 independent arrays
-                                if (self.gpu_ops) |gpu| {
-                                    if (half_len >= 16384) {
-                                        const heq_arrays = [_][]F{ H_prime, eq_raf_hi, eq_rw_hi, eq_val_hi };
-                                        for (heq_arrays) |arr| {
-                                            gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
-                                                for (0..half_len) |j| {
-                                                    const lo = arr[2 * j];
-                                                    arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(challenge.limbs));
-                                                }
-                                            };
-                                        }
-                                    } else {
-                                        for (0..half_len) |j| {
-                                            H_prime[j] = H_prime[2 * j].add(H_prime[2 * j + 1].sub(H_prime[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        }
-                                        for (0..half_len) |j| {
-                                            eq_raf_hi[j] = eq_raf_hi[2 * j].add(eq_raf_hi[2 * j + 1].sub(eq_raf_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            eq_rw_hi[j] = eq_rw_hi[2 * j].add(eq_rw_hi[2 * j + 1].sub(eq_rw_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            eq_val_hi[j] = eq_val_hi[2 * j].add(eq_val_hi[2 * j + 1].sub(eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        }
-                                    }
-                                } else if (self.thread_pool) |tp| {
-                                    const BindCtx2 = struct {
-                                        h_prime: []F,
-                                        eq_raf: []F,
-                                        eq_rw: []F,
-                                        eq_val: []F,
-                                        chal_limbs: [4]u64,
-                                        h: usize,
-                                    };
-                                    const bctx2 = BindCtx2{ .h_prime = H_prime, .eq_raf = eq_raf_hi, .eq_rw = eq_rw_hi, .eq_val = eq_val_hi, .chal_limbs = challenge.limbs, .h = half_len };
-                                    tp.parallelForForce(4, bctx2, struct {
-                                        fn f(c: BindCtx2, arr_idx: usize) void {
-                                            const arr = switch (arr_idx) {
-                                                0 => c.h_prime,
-                                                1 => c.eq_raf,
-                                                2 => c.eq_rw,
-                                                3 => c.eq_val,
-                                                else => unreachable,
-                                            };
-                                            for (0..c.h) |j| {
-                                                const lo = arr[2 * j];
-                                                arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(c.chal_limbs));
-                                            }
-                                        }
-                                    }.f);
-                                } else {
-                                    for (0..half_len) |j| {
-                                        H_prime[j] = H_prime[2 * j].add(H_prime[2 * j + 1].sub(H_prime[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                    }
-                                    for (0..half_len) |j| {
-                                        eq_raf_hi[j] = eq_raf_hi[2 * j].add(eq_raf_hi[2 * j + 1].sub(eq_raf_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        eq_rw_hi[j] = eq_rw_hi[2 * j].add(eq_rw_hi[2 * j + 1].sub(eq_rw_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        eq_val_hi[j] = eq_val_hi[2 * j].add(eq_val_hi[2 * j + 1].sub(eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                    }
-                                }
-
-                                if (comptime debug_verbose) {
-                                    dbg("[STAGE5 RAM_RA] Bound PhaseCycle2 round {} (suffix {}): challenge={x}, new_len={}\n", .{
-                                        cycle_round,
-                                        suffix_round,
-                                        challenge.toBytesBE()[16..32].*,
-                                        half_len,
-                                    });
-                                }
-                                if (half_len > 0) {
-                                    if (comptime debug_verbose) {
-                                        dbg("  H_prime[0]={x}, eq_raf_hi[0]={x}\n", .{
-                                            H_prime[0].toBytesBE()[16..32].*,
-                                            eq_raf_hi[0].toBytesBE()[16..32].*,
-                                        });
-                                    }
-                                }
-                            }
-
-                            // Update Instance 1 claim: p(r) = c0 + r*c1 + r²*c2
-                            const c2_inst1 = inst1_eval_2.sub(inst1_eval_1).sub(inst1_eval_1).add(inst1_eval_0).mul(UniPoly(F).INV2);
-                            const c1_inst1 = inst1_eval_1.sub(inst1_eval_0).sub(c2_inst1);
-                            const c0_inst1 = inst1_eval_0;
-                            const r2_inst1 = challenge.mul(challenge);
-                            ram_ra_current_claim = c0_inst1.add(c1_inst1.mulHiBigIntU128(challenge.limbs)).add(c2_inst1.mul(r2_inst1));
-                        }
+                        ram_ra_prover.bindChallenge(ram_ra_round, challenge);
                     }
 
                     // Update lookups_claim from the polynomial chain
@@ -3939,7 +3151,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             dbg("[ADDR CLAIM TRACK] Round {}: regs_val={x}, ram_ra={x}, lookups={x}\n", .{
                                 round,
                                 regs_val_current_claim.toBytesBE()[16..32].*,
-                                ram_ra_current_claim.toBytesBE()[16..32].*,
+                                ram_ra_prover.current_claim.toBytesBE()[16..32].*,
                                 lookups_claim.toBytesBE()[16..32].*,
                             });
                             dbg("[ADDR CLAIM TRACK] Round {}: batched_claim={x}\n", .{
@@ -5866,16 +5078,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // CRITICAL DEBUG: Check if current_batched_claim = sum of scaled instance claims
                         // Expected: batch0*claim0 + batch1*claim1 + batch2*claim2
                         const expected_batched = batch0.mul(regs_val_current_claim)
-                            .add(batch1.mul(ram_ra_current_claim))
+                            .add(batch1.mul(ram_ra_prover.current_claim))
                             .add(batch2.mul(lookups_claim));
                         if (comptime debug_verbose) {
                             dbg("  expected_batched (batch0*c0+batch1*c1+batch2*c2) = {any}\n", .{expected_batched.toBytes()});
                             dbg("  current_batched_claim matches expected: {}\n", .{current_batched_claim.eql(expected_batched)});
                             dbg("    batch0*claim0 = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
-                            dbg("    batch1*claim1 = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
+                            dbg("    batch1*claim1 = {any}\n", .{batch1.mul(ram_ra_prover.current_claim).toBytes()});
                             dbg("    batch2*claim2 = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
                             dbg("    regs_val_current_claim = {x}\n", .{regs_val_current_claim.toBytesBE()[16..32].*});
-                            dbg("    ram_ra_current_claim   = {x}\n", .{ram_ra_current_claim.toBytesBE()[16..32].*});
+                            dbg("    ram_ra_prover.current_claim   = {x}\n", .{ram_ra_prover.current_claim.toBytesBE()[16..32].*});
                             dbg("    lookups_claim          = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                         }
 
@@ -5944,256 +5156,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Upstream: cycle-only binding (no PhaseAddress)
                     if (remaining_rounds <= ram_ra_num_rounds) {
                         const ram_ra_round = ram_ra_num_rounds - remaining_rounds;
-                        {
-                            // PhaseCycle: bind cycle variables (all rounds are cycle rounds)
-                            const cycle_round = ram_ra_round;
-                            const one_minus_r = F.one().sub(challenge);
-
-                            // Get r_cycle_* values for this bit (LowToHigh order)
-                            const r_raf_bit = r_cycle_raf[n_cycle_vars - 1 - cycle_round];
-                            const r_rw_bit = r_cycle_rw[n_cycle_vars - 1 - cycle_round];
-                            const r_val_bit = r_cycle_val[n_cycle_vars - 1 - cycle_round];
-
-                            // Update eq_*_bound with eq_bit(r_*[m], r_m)
-                            const eq_raf_update = F.one().sub(r_raf_bit).sub(challenge).add(r_raf_bit.mul(challenge).add(r_raf_bit.mul(challenge)));
-                            const eq_rw_update = F.one().sub(r_rw_bit).sub(challenge).add(r_rw_bit.mul(challenge).add(r_rw_bit.mul(challenge)));
-                            const eq_val_update = F.one().sub(r_val_bit).sub(challenge).add(r_val_bit.mul(challenge).add(r_val_bit.mul(challenge)));
-                            eq_raf_bound = eq_raf_bound.mul(eq_raf_update);
-                            eq_rw_bound = eq_rw_bound.mul(eq_rw_update);
-                            eq_val_bound = eq_val_bound.mul(eq_val_update);
-
-                            // Precompute the 6 inverses: each eq_*_bit_at_c only takes
-                            // 2 possible values per round (r_*_bit or 1-r_*_bit).
-                            // Avoids M * 3 field inversions per round (each ~256 muls).
-                            const one_minus_r_raf = F.one().sub(r_raf_bit);
-                            const one_minus_r_rw = F.one().sub(r_rw_bit);
-                            const one_minus_r_val = F.one().sub(r_val_bit);
-                            const inv_r_raf = if (!r_raf_bit.eql(F.zero())) r_raf_bit.inverse().? else F.zero();
-                            const inv_1mr_raf = if (!one_minus_r_raf.eql(F.zero())) one_minus_r_raf.inverse().? else F.zero();
-                            const inv_r_rw = if (!r_rw_bit.eql(F.zero())) r_rw_bit.inverse().? else F.zero();
-                            const inv_1mr_rw = if (!one_minus_r_rw.eql(F.zero())) one_minus_r_rw.inverse().? else F.zero();
-                            const inv_r_val = if (!r_val_bit.eql(F.zero())) r_val_bit.inverse().? else F.zero();
-                            const inv_1mr_val = if (!one_minus_r_val.eql(F.zero())) one_minus_r_val.inverse().? else F.zero();
-
-                            for (0..ram_access_count) |access_idx| {
-                                const cycle = ram_cycles[access_idx];
-                                const cycle_usize: usize = @intCast(cycle);
-                                // Get the cycle bit that was just bound
-                                const c_m: u1 = @truncate(cycle_usize >> @intCast(cycle_round));
-                                // Multiply eq_cycle_bound by the binding factor
-                                const factor = if (c_m == 0) one_minus_r else challenge;
-                                eq_cycle_bound[access_idx] = eq_cycle_bound[access_idx].mul(factor);
-
-                                // Update eq_*_remaining by dividing out eq_bit(r_*[m], c_m)
-                                const inv_raf = if (c_m == 0) inv_1mr_raf else inv_r_raf;
-                                const inv_rw = if (c_m == 0) inv_1mr_rw else inv_r_rw;
-                                const inv_val = if (c_m == 0) inv_1mr_val else inv_r_val;
-
-                                if (!inv_raf.eql(F.zero())) {
-                                    eq_raf_remaining[access_idx] = eq_raf_remaining[access_idx].mul(inv_raf);
-                                }
-                                if (!inv_rw.eql(F.zero())) {
-                                    eq_rw_remaining[access_idx] = eq_rw_remaining[access_idx].mul(inv_rw);
-                                }
-                                if (!inv_val.eql(F.zero())) {
-                                    eq_val_remaining[access_idx] = eq_val_remaining[access_idx].mul(inv_val);
-                                }
-                            }
-
-                            if (comptime debug_verbose) {
-                                dbg("[STAGE5 CYCLE BIND R{}] cycle_round={}, challenge={x}\n", .{
-                                    round,
-                                    cycle_round,
-                                    challenge.toBytesBE()[16..32].*,
-                                });
-                                dbg("  eq_raf_bound={x}\n", .{eq_raf_bound.toBytesBE()[16..32].*});
-                            }
-                            if (ram_access_count > 0) {
-                                if (comptime debug_verbose) {
-                                    dbg("  eq_cycle_bound[0]={x}\n", .{eq_cycle_bound[0].toBytesBE()[16..32].*});
-                                }
-                            }
-
-                            // CRITICAL FIX: Bind P/Q arrays for Instance 1 PhaseCycle
-                            // This was missing - P/Q arrays need to be bound after each cycle round
-                            // to match the address rounds behavior
-
-                            // Store cycle challenge for PhaseCycle2 eq_prefix computation
-                            cycle_challenges[cycle_round] = challenge;
-
-                            if (cycle_round < prefix_n_vars) {
-                                // PhaseCycle1: bind P and Q polynomials
-                                const current_len = prefix_size >> @intCast(cycle_round);
-                                const half_len = current_len / 2;
-
-                                // Bind P and Q arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
-                                // Parallelize across the 6 independent arrays
-                                if (self.gpu_ops) |gpu| {
-                                    if (half_len >= 16384) {
-                                        const pq_arrays = [_][]F{ P_raf, P_rw, P_val, Q_raf, Q_rw, Q_val };
-                                        for (pq_arrays) |arr| {
-                                            gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
-                                                for (0..half_len) |j| {
-                                                    const lo = arr[2 * j];
-                                                    arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(challenge.limbs));
-                                                }
-                                            };
-                                        }
-                                    } else {
-                                        for (0..half_len) |j| {
-                                            P_raf[j] = P_raf[2 * j].add(P_raf[2 * j + 1].sub(P_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            P_rw[j] = P_rw[2 * j].add(P_rw[2 * j + 1].sub(P_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            P_val[j] = P_val[2 * j].add(P_val[2 * j + 1].sub(P_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        }
-                                        for (0..half_len) |j| {
-                                            Q_raf[j] = Q_raf[2 * j].add(Q_raf[2 * j + 1].sub(Q_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            Q_rw[j] = Q_rw[2 * j].add(Q_rw[2 * j + 1].sub(Q_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            Q_val[j] = Q_val[2 * j].add(Q_val[2 * j + 1].sub(Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        }
-                                    }
-                                } else if (self.thread_pool) |tp| {
-                                    const BindCtx = struct {
-                                        p_raf: []F,
-                                        p_rw: []F,
-                                        p_val: []F,
-                                        q_raf: []F,
-                                        q_rw: []F,
-                                        q_val: []F,
-                                        chal_limbs: [4]u64,
-                                        h: usize,
-                                    };
-                                    const bctx = BindCtx{ .p_raf = P_raf, .p_rw = P_rw, .p_val = P_val, .q_raf = Q_raf, .q_rw = Q_rw, .q_val = Q_val, .chal_limbs = challenge.limbs, .h = half_len };
-                                    tp.parallelForForce(6, bctx, struct {
-                                        fn f(c: BindCtx, arr_idx: usize) void {
-                                            const arr = switch (arr_idx) {
-                                                0 => c.p_raf,
-                                                1 => c.p_rw,
-                                                2 => c.p_val,
-                                                3 => c.q_raf,
-                                                4 => c.q_rw,
-                                                5 => c.q_val,
-                                                else => unreachable,
-                                            };
-                                            for (0..c.h) |j| {
-                                                const lo = arr[2 * j];
-                                                arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(c.chal_limbs));
-                                            }
-                                        }
-                                    }.f);
-                                } else {
-                                    for (0..half_len) |j| {
-                                        P_raf[j] = P_raf[2 * j].add(P_raf[2 * j + 1].sub(P_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        P_rw[j] = P_rw[2 * j].add(P_rw[2 * j + 1].sub(P_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        P_val[j] = P_val[2 * j].add(P_val[2 * j + 1].sub(P_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                    }
-                                    for (0..half_len) |j| {
-                                        Q_raf[j] = Q_raf[2 * j].add(Q_raf[2 * j + 1].sub(Q_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        Q_rw[j] = Q_rw[2 * j].add(Q_rw[2 * j + 1].sub(Q_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        Q_val[j] = Q_val[2 * j].add(Q_val[2 * j + 1].sub(Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                    }
-                                }
-
-                                if (comptime debug_verbose) {
-                                    dbg("[STAGE5 CYCLE BIND R{}] Bound P/Q arrays: half_len={}\n", .{
-                                        round,
-                                        half_len,
-                                    });
-                                }
-                            } else {
-                                // PhaseCycle2: bind H_prime and eq_hi arrays
-                                const suffix_round = cycle_round - prefix_n_vars;
-                                const current_len = suffix_size >> @intCast(suffix_round);
-                                const half_len = current_len / 2;
-
-                                // Bind H_prime and eq_hi arrays: X'[j] = (1-r)*X[2j] + r*X[2j+1]
-                                // Parallelize across the 4 independent arrays
-                                if (self.gpu_ops) |gpu| {
-                                    if (half_len >= 16384) {
-                                        const heq_arrays = [_][]F{ H_prime, eq_raf_hi, eq_rw_hi, eq_val_hi };
-                                        for (heq_arrays) |arr| {
-                                            gpu.polyBindLow(arr[0 .. half_len * 2], challenge, arr[0..half_len]) catch {
-                                                for (0..half_len) |j| {
-                                                    const lo = arr[2 * j];
-                                                    arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(challenge.limbs));
-                                                }
-                                            };
-                                        }
-                                    } else {
-                                        for (0..half_len) |j| {
-                                            H_prime[j] = H_prime[2 * j].add(H_prime[2 * j + 1].sub(H_prime[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        }
-                                        for (0..half_len) |j| {
-                                            eq_raf_hi[j] = eq_raf_hi[2 * j].add(eq_raf_hi[2 * j + 1].sub(eq_raf_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            eq_rw_hi[j] = eq_rw_hi[2 * j].add(eq_rw_hi[2 * j + 1].sub(eq_rw_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                            eq_val_hi[j] = eq_val_hi[2 * j].add(eq_val_hi[2 * j + 1].sub(eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        }
-                                    }
-                                } else if (self.thread_pool) |tp| {
-                                    const BindCtx2 = struct {
-                                        h_prime: []F,
-                                        eq_raf: []F,
-                                        eq_rw: []F,
-                                        eq_val: []F,
-                                        chal_limbs: [4]u64,
-                                        h: usize,
-                                    };
-                                    const bctx2 = BindCtx2{ .h_prime = H_prime, .eq_raf = eq_raf_hi, .eq_rw = eq_rw_hi, .eq_val = eq_val_hi, .chal_limbs = challenge.limbs, .h = half_len };
-                                    tp.parallelForForce(4, bctx2, struct {
-                                        fn f(c: BindCtx2, arr_idx: usize) void {
-                                            const arr = switch (arr_idx) {
-                                                0 => c.h_prime,
-                                                1 => c.eq_raf,
-                                                2 => c.eq_rw,
-                                                3 => c.eq_val,
-                                                else => unreachable,
-                                            };
-                                            for (0..c.h) |j| {
-                                                const lo = arr[2 * j];
-                                                arr[j] = lo.add(arr[2 * j + 1].sub(lo).mulHiBigIntU128(c.chal_limbs));
-                                            }
-                                        }
-                                    }.f);
-                                } else {
-                                    for (0..half_len) |j| {
-                                        H_prime[j] = H_prime[2 * j].add(H_prime[2 * j + 1].sub(H_prime[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                    }
-                                    for (0..half_len) |j| {
-                                        eq_raf_hi[j] = eq_raf_hi[2 * j].add(eq_raf_hi[2 * j + 1].sub(eq_raf_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        eq_rw_hi[j] = eq_rw_hi[2 * j].add(eq_rw_hi[2 * j + 1].sub(eq_rw_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                        eq_val_hi[j] = eq_val_hi[2 * j].add(eq_val_hi[2 * j + 1].sub(eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                                    }
-                                }
-
-                                if (comptime debug_verbose) {
-                                    dbg("[STAGE5 CYCLE BIND R{}] Bound H'/eq_hi arrays: half_len={}\n", .{
-                                        round,
-                                        half_len,
-                                    });
-                                }
-                            }
-
-                            // CRITICAL: Update Instance 1 claim after binding
-                            // p(r) = c0 + r*c1 + r²*c2 for degree-2 polynomial
-                            // where c0 = eval_0, c1 = eval_1 - eval_0 - c2, c2 = (eval_2 - 2*eval_1 + eval_0) / 2
-                            // Since we use hint: eval_0 = claim - eval_1, we have p(0) + p(1) = claim
-                            // Compute p(r) using Lagrange interpolation:
-                            // p(r) = eval_0 * L0(r) + eval_1 * L1(r) + eval_2 * L2(r)
-                            // where L0(r) = (r-1)(r-2)/2, L1(r) = -r(r-2), L2(r) = r(r-1)/2
-                            // Simpler: convert to coefficients and use Horner
-                            const c2_inst1 = inst1_eval_2.sub(inst1_eval_1).sub(inst1_eval_1).add(inst1_eval_0).mul(UniPoly(F).INV2);
-                            const c1_inst1 = inst1_eval_1.sub(inst1_eval_0).sub(c2_inst1);
-                            const c0_inst1 = inst1_eval_0;
-                            // p(r) = c0 + r*c1 + r²*c2
-                            const r2 = challenge.mul(challenge);
-                            ram_ra_current_claim = c0_inst1.add(c1_inst1.mulHiBigIntU128(challenge.limbs)).add(c2_inst1.mul(r2));
-
-                            if (comptime debug_verbose) {
-                                dbg("[STAGE5 INST1 CLAIM] Round {}: new_claim={x}\n", .{
-                                    round,
-                                    ram_ra_current_claim.toBytesBE()[16..32].*,
-                                });
-                            }
-                        }
+                        ram_ra_prover.bindChallenge(ram_ra_round, challenge);
                     }
 
                     // Bind cycle round challenge for lookups
@@ -6455,10 +5418,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             if (comptime debug_verbose) {
                 dbg("[STAGE5 FINAL CLAIMS] Individual instance final values:\n", .{});
                 dbg("  regs_val_current_claim (Instance 0) = {any}\n", .{regs_val_current_claim.toBytes()});
-                dbg("  ram_ra_current_claim (Instance 1) = {any}\n", .{ram_ra_current_claim.toBytes()});
+                dbg("  ram_ra_prover.current_claim (Instance 1) = {any}\n", .{ram_ra_prover.current_claim.toBytes()});
                 dbg("  lookups_claim (Instance 2) = {any}\n", .{lookups_claim.toBytes()});
                 dbg("  batch0*inst0 (LE) = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
-                dbg("  batch1*inst1 (LE) = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
+                dbg("  batch1*inst1 (LE) = {any}\n", .{batch1.mul(ram_ra_prover.current_claim).toBytes()});
                 dbg("  batch2*inst2 (LE) = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
             }
 
@@ -6466,20 +5429,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             if (comptime debug_verbose) {
                 const print = std.debug.print;
                 print("[ZOLT S5 CHAIN] inst0_claim FULL LE = {any}\n", .{regs_val_current_claim.toBytes()});
-                print("[ZOLT S5 CHAIN] inst1_claim FULL LE = {any}\n", .{ram_ra_current_claim.toBytes()});
+                print("[ZOLT S5 CHAIN] inst1_claim FULL LE = {any}\n", .{ram_ra_prover.current_claim.toBytes()});
                 print("[ZOLT S5 CHAIN] inst2_claim FULL LE = {any}\n", .{lookups_claim.toBytes()});
                 print("[ZOLT S5 CHAIN] batch0 FULL LE = {any}\n", .{batch0.toBytes()});
                 print("[ZOLT S5 CHAIN] batch1 FULL LE = {any}\n", .{batch1.toBytes()});
                 print("[ZOLT S5 CHAIN] batch2 FULL LE = {any}\n", .{batch2.toBytes()});
                 print("[ZOLT S5 CHAIN] batch0*inst0 FULL LE = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
-                print("[ZOLT S5 CHAIN] batch1*inst1 FULL LE = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
+                print("[ZOLT S5 CHAIN] batch1*inst1 FULL LE = {any}\n", .{batch1.mul(ram_ra_prover.current_claim).toBytes()});
                 print("[ZOLT S5 CHAIN] batch2*inst2 FULL LE = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
-                const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
+                const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_prover.current_claim)).add(batch2.mul(lookups_claim));
                 print("[ZOLT S5 CHAIN] sum = {any}\n", .{recon.toBytes()});
                 print("[ZOLT S5 CHAIN] batched_claim = {any}\n", .{current_batched_claim.toBytes()});
                 print("[ZOLT S5 CHAIN] sum==batched = {}\n", .{recon.eql(current_batched_claim)});
             }
-            const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
+            const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_prover.current_claim)).add(batch2.mul(lookups_claim));
             if (comptime debug_verbose) {
                 dbg("  batch0*inst0 + batch1*inst1 + batch2*inst2 = {any}\n", .{recon.toBytes()});
                 dbg("  current_batched_claim = {any}\n", .{current_batched_claim.toBytes()});
@@ -6489,7 +5452,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // CRITICAL: Derive correct Instance 2 claim from batched output
             // The batched output_claim is CORRECT (S5P==S5V). Individual claims for
             // inst0 and inst1 are also correct. So we can derive the TRUE inst2 claim.
-            const correct_inst2_from_batched = if (comptime debug_verbose) current_batched_claim.sub(batch0.mul(regs_val_current_claim)).sub(batch1.mul(ram_ra_current_claim)).mul(batch2_inv) else F.zero();
+            const correct_inst2_from_batched = if (comptime debug_verbose) current_batched_claim.sub(batch0.mul(regs_val_current_claim)).sub(batch1.mul(ram_ra_prover.current_claim)).mul(batch2_inv) else F.zero();
             if (comptime debug_verbose) {
                 dbg("  [DRIFT CHECK] lookups_claim (tracked)     = {any}\n", .{lookups_claim.toBytes()});
                 dbg("  [DRIFT CHECK] correct_inst2 (from batch)  = {any}\n", .{correct_inst2_from_batched.toBytes()});
@@ -6531,7 +5494,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const addr: u64 = if (memory_layout) |ml|
                                 ml.remapAddress(raw_addr) orelse 0
                             else
-                                raw_addr & (@as(u64, K) - 1);
+                                raw_addr & ((@as(u64, 1) << @intCast(log_ram_k)) - 1);
                             const eq_a = computeEqAtPoint(F, r_address_raf, addr);
                             const eq_c = computeEqAtPoint(F, r_cycle_reduced_be, cycle);
                             bf_ra_claim = bf_ra_claim.add(eq_a.mul(eq_c));
@@ -6548,8 +5511,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     dbg("[BRUTE FORCE INST1] eq_combined = {x}\n", .{bf_eq_combined.toBytesBE()[16..32].*});
                     dbg("[BRUTE FORCE INST1] ra_claim_reduced = {x}\n", .{bf_ra_claim.toBytesBE()[16..32].*});
                     dbg("[BRUTE FORCE INST1] expected (eq_combined * ra_reduced) = {any}\n", .{bf_expected_inst1.toBytes()});
-                    dbg("[BRUTE FORCE INST1] prover tracked ram_ra_current_claim = {any}\n", .{ram_ra_current_claim.toBytes()});
-                    dbg("[BRUTE FORCE INST1] match: {}\n", .{bf_expected_inst1.eql(ram_ra_current_claim)});
+                    dbg("[BRUTE FORCE INST1] prover tracked ram_ra_prover.current_claim = {any}\n", .{ram_ra_prover.current_claim.toBytes()});
+                    dbg("[BRUTE FORCE INST1] match: {}\n", .{bf_expected_inst1.eql(ram_ra_prover.current_claim)});
                 }
             }
 
@@ -7062,7 +6025,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // H_prime[0] holds the final evaluation of the ra polynomial at the
             // opening point [r_address, r_cycle_reduced].
             // This matches upstream's state.H_prime.final_sumcheck_claim().
-            const ram_ra_claim = H_prime[0];
+            const ram_ra_claim = ram_ra_prover.finalClaim();
             if (comptime debug_verbose) {
                 dbg("[STAGE5 RAM_RA] ram_ra_claim = H_prime[0] = {x}\n", .{ram_ra_claim.toBytesBE()});
             }

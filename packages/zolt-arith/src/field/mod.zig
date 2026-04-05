@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const testdata = @import("../testdata.zig");
 
 /// LLVM carry/borrow intrinsics — map to single adc/sbb instructions on x86-64.
 /// Wrapped in a comptime-conditional struct so they are not emitted on non-x86 targets.
@@ -2198,6 +2199,54 @@ pub const SimdOps = simd_ops.SimdOps;
 // Verify BN254Scalar implements JoltField interface
 comptime {
     _ = JoltField(BN254Scalar);
+}
+
+fn scalarFromFixtureValue(value: u128) BN254Scalar {
+    if (value <= std.math.maxInt(u64)) {
+        return BN254Scalar.fromU64(@intCast(value));
+    }
+    return BN254Scalar.fromU128(value);
+}
+
+test "bn254 scalar arithmetic vectors" {
+    const fixture_text = @embedFile("../testdata/field/bn254_scalar_arithmetic.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(6, line, '|');
+
+        const a = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[1]));
+        const b = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[2]));
+        const expected_sum = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[3]));
+        const expected_diff = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[4]));
+        const expected_product = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[5]));
+
+        try std.testing.expect(a.add(b).eql(expected_sum));
+        try std.testing.expect(a.sub(b).eql(expected_diff));
+        try std.testing.expect(a.mul(b).eql(expected_product));
+    }
+}
+
+test "bn254 scalar serialization vectors" {
+    const fixture_text = @embedFile("../testdata/field/bn254_scalar_serialization.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(4, line, '|');
+
+        const value = scalarFromFixtureValue(try testdata.parseDecimal(u128, fields[1]));
+        const expected_le = try testdata.parseHexBytesExact(32, fields[2]);
+        const expected_be = try testdata.parseHexBytesExact(32, fields[3]);
+
+        const actual_le = value.toBytes();
+        const actual_be = value.toBytesBE();
+        try std.testing.expectEqualSlices(u8, &expected_le, &actual_le);
+        try std.testing.expectEqualSlices(u8, &expected_be, &actual_be);
+        try std.testing.expect(value.eql(BN254Scalar.fromBytes(&expected_le)));
+        try std.testing.expect(value.eql(BN254Scalar.fromBytesBE(&expected_be)));
+    }
 }
 
 test "bn254 scalar basic operations" {

@@ -13,6 +13,7 @@
 //! - Challenges are 128-bit (16 bytes)
 
 const std = @import("std");
+const testdata = @import("../testdata.zig");
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
@@ -349,6 +350,88 @@ pub fn Blake2bTranscript(comptime F: type) type {
 // Tests
 const testing = std.testing;
 const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
+
+test "blake2b rfc7693 vectors" {
+    const fixture_text = @embedFile("../testdata/transcripts/blake2b_rfc7693.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(3, line, '|');
+
+        var input_buf: [256]u8 = undefined;
+        const input = try testdata.parseHexIntoBuffer(fields[1], &input_buf);
+        const expected_digest = try testdata.parseHexBytesExact(32, fields[2]);
+
+        var hasher = Blake2b256.init(.{});
+        hasher.update(input);
+
+        var actual_digest: [32]u8 = undefined;
+        hasher.final(&actual_digest);
+        try testing.expectEqualSlices(u8, &expected_digest, &actual_digest);
+    }
+}
+
+test "jolt compatibility: fixture-backed state vectors" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+    const fixture_text = @embedFile("../testdata/transcripts/blake2b_jolt_state_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(6, line, '|');
+
+        var transcript = Transcript.init(fields[1]);
+        const op_kind = fields[2];
+        const op_arg = fields[3];
+
+        if (mem.eql(u8, op_kind, "init")) {
+            // No-op: expected state is the initialized transcript state.
+        } else if (mem.eql(u8, op_kind, "raw_label")) {
+            transcript.rawAppendLabel(op_arg);
+        } else if (mem.eql(u8, op_kind, "raw_bytes_hex")) {
+            var bytes_buf: [256]u8 = undefined;
+            const bytes = try testdata.parseHexIntoBuffer(op_arg, &bytes_buf);
+            transcript.rawAppendBytes(bytes);
+        } else if (mem.eql(u8, op_kind, "raw_scalar_u64")) {
+            transcript.rawAppendScalar(BN254Scalar.fromU64(try testdata.parseDecimal(u64, op_arg)));
+        } else {
+            return error.UnknownTranscriptVectorOperation;
+        }
+
+        const expected_state = try testdata.parseHexBytesExact(32, fields[4]);
+        try testing.expectEqualSlices(u8, &expected_state, &transcript.state);
+        try testing.expectEqual(try testdata.parseDecimal(u32, fields[5]), transcript.n_rounds);
+    }
+}
+
+test "jolt compatibility: fixture-backed challenge vectors" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+    const fixture_text = @embedFile("../testdata/transcripts/blake2b_jolt_challenge_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(6, line, '|');
+
+        if (!mem.eql(u8, fields[3], "-")) {
+            var transcript_u128 = Transcript.init(fields[1]);
+            transcript_u128.rawAppendLabel(fields[2]);
+            try testing.expectEqual(try testdata.parseDecimal(u128, fields[3]), transcript_u128.challengeU128());
+        }
+
+        if (!mem.eql(u8, fields[4], "-") and !mem.eql(u8, fields[5], "-")) {
+            var transcript_limbs = Transcript.init(fields[1]);
+            transcript_limbs.rawAppendLabel(fields[2]);
+            const challenge = transcript_limbs.challengeScalar128Bits();
+
+            try testing.expectEqual(@as(u64, 0), challenge.limbs[0]);
+            try testing.expectEqual(@as(u64, 0), challenge.limbs[1]);
+            try testing.expectEqual(try std.fmt.parseInt(u64, fields[4], 16), challenge.limbs[2]);
+            try testing.expectEqual(try std.fmt.parseInt(u64, fields[5], 16), challenge.limbs[3]);
+        }
+    }
+}
 
 test "blake2b transcript: basic initialization" {
     const Transcript = Blake2bTranscript(BN254Scalar);

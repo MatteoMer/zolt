@@ -24,6 +24,26 @@ pub fn parallelReduceOptional(
         mapFn(ctx, 0, len);
 }
 
+/// Optional parallelReduceForce — falls back to sequential map if pool is null.
+///
+/// Like parallelReduceOptional but uses force semantics (ignores MIN_ITEMS_PER_THREAD).
+/// Replaces the pattern:
+///   if (self.pool) |tp| tp.parallelReduceForce(R, len, identity, ctx, mapFn, reduceFn) else mapFn(ctx, 0, len);
+pub fn parallelReduceForceOptional(
+    comptime R: type,
+    pool: ?*ThreadPool,
+    len: usize,
+    identity: R,
+    ctx: anytype,
+    mapFn: anytype,
+    reduceFn: anytype,
+) R {
+    return if (pool) |p|
+        p.parallelReduceForce(R, len, identity, ctx, mapFn, reduceFn)
+    else
+        mapFn(ctx, 0, len);
+}
+
 /// Optional parallelFor with force semantics — falls back to sequential loop if pool is null.
 ///
 /// Replaces the pattern:

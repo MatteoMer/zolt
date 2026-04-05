@@ -40,6 +40,7 @@ const poly = @import("zolt_arith").poly;
 const EqPolynomial = poly.EqPolynomial;
 const field_mod = @import("zolt_arith").field;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const evaluators = @import("evaluators.zig");
 
 /// Number of R1CS inputs per cycle
@@ -178,10 +179,7 @@ pub fn R1CSInputEvaluator(comptime F: type) type {
                 }
             };
 
-            const accum_result = if (thread_pool) |tp|
-                tp.parallelReduce(AccumArray, eq_one.len, accum_zero, ctx, mapReduceFns.mapFn, mapReduceFns.reduceFn)
-            else
-                mapReduceFns.mapFn(ctx, 0, eq_one.len);
+            const accum_result = pool_helpers.parallelReduceOptional(AccumArray, thread_pool, eq_one.len, accum_zero, ctx, mapReduceFns.mapFn, mapReduceFns.reduceFn);
 
             var result: [NUM_R1CS_INPUTS]F = undefined;
             for (0..NUM_R1CS_INPUTS) |i| {
@@ -321,10 +319,7 @@ pub fn R1CSInputEvaluator(comptime F: type) type {
                 }
             };
 
-            const accum_result = if (thread_pool) |tp|
-                tp.parallelReduce(AccumArray, eq_one.len, accum_zero, ctx, typedMapReduce.mapFn, typedMapReduce.reduceFn)
-            else
-                typedMapReduce.mapFn(ctx, 0, eq_one.len);
+            const accum_result = pool_helpers.parallelReduceOptional(AccumArray, thread_pool, eq_one.len, accum_zero, ctx, typedMapReduce.mapFn, typedMapReduce.reduceFn);
 
             var result: [NUM_R1CS_INPUTS]F = undefined;
             for (0..NUM_R1CS_INPUTS) |i| {

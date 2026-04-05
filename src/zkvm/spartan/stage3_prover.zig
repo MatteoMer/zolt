@@ -481,74 +481,32 @@ pub fn Stage3Prover(comptime F: type) type {
                     dbg("[ZOLT] STAGE3_ROUND_{}: shift_p1 = {{ {any} }}\n", .{ round, shift_evals[1].toBytes() });
                 }
 
-                // Combine round polynomials (all evaluated at 0, 1, 2, 3)
-                // batched_poly = coeff[0] * shift_poly + coeff[1] * instr_poly + coeff[2] * reg_poly
-                // NOTE: shift and reg are degree-2, but we need their values at x=3 via extrapolation
-                // Linear extrapolation: p(3) = 3*p(1) - 3*p(0) + p(-1) is wrong for degree-2
-                // Quadratic extrapolation: p(3) = 3*p(2) - 3*p(1) + p(0)
-                const shift_p3 = sumcheck_helpers.extrapolateDeg2(F, shift_evals);
-                const reg_p3 = sumcheck_helpers.extrapolateDeg2(F, reg_evals);
+                // Combine round polynomials in monomial form
+                // Each instance's evaluations are converted to monomial coefficients and
+                // accumulated into combined_coeffs, weighted by batching coefficients.
+                var combined_coeffs = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                sumcheck_helpers.addEvalsAsMonomialToCoeffs(F, &combined_coeffs, &shift_evals, 3, batching_coeffs[0]);
+                sumcheck_helpers.addEvalsAsMonomialToCoeffs(F, &combined_coeffs, &instr_evals, 4, batching_coeffs[1]);
+                sumcheck_helpers.addEvalsAsMonomialToCoeffs(F, &combined_coeffs, &reg_evals, 3, batching_coeffs[2]);
 
-                var combined_evals: [4]F = undefined;
-                for (0..4) |i| {
-                    const shift_val = if (i < 3) shift_evals[i] else shift_p3;
-                    const instr_val = instr_evals[i];
-                    const reg_val = if (i < 3) reg_evals[i] else reg_p3;
-                    combined_evals[i] = shift_val.mul(batching_coeffs[0])
-                        .add(instr_val.mul(batching_coeffs[1]))
-                        .add(reg_val.mul(batching_coeffs[2]));
-                }
-
-                // Debug: Print evaluations
-                if (comptime debug_verbose) {
-                    if (round < 3) {
-                        dbg("[ZOLT] STAGE3_ROUND_{}: p0 = {{ {any} }}\n", .{ round, combined_evals[0].toBytes() });
-                        dbg("[ZOLT] STAGE3_ROUND_{}: p1 = {{ {any} }}\n", .{ round, combined_evals[1].toBytes() });
-                        dbg("[ZOLT] STAGE3_ROUND_{}: p0+p1 = {{ {any} }}\n", .{ round, combined_evals[0].add(combined_evals[1]).toBytes() });
-                        dbg("[ZOLT] STAGE3_ROUND_{}: current_claim (should match p0+p1) = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
-                    }
-                }
-
-                // Compress evaluations to [c0, c2, c3] using finite differences (no allocation for interp)
-                const fd = sumcheck_helpers.finiteDifferencesCompress(F, combined_evals);
-
-                const compressed = try self.allocator.alloc(F, 3);
-                compressed[0] = fd[0]; // c0
-                compressed[1] = fd[1]; // c2
-                compressed[2] = fd[2]; // c3
-
-                // Append to proof
-                try proof.compressed_polys.append(self.allocator, .{
-                    .coeffs_except_linear_term = compressed,
-                    .allocator = self.allocator,
-                });
-
-                // Append compressed poly to transcript
-                transcript.appendScalars("sumcheck_poly", compressed);
-
-                // Debug: Print compressed coefficients
-                if (comptime debug_verbose) {
-                    dbg("[ZOLT] STAGE3_ROUND_{}: c0 = {{ {any} }}\n", .{ round, compressed[0].toBytes() });
-                    dbg("[ZOLT] STAGE3_ROUND_{}: c2 = {{ {any} }}\n", .{ round, compressed[1].toBytes() });
-                    dbg("[ZOLT] STAGE3_ROUND_{}: c3 = {{ {any} }}\n", .{ round, compressed[2].toBytes() });
-                }
-
-                // Derive challenge
-                const r_j = transcript.challengeScalar();
+                // Compress, append to proof+transcript, derive challenge, evaluate
+                const round_result = try sumcheck_helpers.finishSumcheckRound(
+                    F, &combined_coeffs, 3, combined_claim, transcript, proof, self.allocator,
+                );
+                const r_j = round_result.challenge;
                 challenges[round] = r_j;
+                combined_claim = round_result.new_claim;
 
                 if (comptime debug_verbose) {
+                    dbg("[ZOLT] STAGE3_ROUND_{}: c0 = {{ {any} }}\n", .{ round, round_result.compressed[0].toBytes() });
+                    dbg("[ZOLT] STAGE3_ROUND_{}: c2 = {{ {any} }}\n", .{ round, round_result.compressed[1].toBytes() });
+                    dbg("[ZOLT] STAGE3_ROUND_{}: c3 = {{ {any} }}\n", .{ round, round_result.compressed[2].toBytes() });
                     dbg("[ZOLT] STAGE3_ROUND_{}: challenge = {{ {any} }}\n", .{ round, r_j.toBytes() });
-                }
-
-                // Evaluate combined polynomial at r_j using evalFromHint (no allocation)
-                const UniPolyF = poly_mod.UniPoly(F);
-                combined_claim = UniPolyF.evalFromHint(.{ compressed[0], compressed[1], compressed[2] }, combined_claim, r_j);
-                if (comptime debug_verbose) {
                     dbg("[ZOLT] STAGE3_ROUND_{}: next_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
                 }
 
                 // Update individual claims using direct evaluation from evals (no allocation)
+                const UniPolyF = poly_mod.UniPoly(F);
                 current_shift_claim = UniPolyF.evalFromEvalsDeg2(shift_evals, r_j);
                 current_instr_claim = UniPolyF.evalFromEvalsDeg3(instr_evals, r_j);
                 current_reg_claim = UniPolyF.evalFromEvalsDeg2(reg_evals, r_j);

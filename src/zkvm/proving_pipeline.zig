@@ -24,6 +24,8 @@ const Dory = poly_commitment.dory;
 const Fp = field.BN254BaseField;
 const Fr = field.BN254Scalar;
 
+const pool_helpers = @import("zolt_pool").helpers;
+
 const jolt_device = @import("jolt_device.zig");
 const jolt_types = @import("jolt_types.zig");
 const jolt_serialization = @import("jolt_serialization.zig");
@@ -660,7 +662,7 @@ pub fn JoltProver(comptime F: type) type {
                     ) catch break :gpu_blk;
                     // GPU succeeded — skip CPU path
                     _ = gpu_msm_mod; // suppress unused
-                } else if (self.thread_pool) |tp| {
+                } else {
                     _ = gpu_msm_mod;
                     const MsmRowCtx = struct {
                         g1_bases: []const G1Point,
@@ -678,7 +680,7 @@ pub fn JoltProver(comptime F: type) type {
                         .ram_commits = ram_row_commits,
                         .cols = dense_num_cols,
                     };
-                    tp.parallelForForce(active_rows, msm_ctx, struct {
+                    pool_helpers.parallelForOptional(self.thread_pool, active_rows, msm_ctx, struct {
                         fn f(ctx: MsmRowCtx, row: usize) void {
                             const off = row * ctx.cols;
                             ctx.rd_commits[row] = msm.MSM(Fr, Fp).computeI128(
@@ -693,21 +695,6 @@ pub fn JoltProver(comptime F: type) type {
                             );
                         }
                     }.f);
-                } else {
-                    // Sequential fallback (no thread pool)
-                    for (0..active_rows) |row| {
-                        const off = row * dense_num_cols;
-                        rd_row_commits[row] = msm.MSM(Fr, Fp).computeI128(
-                            g1_slice,
-                            all_rd_bufs[off .. off + dense_num_cols],
-                            null,
-                        );
-                        ram_row_commits[row] = msm.MSM(Fr, Fp).computeI128(
-                            g1_slice,
-                            all_ram_bufs[off .. off + dense_num_cols],
-                            null,
-                        );
-                    }
                 }
 
                 // Zero-padded rows (beyond active data)

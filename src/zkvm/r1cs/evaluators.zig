@@ -682,6 +682,7 @@ pub const RawR1CSInputs = struct {
 };
 
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 
 /// Build compact witness array from field-form cycle witnesses.
 /// This performs Montgomery de-encoding once per value, then all subsequent
@@ -712,13 +713,7 @@ pub fn buildCompactWitnesses(
         }
     }.f;
 
-    if (thread_pool) |tp| {
-        tp.parallelFor(n, ctx, mapFn);
-    } else {
-        for (0..n) |i| {
-            mapFn(ctx, i);
-        }
-    }
+    pool_helpers.parallelForOptional(thread_pool, n, ctx, mapFn);
 
     return result;
 }
@@ -758,13 +753,7 @@ pub fn buildCompactAndRawWitnesses(
         }
     }.f;
 
-    if (thread_pool) |tp| {
-        tp.parallelFor(n, ctx, mapFn);
-    } else {
-        for (0..n) |i| {
-            mapFn(ctx, i);
-        }
-    }
+    pool_helpers.parallelForOptional(thread_pool, n, ctx, mapFn);
 
     return .{ .compact = compact, .raw = raw };
 }

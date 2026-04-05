@@ -17,6 +17,7 @@ const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const poly_mod = @import("zolt_arith").poly;
 const EqPolynomial = poly_mod.EqPolynomial;
 const UniPoly = poly_mod.UniPoly;
@@ -250,11 +251,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                 }
             }.f;
 
-            if (thread_pool) |tp| {
-                tp.parallelForForce(prefix_size, qctx, buildQFn);
-            } else {
-                for (0..prefix_size) |x_lo| buildQFn(qctx, x_lo);
-            }
+            pool_helpers.parallelForOptional(thread_pool, prefix_size, qctx, buildQFn);
 
             return Self{
                 .params = params,
@@ -391,10 +388,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             }.f;
 
             const identity = [2]F{ F.zero(), F.zero() };
-            const sums = if (self.thread_pool) |tp|
-                tp.parallelReduce([2]F, half, identity, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, half);
+            const sums = pool_helpers.parallelReduceOptional([2]F, self.thread_pool, half, identity, ctx, mapFn, reduceFn);
 
             const s0 = sums[0];
             const s1 = self.current_claim.sub(s0);
@@ -446,11 +440,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                         }
                     }.f;
 
-                    if (self.thread_pool) |tp| {
-                        tp.parallelForForce(6, bctx, bindOneFn);
-                    } else {
-                        for (0..6) |idx| bindOneFn(bctx, idx);
-                    }
+                    pool_helpers.parallelForOptional(self.thread_pool, 6, bctx, bindOneFn);
 
                     s.eq_evals = s.eq_evals[0..half];
                     s.lookup_outputs = s.lookup_outputs[0..half];
@@ -565,11 +555,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.thread_pool) |tp| {
-                tp.parallelForForce(suffix_size, mctx, materializeFn);
-            } else {
-                for (0..suffix_size) |j_hi| materializeFn(mctx, j_hi);
-            }
+            pool_helpers.parallelForOptional(self.thread_pool, suffix_size, mctx, materializeFn);
 
             // Free Phase 1 state
             self.allocator.free(s1.P.ptr[0..s1.original_P_size]);

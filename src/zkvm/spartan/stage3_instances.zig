@@ -16,6 +16,7 @@ const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 const poly_mod = @import("zolt_arith").poly;
 const field_mod = @import("zolt_arith").field;
@@ -275,11 +276,7 @@ pub fn ShiftPrefixSuffixProver(comptime F: type) type {
                 }
             }.f;
 
-            if (thread_pool) |tp| {
-                tp.parallelForForce(prefix_size, shift_init_ctx, shiftInitWorker);
-            } else {
-                for (0..prefix_size) |x_lo| shiftInitWorker(shift_init_ctx, x_lo);
-            }
+            pool_helpers.parallelForOptional(thread_pool, prefix_size, shift_init_ctx, shiftInitWorker);
 
             if (comptime debug_verbose) {
                 // DEBUG: Print initial witness MLE values
@@ -446,10 +443,7 @@ pub fn ShiftPrefixSuffixProver(comptime F: type) type {
             }.f;
 
             const identity = [3]F{ F.zero(), F.zero(), F.zero() };
-            const evals = if (self.thread_pool) |tp|
-                tp.parallelReduce([3]F, half, identity, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, half);
+            const evals = pool_helpers.parallelReduceOptional([3]F, self.thread_pool, half, identity, ctx, mapFn, reduceFn);
 
             // DEBUG: Verify sumcheck invariant p(0) + p(1) = previous_claim
             if (comptime debug_verbose) {
@@ -621,10 +615,8 @@ pub fn ShiftPrefixSuffixProver(comptime F: type) type {
                 } else {
                     for (0..8) |idx| bindOneFn(bctx, idx);
                 }
-            } else if (self.thread_pool) |tp| {
-                tp.parallelForForce(8, bctx, bindOneFn);
             } else {
-                for (0..8) |idx| bindOneFn(bctx, idx);
+                pool_helpers.parallelForOptional(self.thread_pool, 8, bctx, bindOneFn);
             }
 
             self.current_prefix_size = new_prefix_size;
@@ -801,11 +793,7 @@ pub fn ShiftPrefixSuffixProver(comptime F: type) type {
                     c.eq_prod[j] = c.p0p.mul(c.s0p[j]).add(c.p1p.mul(c.s1p[j]));
                 }
             }.f;
-            if (self.thread_pool) |tp| {
-                tp.parallelForForce(suffix_size, eq_mat_ctx, eqMatWorker);
-            } else {
-                for (0..suffix_size) |j| eqMatWorker(eq_mat_ctx, j);
-            }
+            pool_helpers.parallelForOptional(self.thread_pool, suffix_size, eq_mat_ctx, eqMatWorker);
 
             // =====================================================================
             // Step 3: Construct witness MLEs by summing over prefix domain weighted by Eq(r_prefix, j)
@@ -895,11 +883,7 @@ pub fn ShiftPrefixSuffixProver(comptime F: type) type {
                     c.noop_out[j] = field_mod.reduceMulU64(noop_acc);
                 }
             }.f;
-            if (self.thread_pool) |tp| {
-                tp.parallelForForce(suffix_size, wit_ctx, witReconWorker);
-            } else {
-                for (0..suffix_size) |j| witReconWorker(wit_ctx, j);
-            }
+            pool_helpers.parallelForOptional(self.thread_pool, suffix_size, wit_ctx, witReconWorker);
 
             self.current_witness_size = suffix_size;
 
@@ -1017,10 +1001,8 @@ pub fn ShiftPrefixSuffixProver(comptime F: type) type {
                 } else {
                     for (0..num_arrays) |idx| bindOneFn(bctx, idx);
                 }
-            } else if (self.thread_pool) |tp| {
-                tp.parallelForForce(num_arrays, bctx, bindOneFn);
             } else {
-                for (0..num_arrays) |idx| bindOneFn(bctx, idx);
+                pool_helpers.parallelForOptional(self.thread_pool, num_arrays, bctx, bindOneFn);
             }
 
             self.current_witness_size = new_size;
@@ -1221,11 +1203,7 @@ pub fn RegistersPrefixSuffixProver(comptime F: type) type {
                 }
             }.f;
 
-            if (thread_pool) |tp| {
-                tp.parallelForForce(prefix_size, reg_init_ctx, regInitWorker);
-            } else {
-                for (0..prefix_size) |x_lo| regInitWorker(reg_init_ctx, x_lo);
-            }
+            pool_helpers.parallelForOptional(thread_pool, prefix_size, reg_init_ctx, regInitWorker);
 
             const padded_size = prefix_size * suffix_size;
             return Self{
@@ -1466,11 +1444,7 @@ pub fn RegistersPrefixSuffixProver(comptime F: type) type {
                     c.rs2_out[j] = field_mod.reduceMulU64(rs2_acc);
                 }
             }.f;
-            if (self.thread_pool) |tp| {
-                tp.parallelForForce(suffix_size, recon_ctx, regReconWorker);
-            } else {
-                for (0..suffix_size) |j| regReconWorker(recon_ctx, j);
-            }
+            pool_helpers.parallelForOptional(self.thread_pool, suffix_size, recon_ctx, regReconWorker);
 
             self.current_witness_size = suffix_size;
         }
@@ -1513,10 +1487,8 @@ pub fn RegistersPrefixSuffixProver(comptime F: type) type {
                 } else {
                     for (0..num_arrays) |idx| bindOneFn(bctx, idx);
                 }
-            } else if (self.thread_pool) |tp| {
-                tp.parallelForForce(num_arrays, bctx, bindOneFn);
             } else {
-                for (0..num_arrays) |idx| bindOneFn(bctx, idx);
+                pool_helpers.parallelForOptional(self.thread_pool, num_arrays, bctx, bindOneFn);
             }
 
             self.current_witness_size = new_size;

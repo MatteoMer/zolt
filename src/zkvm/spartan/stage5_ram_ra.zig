@@ -17,6 +17,7 @@ const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 
 const poly_mod = @import("zolt_arith").poly;
@@ -775,7 +776,7 @@ pub fn RamRaClaimReductionProver(comptime F: type) type {
                             self.Q_val[j] = self.Q_val[2 * j].add(self.Q_val[2 * j + 1].sub(self.Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
                         }
                     }
-                } else if (self.thread_pool) |tp| {
+                } else {
                     const BindCtx = struct {
                         p_raf: []F,
                         p_rw: []F,
@@ -787,7 +788,7 @@ pub fn RamRaClaimReductionProver(comptime F: type) type {
                         h: usize,
                     };
                     const bctx = BindCtx{ .p_raf = self.P_raf, .p_rw = self.P_rw, .p_val = self.P_val, .q_raf = self.Q_raf, .q_rw = self.Q_rw, .q_val = self.Q_val, .chal_limbs = challenge.limbs, .h = half_len };
-                    tp.parallelForForce(6, bctx, struct {
+                    pool_helpers.parallelForOptional(self.thread_pool, 6, bctx, struct {
                         fn f(c: BindCtx, arr_idx: usize) void {
                             const arr = switch (arr_idx) {
                                 0 => c.p_raf,
@@ -804,17 +805,6 @@ pub fn RamRaClaimReductionProver(comptime F: type) type {
                             }
                         }
                     }.f);
-                } else {
-                    for (0..half_len) |j| {
-                        self.P_raf[j] = self.P_raf[2 * j].add(self.P_raf[2 * j + 1].sub(self.P_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                        self.P_rw[j] = self.P_rw[2 * j].add(self.P_rw[2 * j + 1].sub(self.P_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                        self.P_val[j] = self.P_val[2 * j].add(self.P_val[2 * j + 1].sub(self.P_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                    }
-                    for (0..half_len) |j| {
-                        self.Q_raf[j] = self.Q_raf[2 * j].add(self.Q_raf[2 * j + 1].sub(self.Q_raf[2 * j]).mulHiBigIntU128(challenge.limbs));
-                        self.Q_rw[j] = self.Q_rw[2 * j].add(self.Q_rw[2 * j + 1].sub(self.Q_rw[2 * j]).mulHiBigIntU128(challenge.limbs));
-                        self.Q_val[j] = self.Q_val[2 * j].add(self.Q_val[2 * j + 1].sub(self.Q_val[2 * j]).mulHiBigIntU128(challenge.limbs));
-                    }
                 }
 
                 if (comptime debug_verbose) {
@@ -849,7 +839,7 @@ pub fn RamRaClaimReductionProver(comptime F: type) type {
                             self.eq_val_hi[j] = self.eq_val_hi[2 * j].add(self.eq_val_hi[2 * j + 1].sub(self.eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
                         }
                     }
-                } else if (self.thread_pool) |tp| {
+                } else {
                     const BindCtx2 = struct {
                         h_prime: []F,
                         eq_raf: []F,
@@ -859,7 +849,7 @@ pub fn RamRaClaimReductionProver(comptime F: type) type {
                         h: usize,
                     };
                     const bctx2 = BindCtx2{ .h_prime = self.H_prime, .eq_raf = self.eq_raf_hi, .eq_rw = self.eq_rw_hi, .eq_val = self.eq_val_hi, .chal_limbs = challenge.limbs, .h = half_len };
-                    tp.parallelForForce(4, bctx2, struct {
+                    pool_helpers.parallelForOptional(self.thread_pool, 4, bctx2, struct {
                         fn f(c: BindCtx2, arr_idx: usize) void {
                             const arr = switch (arr_idx) {
                                 0 => c.h_prime,
@@ -874,15 +864,6 @@ pub fn RamRaClaimReductionProver(comptime F: type) type {
                             }
                         }
                     }.f);
-                } else {
-                    for (0..half_len) |j| {
-                        self.H_prime[j] = self.H_prime[2 * j].add(self.H_prime[2 * j + 1].sub(self.H_prime[2 * j]).mulHiBigIntU128(challenge.limbs));
-                    }
-                    for (0..half_len) |j| {
-                        self.eq_raf_hi[j] = self.eq_raf_hi[2 * j].add(self.eq_raf_hi[2 * j + 1].sub(self.eq_raf_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                        self.eq_rw_hi[j] = self.eq_rw_hi[2 * j].add(self.eq_rw_hi[2 * j + 1].sub(self.eq_rw_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                        self.eq_val_hi[j] = self.eq_val_hi[2 * j].add(self.eq_val_hi[2 * j + 1].sub(self.eq_val_hi[2 * j]).mulHiBigIntU128(challenge.limbs));
-                    }
                 }
 
                 if (comptime debug_verbose) {

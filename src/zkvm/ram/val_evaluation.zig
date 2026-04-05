@@ -711,10 +711,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
                     return a.add(b);
                 }
             }.f;
-            const initial_claim = if (pool) |tp|
-                tp.parallelReduce(F, n, F.zero(), claim_ctx, claimMapFn, claimReduceFn)
-            else
-                claimMapFn(claim_ctx, 0, n);
+            const initial_claim = parallelReduceOptional(F, pool, n, F.zero(), claim_ctx, claimMapFn, claimReduceFn);
 
             return Self{
                 .inc_evals = inc_evals,
@@ -964,11 +961,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
                     }
                 }.f;
 
-                if (self.thread_pool) |tp| {
-                    tp.parallelFor(half, mctx, matWaFn);
-                } else {
-                    for (0..half) |i| matWaFn(mctx, i);
-                }
+                parallelForOptional(self.thread_pool, half, mctx, matWaFn);
 
                 // Free lazy state
                 if (self.wa_addrs_owned) {

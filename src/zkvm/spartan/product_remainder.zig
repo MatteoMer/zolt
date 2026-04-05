@@ -36,6 +36,7 @@ const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 const field_mod = @import("zolt_arith").field;
 const UnreducedProductAccum = field_mod.UnreducedProductAccum;
@@ -252,11 +253,7 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 }
             }.f;
 
-            if (thread_pool) |tp| {
-                tp.parallelForForce(padded_len, ictx, initFn);
-            } else {
-                for (0..padded_len) |idx| initFn(ictx, idx);
-            }
+            pool_helpers.parallelForOptional(thread_pool, padded_len, ictx, initFn);
 
             var left_poly = DensePolynomial(F).initOwned(allocator, left_evals);
 
@@ -419,10 +416,8 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                     E_in,
                     num_xin_bits,
                 ) catch identity;
-            } else if (self.thread_pool) |tp|
-                tp.parallelReduce([2]F, num_groups, identity, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, num_groups);
+            } else
+                pool_helpers.parallelReduceOptional([2]F, self.thread_pool, num_groups, identity, ctx, mapFn, reduceFn);
 
             const t0_sum = sums[0];
             const t_inf_sum = sums[1];

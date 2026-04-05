@@ -12,6 +12,7 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 const poly_mod = @import("zolt_arith").poly;
 const field_mod = @import("zolt_arith").field;
@@ -117,11 +118,7 @@ pub fn InstructionInputProver(comptime F: type) type {
                 }
             }.f;
 
-            if (thread_pool) |tp| {
-                tp.parallelForForce(trace_len, fill_ctx, fillWorker);
-            } else {
-                for (0..trace_len) |i| fillWorker(fill_ctx, i);
-            }
+            pool_helpers.parallelForOptional(thread_pool, trace_len, fill_ctx, fillWorker);
 
             // Initialize Gruen split eq polynomial at r_product (= r_cycle_stage_2)
             _ = r_outer; // Not used for InstructionInput
@@ -256,10 +253,7 @@ pub fn InstructionInputProver(comptime F: type) type {
                 }
             }.reduce;
 
-            const sums = if (self.thread_pool) |tp|
-                tp.parallelReduce([2]F, half, .{ F.zero(), F.zero() }, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, half);
+            const sums = pool_helpers.parallelReduceOptional([2]F, self.thread_pool, half, .{ F.zero(), F.zero() }, ctx, mapFn, reduceFn);
 
             // Reconstruct degree-3 polynomial from {0, ∞} evaluations
             return self.gruen_eq.computeCubicRoundPoly(sums[0], sums[1], previous_claim);

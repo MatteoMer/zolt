@@ -20,6 +20,7 @@ const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 
 const poly_mod = @import("zolt_arith").poly;
@@ -650,11 +651,7 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                         c.combined[j] = val;
                     }
                 }.f;
-                if (self.thread_pool) |tp| {
-                    tp.parallelForForce(T, rctx, rematFn);
-                } else {
-                    for (0..T) |j| rematFn(rctx, j);
-                }
+                pool_helpers.parallelForOptional(self.thread_pool, T, rctx, rematFn);
             }
 
             // Reinitialize lookups_eq_evals for cycle rounds (debug only needs full rebuild)
@@ -719,11 +716,7 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                         }
                     }
                 }.f;
-                if (self.thread_pool) |tp| {
-                    tp.parallelForForce(T, rctx, rematChunkFn);
-                } else {
-                    for (0..T) |j| rematChunkFn(rctx, j);
-                }
+                pool_helpers.parallelForOptional(self.thread_pool, T, rctx, rematChunkFn);
             }
 
             // Free data structures no longer needed after rematerialization
@@ -853,10 +846,7 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                         return r;
                     }
                 }.f;
-                if (self.thread_pool) |tp| {
-                    break :blk tp.parallelReduce([9]F, current_half_size, identity, ectx, mapFn, reduceFn);
-                }
-                break :blk mapFn(ectx, 0, current_half_size);
+                break :blk pool_helpers.parallelReduceOptional([9]F, self.thread_pool, current_half_size, identity, ectx, mapFn, reduceFn);
             };
 
             // Multiply sum_evals by lookups_current_scalar
@@ -923,7 +913,7 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                         Inst.bindSinglePolynomial(ra_poly, lookups_round, challenge, self.thread_pool, self.gpu_ops);
                     }
                 }
-            } else if (self.thread_pool) |tp| {
+            } else {
                 const BindArraysCtx = struct {
                     combined: []F,
                     chunks: *[MAX_RA_CHUNKS][]F,
@@ -938,7 +928,7 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                     .lround = lookups_round,
                     .chal = challenge,
                 };
-                tp.parallelForForce(self.ra_num_chunks + 1, bactx, struct {
+                pool_helpers.parallelForOptional(self.thread_pool, self.ra_num_chunks + 1, bactx, struct {
                     fn f(c: BindArraysCtx, arr_idx: usize) void {
                         const poly = if (arr_idx == 0) c.combined else c.chunks[arr_idx - 1];
                         const n = poly.len >> @intCast(c.lround);
@@ -952,11 +942,6 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                         }
                     }
                 }.f);
-            } else {
-                Inst.bindSinglePolynomial(self.lookups_combined_vals, lookups_round, challenge, self.thread_pool, self.gpu_ops);
-                for (0..self.ra_num_chunks) |chunk_idx| {
-                    Inst.bindSinglePolynomial(self.ra_chunk_weights[chunk_idx], lookups_round, challenge, self.thread_pool, self.gpu_ops);
-                }
             }
 
             // Update lookups_current_scalar with eq(w_i, challenge)
@@ -1096,10 +1081,7 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                 }
             }.f;
 
-            const flag_result = if (self.thread_pool) |tp|
-                tp.parallelReduce(FlagResult, flag_hi_len, flag_identity, flag_ctx, flagMapFn, flagReduceFn)
-            else
-                flagMapFn(flag_ctx, 0, flag_hi_len);
+            const flag_result = pool_helpers.parallelReduceOptional(FlagResult, self.thread_pool, flag_hi_len, flag_identity, flag_ctx, flagMapFn, flagReduceFn);
 
             @memcpy(table_flags[0..num_lookup_tables], flag_result.flags[0..num_lookup_tables]);
             const computed_raf_flag = flag_result.raf;

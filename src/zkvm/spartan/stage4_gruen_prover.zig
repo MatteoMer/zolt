@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 const TraceStep = @import("../../tracer/mod.zig").TraceStep;
 const ExecutionTrace = @import("../../tracer/mod.zig").ExecutionTrace;
@@ -197,11 +198,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     }
                 }
             }.f;
-            if (pool) |tp| {
-                tp.parallelFor(T, inc_ctx, incFn);
-            } else {
-                for (0..T) |cycle| incFn(inc_ctx, cycle);
-            }
+            pool_helpers.parallelForOptional(pool, T, inc_ctx, incFn);
 
             // Build GruenSplitEqPolynomial from r_cycle in BE order.
             // Reverse r_cycle_copy in-place, build eq poly (which copies internally), then restore.
@@ -423,11 +420,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
                         }
                     }.f;
 
-                    if (self.thread_pool) |tp| {
-                        break :blk tp.parallelReduce(F, e_hi_size, F.zero(), ctx, mapFn, reduceFn);
-                    } else {
-                        break :blk mapFn(ctx, 0, e_hi_size);
-                    }
+                    break :blk pool_helpers.parallelReduceOptional(F, self.thread_pool, e_hi_size, F.zero(), ctx, mapFn, reduceFn);
                 };
 
                 // Derive rs1_ra = (combined_ra - gamma^2 * rs2_ra) / gamma

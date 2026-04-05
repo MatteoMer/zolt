@@ -22,6 +22,7 @@ const bench_timing = false;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
 
 const poly_mod = @import("zolt_arith").poly;
@@ -668,11 +669,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
                 }.f;
-                if (self.thread_pool) |tp| {
-                    tp.parallelForForce(trace_len, ctx, incWaFn);
-                } else {
-                    for (0..trace_len) |j| incWaFn(ctx, j);
-                }
+                pool_helpers.parallelForOptional(self.thread_pool, trace_len, ctx, incWaFn);
             }
 
             if (comptime bench_timing) {
@@ -949,13 +946,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
                 }
             }.f;
-            if (self.thread_pool) |tp| {
-                tp.parallelForForce(combined_chunk_count, cctx, combinedChunkFn);
-            } else {
-                for (0..trace_len) |j| {
-                    Inst.processTraceCycleCombined(trace.steps.items[j], j, lookups_combined_vals, lookups_indices_lo, lookups_indices_hi, cycle_table_indices, cycle_is_identity_path, gamma_raf, gamma_raf2, lookup_indices_u128, is_interleaved_operands);
-                }
-            }
+            pool_helpers.parallelForOptional(self.thread_pool, combined_chunk_count, cctx, combinedChunkFn);
             // Padding cycles (trace_len..T) keep memset defaults
 
             if (comptime bench_timing) {
@@ -1004,11 +995,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
                 }.f;
-                if (self.thread_pool) |tp| {
-                    tp.parallelForForce(NUM_TABLES, fill_ctx, fillFn);
-                } else {
-                    for (0..NUM_TABLES) |t| fillFn(fill_ctx, t);
-                }
+                pool_helpers.parallelForOptional(self.thread_pool, NUM_TABLES, fill_ctx, fillFn);
             }
             // NOTE: No defer for lookup_indices_by_table -- ownership transfers to LookupsReadRafProver below.
 
@@ -2154,145 +2141,22 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
-                    // Convert to compressed format [c0, c2, c3, ..., c10]
-                    const final_compressed = try UniPoly(F).toCompressed(self.allocator, combined_coeffs);
-
-                    // Debug: print first 3 compressed coefficients (excluding linear term) in LE format
-                    if (round == 135) { // Only Round 135
-                        if (comptime debug_verbose) {
-                            dbg("[STAGE5 CYCLE ZOLT] Round {} compressed coeffs (LE, comparing to Jolt):\n", .{round});
-                            dbg("  final_compressed.len = {}\n", .{final_compressed.len});
-                        }
-                        for (0..final_compressed.len) |k| {
-                            // Jolt displays LE bytes from arkworks serialization
-                            if (comptime debug_verbose) {
-                                dbg("  coeff[{}] = {any}\n", .{ k, final_compressed[k].toBytes() });
-                            }
-                        }
-                        if (comptime debug_verbose) {
-                            dbg("  current_batched_claim (LE) = {any}\n", .{current_batched_claim.toBytes()});
-                        }
-                        // Also print combined_coeffs before compression
-                        if (comptime debug_verbose) {
-                            dbg("  combined_coeffs[0] (c0) = {any}\n", .{combined_coeffs[0].toBytes()});
-                            dbg("  combined_coeffs[1] (c1) = {any}\n", .{combined_coeffs[1].toBytes()});
-                            dbg("  combined_coeffs[2] (c2) = {any}\n", .{combined_coeffs[2].toBytes()});
-                        }
-                        // Print Instance 0+1 contribution details
-                        if (comptime debug_verbose) {
-                            dbg("  inst01_coeffs[0..4] = [{any}, {any}, {any}, {any}]\n", .{
-                                inst01_coeffs[0].toBytes(), inst01_coeffs[1].toBytes(),
-                                inst01_coeffs[2].toBytes(), inst01_coeffs[3].toBytes(),
-                            });
-                        }
-                        // Print full_coeffs (Instance 2)
-                        if (comptime debug_verbose) {
-                            dbg("  full_coeffs[0..3] = [{any}, {any}, {any}]\n", .{
-                                full_coeffs[0].toBytes(), full_coeffs[1].toBytes(), full_coeffs[2].toBytes(),
-                            });
-                        }
-                    }
-
-                    try proof.compressed_polys.append(self.allocator, .{
-                        .coeffs_except_linear_term = final_compressed,
-                        .allocator = self.allocator,
-                    });
-
-                    // Append to transcript
+                    // Compress, append to proof/transcript, derive challenge, evaluate
+                    const degree = combined_coeffs.len - 1; // degree 10
                     if (comptime bench_timing) bench_cycle_coeff_ns += bench_timer.read();
                     if (comptime bench_timing) bench_timer.reset();
-                    transcript.appendScalars("sumcheck_poly", final_compressed);
-
-                    const challenge = transcript.challengeScalar();
+                    const round_result = try sumcheck_helpers.finishSumcheckRound(F, combined_coeffs, degree, current_batched_claim, transcript, proof, self.allocator);
+                    const challenge = round_result.challenge;
                     challenges[round] = challenge;
+                    current_batched_claim = round_result.new_claim;
                     if (comptime bench_timing) bench_cycle_transcript_ns += bench_timer.read();
 
-                    // Debug: print challenge for comparison with Jolt
-                    if (round < 4 or round >= 128) {
-                        if (comptime debug_verbose) {
-                            dbg("[STAGE5 CHALLENGE] Round {}: LE = {any}\n", .{ round, challenge.toBytes()[0..16].* });
-                        }
-                    }
-
-                    // Update current_batched_claim by evaluating polynomial at challenge
-                    // The VERIFIER uses eval_from_hint which:
-                    // 1. Has compressed coeffs [c0, c2, c3, ...] and hint = current_claim
-                    // 2. Recovers c1 = hint - 2*c0 - c2 - c3 - ...
-                    // 3. Evaluates p(r) = c0 + r*c1 + r²*c2 + ...
-                    //
-                    // So we MUST update our claim using the same formula as the verifier.
-
-                    // Compute c1_recovered from the hint (current_batched_claim)
-                    // c1 = hint - 2*c0 - c2 - c3 - ... - c_d
-                    var c1_recovered = current_batched_claim.sub(combined_coeffs[0]).sub(combined_coeffs[0]); // hint - 2*c0
-                    for (2..combined_coeffs.len) |i| {
-                        c1_recovered = c1_recovered.sub(combined_coeffs[i]);
-                    }
-
-                    // Debug: compare c1_direct vs c1_recovered
-                    if (round >= 128) {
-                        if (comptime debug_verbose) {
-                            dbg("[STAGE5 C1 DEBUG] Round {}:\n", .{round});
-                            dbg("  c1_direct (combined_coeffs[1]) = {any}\n", .{combined_coeffs[1].toBytes()});
-                            dbg("  c1_recovered (from hint)       = {any}\n", .{c1_recovered.toBytes()});
-                            dbg("  hint (current_batched_claim)   = {any}\n", .{current_batched_claim.toBytes()});
-                            dbg("  c1_direct == c1_recovered: {}\n", .{combined_coeffs[1].eql(c1_recovered)});
-                        }
-
-                        // CRITICAL DEBUG: Check if current_batched_claim = sum of scaled instance claims
-                        // Expected: batch0*claim0 + batch1*claim1 + batch2*claim2
-                        const expected_batched = batch0.mul(regs_val_current_claim)
-                            .add(batch1.mul(ram_ra_prover.current_claim))
-                            .add(batch2.mul(lookups_claim));
-                        if (comptime debug_verbose) {
-                            dbg("  expected_batched (batch0*c0+batch1*c1+batch2*c2) = {any}\n", .{expected_batched.toBytes()});
-                            dbg("  current_batched_claim matches expected: {}\n", .{current_batched_claim.eql(expected_batched)});
-                            dbg("    batch0*claim0 = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
-                            dbg("    batch1*claim1 = {any}\n", .{batch1.mul(ram_ra_prover.current_claim).toBytes()});
-                            dbg("    batch2*claim2 = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
-                            dbg("    regs_val_current_claim = {x}\n", .{regs_val_current_claim.toBytesBE()[16..32].*});
-                            dbg("    ram_ra_prover.current_claim   = {x}\n", .{ram_ra_prover.current_claim.toBytesBE()[16..32].*});
-                            dbg("    lookups_claim          = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                        }
-
-                        // Compute what the hint SHOULD be if coefficients are correct:
-                        // hint_expected = p(0) + p(1) = 2*c0 + c1 + c2 + ... + c_d
-                        var hint_expected = combined_coeffs[0].add(combined_coeffs[0]); // 2*c0
-                        for (1..combined_coeffs.len) |i| {
-                            hint_expected = hint_expected.add(combined_coeffs[i]);
-                        }
-                        if (comptime debug_verbose) {
-                            dbg("  hint_expected (2*c0+c1+c2+...) = {any}\n", .{hint_expected.toBytes()});
-                            dbg("  hint == hint_expected: {}\n", .{current_batched_claim.eql(hint_expected)});
-                        }
-                    }
-
-                    // CRITICAL: Update current_batched_claim by evaluating the batched polynomial
-                    // at the challenge, using the same formula as Jolt's eval_from_hint.
-                    // This ensures the prover's claim matches what the verifier will compute.
-                    // The verifier uses: c1 = hint - 2*c0 - c2 - ..., then p(r) = c0 + r*c1 + r²*c2 + ...
-                    {
-                        // combined_coeffs[0] = c0, combined_coeffs[1] = c1, combined_coeffs[2] = c2, etc.
-                        // Evaluate p(r) = c0 + r*c1 + r²*c2 + r³*c3 + ...
-                        // Use c1_recovered from hint (to match verifier exactly)
-                        var eval_result = combined_coeffs[0].add(c1_recovered.mulHiBigIntU128(challenge.limbs));
-                        var r_power = challenge.mul(challenge); // r²
-                        for (2..combined_coeffs.len) |ci| {
-                            eval_result = eval_result.add(combined_coeffs[ci].mul(r_power));
-                            if (ci + 1 < combined_coeffs.len) {
-                                r_power = r_power.mul(challenge);
-                            }
-                        }
-                        current_batched_claim = eval_result;
-                    }
-
-                    // Per-round tracking (matches Jolt verifier's [S5V] output)
                     if (comptime debug_verbose) {
                         dbg("  [S5P] R{} challenge={x} new_e={x} degree={}\n", .{
                             round,
                             challenge.toBytes()[0..16].*,
                             current_batched_claim.toBytes()[0..16].*,
-                            combined_coeffs.len - 1,
+                            degree,
                         });
                     }
 

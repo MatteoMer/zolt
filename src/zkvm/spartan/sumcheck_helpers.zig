@@ -7,6 +7,10 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const poly_mod = @import("zolt_arith").poly;
+
+/// Re-export from stage6_helpers for cross-stage use.
+pub const addEvalsAsMonomialToCoeffs = @import("stage6_helpers.zig").addEvalsAsMonomialToCoeffs;
 
 /// Compute contribution of an inactive instance to the combined polynomial.
 /// Used when remaining_rounds > instance_num_rounds.
@@ -67,6 +71,57 @@ pub fn deriveBatchingCoeffs(comptime F: type, comptime N: usize, transcript: any
     var coeffs: [N]F = undefined;
     for (0..N) |i| coeffs[i] = transcript.challengeScalarFull();
     return coeffs;
+}
+
+/// Add an inactive instance's constant-polynomial contribution to combined monomial coefficients.
+/// When remaining_rounds > instance_num_rounds, the instance contributes a constant polynomial
+/// scaled by 2^(remaining - num_rounds - 1), which only affects the degree-0 coefficient.
+pub fn addInactiveToMonomial(comptime F: type, combined_coeffs: []F, input_claim: F, batch_coeff: F, remaining_rounds: usize, num_rounds: usize) void {
+    const scaled = inactiveContribution(F, input_claim, remaining_rounds, num_rounds);
+    combined_coeffs[0] = combined_coeffs[0].add(batch_coeff.mul(scaled));
+}
+
+/// Finish a batched sumcheck round: compress monomial coefficients (strip c1),
+/// append to proof and transcript, derive challenge, and evaluate combined poly.
+///
+/// This centralizes the correctness-critical transcript interaction that all
+/// batched sumcheck stages share: the compress format, transcript label,
+/// challenge derivation, and hint-based polynomial evaluation.
+///
+/// `combined_coeffs` must be monomial form [c0, c1, c2, ..., c_d] with len >= max_degree + 1.
+/// Returns the challenge and updated batched claim.
+pub fn finishSumcheckRound(
+    comptime F: type,
+    combined_coeffs: []const F,
+    max_degree: usize,
+    batched_claim: F,
+    transcript: anytype,
+    proof: anytype,
+    allocator: Allocator,
+) !struct { challenge: F, new_claim: F, compressed: []F } {
+    const UniPoly = poly_mod.UniPoly(F);
+
+    // 1. Compress: strip c1, keep [c0, c2, c3, ..., c_d]
+    const compressed = try allocator.alloc(F, max_degree);
+    compressed[0] = combined_coeffs[0]; // c0
+    for (1..max_degree) |i| {
+        compressed[i] = if (i + 1 < combined_coeffs.len) combined_coeffs[i + 1] else F.zero();
+    }
+
+    // 2. Append to proof
+    try proof.compressed_polys.append(allocator, .{
+        .coeffs_except_linear_term = compressed,
+        .allocator = allocator,
+    });
+
+    // 3. Transcript: append compressed coefficients, derive challenge
+    transcript.appendScalars("sumcheck_poly", compressed);
+    const challenge = transcript.challengeScalar();
+
+    // 4. Evaluate combined poly at challenge using hint (batched_claim = p(0) + p(1))
+    const new_claim = UniPoly.evalFromHintGeneral(compressed, batched_claim, challenge);
+
+    return .{ .challenge = challenge, .new_claim = new_claim, .compressed = compressed };
 }
 
 test "extrapolateDeg2 matches known values" {

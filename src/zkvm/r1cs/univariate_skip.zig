@@ -27,6 +27,7 @@ const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const field_mod = @import("zolt_arith").field;
 const RawR1CSInputs = @import("evaluators.zig").RawR1CSInputs;
 
@@ -683,10 +684,7 @@ pub fn computeProductVirtualExtendedEvals(
     }.f;
 
     const identity: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
-    const result = if (thread_pool) |tp|
-        tp.parallelReduce([DEGREE]F, raw_inputs.len, identity, ctx, mapFn, reduceFn)
-    else
-        mapFn(ctx, 0, raw_inputs.len);
+    const result = pool_helpers.parallelReduceOptional([DEGREE]F, thread_pool, raw_inputs.len, identity, ctx, mapFn, reduceFn);
 
     return result;
 }

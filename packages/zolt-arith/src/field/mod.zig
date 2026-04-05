@@ -1303,8 +1303,199 @@ pub fn MontgomeryField(
                 if (!r.lessThanModulus()) r = r.subtractModulus();
                 return r;
             }
-            if (!@inComptime() and comptime use_asm_mul) return self.montgomeryMulX86(self);
+            if (!@inComptime() and comptime use_asm_mul) return self.montgomerySquareX86();
             return self.montgomeryMul(self);
+        }
+
+        /// x86-64 dedicated Montgomery squaring using ADX (mulxq/adcxq/adoxq).
+        /// Product-then-reduce: 10 multiplies for a^2, then 4 CIOS reduction iterations.
+        fn montgomerySquareX86(self: Self) Self {
+            const a = self.limbs;
+            const mod_arr: [4]u64 = modulus;
+
+            var r0: u64 = undefined;
+            var r1: u64 = undefined;
+            var r2: u64 = undefined;
+            var r3: u64 = undefined;
+
+            asm volatile (
+                // ═════════════════════════��═════════════
+                // Phase 1: 8-limb product a^2
+                // P[0..7] in r8,r9,r10,r11,r12,r13,r15,rcx
+                // ═══════════════════════════════════════
+                //
+                // Cross products, column by column:
+                //
+                // a[0]*a[1] → P[1],P[2]
+                \\movq (%%rdi), %%rdx
+                \\mulxq 8(%%rdi), %%r9, %%r10
+                //
+                // a[0]*a[2] → P[2],P[3]
+                \\mulxq 16(%%rdi), %%rax, %%r11
+                \\addq %%rax, %%r10
+                \\adcq $0, %%r11
+                //
+                // a[0]*a[3] → P[3],P[4]
+                \\mulxq 24(%%rdi), %%rax, %%r12
+                \\addq %%rax, %%r11
+                \\adcq $0, %%r12
+                //
+                // a[1]*a[2] → P[3],P[4],carry→P[5]
+                \\movq 8(%%rdi), %%rdx
+                \\mulxq 16(%%rdi), %%rax, %%rcx
+                \\addq %%rax, %%r11
+                \\adcq %%rcx, %%r12
+                \\movq $0, %%r13
+                \\adcq $0, %%r13
+                //
+                // a[1]*a[3] → P[4],P[5],carry→P[6]
+                \\mulxq 24(%%rdi), %%rax, %%rcx
+                \\addq %%rax, %%r12
+                \\adcq %%rcx, %%r13
+                \\movq $0, %%r15
+                \\adcq $0, %%r15
+                //
+                // a[2]*a[3] → P[5],P[6],carry→P[7]
+                \\movq 16(%%rdi), %%rdx
+                \\mulxq 24(%%rdi), %%rax, %%rcx
+                \\addq %%rax, %%r13
+                \\adcq %%rcx, %%r15
+                \\movq $0, %%rsi
+                \\adcq $0, %%rsi
+                //
+                // Double cross products: P[1..7] *= 2
+                \\addq %%r9, %%r9
+                \\adcq %%r10, %%r10
+                \\adcq %%r11, %%r11
+                \\adcq %%r12, %%r12
+                \\adcq %%r13, %%r13
+                \\adcq %%r15, %%r15
+                \\adcq %%rsi, %%rsi
+                //
+                // Add diagonal products with carry chain
+                // a[0]^2 → P[0],P[1]
+                \\movq (%%rdi), %%rdx
+                \\mulxq %%rdx, %%r8, %%rax
+                \\addq %%rax, %%r9
+                // a[1]^2 → P[2],P[3]
+                \\movq 8(%%rdi), %%rdx
+                \\mulxq %%rdx, %%rax, %%rcx
+                \\adcq %%rax, %%r10
+                \\adcq %%rcx, %%r11
+                // a[2]^2 → P[4],P[5]
+                \\movq 16(%%rdi), %%rdx
+                \\mulxq %%rdx, %%rax, %%rcx
+                \\adcq %%rax, %%r12
+                \\adcq %%rcx, %%r13
+                // a[3]^2 → P[6],P[7]
+                \\movq 24(%%rdi), %%rdx
+                \\mulxq %%rdx, %%rax, %%rcx
+                \\adcq %%rax, %%r15
+                \\adcq %%rcx, %%rsi
+                //
+                // Product: P[0..7] = {r8,r9,r10,r11,r12,r13,r15,rsi}
+                //
+                // ═══════════════════════════════════════
+                // Phase 2: Montgomery reduction (4 iterations)
+                // Uses ADX dual carry chains (adcxq/adoxq)
+                // ═══════════════════════════════════════
+                //
+                // Iteration 0: k = P[0]*inv, window {r8..r12}, carry→r13
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r8, %%rdx, %%rax
+                \\xorq %%rcx, %%rcx
+                \\mulxq (%%r14), %%rax, %%rcx
+                \\adcxq %%r8, %%rax
+                \\adoxq %%rcx, %%r9
+                \\mulxq 8(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r9
+                \\adoxq %%rcx, %%r10
+                \\mulxq 16(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r10
+                \\adoxq %%rcx, %%r11
+                \\mulxq 24(%%r14), %%rax, %%rcx
+                \\movq $0, %%r8
+                \\adcxq %%rax, %%r11
+                \\adoxq %%rcx, %%r12
+                \\adcxq %%r8, %%r12
+                \\adoxq %%r8, %%r13
+                \\adcxq %%r8, %%r13
+                //
+                // Iteration 1: window {r9..r13}, carry→r15
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r9, %%rdx, %%rax
+                \\xorq %%rcx, %%rcx
+                \\mulxq (%%r14), %%rax, %%rcx
+                \\adcxq %%r9, %%rax
+                \\adoxq %%rcx, %%r10
+                \\mulxq 8(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r10
+                \\adoxq %%rcx, %%r11
+                \\mulxq 16(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r11
+                \\adoxq %%rcx, %%r12
+                \\mulxq 24(%%r14), %%rax, %%rcx
+                \\movq $0, %%r9
+                \\adcxq %%rax, %%r12
+                \\adoxq %%rcx, %%r13
+                \\adcxq %%r9, %%r13
+                \\adoxq %%r9, %%r15
+                \\adcxq %%r9, %%r15
+                //
+                // Iteration 2: window {r10..r15}, carry→rsi
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r10, %%rdx, %%rax
+                \\xorq %%rcx, %%rcx
+                \\mulxq (%%r14), %%rax, %%rcx
+                \\adcxq %%r10, %%rax
+                \\adoxq %%rcx, %%r11
+                \\mulxq 8(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r11
+                \\adoxq %%rcx, %%r12
+                \\mulxq 16(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r12
+                \\adoxq %%rcx, %%r13
+                \\mulxq 24(%%r14), %%rax, %%rcx
+                \\movq $0, %%r10
+                \\adcxq %%rax, %%r13
+                \\adoxq %%rcx, %%r15
+                \\adcxq %%r10, %%r15
+                \\adoxq %%r10, %%rsi
+                \\adcxq %%r10, %%rsi
+                //
+                // Iteration 3: window {r11..rsi} (last)
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r11, %%rdx, %%rax
+                \\xorq %%rcx, %%rcx
+                \\mulxq (%%r14), %%rax, %%rcx
+                \\adcxq %%r11, %%rax
+                \\adoxq %%rcx, %%r12
+                \\mulxq 8(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r12
+                \\adoxq %%rcx, %%r13
+                \\mulxq 16(%%r14), %%rax, %%rcx
+                \\adcxq %%rax, %%r13
+                \\adoxq %%rcx, %%r15
+                \\mulxq 24(%%r14), %%rax, %%rcx
+                \\movq $0, %%r11
+                \\adcxq %%rax, %%r15
+                \\adoxq %%rcx, %%rsi
+                \\adcxq %%r11, %%rsi
+                // Result: {r12, r13, r15, rsi}
+                : [_r0] "={r12}" (r0),
+                  [_r1] "={r13}" (r1),
+                  [_r2] "={r15}" (r2),
+                  [_r3] "={rsi}" (r3),
+                : [_a] "{rdi}" (&a),
+                  [_mod] "{r14}" (&mod_arr),
+                  [_inv] "{rbx}" (montgomery_inv),
+                : .{ .rax = true, .rcx = true, .rdx = true, .rsi = true, .r8 = true, .r9 = true, .r10 = true, .r11 = true, .r12 = true, .r13 = true, .r15 = true, .cc = true, .memory = true });
+
+            var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
+            if (!result.lessThanModulus()) {
+                result = result.subtractModulus();
+            }
+            return result;
         }
 
         /// Multiply by a signed 128-bit integer
@@ -1877,6 +2068,172 @@ pub const BN254Scalar = struct {
         return result;
     }
 
+    /// x86-64 dedicated Montgomery squaring for BN254Scalar.
+    fn montgomerySquareX86(self: Self) Self {
+        const a = self.limbs;
+        const mod_arr: [4]u64 = BN254_MODULUS;
+
+        var r0: u64 = undefined;
+        var r1: u64 = undefined;
+        var r2: u64 = undefined;
+        var r3: u64 = undefined;
+
+        asm volatile (
+            // Phase 1: 8-limb product a^2
+            // P[0..7] in r8,r9,r10,r11,r12,r13,r15,rsi
+            //
+            // Cross products, column by column:
+            \\movq (%%rdi), %%rdx
+            \\mulxq 8(%%rdi), %%r9, %%r10
+            \\mulxq 16(%%rdi), %%rax, %%r11
+            \\addq %%rax, %%r10
+            \\adcq $0, %%r11
+            \\mulxq 24(%%rdi), %%rax, %%r12
+            \\addq %%rax, %%r11
+            \\adcq $0, %%r12
+            \\movq 8(%%rdi), %%rdx
+            \\mulxq 16(%%rdi), %%rax, %%rcx
+            \\addq %%rax, %%r11
+            \\adcq %%rcx, %%r12
+            \\movq $0, %%r13
+            \\adcq $0, %%r13
+            \\mulxq 24(%%rdi), %%rax, %%rcx
+            \\addq %%rax, %%r12
+            \\adcq %%rcx, %%r13
+            \\movq $0, %%r15
+            \\adcq $0, %%r15
+            \\movq 16(%%rdi), %%rdx
+            \\mulxq 24(%%rdi), %%rax, %%rcx
+            \\addq %%rax, %%r13
+            \\adcq %%rcx, %%r15
+            \\movq $0, %%rsi
+            \\adcq $0, %%rsi
+            //
+            // Double cross products
+            \\addq %%r9, %%r9
+            \\adcq %%r10, %%r10
+            \\adcq %%r11, %%r11
+            \\adcq %%r12, %%r12
+            \\adcq %%r13, %%r13
+            \\adcq %%r15, %%r15
+            \\adcq %%rsi, %%rsi
+            //
+            // Add diagonal products
+            \\movq (%%rdi), %%rdx
+            \\mulxq %%rdx, %%r8, %%rax
+            \\addq %%rax, %%r9
+            \\movq 8(%%rdi), %%rdx
+            \\mulxq %%rdx, %%rax, %%rcx
+            \\adcq %%rax, %%r10
+            \\adcq %%rcx, %%r11
+            \\movq 16(%%rdi), %%rdx
+            \\mulxq %%rdx, %%rax, %%rcx
+            \\adcq %%rax, %%r12
+            \\adcq %%rcx, %%r13
+            \\movq 24(%%rdi), %%rdx
+            \\mulxq %%rdx, %%rax, %%rcx
+            \\adcq %%rax, %%r15
+            \\adcq %%rcx, %%rsi
+            //
+            // Phase 2: Montgomery reduction with ADX dual carry chains
+            //
+            // Iteration 0
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r8, %%rdx, %%rax
+            \\xorq %%rcx, %%rcx
+            \\mulxq (%%r14), %%rax, %%rcx
+            \\adcxq %%r8, %%rax
+            \\adoxq %%rcx, %%r9
+            \\mulxq 8(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r9
+            \\adoxq %%rcx, %%r10
+            \\mulxq 16(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r10
+            \\adoxq %%rcx, %%r11
+            \\mulxq 24(%%r14), %%rax, %%rcx
+            \\movq $0, %%r8
+            \\adcxq %%rax, %%r11
+            \\adoxq %%rcx, %%r12
+            \\adcxq %%r8, %%r12
+            \\adoxq %%r8, %%r13
+            \\adcxq %%r8, %%r13
+            //
+            // Iteration 1
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r9, %%rdx, %%rax
+            \\xorq %%rcx, %%rcx
+            \\mulxq (%%r14), %%rax, %%rcx
+            \\adcxq %%r9, %%rax
+            \\adoxq %%rcx, %%r10
+            \\mulxq 8(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r10
+            \\adoxq %%rcx, %%r11
+            \\mulxq 16(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r11
+            \\adoxq %%rcx, %%r12
+            \\mulxq 24(%%r14), %%rax, %%rcx
+            \\movq $0, %%r9
+            \\adcxq %%rax, %%r12
+            \\adoxq %%rcx, %%r13
+            \\adcxq %%r9, %%r13
+            \\adoxq %%r9, %%r15
+            \\adcxq %%r9, %%r15
+            //
+            // Iteration 2
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r10, %%rdx, %%rax
+            \\xorq %%rcx, %%rcx
+            \\mulxq (%%r14), %%rax, %%rcx
+            \\adcxq %%r10, %%rax
+            \\adoxq %%rcx, %%r11
+            \\mulxq 8(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r11
+            \\adoxq %%rcx, %%r12
+            \\mulxq 16(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r12
+            \\adoxq %%rcx, %%r13
+            \\mulxq 24(%%r14), %%rax, %%rcx
+            \\movq $0, %%r10
+            \\adcxq %%rax, %%r13
+            \\adoxq %%rcx, %%r15
+            \\adcxq %%r10, %%r15
+            \\adoxq %%r10, %%rsi
+            \\adcxq %%r10, %%rsi
+            //
+            // Iteration 3 (last, no carry beyond)
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r11, %%rdx, %%rax
+            \\xorq %%rcx, %%rcx
+            \\mulxq (%%r14), %%rax, %%rcx
+            \\adcxq %%r11, %%rax
+            \\adoxq %%rcx, %%r12
+            \\mulxq 8(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r12
+            \\adoxq %%rcx, %%r13
+            \\mulxq 16(%%r14), %%rax, %%rcx
+            \\adcxq %%rax, %%r13
+            \\adoxq %%rcx, %%r15
+            \\mulxq 24(%%r14), %%rax, %%rcx
+            \\movq $0, %%r11
+            \\adcxq %%rax, %%r15
+            \\adoxq %%rcx, %%rsi
+            \\adcxq %%r11, %%rsi
+            : [_r0] "={r12}" (r0),
+              [_r1] "={r13}" (r1),
+              [_r2] "={r15}" (r2),
+              [_r3] "={rsi}" (r3),
+            : [_a] "{rdi}" (&a),
+              [_mod] "{r14}" (&mod_arr),
+              [_inv] "{rbx}" (BN254_INV),
+            : .{ .rax = true, .rcx = true, .rdx = true, .rsi = true, .r8 = true, .r9 = true, .r10 = true, .r11 = true, .r12 = true, .r13 = true, .r15 = true, .cc = true, .memory = true });
+
+        var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
+        if (!result.lessThanModulus()) {
+            result = result.subtractModulus();
+        }
+        return result;
+    }
+
     /// Fused multiply-accumulate: computes a[0]*b[0] + a[1]*b[1] with only
     /// 2 Montgomery reductions instead of 3 (vs separate mul + mul + add).
     pub fn sumOfProducts(a: [2]Self, b: [2]Self) Self {
@@ -2169,7 +2526,7 @@ pub const BN254Scalar = struct {
             if (!r.lessThanModulus()) r = r.subtractModulus();
             return r;
         }
-        if (!@inComptime() and comptime use_asm_mul) return self.montgomeryMulX86(self);
+        if (!@inComptime() and comptime use_asm_mul) return self.montgomerySquareX86();
         // Optimized squaring: we can compute a^2 with fewer multiplications
         // Since (a0 + a1*2^64 + a2*2^128 + a3*2^192)^2 has symmetric terms
         // For example: 2*a0*a1 instead of a0*a1 + a1*a0

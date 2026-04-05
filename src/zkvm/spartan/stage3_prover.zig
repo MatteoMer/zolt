@@ -206,10 +206,7 @@ pub fn Stage3Prover(comptime F: type) type {
 
             // Derive batching coefficients (line 204 in sumcheck.rs)
             // NOTE: Jolt's challenge_vector uses challenge_scalar (full 128 bits, no masking)
-            var batching_coeffs: [3]F = undefined;
-            for (0..3) |i| {
-                batching_coeffs[i] = transcript.challengeScalarFull();
-            }
+            const batching_coeffs = sumcheck_helpers.deriveBatchingCoeffs(F, 3, transcript);
             if (comptime debug_verbose) {
                 dbg("[ZOLT] STAGE3_PRE: batching_coeff[0] = {{ {any} }}\n", .{batching_coeffs[0].toBytes()});
             }

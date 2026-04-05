@@ -1021,11 +1021,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             transcript.appendScalar("sumcheck_claim", lookupsRaVirtual_input);
             transcript.appendScalar("sumcheck_claim", incClaimReduction_input);
 
-            const batch = try self.allocator.alloc(F, 6);
-            defer self.allocator.free(batch);
-            for (0..6) |i| {
-                batch[i] = transcript.challengeScalarFull();
-            }
+            const batch = sumcheck_helpers.deriveBatchingCoeffs(F, 6, transcript);
 
             const input_claims = [6]F{
                 bytecodeReadRaf_input,

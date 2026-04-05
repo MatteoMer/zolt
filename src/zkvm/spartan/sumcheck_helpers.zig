@@ -56,6 +56,19 @@ pub fn deriveGammaPowers(comptime F: type, allocator: Allocator, gamma: F, n: us
     return powers;
 }
 
+/// Extrapolate a multilinear polynomial from evaluations at x=0 and x=1 to x=2.
+/// f(2) = 2*f(1) - f(0)
+pub inline fn extrapolateLinearTo2(comptime F: type, f0: F, f1: F) F {
+    return f1.add(f1).sub(f0);
+}
+
+/// Derive N batching coefficients from transcript as a comptime-sized stack array.
+pub fn deriveBatchingCoeffs(comptime F: type, comptime N: usize, transcript: anytype) [N]F {
+    var coeffs: [N]F = undefined;
+    for (0..N) |i| coeffs[i] = transcript.challengeScalarFull();
+    return coeffs;
+}
+
 test "extrapolateDeg2 matches known values" {
     const F = @import("zolt_arith").field.BN254Scalar;
     // p(x) = x^2  =>  p(0)=0, p(1)=1, p(2)=4, p(3)=9
@@ -93,6 +106,13 @@ test "deriveGammaPowers produces correct powers" {
     try std.testing.expectEqual(F.fromU64(5), powers[1]);
     try std.testing.expectEqual(F.fromU64(25), powers[2]);
     try std.testing.expectEqual(F.fromU64(125), powers[3]);
+}
+
+test "extrapolateLinearTo2 computes 2*f1 - f0" {
+    const F = @import("zolt_arith").field.BN254Scalar;
+    // f(0) = 3, f(1) = 7 => f(2) = 2*7 - 3 = 11
+    const result = extrapolateLinearTo2(F, F.fromU64(3), F.fromU64(7));
+    try std.testing.expectEqual(F.fromU64(11), result);
 }
 
 test "inactiveContribution doubles correctly" {

@@ -22,6 +22,7 @@ const jolt_device = @import("../jolt_device.zig");
 const ram = @import("../ram/mod.zig");
 const claim_reductions = @import("../claim_reductions/mod.zig");
 const jolt_prover = @import("../jolt_prover.zig");
+const sumcheck_helpers = @import("sumcheck_helpers.zig");
 
 /// Generic Stage 2 sumcheck namespace, parameterised on the field.
 pub fn Stage2Sumcheck(comptime F: type) type {
@@ -208,10 +209,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
             }
 
             // Step 2: Sample batching coefficients (input claims already appended at line 1747)
-            var batching_coeffs: [5]F = undefined;
-            for (0..5) |i| {
-                batching_coeffs[i] = transcript.challengeScalarFull();
-            }
+            const batching_coeffs = sumcheck_helpers.deriveBatchingCoeffs(F, 5, transcript);
 
             // Step 3: Compute initial batched claim
             // batched_claim = Σᵢ αᵢ * input_claim[i] * 2^(max_rounds - rounds[i])

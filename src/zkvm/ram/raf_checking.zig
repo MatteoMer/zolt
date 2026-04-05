@@ -22,7 +22,9 @@ const zkvm_debug = @import("../debug.zig");
 const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("zolt_pool").ThreadPool;
+const zolt_pool = @import("zolt_pool");
+const ThreadPool = zolt_pool.ThreadPool;
+const parallelReduceOptional = zolt_pool.parallelReduceOptional;
 const UnreducedProductAccum = @import("zolt_arith").field.UnreducedProductAccum;
 
 const mod = @import("mod.zig");
@@ -450,10 +452,7 @@ pub fn RafEvaluationProver(comptime F: type) type {
             }.f;
 
             const identity = [2]F{ F.zero(), F.zero() };
-            const sums = if (self.thread_pool) |tp|
-                tp.parallelReduce([2]F, half, identity, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, half);
+            const sums = parallelReduceOptional([2]F, self.thread_pool, half, identity, ctx, mapFn, reduceFn);
 
             const s0 = sums[0];
             const s1 = current_claim.sub(s0);

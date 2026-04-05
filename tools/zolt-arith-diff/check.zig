@@ -6,12 +6,15 @@ const diff_config = @import("diff_config");
 const field = zolt.field;
 const pairing = field.pairing;
 const msm = zolt.msm;
+const accumulators = field.accumulators;
+const transcripts = zolt.transcripts;
 
 const Fr = field.BN254Scalar;
 const Fp = field.BN254BaseField;
 const G1Affine = msm.AffinePoint(Fp);
 const G2Point = pairing.G2Point;
 const G1MSM = msm.MSM(Fr, Fp);
+const Transcript = transcripts.Blake2bTranscript(Fr);
 
 fn readFixtureAlloc(allocator: std.mem.Allocator, relative_path: []const u8) ![]u8 {
     const full_path = try std.fs.path.join(allocator, &.{ diff_config.fixtures_root, relative_path });
@@ -229,6 +232,191 @@ test "zolt-arith differential msm g2 fr fixtures" {
             try std.testing.expectEqualSlices(u8, &expected_x_c1, &actual_x_c1);
             try std.testing.expectEqualSlices(u8, &expected_y_c0, &actual_y_c0);
             try std.testing.expectEqualSlices(u8, &expected_y_c1, &actual_y_c1);
+        }
+    }
+}
+
+// ============================================================================
+// Accumulator differential tests
+// ============================================================================
+
+test "zolt-arith differential sum_of_products fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "accumulator/sum_of_products.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(6, line, '|');
+
+        const a0 = try parseFrHex(fields_split[1]);
+        const b0 = try parseFrHex(fields_split[2]);
+        const a1 = try parseFrHex(fields_split[3]);
+        const b1 = try parseFrHex(fields_split[4]);
+        const expected = try parseFrHex(fields_split[5]);
+
+        const actual = Fr.sumOfProducts(.{ a0, a1 }, .{ b0, b1 });
+        try std.testing.expect(actual.eql(expected));
+    }
+}
+
+test "zolt-arith differential batch_inverse fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "accumulator/batch_inverse.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(4, line, '|');
+
+        const count = try parser.parseDecimal(usize, fields_split[1]);
+        const inputs = try parseFrCsv(allocator, fields_split[2]);
+        defer allocator.free(inputs);
+        const expected_vals = try parseFrCsv(allocator, fields_split[3]);
+        defer allocator.free(expected_vals);
+
+        try std.testing.expectEqual(count, inputs.len);
+        try std.testing.expectEqual(count, expected_vals.len);
+
+        const results = try allocator.alloc(Fr, count);
+        defer allocator.free(results);
+        try accumulators.BatchOps.batchInverse(results, inputs, allocator);
+
+        for (0..count) |i| {
+            try std.testing.expect(results[i].eql(expected_vals[i]));
+        }
+    }
+}
+
+test "zolt-arith differential mul_u64 fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "accumulator/mul_u64.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(4, line, '|');
+
+        const field_val = try parseFrHex(fields_split[1]);
+        const scalar = try parser.parseDecimal(u64, fields_split[2]);
+        const expected = try parseFrHex(fields_split[3]);
+
+        const actual = accumulators.mulU64(field_val, scalar);
+        try std.testing.expect(actual.eql(expected));
+    }
+}
+
+test "zolt-arith differential mul_u128 fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "accumulator/mul_u128.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(4, line, '|');
+
+        const field_val = try parseFrHex(fields_split[1]);
+        const scalar = try parser.parseDecimal(u128, fields_split[2]);
+        const expected = try parseFrHex(fields_split[3]);
+
+        const unreduced = accumulators.mulU128Unreduced(field_val, scalar);
+        const actual = accumulators.reduceMulU128(unreduced);
+        try std.testing.expect(actual.eql(expected));
+    }
+}
+
+// ============================================================================
+// Transcript differential tests
+// ============================================================================
+
+/// Apply a semicolon-separated list of public transcript operations.
+/// Format: "append_label:data;append_u64:count:999;append_scalar:val:7"
+fn applyTranscriptOps(transcript: *Transcript, ops_desc: []const u8) !void {
+    if (std.mem.eql(u8, ops_desc, "-")) return;
+    var ops = std.mem.splitScalar(u8, ops_desc, ';');
+    while (ops.next()) |op| {
+        var parts = std.mem.splitScalar(u8, op, ':');
+        const kind = parts.next() orelse continue;
+        if (std.mem.eql(u8, kind, "append_label")) {
+            transcript.appendLabel(parts.next() orelse return error.MissingArg);
+        } else if (std.mem.eql(u8, kind, "append_u64")) {
+            const label = parts.next() orelse return error.MissingArg;
+            const val_str = parts.next() orelse return error.MissingArg;
+            transcript.appendU64(label, try parser.parseDecimal(u64, val_str));
+        } else if (std.mem.eql(u8, kind, "append_scalar")) {
+            const label = parts.next() orelse return error.MissingArg;
+            const val_str = parts.next() orelse return error.MissingArg;
+            transcript.appendScalar(label, Fr.fromU64(try parser.parseDecimal(u64, val_str)));
+        } else {
+            return error.UnknownTranscriptOp;
+        }
+    }
+}
+
+test "zolt-arith differential transcript state fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "transcript/state_vectors.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        // Format: name|init_label|ops_desc|expected_state_hex|expected_rounds
+        const fields_split = try parser.splitFieldsExact(5, line, '|');
+
+        const init_label = fields_split[1];
+        const ops_desc = fields_split[2];
+        const expected_state = try parser.parseHexBytesExact(32, fields_split[3]);
+        const expected_rounds = try parser.parseDecimal(u32, fields_split[4]);
+
+        var transcript = Transcript.init(init_label);
+        try applyTranscriptOps(&transcript, ops_desc);
+
+        try std.testing.expectEqualSlices(u8, &expected_state, &transcript.debugState());
+        try std.testing.expectEqual(expected_rounds, transcript.n_rounds);
+    }
+}
+
+test "zolt-arith differential transcript challenge fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "transcript/challenge_vectors.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        // Format: name|init_label|ops_desc|expected_u128|expected_limb2_hex|expected_limb3_hex
+        const fields_split = try parser.splitFieldsExact(6, line, '|');
+
+        const init_label = fields_split[1];
+        const ops_desc = fields_split[2];
+        const expected_u128_str = fields_split[3];
+        const expected_low_str = fields_split[4];
+        const expected_high_str = fields_split[5];
+
+        // Check challenge_u128
+        if (!std.mem.eql(u8, expected_u128_str, "-")) {
+            var transcript = Transcript.init(init_label);
+            try applyTranscriptOps(&transcript, ops_desc);
+            const expected_u128 = try parser.parseDecimal(u128, expected_u128_str);
+            try std.testing.expectEqual(expected_u128, transcript.challengeU128());
+        }
+
+        // Check challenge_scalar_128bits
+        if (!std.mem.eql(u8, expected_low_str, "-") and !std.mem.eql(u8, expected_high_str, "-")) {
+            var transcript = Transcript.init(init_label);
+            try applyTranscriptOps(&transcript, ops_desc);
+            const expected_low = try std.fmt.parseInt(u64, expected_low_str, 16);
+            const expected_high = try std.fmt.parseInt(u64, expected_high_str, 16);
+            const challenge = transcript.challengeScalar128Bits();
+            try std.testing.expectEqual(@as(u64, 0), challenge.limbs[0]);
+            try std.testing.expectEqual(@as(u64, 0), challenge.limbs[1]);
+            try std.testing.expectEqual(expected_low, challenge.limbs[2]);
+            try std.testing.expectEqual(expected_high, challenge.limbs[3]);
         }
     }
 }

@@ -8,6 +8,7 @@ name = "zolt-arith-arkworks-fixtures"
 path = "src/main.rs"
 
 [dependencies]
+blake2 = "0.10"
 ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
 ark-ec = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false, features = ["parallel"] }
 ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false, features = ["asm"] }

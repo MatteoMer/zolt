@@ -1,3 +1,5 @@
+mod transcript;
+
 use ark_bn254::{Bn254, Fq, Fq12, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{
     pairing::Pairing,
@@ -252,6 +254,263 @@ fn generate_msm_cases(out_dir: &Path) {
     write_file(out_dir.join("msm/g2_fr_cases.txt"), g2_fr_out);
 }
 
+fn generate_accumulator_ops(out_dir: &Path) {
+    let mut rng = StdRng::seed_from_u64(0xacc0_0001);
+
+    // --- sum_of_products: a0*b0 + a1*b1 ---
+    let sop_cases: Vec<(Fr, Fr, Fr, Fr)> = vec![
+        (Fr::from(0u64), Fr::from(1u64), Fr::from(0u64), Fr::from(1u64)),
+        (Fr::from(1u64), Fr::from(1u64), Fr::from(1u64), Fr::from(1u64)),
+        (Fr::from(3u64), Fr::from(5u64), Fr::from(7u64), Fr::from(11u64)),
+        (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng)),
+        (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng)),
+        (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng)),
+    ];
+    let mut sop_out = String::from("# name|a0_be_hex|b0_be_hex|a1_be_hex|b1_be_hex|expected_be_hex\n");
+    for (i, (a0, b0, a1, b1)) in sop_cases.iter().enumerate() {
+        let expected = *a0 * *b0 + *a1 * *b1;
+        sop_out.push_str(&format!(
+            "case_{i}|{}|{}|{}|{}|{}\n",
+            hex_be(a0), hex_be(b0), hex_be(a1), hex_be(b1), hex_be(&expected)
+        ));
+    }
+    write_file(out_dir.join("accumulator/sum_of_products.txt"), sop_out);
+
+    // --- batch_inverse ---
+    let mut bi_out = String::from("# name|count|inputs_be_hex_csv|expected_be_hex_csv\n");
+    let batch_sizes = [1usize, 2, 4, 8];
+    let mut bi_rng = StdRng::seed_from_u64(0xacc0_0002);
+    for (i, &n) in batch_sizes.iter().enumerate() {
+        let inputs: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut bi_rng)).collect();
+        let outputs: Vec<Fr> = inputs.iter().map(|x| x.inverse().unwrap()).collect();
+        bi_out.push_str(&format!(
+            "case_{i}|{n}|{}|{}\n",
+            join_field_scalars(&inputs),
+            join_field_scalars(&outputs),
+        ));
+    }
+    // Case with a zero element (zero inverse → zero)
+    {
+        let inputs = vec![Fr::rand(&mut bi_rng), Fr::from(0u64), Fr::rand(&mut bi_rng)];
+        let outputs: Vec<Fr> = inputs
+            .iter()
+            .map(|x| {
+                if x.is_zero() {
+                    Fr::from(0u64)
+                } else {
+                    x.inverse().unwrap()
+                }
+            })
+            .collect();
+        bi_out.push_str(&format!(
+            "case_with_zero|3|{}|{}\n",
+            join_field_scalars(&inputs),
+            join_field_scalars(&outputs),
+        ));
+    }
+    write_file(out_dir.join("accumulator/batch_inverse.txt"), bi_out);
+
+    // --- mul_u64: field * u64 scalar ---
+    let mut mu64_rng = StdRng::seed_from_u64(0xacc0_0003);
+    let mu64_cases: Vec<(Fr, u64)> = vec![
+        (Fr::rand(&mut mu64_rng), 0),
+        (Fr::rand(&mut mu64_rng), 1),
+        (Fr::rand(&mut mu64_rng), 2),
+        (Fr::rand(&mut mu64_rng), 12345),
+        (Fr::rand(&mut mu64_rng), 0xdeadbeef_cafebabe),
+        (Fr::rand(&mut mu64_rng), u64::MAX),
+    ];
+    let mut mu64_out = String::from("# name|field_be_hex|scalar_u64|expected_be_hex\n");
+    for (i, (field_val, scalar)) in mu64_cases.iter().enumerate() {
+        let expected = *field_val * Fr::from(*scalar);
+        mu64_out.push_str(&format!(
+            "case_{i}|{}|{scalar}|{}\n",
+            hex_be(field_val),
+            hex_be(&expected)
+        ));
+    }
+    write_file(out_dir.join("accumulator/mul_u64.txt"), mu64_out);
+
+    // --- mul_u128: field * u128 scalar ---
+    let mut mu128_rng = StdRng::seed_from_u64(0xacc0_0004);
+    let mu128_cases: Vec<(Fr, u128)> = vec![
+        (Fr::rand(&mut mu128_rng), 0),
+        (Fr::rand(&mut mu128_rng), 1),
+        (Fr::rand(&mut mu128_rng), u64::MAX as u128),
+        (Fr::rand(&mut mu128_rng), (u64::MAX as u128) + 1),
+        (Fr::rand(&mut mu128_rng), 0xdeadbeef_cafebabe_12345678_9abcdef0),
+        (Fr::rand(&mut mu128_rng), u128::MAX),
+    ];
+    let mut mu128_out = String::from("# name|field_be_hex|scalar_u128|expected_be_hex\n");
+    for (i, (field_val, scalar)) in mu128_cases.iter().enumerate() {
+        let expected = *field_val * Fr::from(*scalar);
+        mu128_out.push_str(&format!(
+            "case_{i}|{}|{scalar}|{}\n",
+            hex_be(field_val),
+            hex_be(&expected)
+        ));
+    }
+    write_file(out_dir.join("accumulator/mul_u128.txt"), mu128_out);
+}
+
+fn generate_transcript_fixtures(out_dir: &Path) {
+    use transcript::Blake2bTranscript;
+
+    // Uses only the PUBLIC transcript API (init, appendLabel, appendU64,
+    // appendScalar, challengeU128, challengeScalar128Bits) so that the Zig
+    // differential verifier can exercise the same paths without accessing
+    // private/raw methods.
+
+    // --- State vectors ---
+    // Each line: name|init_label|ops_desc|expected_state_hex|expected_rounds
+    // ops_desc uses semicolons to separate steps, colons for args:
+    //   append_label:data ; append_u64:count:999 ; append_scalar:val:7
+    let mut state_out = String::from(
+        "# name|init_label|ops_desc|expected_state_hex|expected_rounds\n",
+    );
+
+    let emit = |out: &mut String, name: &str, t: &Blake2bTranscript, init_label: &str, ops: &str| {
+        out.push_str(&format!(
+            "{name}|{init_label}|{ops}|{}|{}\n",
+            hex_encode(t.state()),
+            t.n_rounds()
+        ));
+    };
+
+    // init only
+    {
+        let t = Blake2bTranscript::new(b"init_test");
+        emit(&mut state_out, "init_basic", &t, "init_test", "-");
+    }
+    {
+        let t = Blake2bTranscript::new(b"");
+        emit(&mut state_out, "init_empty", &t, "", "-");
+    }
+
+    // appendLabel
+    {
+        let mut t = Blake2bTranscript::new(b"pub_test");
+        t.append_label(b"data");
+        emit(&mut state_out, "label_data", &t, "pub_test", "append_label:data");
+    }
+    {
+        let mut t = Blake2bTranscript::new(b"zolt_test");
+        t.append_label(b"hello");
+        emit(&mut state_out, "label_hello", &t, "zolt_test", "append_label:hello");
+    }
+
+    // appendU64
+    {
+        let mut t = Blake2bTranscript::new(b"pub_test");
+        t.append_u64(b"count", 999);
+        emit(&mut state_out, "u64_999", &t, "pub_test", "append_u64:count:999");
+    }
+    {
+        let mut t = Blake2bTranscript::new(b"pub_test");
+        t.append_u64(b"size", 0);
+        emit(&mut state_out, "u64_zero", &t, "pub_test", "append_u64:size:0");
+    }
+
+    // appendScalar
+    {
+        let mut t = Blake2bTranscript::new(b"pub_test");
+        t.append_scalar(b"val", Fr::from(7u64));
+        emit(&mut state_out, "scalar_7", &t, "pub_test", "append_scalar:val:7");
+    }
+    {
+        let mut t = Blake2bTranscript::new(b"scalar_test");
+        t.append_scalar(b"x", Fr::from(42u64));
+        emit(&mut state_out, "scalar_42", &t, "scalar_test", "append_scalar:x:42");
+    }
+    {
+        let mut t = Blake2bTranscript::new(b"scalar_test");
+        t.append_scalar(b"x", Fr::from(0u64));
+        emit(&mut state_out, "scalar_zero", &t, "scalar_test", "append_scalar:x:0");
+    }
+
+    // Multi-step (public API only)
+    {
+        let mut t = Blake2bTranscript::new(b"sequence");
+        t.append_label(b"step1");
+        t.append_scalar(b"x", Fr::from(100u64));
+        t.append_u64(b"n", 42);
+        emit(&mut state_out, "multi_pub_3ops", &t, "sequence",
+            "append_label:step1;append_scalar:x:100;append_u64:n:42");
+    }
+    {
+        let mut t = Blake2bTranscript::new(b"multi");
+        t.append_label(b"round1");
+        t.append_label(b"round2");
+        t.append_scalar(b"r", Fr::from(999u64));
+        emit(&mut state_out, "multi_labels_scalar", &t, "multi",
+            "append_label:round1;append_label:round2;append_scalar:r:999");
+    }
+
+    write_file(out_dir.join("transcript/state_vectors.txt"), state_out);
+
+    // --- Challenge vectors ---
+    // Each line: name|init_label|ops_desc|expected_u128|expected_limb2_hex|expected_limb3_hex
+    let mut chal_out = String::from(
+        "# name|init_label|ops_desc|expected_u128|expected_limb2_hex|expected_limb3_hex\n",
+    );
+
+    // challenge after appendLabel
+    {
+        let mut t = Blake2bTranscript::new(b"chal_test");
+        t.append_label(b"data");
+        let val = t.challenge_u128();
+        chal_out.push_str(&format!("u128_after_label|chal_test|append_label:data|{val}|-|-\n"));
+    }
+    {
+        let mut t = Blake2bTranscript::new(b"chal_test");
+        t.append_label(b"data");
+        let (low, high) = t.challenge_scalar_128bits();
+        chal_out.push_str(&format!(
+            "scalar128_after_label|chal_test|append_label:data|-|{low:016x}|{high:016x}\n"
+        ));
+    }
+
+    // challenge after appendScalar
+    {
+        let mut t = Blake2bTranscript::new(b"chal_test");
+        t.append_scalar(b"input", Fr::from(42u64));
+        let val = t.challenge_u128();
+        chal_out.push_str(&format!(
+            "u128_after_scalar|chal_test|append_scalar:input:42|{val}|-|-\n"
+        ));
+    }
+    {
+        let mut t = Blake2bTranscript::new(b"chal_test");
+        t.append_scalar(b"input", Fr::from(42u64));
+        let (low, high) = t.challenge_scalar_128bits();
+        chal_out.push_str(&format!(
+            "scalar128_after_scalar|chal_test|append_scalar:input:42|-|{low:016x}|{high:016x}\n"
+        ));
+    }
+
+    // challenge after multi-step
+    {
+        let mut t = Blake2bTranscript::new(b"multi_chal");
+        t.append_label(b"round1");
+        t.append_u64(b"size", 256);
+        let val = t.challenge_u128();
+        chal_out.push_str(&format!(
+            "u128_multi_step|multi_chal|append_label:round1;append_u64:size:256|{val}|-|-\n"
+        ));
+    }
+    {
+        let mut t = Blake2bTranscript::new(b"multi_chal");
+        t.append_label(b"round1");
+        t.append_u64(b"size", 256);
+        let (low, high) = t.challenge_scalar_128bits();
+        chal_out.push_str(&format!(
+            "scalar128_multi_step|multi_chal|append_label:round1;append_u64:size:256|-|{low:016x}|{high:016x}\n"
+        ));
+    }
+
+    write_file(out_dir.join("transcript/challenge_vectors.txt"), chal_out);
+}
+
 fn parse_out_dir() -> PathBuf {
     let mut args = env::args().skip(1);
     let mut out_dir = PathBuf::from("testdata/zolt-arith-diff");
@@ -272,5 +531,7 @@ fn main() {
     generate_field_ops(&out_dir);
     generate_pairing_cases(&out_dir);
     generate_msm_cases(&out_dir);
+    generate_accumulator_ops(&out_dir);
+    generate_transcript_fixtures(&out_dir);
     eprintln!("generated zolt-arith differential fixtures under {}", out_dir.display());
 }

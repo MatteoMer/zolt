@@ -12,9 +12,11 @@ It is intentionally kept outside `packages/zolt-arith/` so:
 
 - `arkworks-fixtures/`
   Generates deterministic BN254 differential fixtures for:
-  - field ops
+  - field ops (add, sub, mul, inverse for Fr and Fp)
+  - accumulator ops (sumOfProducts, batchInverse, mulU64, mulU128)
   - pairing on generator-derived points
-  - MSM on deterministic doubled bases
+  - MSM on deterministic doubled bases (G1 Fr, G1 i128, G2 Fr)
+  - Blake2b transcript state and challenge vectors (independent Rust oracle)
 
 - `check.zig`
   Reads the generated fixtures and verifies Zolt against them.

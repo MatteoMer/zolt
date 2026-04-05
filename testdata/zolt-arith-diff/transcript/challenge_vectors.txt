@@ -1,0 +1,7 @@
+# name|init_label|ops_desc|expected_u128|expected_limb2_hex|expected_limb3_hex
+u128_after_label|chal_test|append_label:data|162254257622815994855625205374327650453|-|-
+scalar128_after_label|chal_test|append_label:data|-|904fe9fdafb2f895|1a110888b571b1d2
+u128_after_scalar|chal_test|append_scalar:input:42|320459821532379581560418381073129669534|-|-
+scalar128_after_scalar|chal_test|append_scalar:input:42|-|92bd5ffbb384039e|1116510e6a7bab8a
+u128_multi_step|multi_chal|append_label:round1;append_u64:size:256|291277234265759587083847672085601804209|-|-
+scalar128_multi_step|multi_chal|append_label:round1;append_u64:size:256|-|611556ef099b5fb1|1b21f46b172ec1eb

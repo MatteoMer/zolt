@@ -1897,3 +1897,123 @@ test "parallel msm zero scalars" {
     const result = try PMSM.compute(&bases, &scalars, 4, allocator);
     try std.testing.expect(result.isIdentity());
 }
+
+// ============================================================================
+// Fixture-backed vector tests (arkworks-validated)
+// ============================================================================
+
+const testdata = @import("../testdata.zig");
+
+fn fieldToBytesLE(comptime F: type, value: F) [32]u8 {
+    const standard = value.fromMontgomery();
+    var bytes: [32]u8 = undefined;
+    inline for (0..4) |i| {
+        std.mem.writeInt(u64, bytes[i * 8 ..][0..8], standard.limbs[i], .little);
+    }
+    return bytes;
+}
+
+test "msm g1 fr fixture vectors" {
+    const Fr = @import("../field/mod.zig").BN254Scalar;
+    const Fp = @import("../field/mod.zig").BN254BaseField;
+    const G1Affine = AffinePoint(Fp);
+    const G1MSM = MSM(Fr, Fp);
+
+    const fixture_text = @embedFile("../testdata/msm/g1_fr_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    var case_count: usize = 0;
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(5, line, '|');
+
+        // Parse comma-separated BE hex scalars
+        var scalar_buf: [64]Fr = undefined;
+        var n: usize = 0;
+        var csv = std.mem.splitScalar(u8, fields[1], ',');
+        while (csv.next()) |token| {
+            const trimmed = std.mem.trim(u8, token, " \t\r");
+            if (trimmed.len == 0) continue;
+            const bytes = try testdata.parseHexBytesExact(32, trimmed);
+            scalar_buf[n] = Fr.fromBytesBE(&bytes);
+            n += 1;
+        }
+        const scalars = scalar_buf[0..n];
+
+        // Generate bases: G, 2G, 4G, ... (successive doublings of generator)
+        var base_buf: [64]G1Affine = undefined;
+        const gen = G1Affine.generator();
+        var proj = ProjectivePoint(Fp).fromAffine(gen);
+        for (0..n) |i| {
+            base_buf[i] = proj.toAffine();
+            proj = proj.double();
+        }
+        const bases = base_buf[0..n];
+
+        const actual = G1MSM.computeWithPool(bases, scalars, null);
+        const expected_infinity = try testdata.parseDecimal(u8, fields[2]);
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            const expected_x = try testdata.parseHexBytesExact(32, fields[3]);
+            const expected_y = try testdata.parseHexBytesExact(32, fields[4]);
+            const actual_x = fieldToBytesLE(Fp, actual.x);
+            const actual_y = fieldToBytesLE(Fp, actual.y);
+            try std.testing.expectEqualSlices(u8, &expected_x, &actual_x);
+            try std.testing.expectEqualSlices(u8, &expected_y, &actual_y);
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 3);
+}
+
+test "msm g1 i128 fixture vectors" {
+    const Fr = @import("../field/mod.zig").BN254Scalar;
+    const Fp = @import("../field/mod.zig").BN254BaseField;
+    const G1Affine = AffinePoint(Fp);
+    const G1MSM = MSM(Fr, Fp);
+
+    const fixture_text = @embedFile("../testdata/msm/g1_i128_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    var case_count: usize = 0;
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(5, line, '|');
+
+        // Parse comma-separated decimal i128 scalars
+        var scalar_buf: [64]i128 = undefined;
+        var n: usize = 0;
+        var csv = std.mem.splitScalar(u8, fields[1], ',');
+        while (csv.next()) |token| {
+            const trimmed = std.mem.trim(u8, token, " \t\r");
+            if (trimmed.len == 0) continue;
+            scalar_buf[n] = try std.fmt.parseInt(i128, trimmed, 10);
+            n += 1;
+        }
+        const scalars = scalar_buf[0..n];
+
+        // Generate bases: G, 2G, 4G, ...
+        var base_buf: [64]G1Affine = undefined;
+        const gen = G1Affine.generator();
+        var proj = ProjectivePoint(Fp).fromAffine(gen);
+        for (0..n) |i| {
+            base_buf[i] = proj.toAffine();
+            proj = proj.double();
+        }
+        const bases = base_buf[0..n];
+
+        const actual = G1MSM.computeI128(bases, scalars, null);
+        const expected_infinity = try testdata.parseDecimal(u8, fields[2]);
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            const expected_x = try testdata.parseHexBytesExact(32, fields[3]);
+            const expected_y = try testdata.parseHexBytesExact(32, fields[4]);
+            const actual_x = fieldToBytesLE(Fp, actual.x);
+            const actual_y = fieldToBytesLE(Fp, actual.y);
+            try std.testing.expectEqualSlices(u8, &expected_x, &actual_x);
+            try std.testing.expectEqualSlices(u8, &expected_y, &actual_y);
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 3);
+}

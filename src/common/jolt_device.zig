@@ -46,7 +46,7 @@ pub const MemoryLayout = struct {
     heap_size: u64,
     /// Heap starts just after the start of the stack
     heap_end: u64,
-    panic_addr: u64,
+    panic: u64,
     termination: u64,
     /// End of the memory region containing inputs, outputs, panic bit, and termination bit
     io_end: u64,
@@ -98,12 +98,12 @@ pub const MemoryLayout = struct {
         const input_end = input_start + max_input_size;
         const output_start = input_end;
         const output_end = output_start + max_output_size;
-        const panic_addr = output_end;
-        const termination = panic_addr + 8;
+        const panic = output_end;
+        const termination = panic + 8;
         const io_end = termination + 8;
 
         // Stack grows downwards from bytecode_end + stack_size to bytecode_end
-        const stack_end = constants.RAM_START_ADDRESS + program_size;
+        const stack_end = constants.RAM_START_ADDRESS + alignUp(program_size, 8);
         const stack_start = stack_end + stack_size;
 
         // Heap grows up from the top of the stack
@@ -127,7 +127,7 @@ pub const MemoryLayout = struct {
             .stack_end = stack_end,
             .heap_size = heap_size,
             .heap_end = heap_end,
-            .panic_addr = panic_addr,
+            .panic = panic,
             .termination = termination,
             .io_end = io_end,
         };
@@ -158,6 +158,56 @@ pub const MemoryLayout = struct {
         return self.heap_size + self.stack_size + constants.STACK_CANARY_SIZE;
     }
 
+    /// Serialize to arkworks canonical format (little-endian u64 sequence)
+    pub fn serialize(self: *const MemoryLayout, writer: anytype) !void {
+        try writer.writeInt(u64, self.program_size, .little);
+        try writer.writeInt(u64, self.max_trusted_advice_size, .little);
+        try writer.writeInt(u64, self.trusted_advice_start, .little);
+        try writer.writeInt(u64, self.trusted_advice_end, .little);
+        try writer.writeInt(u64, self.max_untrusted_advice_size, .little);
+        try writer.writeInt(u64, self.untrusted_advice_start, .little);
+        try writer.writeInt(u64, self.untrusted_advice_end, .little);
+        try writer.writeInt(u64, self.max_input_size, .little);
+        try writer.writeInt(u64, self.max_output_size, .little);
+        try writer.writeInt(u64, self.input_start, .little);
+        try writer.writeInt(u64, self.input_end, .little);
+        try writer.writeInt(u64, self.output_start, .little);
+        try writer.writeInt(u64, self.output_end, .little);
+        try writer.writeInt(u64, self.stack_size, .little);
+        try writer.writeInt(u64, self.stack_end, .little);
+        try writer.writeInt(u64, self.heap_size, .little);
+        try writer.writeInt(u64, self.heap_end, .little);
+        try writer.writeInt(u64, self.panic, .little);
+        try writer.writeInt(u64, self.termination, .little);
+        try writer.writeInt(u64, self.io_end, .little);
+    }
+
+    /// Deserialize from arkworks canonical format (little-endian u64 sequence)
+    pub fn deserialize(reader: anytype) !MemoryLayout {
+        return MemoryLayout{
+            .program_size = try reader.readInt(u64, .little),
+            .max_trusted_advice_size = try reader.readInt(u64, .little),
+            .trusted_advice_start = try reader.readInt(u64, .little),
+            .trusted_advice_end = try reader.readInt(u64, .little),
+            .max_untrusted_advice_size = try reader.readInt(u64, .little),
+            .untrusted_advice_start = try reader.readInt(u64, .little),
+            .untrusted_advice_end = try reader.readInt(u64, .little),
+            .max_input_size = try reader.readInt(u64, .little),
+            .max_output_size = try reader.readInt(u64, .little),
+            .input_start = try reader.readInt(u64, .little),
+            .input_end = try reader.readInt(u64, .little),
+            .output_start = try reader.readInt(u64, .little),
+            .output_end = try reader.readInt(u64, .little),
+            .stack_size = try reader.readInt(u64, .little),
+            .stack_end = try reader.readInt(u64, .little),
+            .heap_size = try reader.readInt(u64, .little),
+            .heap_end = try reader.readInt(u64, .little),
+            .panic = try reader.readInt(u64, .little),
+            .termination = try reader.readInt(u64, .little),
+            .io_end = try reader.readInt(u64, .little),
+        };
+    }
+
     pub fn format(self: *const MemoryLayout, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
@@ -167,7 +217,7 @@ pub const MemoryLayout = struct {
         try writer.print("  untrusted_advice: 0x{X:0>16} - 0x{X:0>16}\n", .{ self.untrusted_advice_start, self.untrusted_advice_end });
         try writer.print("  input: 0x{X:0>16} - 0x{X:0>16}\n", .{ self.input_start, self.input_end });
         try writer.print("  output: 0x{X:0>16} - 0x{X:0>16}\n", .{ self.output_start, self.output_end });
-        try writer.print("  panic: 0x{X:0>16}\n", .{self.panic_addr});
+        try writer.print("  panic: 0x{X:0>16}\n", .{self.panic});
         try writer.print("  termination: 0x{X:0>16}\n", .{self.termination});
         try writer.print("  io_end: 0x{X:0>16}\n", .{self.io_end});
         try writer.print("  stack_end: 0x{X:0>16}\n", .{self.stack_end});
@@ -245,7 +295,7 @@ pub const JoltDevice = struct {
 
     /// Store a byte at the given address
     pub fn store(self: *JoltDevice, address: u64, value: u8) !void {
-        if (address == self.memory_layout.panic_addr) {
+        if (address == self.memory_layout.panic) {
             self.panic = true;
             return;
         } else if (self.isPanic(address) or self.isTermination(address)) {
@@ -286,7 +336,7 @@ pub const JoltDevice = struct {
 
     /// Check if address is the panic address
     pub fn isPanic(self: *const JoltDevice, address: u64) bool {
-        return address >= self.memory_layout.panic_addr and address < self.memory_layout.termination;
+        return address >= self.memory_layout.panic and address < self.memory_layout.termination;
     }
 
     /// Check if address is the termination address
@@ -328,7 +378,7 @@ test "memory layout creation" {
     // Basic sanity checks
     try std.testing.expect(layout.input_start < layout.input_end);
     try std.testing.expect(layout.output_start < layout.output_end);
-    try std.testing.expect(layout.panic_addr < layout.termination);
+    try std.testing.expect(layout.panic < layout.termination);
     try std.testing.expect(layout.termination < layout.io_end);
 }
 

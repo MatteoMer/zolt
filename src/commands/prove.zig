@@ -213,7 +213,7 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
             const ram_writer = ram_buffer.writer(allocator);
 
             try ram_prep.serialize(ram_writer);
-            try preprocessing.serializeMemoryLayout(&device.memory_layout, ram_writer);
+            try device.memory_layout.serialize(ram_writer);
 
             const bytecode_K_for_export = zolt.zkvm.computeBytecodeCodeSize(program.bytecode);
             try ram_writer.writeInt(u64, @intCast(bytecode_K_for_export), .little);

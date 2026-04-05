@@ -2173,35 +2173,13 @@ pub const JoltSharedPreprocessing = struct {
     pub fn serialize(self: *const JoltSharedPreprocessing, allocator: Allocator, writer: anytype) !void {
         try self.bytecode.serialize(allocator, writer);
         try self.ram.serialize(writer);
-        try serializeMemoryLayout(&self.memory_layout, writer);
+        try self.memory_layout.serialize(writer);
         // max_padded_trace_length: usize (as u64)
         try writer.writeInt(u64, @intCast(self.max_padded_trace_length), .little);
     }
 };
 
-/// Serialize MemoryLayout to arkworks format
-pub fn serializeMemoryLayout(layout: *const MemoryLayout, writer: anytype) !void {
-    try writer.writeInt(u64, layout.program_size, .little);
-    try writer.writeInt(u64, layout.max_trusted_advice_size, .little);
-    try writer.writeInt(u64, layout.trusted_advice_start, .little);
-    try writer.writeInt(u64, layout.trusted_advice_end, .little);
-    try writer.writeInt(u64, layout.max_untrusted_advice_size, .little);
-    try writer.writeInt(u64, layout.untrusted_advice_start, .little);
-    try writer.writeInt(u64, layout.untrusted_advice_end, .little);
-    try writer.writeInt(u64, layout.max_input_size, .little);
-    try writer.writeInt(u64, layout.max_output_size, .little);
-    try writer.writeInt(u64, layout.input_start, .little);
-    try writer.writeInt(u64, layout.input_end, .little);
-    try writer.writeInt(u64, layout.output_start, .little);
-    try writer.writeInt(u64, layout.output_end, .little);
-    try writer.writeInt(u64, layout.stack_size, .little);
-    try writer.writeInt(u64, layout.stack_end, .little);
-    try writer.writeInt(u64, layout.heap_size, .little);
-    try writer.writeInt(u64, layout.heap_end, .little);
-    try writer.writeInt(u64, layout.panic, .little);
-    try writer.writeInt(u64, layout.termination, .little);
-    try writer.writeInt(u64, layout.io_end, .little);
-}
+// serializeMemoryLayout has been moved to MemoryLayout.serialize() in common/jolt_device.zig
 
 // ============================================================================
 // Tests

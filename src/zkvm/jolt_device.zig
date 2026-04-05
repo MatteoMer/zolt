@@ -1,8 +1,11 @@
-//! JoltDevice and MemoryLayout Types for Fiat-Shamir Preamble
+//! JoltDevice for Fiat-Shamir Preamble and Proof Serialization
 //!
-//! These types match the Jolt definitions in `common/src/jolt_device.rs`
-//! and are used for Fiat-Shamir transcript preamble to ensure compatible
+//! This type matches the Jolt definition in `common/src/jolt_device.rs`
+//! and is used for Fiat-Shamir transcript preamble to ensure compatible
 //! challenge derivation between Zolt prover and Jolt verifier.
+//!
+//! MemoryLayout is imported from `src/common/jolt_device.zig` — the single
+//! canonical definition shared by both the emulator and the proof system.
 //!
 //! Reference: jolt/common/src/jolt_device.rs
 
@@ -12,78 +15,11 @@ const zkvm_debug = @import("debug.zig");
 const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
+const common_jolt = @import("../common/jolt_device.zig");
+const constants = @import("../common/constants.zig");
 
-/// Memory layout configuration matching Jolt's MemoryLayout
-pub const MemoryLayout = struct {
-    program_size: u64,
-    max_trusted_advice_size: u64,
-    trusted_advice_start: u64,
-    trusted_advice_end: u64,
-    max_untrusted_advice_size: u64,
-    untrusted_advice_start: u64,
-    untrusted_advice_end: u64,
-    max_input_size: u64,
-    max_output_size: u64,
-    input_start: u64,
-    input_end: u64,
-    output_start: u64,
-    output_end: u64,
-    stack_size: u64,
-    stack_end: u64,
-    heap_size: u64,
-    heap_end: u64,
-    panic: u64,
-    termination: u64,
-    io_end: u64,
-
-    /// Deserialize from arkworks canonical format
-    pub fn deserialize(reader: anytype) !MemoryLayout {
-        return MemoryLayout{
-            .program_size = try reader.readInt(u64, .little),
-            .max_trusted_advice_size = try reader.readInt(u64, .little),
-            .trusted_advice_start = try reader.readInt(u64, .little),
-            .trusted_advice_end = try reader.readInt(u64, .little),
-            .max_untrusted_advice_size = try reader.readInt(u64, .little),
-            .untrusted_advice_start = try reader.readInt(u64, .little),
-            .untrusted_advice_end = try reader.readInt(u64, .little),
-            .max_input_size = try reader.readInt(u64, .little),
-            .max_output_size = try reader.readInt(u64, .little),
-            .input_start = try reader.readInt(u64, .little),
-            .input_end = try reader.readInt(u64, .little),
-            .output_start = try reader.readInt(u64, .little),
-            .output_end = try reader.readInt(u64, .little),
-            .stack_size = try reader.readInt(u64, .little),
-            .stack_end = try reader.readInt(u64, .little),
-            .heap_size = try reader.readInt(u64, .little),
-            .heap_end = try reader.readInt(u64, .little),
-            .panic = try reader.readInt(u64, .little),
-            .termination = try reader.readInt(u64, .little),
-            .io_end = try reader.readInt(u64, .little),
-        };
-    }
-
-    /// Returns the start address of memory (lowest of trusted/untrusted advice)
-    /// Matches Jolt's MemoryLayout::get_lowest_address()
-    pub fn getLowestAddress(self: *const MemoryLayout) u64 {
-        return @min(self.trusted_advice_start, self.untrusted_advice_start);
-    }
-
-    /// Remap a physical address to a polynomial index
-    /// Returns null if address is 0 (no read/write)
-    /// Matches Jolt's remap_address function in zkvm/ram/mod.rs
-    pub fn remapAddress(self: *const MemoryLayout, address: u64) ?u64 {
-        if (address == 0) {
-            return null;
-        }
-
-        const lowest_address = self.getLowestAddress();
-        if (address >= lowest_address) {
-            return (address - lowest_address) / 8;
-        } else {
-            std.debug.panic("Unexpected address 0x{X}", .{address});
-        }
-    }
-};
+/// Re-export canonical MemoryLayout from common
+pub const MemoryLayout = common_jolt.MemoryLayout;
 
 /// JoltDevice matching Jolt's JoltDevice struct
 pub const JoltDevice = struct {
@@ -113,76 +49,16 @@ pub const JoltDevice = struct {
         program_size: u64,
         heap_size_opt: ?u64,
     ) !Self {
-        // Use Jolt's default constants (from common/src/constants.rs)
-        // These MUST match the values used when Jolt generates the preprocessing!
-        const DEFAULT_MAX_INPUT_SIZE: u64 = 4096;
-        const DEFAULT_MAX_OUTPUT_SIZE: u64 = 4096;
-        const DEFAULT_MAX_TRUSTED_ADVICE_SIZE: u64 = 4096; // Must match Jolt's default
-        const DEFAULT_MAX_UNTRUSTED_ADVICE_SIZE: u64 = 4096; // Must match Jolt's default
-        const DEFAULT_MEMORY_SIZE: u64 = 1024 * 1024 * 128; // 128 MB
-        const DEFAULT_STACK_SIZE: u64 = 4096; // 4 KB
-        const RAM_START_ADDRESS: u64 = 0x80000000;
-
-        // Use provided heap_size or default
-        const heap_size = heap_size_opt orelse DEFAULT_MEMORY_SIZE;
-
         // Copy inputs/outputs
         const inputs_copy = try allocator.alloc(u8, inputs.len);
         @memcpy(inputs_copy, inputs);
         const outputs_copy = try allocator.alloc(u8, outputs.len);
         @memcpy(outputs_copy, outputs);
 
-        // Align all sizes to 8 bytes (matching Jolt)
-        const max_trusted_advice_size = alignUp(DEFAULT_MAX_TRUSTED_ADVICE_SIZE, 8);
-        const max_untrusted_advice_size = alignUp(DEFAULT_MAX_UNTRUSTED_ADVICE_SIZE, 8);
-        const max_input_size = alignUp(DEFAULT_MAX_INPUT_SIZE, 8);
-        const max_output_size = alignUp(DEFAULT_MAX_OUTPUT_SIZE, 8);
-        const stack_size = alignUp(DEFAULT_STACK_SIZE, 8);
-
-        // Calculate I/O region size (includes panic and termination = 16 bytes)
-        const io_region_bytes = max_input_size + max_trusted_advice_size +
-            max_untrusted_advice_size + max_output_size + 16;
-
-        // Round up to next power of two in words, then convert back to bytes
-        const io_region_words = std.math.ceilPowerOfTwo(u64, io_region_bytes / 8) catch @panic("overflow");
-        const io_bytes = io_region_words * 8;
-
-        // I/O region is placed BEFORE RAM_START_ADDRESS
-        // Place larger advice region first (at lower address)
-        var trusted_advice_start: u64 = undefined;
-        var trusted_advice_end: u64 = undefined;
-        var untrusted_advice_start: u64 = undefined;
-        var untrusted_advice_end: u64 = undefined;
-
-        const first_advice_start = RAM_START_ADDRESS - io_bytes;
-
-        if (max_trusted_advice_size >= max_untrusted_advice_size) {
-            // Trusted advice goes first (at lower address)
-            trusted_advice_start = first_advice_start;
-            trusted_advice_end = trusted_advice_start + max_trusted_advice_size;
-            untrusted_advice_start = trusted_advice_end;
-            untrusted_advice_end = untrusted_advice_start + max_untrusted_advice_size;
-        } else {
-            // Untrusted advice goes first
-            untrusted_advice_start = first_advice_start;
-            untrusted_advice_end = untrusted_advice_start + max_untrusted_advice_size;
-            trusted_advice_start = untrusted_advice_end;
-            trusted_advice_end = trusted_advice_start + max_trusted_advice_size;
-        }
-
-        // Input/output region follows the advice regions
-        const input_start = @max(trusted_advice_end, untrusted_advice_end);
-        const input_end = input_start + max_input_size;
-        const output_start = input_end;
-        const output_end = output_start + max_output_size;
-        const panic_addr = output_end;
-        const termination = panic_addr + 8; // 8-byte word for panic
-        const io_end = termination + 8; // 8-byte word for termination
-
-        // Stack and memory are placed AFTER RAM_START_ADDRESS
-        const program_size_aligned = alignUp(program_size, 8);
-        const stack_end = RAM_START_ADDRESS + program_size_aligned;
-        const heap_end = stack_end + stack_size + heap_size;
+        const config = common_jolt.MemoryConfig{
+            .program_size = program_size,
+            .heap_size = heap_size_opt orelse constants.DEFAULT_MEMORY_SIZE,
+        };
 
         return Self{
             .inputs = inputs_copy,
@@ -190,35 +66,9 @@ pub const JoltDevice = struct {
             .untrusted_advice = &[_]u8{},
             .outputs = outputs_copy,
             .panic = panic_flag,
-            .memory_layout = MemoryLayout{
-                .program_size = program_size,
-                .max_trusted_advice_size = max_trusted_advice_size,
-                .trusted_advice_start = trusted_advice_start,
-                .trusted_advice_end = trusted_advice_end,
-                .max_untrusted_advice_size = max_untrusted_advice_size,
-                .untrusted_advice_start = untrusted_advice_start,
-                .untrusted_advice_end = untrusted_advice_end,
-                .max_input_size = max_input_size,
-                .max_output_size = max_output_size,
-                .input_start = input_start,
-                .input_end = input_end,
-                .output_start = output_start,
-                .output_end = output_end,
-                .stack_size = stack_size,
-                .stack_end = stack_end,
-                .heap_size = heap_size,
-                .heap_end = heap_end,
-                .panic = panic_addr,
-                .termination = termination,
-                .io_end = io_end,
-            },
+            .memory_layout = MemoryLayout.init(&config),
             .allocator = allocator,
         };
-    }
-
-    fn alignUp(val: u64, alignment: u64) u64 {
-        if (alignment == 0) return val;
-        return ((val + alignment - 1) / alignment) * alignment;
     }
 
     /// Deserialize from arkworks canonical format (from Jolt-generated file)
@@ -264,7 +114,7 @@ pub const JoltDevice = struct {
 
         // Read panic bool (1 byte)
         const panic_byte = try reader.readByte();
-        const panic = panic_byte != 0;
+        const panic_val = panic_byte != 0;
 
         // Read MemoryLayout
         const memory_layout = try MemoryLayout.deserialize(reader);
@@ -274,7 +124,7 @@ pub const JoltDevice = struct {
             .trusted_advice = trusted_advice,
             .untrusted_advice = untrusted_advice,
             .outputs = outputs,
-            .panic = panic,
+            .panic = panic_val,
             .memory_layout = memory_layout,
             .allocator = allocator,
         };

@@ -727,16 +727,15 @@ test "zolt-arith differential g2 point compression fixtures" {
                 .infinity = false,
             };
 
-            // Verify compression produces stable output and the x-coordinate
-            // is preserved (decompressG2 fp2Sqrt is a known limitation for some points)
+            // Verify full compress → decompress roundtrip
             const compressed = dory.compressG2(point);
-
-            // Verify x-coords are in the compressed bytes (first 64 bytes, with flag bits in last byte)
-            var x1_from_compressed: [32]u8 = undefined;
-            @memcpy(&x1_from_compressed, compressed[32..64]);
-            x1_from_compressed[31] &= 0x3F; // mask flag bits
-            try std.testing.expectEqualSlices(u8, &x_c0_bytes, compressed[0..32]);
-            try std.testing.expectEqualSlices(u8, &x_c1_bytes, &x1_from_compressed);
+            const decompressed = dory.decompressG2(&compressed);
+            try std.testing.expect(decompressed != null);
+            try std.testing.expect(!decompressed.?.infinity);
+            try std.testing.expectEqualSlices(u8, &x_c0_bytes, &fieldToBytesLE(Fp, decompressed.?.x.c0));
+            try std.testing.expectEqualSlices(u8, &x_c1_bytes, &fieldToBytesLE(Fp, decompressed.?.x.c1));
+            try std.testing.expectEqualSlices(u8, &y_c0_bytes, &fieldToBytesLE(Fp, decompressed.?.y.c0));
+            try std.testing.expectEqualSlices(u8, &y_c1_bytes, &fieldToBytesLE(Fp, decompressed.?.y.c1));
         }
         case_count += 1;
     }

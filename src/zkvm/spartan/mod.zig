@@ -28,6 +28,13 @@ pub const stage3_prover = @import("stage3_prover.zig");
 pub const Stage3Prover = stage3_prover.Stage3Prover;
 pub const Stage3Result = stage3_prover.Stage3Result;
 
+// Stage 3 instance provers (extracted from stage3_prover)
+pub const stage3_instances = @import("stage3_instances.zig");
+pub const ShiftPrefixSuffixProver = stage3_instances.ShiftPrefixSuffixProver;
+pub const RegistersPrefixSuffixProver = stage3_instances.RegistersPrefixSuffixProver;
+pub const stage3_instruction_input = @import("stage3_instruction_input.zig");
+pub const InstructionInputProver = stage3_instruction_input.InstructionInputProver;
+
 // Stage 4 orchestrating prover (RegistersRWC + RamValCheck batched sumcheck)
 pub const stage4_prover_mod = @import("stage4_prover.zig");
 pub const Stage4Prover = stage4_prover_mod.Stage4Prover;
@@ -177,5 +184,7 @@ test {
     _ = @import("stage5_prover.zig");
     _ = @import("stage5_instances.zig");
     _ = @import("stage5_lookups.zig");
+    _ = @import("stage3_instances.zig");
+    _ = @import("stage3_instruction_input.zig");
     _ = @import("sumcheck_helpers.zig");
 }

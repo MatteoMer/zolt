@@ -29,9 +29,15 @@ const stage6_helpers = @import("stage6_helpers.zig");
 const computeEqTable = stage6_helpers.computeEqTable;
 const computeEqTableParallel = stage6_helpers.computeEqTableParallel;
 const extractChunkMSB = stage6_helpers.extractChunkMSB;
+const fieldFromI128 = stage6_helpers.fieldFromI128;
 const zkvm_debug = @import("../debug.zig");
 const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
+const bytecode_entry_mod = @import("bytecode_entries.zig");
+const BytecodeEntry = bytecode_entry_mod.BytecodeEntry;
+const instruction_mod = @import("../instruction/mod.zig");
+const CircuitFlags = instruction_mod.CircuitFlags;
+const InstructionFlags = instruction_mod.InstructionFlags;
 
 // Maximum evaluation points for parallelReduce accumulator.
 // Covers all sub-provers: LookupsRa (M+2 ≤ 10), RamRa (d+2 ≤ 6), BytecodeReadRaf (d+2 ≤ 4).
@@ -1336,4 +1342,246 @@ pub fn computeBytecodeReadRafInputClaim(
     });
 
     return .{ .total = result, .per_stage = per_stage };
+}
+
+/// Compute the 5 Val polynomials for BytecodeReadRaf from bytecode entries and per-stage gammas.
+///
+/// Val_s(k) encodes the bytecode entry at address k using the gamma-weighted formula for stage s.
+/// Also computes eq tables for Stages 4/5 register addresses (returned for use by debug comparisons).
+///
+/// Caller must free each val_polys[s] and the two eq_tables when done.
+pub fn computeBytecodeValPolys(
+    comptime F: type,
+    allocator: Allocator,
+    bytecode_entries: []const BytecodeEntry,
+    bytecode_log_k: usize,
+    stage1_gammas: []const F,
+    stage2_gammas: []const F,
+    stage3_gammas: []const F,
+    stage4_gammas: []const F,
+    stage5_gammas: []const F,
+    r_register_4: []const F,
+    r_register_5: []const F,
+) !struct { val_polys: [5][]F, eq_table_4: []F, eq_table_5: []F } {
+    const bytecode_K: usize = @as(usize, 1) << @intCast(bytecode_log_k);
+
+    // Precompute eq tables for Stages 4 and 5 register addresses
+    // r_register_4 and r_register_5 are the address portions from
+    // RegistersReadWriteChecking and RegistersValEvaluation opening points
+    const REGISTER_COUNT_LOG2: usize = 7; // log2(128 registers: 32 RISC-V + 96 virtual)
+    dbg("[STAGE6] r_register_4 (len={}):\n", .{r_register_4.len});
+    for (r_register_4, 0..) |rv, i| {
+        dbg("  r_register_4[{}] mont_limbs=[0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{ i, rv.limbs[0], rv.limbs[1], rv.limbs[2], rv.limbs[3] });
+    }
+    dbg("[STAGE6] r_register_5 (len={}):\n", .{r_register_5.len});
+    for (r_register_5, 0..) |rv, i| {
+        dbg("  r_register_5[{}] mont_limbs=[0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{ i, rv.limbs[0], rv.limbs[1], rv.limbs[2], rv.limbs[3] });
+    }
+    // Jolt's EqPolynomial::evals uses BIG-ENDIAN bit indexing:
+    // r[0] maps to MSB of index, r[n-1] maps to LSB.
+    // Our computeEqTable uses LITTLE-ENDIAN: r[0] maps to LSB.
+    // Fix: reverse the input array so our LE computation produces BE-indexed results.
+    var r_register_4_rev = try allocator.alloc(F, r_register_4.len);
+    defer allocator.free(r_register_4_rev);
+    for (0..r_register_4.len) |i| {
+        r_register_4_rev[i] = r_register_4[r_register_4.len - 1 - i];
+    }
+    var r_register_5_rev = try allocator.alloc(F, r_register_5.len);
+    defer allocator.free(r_register_5_rev);
+    for (0..r_register_5.len) |i| {
+        r_register_5_rev[i] = r_register_5[r_register_5.len - 1 - i];
+    }
+    const eq_table_4 = try computeEqTable(F, allocator, r_register_4_rev, REGISTER_COUNT_LOG2);
+    const eq_table_5 = try computeEqTable(F, allocator, r_register_5_rev, REGISTER_COUNT_LOG2);
+    // Print eq_table_4 entries in LE hex for comparison with Jolt
+    dbg("[STAGE6] eq_table_4 (len={}):\n", .{eq_table_4.len});
+    for ([_]usize{ 0, 1, 2, 8, 10, 15, 31, 127 }) |idx| {
+        if (idx < eq_table_4.len) {
+            const vbe = eq_table_4[idx].toBytesBE();
+            dbg("  eq4[{}]_LE=[", .{idx});
+            for (0..32) |bi| dbg("{x:0>2}", .{vbe[31 - bi]});
+            dbg("]\n", .{});
+        }
+    }
+    // Print stage4_gammas in LE hex
+    dbg("[STAGE6] stage4_gammas:\n", .{});
+    for (0..3) |i| {
+        const gbe = stage4_gammas[i].toBytesBE();
+        dbg("  gamma4[{}]_LE=[", .{i});
+        for (0..32) |bi| dbg("{x:0>2}", .{gbe[31 - bi]});
+        dbg("]\n", .{});
+    }
+
+    var val_polys: [5][]F = undefined;
+    for (0..5) |s| {
+        val_polys[s] = try allocator.alloc(F, bytecode_K);
+        @memset(val_polys[s], F.zero());
+    }
+
+    for (0..bytecode_K) |k| {
+        if (k >= bytecode_entries.len) break;
+        const entry = bytecode_entries[k];
+
+        // Stage 1: unexpanded_pc + γ₁¹·imm + Σ γ₁^(2+i)·circuit_flag_i
+        // CRITICAL: The Imm encoding must match Jolt's vanilla verifier exactly.
+        // Jolt's NormalizedOperands.imm is i128, but how it gets there depends
+        // on the instruction FORMAT type:
+        //   FormatI (I-type): u64 as i128 → zero-extended (always positive)
+        //   FormatU (U-type): u64 as i128 → zero-extended (always positive)
+        //   FormatJ (J-type): u64 as i128 → zero-extended (always positive)
+        //   FormatB (B-type): i128 directly → signed
+        //   FormatS (S-type): i64 as i128 → sign-extended (signed)
+        //   Virtual (0x0B, 0x2B): u64 as i128 (from emit_i helper)
+        // Then Jolt calls from_i128(operands.imm) to get the field element.
+        const imm_field: F = blk: {
+            const opcode_for_imm = entry.opcode;
+            // Signed encoding: must match R1CS witness and Jolt verifier.
+            const is_signed_format = (opcode_for_imm == 0x63) or // B-type (branches: FormatB i128)
+                (opcode_for_imm == 0x23) or // S-type (stores: FormatS i64)
+                (opcode_for_imm == 0x03) or // Load (FormatLoad: i64 sign-extended to i128)
+                (opcode_for_imm == 0x22); // VirtualAssert (FormatAssert: signed i64)
+            if (is_signed_format) {
+                break :blk fieldFromI128(F, @as(i128, entry.imm));
+            } else {
+                // I-type, U-type, J-type, Virtual: u64 zero-extended to i128.
+                break :blk F.fromU64(@as(u64, @bitCast(entry.imm)));
+            }
+        };
+        var val1 = F.fromU64(entry.address);
+        val1 = val1.add(stage1_gammas[1].mul(imm_field));
+        for (0..14) |i| {
+            if (entry.circuit_flags[i]) {
+                val1 = val1.add(stage1_gammas[2 + i]);
+            }
+        }
+        val_polys[0][k] = val1;
+
+        // Debug: print details for mismatching entries
+        if (k == 3 or k == 4 or k == 10 or k == 16 or k == 18 or k == 27 or k == 29 or k == 35) {
+            const addr_be = F.fromU64(entry.address).toBytesBE();
+            const imm_be = imm_field.toBytesBE();
+            dbg("[ZOLT_BC_ENTRY] k={}: addr=0x{x:0>8} imm_LE=[", .{ k, entry.address });
+            for (0..8) |bi| dbg("{x:0>2}", .{imm_be[31 - bi]});
+            dbg("] opcode=0x{x:0>2} raw_imm={} cf=[", .{ entry.opcode, entry.imm });
+            for (0..14) |ci| {
+                if (entry.circuit_flags[ci]) dbg("1", .{}) else dbg("0", .{});
+            }
+            dbg("]\n", .{});
+            _ = addr_be;
+        }
+
+        // Stage 2: γ₂⁰·jump + γ₂¹·branch + γ₂²·write_lookup_to_rd + γ₂³·virtual_instruction
+        var val2 = F.zero();
+        if (entry.circuit_flags[@intFromEnum(CircuitFlags.Jump)]) {
+            val2 = val2.add(stage2_gammas[0]);
+        }
+        if (entry.instruction_flags[@intFromEnum(InstructionFlags.Branch)]) {
+            val2 = val2.add(stage2_gammas[1]);
+        }
+        if (entry.circuit_flags[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)]) {
+            val2 = val2.add(stage2_gammas[2]);
+        }
+        if (entry.circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)]) {
+            val2 = val2.add(stage2_gammas[3]);
+        }
+        val_polys[1][k] = val2;
+
+        // Stage 3: γ₃⁰·imm + γ₃¹·unexpanded_pc + γ₃²·L_is_rs1 + γ₃³·L_is_pc
+        //         + γ₃⁴·R_is_rs2 + γ₃⁵·R_is_imm + γ₃⁶·is_noop
+        //         + γ₃⁷·virtual_instruction + γ₃⁸·is_first_in_sequence
+        var val3 = imm_field;
+        val3 = val3.add(stage3_gammas[1].mul(F.fromU64(entry.address)));
+        if (entry.instruction_flags[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)]) {
+            val3 = val3.add(stage3_gammas[2]);
+        }
+        if (entry.instruction_flags[@intFromEnum(InstructionFlags.LeftOperandIsPC)]) {
+            val3 = val3.add(stage3_gammas[3]);
+        }
+        if (entry.instruction_flags[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)]) {
+            val3 = val3.add(stage3_gammas[4]);
+        }
+        if (entry.instruction_flags[@intFromEnum(InstructionFlags.RightOperandIsImm)]) {
+            val3 = val3.add(stage3_gammas[5]);
+        }
+        if (entry.instruction_flags[@intFromEnum(InstructionFlags.IsNoop)]) {
+            val3 = val3.add(stage3_gammas[6]);
+        }
+        if (entry.circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)]) {
+            val3 = val3.add(stage3_gammas[7]);
+        }
+        if (entry.is_first_in_sequence) {
+            val3 = val3.add(stage3_gammas[8]);
+        }
+        val_polys[2][k] = val3;
+
+        // Stage 4: γ₄⁰·eq(rd, r_reg4) + γ₄¹·eq(rs1, r_reg4) + γ₄²·eq(rs2, r_reg4)
+        const REGISTER_COUNT: usize = 128; // 32 RISC-V + 96 virtual
+        var val4 = F.zero();
+        if (entry.rd < REGISTER_COUNT) {
+            val4 = val4.add(stage4_gammas[0].mul(eq_table_4[entry.rd]));
+        }
+        if (entry.rs1 < REGISTER_COUNT) {
+            val4 = val4.add(stage4_gammas[1].mul(eq_table_4[entry.rs1]));
+        }
+        if (entry.rs2 < REGISTER_COUNT) {
+            val4 = val4.add(stage4_gammas[2].mul(eq_table_4[entry.rs2]));
+        }
+        val_polys[3][k] = val4;
+
+        // Stage 5: eq(rd, r_reg5) + γ₅¹·!is_interleaved + Σ γ₅^(2+i)·table_flag_i
+        var val5 = F.zero();
+        if (entry.rd < REGISTER_COUNT) {
+            val5 = val5.add(eq_table_5[entry.rd]);
+        }
+        if (!entry.is_interleaved) {
+            val5 = val5.add(stage5_gammas[1]);
+        }
+        if (entry.lookup_table_index < 40) {
+            val5 = val5.add(stage5_gammas[2 + @as(usize, entry.lookup_table_index)]);
+        }
+        val_polys[4][k] = val5;
+    }
+
+    // Debug: Print Val poly entries for comparison with Jolt verifier
+    if (comptime debug_verbose) {
+        dbg("[STAGE6] Val[3] (Stage 4/RegistersRWC) entries:\n", .{});
+        for (0..bytecode_K) |k| {
+            const vbe = val_polys[3][k].toBytesBE();
+            dbg("  Val[3][{}]_LE=[", .{k});
+            for (0..32) |bi| dbg("{x:0>2}", .{vbe[31 - bi]});
+            dbg("]\n", .{});
+        }
+    }
+    if (debug_verbose) {
+        for ([_]usize{ 0, 1, 2, 4 }) |s| {
+            for (0..bytecode_K) |k| {
+                const vbe = val_polys[s][k].toBytesBE();
+                dbg("  Val[{}][{}]_LE=[", .{ s, k });
+                for (0..32) |bi| dbg("{x:0>2}", .{vbe[31 - bi]});
+                dbg("]\n", .{});
+            }
+        }
+    }
+
+    // Debug: Dump bytecode entries
+    if (comptime debug_verbose) {
+        dbg("[STAGE6] Bytecode entries (ALL k=0..{}):\n", .{bytecode_K});
+        for (0..@min(bytecode_K, 64)) |k| {
+            if (k >= bytecode_entries.len) break;
+            const entry = bytecode_entries[k];
+            dbg("[STAGE6] entry[{}]: addr=0x{x:0>8} rd={} rs1={} rs2={} imm={} cf=[", .{ k, entry.address, entry.rd, entry.rs1, entry.rs2, entry.imm });
+            for (0..14) |i| {
+                if (i > 0) dbg(",", .{});
+                if (entry.circuit_flags[i]) dbg("1", .{}) else dbg("0", .{});
+            }
+            dbg("] if=[", .{});
+            for (0..7) |i| {
+                if (i > 0) dbg(",", .{});
+                if (entry.instruction_flags[i]) dbg("1", .{}) else dbg("0", .{});
+            }
+            dbg("] lt={} interleaved={}\n", .{ entry.lookup_table_index, @intFromBool(entry.is_interleaved) });
+        }
+    }
+
+    return .{ .val_polys = val_polys, .eq_table_4 = eq_table_4, .eq_table_5 = eq_table_5 };
 }

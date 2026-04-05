@@ -4,8 +4,8 @@
 //! proper immediate encoding for each instruction format (R/I/S/B/U/J).
 
 const std = @import("std");
-const preprocessing = @import("preprocessing.zig");
-const JoltInstruction = preprocessing.JoltInstruction;
+const jolt_instruction = @import("jolt_instruction.zig");
+const JoltInstruction = jolt_instruction.JoltInstruction;
 const InstructionVariant = JoltInstruction.InstructionVariant;
 const Operands = JoltInstruction.Operands;
 

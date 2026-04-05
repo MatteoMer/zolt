@@ -10,6 +10,7 @@ pub const parallelSort = parallel_sort.parallelSort;
 
 pub const helpers = @import("helpers.zig");
 pub const parallelReduceOptional = helpers.parallelReduceOptional;
+pub const parallelReduceForceOptional = helpers.parallelReduceForceOptional;
 pub const parallelForOptional = helpers.parallelForOptional;
 
 test {

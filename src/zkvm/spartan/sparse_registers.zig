@@ -6,6 +6,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 const UnreducedProductAccum = @import("zolt_arith").field.UnreducedProductAccum;
 const one_hot = @import("one_hot_coeffs.zig");
 const OneHotCoeffLookupTable = one_hot.OneHotCoeffLookupTable;
@@ -785,10 +786,7 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
             }.f;
 
             const identity = [2]F{ F.zero(), F.zero() };
-            const sums = if (pool) |tp|
-                tp.parallelReduce([2]F, self.entries.len, identity, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, self.entries.len);
+            const sums = pool_helpers.parallelReduceOptional([2]F, pool, self.entries.len, identity, ctx, mapFn, reduceFn);
 
             return gruen_eq.gruenPolyDeg3(sums[0], sums[1], previous_claim);
         }
@@ -1267,10 +1265,7 @@ pub fn SparseRegistersAddressMajor(comptime F: type) type {
             }.f;
 
             const identity = [2]F{ F.zero(), F.zero() };
-            return if (pool) |tp|
-                tp.parallelReduce([2]F, self.entries.len, identity, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, self.entries.len);
+            return pool_helpers.parallelReduceOptional([2]F, pool, self.entries.len, identity, ctx, mapFn, reduceFn);
         }
 
         fn seqMergeComputeColEvals(

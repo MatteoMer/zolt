@@ -42,6 +42,7 @@ const GruenSplitEqPolynomial = poly_mod.GruenSplitEqPolynomial;
 const MultiquadraticPolynomial = poly_mod.MultiquadraticPolynomial;
 const utils = @import("../../utils/mod.zig");
 const GpuPolyOps = @import("zolt_arith").gpu.GpuPolyOps;
+const pool_helpers = @import("zolt_pool").helpers;
 const ExpandingTable = utils.ExpandingTable;
 
 /// Streaming outer sumcheck prover for Jolt compatibility
@@ -420,17 +421,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             };
 
             const identity_3 = [3]F{ F.zero(), F.zero(), F.zero() };
-            const t_prime_result = if (self.thread_pool) |tp|
-                tp.parallelReduce(
-                    [3]F,
-                    total_pairs,
-                    identity_3,
-                    mat_ctx,
-                    matFusedMapReduce.mapFn,
-                    matFusedMapReduce.reduceFn,
-                )
-            else
-                matFusedMapReduce.mapFn(mat_ctx, 0, total_pairs);
+            const t_prime_result = pool_helpers.parallelReduceOptional([3]F, self.thread_pool, total_pairs, identity_3, mat_ctx, matFusedMapReduce.mapFn, matFusedMapReduce.reduceFn);
 
             // Create DensePolynomials by taking ownership (no copy)
             self.az_poly = poly_mod.DensePolynomial(F).initOwned(self.allocator, az_evals);
@@ -582,10 +573,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             }.f;
 
             const identity = [3]F{ F.zero(), F.zero(), F.zero() };
-            const ans_result = if (self.thread_pool) |tp|
-                tp.parallelReduce([3]F, total_pairs, identity, build_ctx, mapFn, reduceFn)
-            else
-                mapFn(build_ctx, 0, total_pairs);
+            const ans_result = pool_helpers.parallelReduceOptional([3]F, self.thread_pool, total_pairs, identity, build_ctx, mapFn, reduceFn);
 
             // Convert [3]F to allocated slice for MultiquadraticPolynomial
             var ans = try self.allocator.alloc(F, three_pow_dim);
@@ -811,17 +799,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             const identity: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
 
-            const target_sums = if (self.thread_pool) |tp|
-                tp.parallelReduceForce(
-                    [DEGREE]F,
-                    num_x_out_vals,
-                    identity,
-                    first_round_ctx,
-                    firstRoundMapReduce.map,
-                    firstRoundMapReduce.reduce,
-                )
-            else
-                firstRoundMapReduce.map(first_round_ctx, 0, num_x_out_vals);
+            const target_sums = pool_helpers.parallelReduceForceOptional([DEGREE]F, self.thread_pool, num_x_out_vals, identity, first_round_ctx, firstRoundMapReduce.map, firstRoundMapReduce.reduce);
 
             // Map target sums to extended_evals
             extended_evals = target_sums;
@@ -981,17 +959,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             };
 
             const identity: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
-            const target_sums = if (thread_pool) |tp|
-                tp.parallelReduceForce(
-                    [DEGREE]F,
-                    num_x_out_vals,
-                    identity,
-                    ctx,
-                    mapReduceFns.mapFn,
-                    mapReduceFns.reduceFn,
-                )
-            else
-                mapReduceFns.mapFn(ctx, 0, num_x_out_vals);
+            const target_sums = pool_helpers.parallelReduceForceOptional([DEGREE]F, thread_pool, num_x_out_vals, identity, ctx, mapReduceFns.mapFn, mapReduceFns.reduceFn);
 
             // Build t1_vals and produce final polynomial
             var t1_vals: [EXTENDED_SIZE]F = [_]F{F.zero()} ** EXTENDED_SIZE;
@@ -2320,10 +2288,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             };
 
             const identity = [2]F{ F.zero(), F.zero() };
-            const t_results = if (self.thread_pool) |tp|
-                tp.parallelReduce([2]F, E_out.len, identity, reduce_ctx, reduceMap, reduceAdd)
-            else
-                reduceMap(reduce_ctx, 0, E_out.len);
+            const t_results = pool_helpers.parallelReduceOptional([2]F, self.thread_pool, E_out.len, identity, reduce_ctx, reduceMap, reduceAdd);
 
             const t_00 = t_results[0];
             const t_inf = t_results[1];
@@ -2479,10 +2444,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 }.f;
 
                 const identity = [3]F{ F.zero(), F.zero(), F.zero() };
-                const tp_result = if (self.thread_pool) |tp|
-                    tp.parallelReduce([3]F, total_pairs, identity, fused_ctx, fusedMapFn, fusedReduceFn)
-                else
-                    fusedMapFn(fused_ctx, 0, total_pairs);
+                const tp_result = pool_helpers.parallelReduceOptional([3]F, self.thread_pool, total_pairs, identity, fused_ctx, fusedMapFn, fusedReduceFn);
 
                 // Also bind any remaining elements not covered by pairs
                 // (pairs cover 2*total_pairs elements; if new_size > 2*total_pairs, bind the rest)

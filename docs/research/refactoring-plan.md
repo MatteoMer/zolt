@@ -1,6 +1,6 @@
 # Zolt Refactoring Plan
 
-**Date:** 2026-04-03
+**Date:** 2026-04-03 (updated 2026-04-06)
 **Scope:** Full codebase restructuring — package split + internal modularization
 
 ---
@@ -9,11 +9,10 @@
 
 1. [Work Completed](#1-work-completed)
 2. [Current Codebase State](#2-current-codebase-state)
-3. [Remaining Work: Deduplication](#3-remaining-work-deduplication)
-4. [Remaining Work: File Splits](#4-remaining-work-file-splits)
-5. [Projected Final Outcome](#5-projected-final-outcome)
-6. [Appendix A: Sumcheck Implementations](#appendix-a-all-sumcheck-implementations)
-7. [Appendix B: Parallelism Call Sites](#appendix-b-parallelism-call-sites-by-file)
+3. [Remaining Work](#3-remaining-work)
+4. [Projected Final Outcome](#4-projected-final-outcome)
+5. [Appendix A: Sumcheck Implementations](#appendix-a-all-sumcheck-implementations)
+6. [Appendix B: Parallelism Call Sites](#appendix-b-parallelism-call-sites-by-file)
 
 ---
 
@@ -73,11 +72,9 @@ packages/zolt-arith/
 - Fixed `integration_tests.zig`, `lookup_table/mod.zig` broken paths
 - Added `lt_poly` export to `poly/mod.zig` (was missing)
 
-### Phase 4: File Splits (DONE)
+### Phase 4: zolt-arith File Splits (DONE)
 
-Split 5 oversized files into 12 smaller modules within their packages.
-
-#### In zolt-arith:
+Split 4 oversized files into 11 smaller modules within zolt-arith.
 
 | Original | Split Into | LOC |
 |----------|-----------|-----|
@@ -86,14 +83,44 @@ Split 5 oversized files into 12 smaller modules within their packages.
 | `poly/mod.zig` (2,107) | `mod.zig` (1,273) + `interpolation.zig` (645) + `product_tree.zig` (284) | Largest: 1,273 |
 | `dory.zig` (4,766) | `dory.zig` (4,075) + `point_compression.zig` (471) + `g2_msm.zig` (278) | Largest: 4,075 |
 
-#### In zolt:
+### Phase 5: Instruction Lookup Dedup (DONE)
 
-| Original | Split Into | LOC |
-|----------|-----------|-----|
-| `tracer/mod.zig` (5,479) | `mod.zig` (5,166) + `witness.zig` (333) | Largest: 5,166 |
+Applied `BinaryLookup` comptime generic and `fromBinaryLookup` factory.
 
-Note: `tracer/rv_handlers.zig` extraction was skipped — instruction handlers are deeply
-embedded as methods of the `Emulator` struct, accessing private state throughout.
+- `instruction/lookups.zig`: 4,741 → 3,944 (-797 LOC)
+- `instruction/lookup_trace.zig`: 2,256 → 1,604 (-653 LOC)
+- `instruction_lookups/mod.zig` deleted (-125 LOC)
+- **Total: -1,575 LOC**
+
+### Phase 6: Spartan Stage Splits (DONE)
+
+Split all three large stage provers into focused modules.
+
+| Original | Split Into |
+|----------|-----------|
+| `stage6_prover.zig` (12,285) | `stage6_prover.zig` (1,798) + `stage6_instances.zig` (2,971) + `stage6_bytecode_raf.zig` (1,587) + `stage6_helpers.zig` (2,466) + `stage6_debug.zig` (445) |
+| `stage5_prover.zig` (8,551) | `stage5_prover.zig` (2,600) + `stage5_instances.zig` (1,516) + `stage5_lookups.zig` (1,122) + `stage5_ram_ra.zig` (926) |
+| `stage3_prover.zig` (3,157) | `stage3_prover.zig` (1,245) + `stage3_instances.zig` (1,538) + `stage3_instruction_input.zig` (372) |
+
+### Phase 7: Core zkVM Splits (DONE)
+
+| Original | Result |
+|----------|--------|
+| `jolt_prover.zig` (4,462) | `jolt_prover.zig` (2,507) + `proving_pipeline.zig` (1,447) + `stage4_prover.zig` + `stage7_prover.zig` extracted |
+| `preprocessing.zig` (3,114) | `preprocessing.zig` (205) + `instruction_decoder.zig` (317) + `bytecode_pc_mapper.zig` (149) + `dory_verifier_setup.zig` (430) + `bytecode_preprocessing.zig` (1,852) |
+| `zkvm/mod.zig` (1,806) | `mod.zig` (397) — JoltProver impl moved out |
+| `main.zig` (741) | `main.zig` (157) + `cli/args.zig` (244) |
+
+### Phase 8: Helpers & Dedup (DONE)
+
+- Extracted `sumcheck_helpers.zig` (124 LOC) — shared helpers across stages
+- Extracted `eq_utils.zig` (58 LOC) — shared EQ polynomial utilities
+- Extracted `commitment_types.zig` (119 LOC)
+- Extracted `debug.zig` (30 LOC)
+- Extracted R1CS `witness_types.zig` (213 LOC)
+- Unified `MemoryLayout` into single canonical definition
+- Removed dead pairing code
+- Deduplicated helpers across stages
 
 ### Verification
 
@@ -107,17 +134,17 @@ All work verified at each phase:
 
 ---
 
-## 2. Current Codebase State (after Phase 5)
+## 2. Current Codebase State
 
 ### Package Structure
 
 ```
 zolt/
 ├── packages/
-│   ├── zolt-pool/    (2,244 LOC)   Thread pool + parallel sort + helpers
-│   └── zolt-arith/   (24,046 LOC)  Field, poly, MSM, GPU, transcripts, sumcheck
-├── src/              (84,550 LOC)   zkVM, tracer, host, guest, CLI
-└── total:            110,928 LOC
+│   ├── zolt-pool/    (2,269 LOC)   Thread pool + parallel sort + helpers
+│   └── zolt-arith/   (23,836 LOC)  Field, poly, MSM, GPU, transcripts, sumcheck
+├── src/              (84,192 LOC)   zkVM, tracer, host, guest, CLI
+└── total:            110,297 LOC
 ```
 
 ### Dependency Graph
@@ -134,39 +161,48 @@ zolt                (depends on: zolt-arith, zolt-pool)
 
 ### Current Largest Files
 
-| File | LOC | Status |
-|------|-----|--------|
-| `stage6_prover.zig` | 12,285 | Needs split (bytecode entries + instances) |
-| `stage5_prover.zig` | 8,551 | Needs split (instances) |
-| `tracer/mod.zig` | 5,166 | Partially split (witness extracted, rv_handlers too embedded) |
-| `jolt_prover.zig` | 4,462 | Needs proveWithTranscript breakup |
-| `dory.zig` | 4,075 | Partially split (compression + G2 MSM extracted) |
-| `instruction/lookups.zig` | 3,944 | Phase 5: BinaryLookup generic applied (-797 LOC) |
-| `stage3_prover.zig` | 3,157 | Round loop can use orchestrator |
-| `preprocessing.zig` | 2,157 | Phase 5: decoder + pc_mapper + dory_setup extracted (-957 LOC) |
+| File | LOC | Notes |
+|------|-----|-------|
+| `tracer/mod.zig` | 6,313 | rv_handlers too embedded to extract |
+| `dory.zig` | 4,101 | Core pairing math — partially split |
+| `instruction/lookups.zig` | 3,944 | After BinaryLookup dedup; remaining are non-convertible |
+| `bytecode_entries.zig` | 3,306 | Extracted from stage6 |
+| `stage6_instances.zig` | 2,971 | Extracted from stage6 |
+| `streaming_outer.zig` | 2,956 | Special first-round sumcheck |
+| `stage5_prover.zig` | 2,600 | Orchestrator after split |
+| `prefixes.zig` | 2,556 | 46 prefix type implementations |
+| `jolt_prover.zig` | 2,507 | After stage4/7/pipeline extraction |
+| `stage6_helpers.zig` | 2,466 | Extracted from stage6 |
+| `prefix_suffix_prover.zig` | 2,446 | Multi-phase sumcheck |
+| `field/mod.zig` | 2,440 | After accumulators + SIMD extraction |
+
+### Files > 3,000 LOC: 4
+
+### Files > 2,000 LOC: 14
+
+### Total Zig files: 131
 
 ---
 
-## 3. Remaining Work: Deduplication
+## 3. Remaining Work
 
-### Lessons Learned from Phase 5
+All file splits are **done**. The remaining work is deduplication and cleanup — optional
+improvements that reduce LOC and improve correctness but are not structural.
+
+### Lessons Learned
 
 Initial estimates were too optimistic. Key findings from implementation:
 
-- **BinaryLookup generic** (Phase 5): estimated ~3,000, achieved **797 LOC**. Many lookups
+- **BinaryLookup generic**: estimated ~3,000, achieved **797 LOC**. Many lookups
   have subtle differences (division interleaves divisor with quotient, W-extension masks to
   32 bits, virtual instructions need self-dependent flags). ~19 lookups couldn't be converted.
-- **fromBinaryLookup factory** (Phase 5): estimated ~1,500, achieved **653 LOC**. Load/store/
+- **fromBinaryLookup factory**: estimated ~1,500, achieved **653 LOC**. Load/store/
   virtual/jump factories have different signatures and can't use the generic.
 - **File splits** add ~50-100 LOC overhead each (new imports, re-exports, build boilerplate).
-  Phase 2-4 package/file splits added ~900 LOC of scaffolding that offset dedup savings.
-- **Instruction lookup boilerplate was real** but the original "70% boilerplate" was overestimated.
-  After conversion, lookups.zig went from 4,741 → 3,944 (17% reduction, not 70%).
+- **Rule of thumb:** Actual savings ≈ 30-50% of initial estimate. Always prototype on one
+  instance before committing to mass conversion.
 
-**Rule of thumb:** Actual savings ≈ 30-50% of initial estimate. Always prototype on one
-instance before committing to mass conversion.
-
-### 3A. Comptime Sumcheck Orchestrator (~400 LOC savings)
+### 3A. Comptime Sumcheck Orchestrator (~250 LOC net)
 
 > **REVISED from original ~3,600 estimate.** Deep analysis revealed the three batched
 > stages use different compression formats (finite differences vs Toom-Cook vs monomial),
@@ -202,7 +238,7 @@ to iterate heterogeneous instance types at comptime. Each instance duck-types
 ```zig
 pub fn BatchedSumcheckOrchestrator(
     comptime F: type,
-    comptime InstanceTuple: type,  // e.g., struct { shift: ShiftProver, instr: InstrProver, reg: RegProver }
+    comptime InstanceTuple: type,
     comptime config: struct {
         max_degree: usize,
         compression: enum { finite_differences, toom_cook, monomial },
@@ -241,20 +277,13 @@ implementation of the round loop) than LOC reduction.
 **Risk:** Medium. Stage 6 has per-instance coefficient caching between compute and bind
 that may not fit the generic cleanly. Start with Stage 3, verify proof, then adapt.
 
-### 3B. Instruction Lookup (DONE in Phase 5)
-
-- ~~instruction/lookups.zig (4,741 → ~1,500)~~ → **Achieved: 4,741 → 3,944 (-797)**
-- ~~instruction/lookup_trace.zig (2,256 → ~800)~~ → **Achieved: 2,256 → 1,604 (-653)**
-- ~~instruction_lookups/mod.zig DELETE~~ → **Done (-125)**
-- **Total achieved: -1,575 LOC**
-
-### 3C. Parallelism Helpers (infrastructure DONE, adoption pending)
+### 3B. Parallelism Helper Adoption (~180 LOC)
 
 `parallelReduceOptional` and `parallelForOptional` created in `zolt-pool/src/helpers.zig`.
 The 61 call site replacements are mechanical but deferred for incremental adoption.
 Each replacement saves ~3 lines. **Potential: ~180 LOC when fully adopted.**
 
-### 3D. Shared small helpers (~200 LOC)
+### 3C. Shared Small Helpers (~116 LOC)
 
 | Helper | Sites | Savings |
 |--------|-------|---------|
@@ -265,104 +294,66 @@ Each replacement saves ~3 lines. **Potential: ~180 LOC when fully adopted.**
 | `finiteDifferencesCompress(F, evals)` | 1 | ~12 |
 | **Total** | | **~116** |
 
-### 3E. Other Dedup (NOT YET VALIDATED — estimates may be optimistic)
+### 3D. Other Dedup (NOT YET VALIDATED — estimates may be optimistic)
 
 | Target | Original Est. | Reality Check |
 |--------|--------------|---------------|
 | Shared `ValueEvaluationProver` | ~400 | RAM and Registers differ in witness count and eq array construction — may be ~150 |
-| Shared EQ utilities | ~300 | Need to verify the signatures actually match across 5+ modules |
 | Multi-pairing consolidation | ~200 | 4 variants with 5-10% differences — may save ~80 after refactor overhead |
 | millerLoop dedup | ~100 | ~20 lines differ — easy ~80 |
+| Prefix comptime compression | ~500 | Comptime dispatch table for 46 prefix types — may be ~300 |
+
+### 3E. Debug Print Gating (~120 debug prints remaining in zkvm/)
+
+Wrap behind `comptime debug_verbose` flag. Mechanical but touches many files.
 
 ---
 
-## 4. Remaining Work: File Splits
+## 4. Projected Final Outcome
 
-These reorganize code for navigability but don't reduce LOC.
-
-### 4A. Spartan Stage Provers (after dedup)
-
-| Current | Target after dedup + split |
-|---------|---------------------------|
-| `stage6_prover.zig` (12,285) | `stage6_prover.zig` (~6,000) + `bytecode_entries.zig` (~1,900) + `inc_claim_reduction.zig` (~2,400) |
-| `stage5_prover.zig` (8,551) | ~5,000 after dedup |
-| `stage3_prover.zig` (3,157) | ~1,500 after TwoPhaseProver dedup |
-
-### 4B. Core zkVM
-
-| Current | Target |
-|---------|--------|
-| `jolt_prover.zig` (4,462) | ~2,000 — break up `proveWithTranscript` (2,225 LOC), extract constraint_evaluator + opening_claim_builder |
-| `preprocessing.zig` (3,114) | ~600 — extract `instruction_decoder.zig` (1,645), `pc_mapper.zig` (130), `dory_setup.zig` (200) |
-| `zkvm/mod.zig` (1,806) | ~300 — move JoltProver impl to jolt_prover.zig |
-
-### 4C. CLI
-
-| Current | Target |
-|---------|--------|
-| `main.zig` (741) | ~150 — extract `cli/argument_parser.zig`, `commands/run.zig`, `commands/prove.zig` |
-
-### 4D. R1CS
-
-- Extract immediate decoders from `constraints.zig` → `instruction_decoding.zig`
-- Extract witness types (`CompactWitness`, `RawR1CSInputs`) → `witness_types.zig`
-
----
-
-## 5. Projected Final Outcome
-
-### Revised Estimates (grounded in Phase 5 actuals)
+### Dedup Scorecard
 
 | Abstraction | Original Est. | Actual/Revised | Status |
 |---|---|---|---|
 | Generic InstructionLookup (BinaryLookup) | ~3,000 | **797** | DONE |
 | Generic fromXxx factory (fromBinaryLookup) | ~1,500 | **653** | DONE |
 | Dead stub removal | ~125 | **125** | DONE |
-| BatchedSumcheck orchestrator (comptime) | ~2,100 | **~400** | Planned — use `inline for` over InstanceTuple |
-| TwoPhaseProver generic (comptime) | ~1,500 | **~500** | Planned — comptime config for P/Q counts, witness counts |
-| Shared sumcheck helpers | included above | **~116** | Planned |
+| Shared helpers dedup (cross-stage) | — | **done** | DONE |
+| MemoryLayout unification | — | **done** | DONE |
+| Dead pairing code removal | — | **done** | DONE |
+| R1CS witness type extraction | — | **done** | DONE |
+| EQ utilities extraction | — | **58** | DONE |
+| Sumcheck helpers extraction | — | **124** | DONE |
+| BatchedSumcheck orchestrator (comptime) | ~2,100 | **~250 net** | Not started |
+| Shared sumcheck helpers (remaining) | — | **~116** | Not started |
 | Parallel helper adoption (61 sites × 3 LOC) | ~270 | **~180** | Infrastructure done, adoption pending |
-| Shared ValueEvaluationProver (comptime) | ~400 | **~200** | Use comptime config for RAM vs Register differences |
-| Shared EQ utilities | ~300 | **~200** | Not started |
-| Multi-pairing consolidation | ~200 | **~100** | Comptime strategy enum for prepared/unprepared/affine |
+| Shared ValueEvaluationProver (comptime) | ~400 | **~150** | Not started |
+| Multi-pairing consolidation | ~200 | **~80** | Not started |
 | millerLoop dedup | ~100 | **~80** | Not started |
-| Prefix comptime compression | ~500 | **~300** | Comptime dispatch table for 46 prefix types |
-| Debug print gating | ~350 | **~350** | Wrap behind `comptime debug_verbose` flag |
-| **Total original** | **~10,400** | | |
-| **Already achieved** | | **-1,575** | Phase 5 |
-| **Total remaining** | | **~2,400** | Achievable with Zig comptime generics |
+| Prefix comptime compression | ~500 | **~300** | Not started |
+| Debug print gating | ~350 | **~200** | Not started |
 
-**Key lesson from Phase 5:** Actual LOC savings per-item run lower than initial estimates
-because edge cases (division interleave, W-extension masking, virtual self-dependent flags)
-require `customIndex` or config overrides. But Zig comptime handles these cleanly via
-optional function pointers and config enums — the generics ARE feasible, they just need
-to account for the variations as comptime parameters rather than assuming uniformity.
+**Total remaining potential: ~1,350 LOC** (conservative estimates after Phase 5 calibration)
 
-### Package-Level Projection
+### Package-Level Summary
 
-| Package | Start | Current | After All Remaining | Notes |
-|---------|-------|---------|---------------------|-------|
-| zolt-pool | 2,200 | 2,244 | 2,244 | Helpers done |
-| zolt-arith | 22,500 | 24,046 | 23,500 | -500 from pairing/EQ/millerLoop dedup |
-| zolt (source) | 98,000 | 84,550 | 82,600 | -2,000 from sumcheck/TwoPhase/helpers dedup |
-| **Total** | **112,000** | **110,928** | **~108,300** | |
+| Package | Before Refactor | Current | After All Remaining |
+|---------|----------------|---------|---------------------|
+| zolt-pool | 2,200 | 2,269 | 2,269 |
+| zolt-arith | 22,500 | 23,836 | ~23,600 |
+| zolt (source) | 98,000 | 84,192 | ~83,000 |
+| **Total** | **~112,000** | **110,297** | **~109,000** |
 
-The real value of the refactoring is twofold:
-1. **Navigability** — 3 packages, no file > 8K, clean dependencies
-2. **Shared comptime infrastructure** — `BinaryLookup`, `BatchedSumcheckOrchestrator`,
-   `TwoPhaseProver`, `parallelReduceOptional` — reusable primitives that make future
-   protocol changes easier and less error-prone
+### File-Level Metrics
 
-### File-Level Targets
-
-| Metric | Before Refactor | Current | After Phase 6 |
-|--------|----------------|---------|----------------|
-| Largest file | 12,285 (stage6) | 12,285 (stage6) | ~8,000 (after split) |
-| Files > 3,000 LOC | 10 | 7 | 4-5 |
-| Files > 2,000 LOC | 16 | 9 | 8-9 |
-| Total files | 89 | ~105 | ~110 |
-| Shared abstractions | 0 | 3 (BinaryLookup, fromBinaryLookup, parallel helpers) | 5+ |
-| Packages | 1 | 3 | 3 |
+| Metric | Before Refactor | Current |
+|--------|----------------|---------|
+| Largest file | 12,285 (stage6_prover) | 6,313 (tracer/mod.zig) |
+| Files > 3,000 LOC | 10 | 4 |
+| Files > 2,000 LOC | 16 | 14 |
+| Total Zig files | 89 | 131 |
+| Shared abstractions | 0 | 5+ (BinaryLookup, fromBinaryLookup, parallel helpers, sumcheck_helpers, eq_utils) |
+| Packages | 1 | 3 |
 
 ### What Can't Shrink Further
 
@@ -418,10 +409,6 @@ Use these Zig-specific patterns to handle heterogeneous types without runtime di
 
 5. **`anytype` for transcript/allocator parameters** — avoids threading generic types everywhere.
 
-These patterns let you build a single `BatchedSumcheckOrchestrator` that handles
-stages with different compression formats, different instance counts, and different
-polynomial degrees — all resolved at compile time with no runtime overhead.
-
 ### Codebase Health Audit
 
 | Metric | Finding |
@@ -432,9 +419,9 @@ polynomial degrees — all resolved at compile time with no runtime overhead.
 | Circular deps | None — eliminated in Phase 1 |
 | Packages | 3 clean packages with verified dependency graph |
 | Proof verification | Cross-verified with Rust Jolt verifier (fibonacci + SHA256) |
-| Shared generics | BinaryLookup, fromBinaryLookup, parallelism helpers |
+| Shared generics | BinaryLookup, fromBinaryLookup, parallelism helpers, sumcheck_helpers, eq_utils |
 | Unimplemented stubs | 16 lookup table evaluators return F.zero() (tracked) |
-| Debug output | 337 prints — gate behind comptime debug flag |
+| Debug output | ~122 prints in zkvm/ — gate behind comptime debug flag |
 
 ---
 

@@ -22,6 +22,7 @@ const RawR1CSInputs = evaluators.RawR1CSInputs;
 const field_mod = @import("zolt_arith").field;
 const S192 = field_mod.S192;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 
 const FIRST_GROUP_SIZE = evaluators.FIRST_GROUP_SIZE;
 const SECOND_GROUP_SIZE = evaluators.SECOND_GROUP_SIZE;
@@ -112,13 +113,7 @@ pub fn buildFromTrace(
         }
     }.f;
 
-    if (thread_pool) |tp| {
-        tp.parallelFor(trace_length, ctx, mapFn);
-    } else {
-        for (0..trace_length) |i| {
-            mapFn(ctx, i);
-        }
-    }
+    pool_helpers.parallelForOptional(thread_pool, trace_length, ctx, mapFn);
 
     return .{ .compact = compact, .raw = raw };
 }

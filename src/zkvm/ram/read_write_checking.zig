@@ -17,7 +17,10 @@ const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("zolt_pool").ThreadPool;
+const zolt_pool = @import("zolt_pool");
+const ThreadPool = zolt_pool.ThreadPool;
+const parallelReduceOptional = zolt_pool.parallelReduceOptional;
+const parallelForOptional = zolt_pool.parallelForOptional;
 const MemoryTrace = @import("mod.zig").MemoryTrace;
 const MemoryAccess = @import("mod.zig").MemoryAccess;
 const MemoryOp = @import("mod.zig").MemoryOp;
@@ -579,10 +582,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             }.f;
 
             const identity = [2]F{ F.zero(), F.zero() };
-            const sums = if (self.thread_pool) |tp|
-                tp.parallelReduce([2]F, self.entries.items.len, identity, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, self.entries.items.len);
+            const sums = parallelReduceOptional([2]F, self.thread_pool, self.entries.items.len, identity, ctx, mapFn, reduceFn);
 
             const result = gruen_eq.computeCubicRoundPoly(sums[0], sums[1], self.current_claim);
 
@@ -761,10 +761,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }.f;
 
                 const p2id = [2]F{ F.zero(), F.zero() };
-                break :blk if (self.thread_pool) |tp|
-                    tp.parallelReduce([2]F, self.entries.items.len, p2id, p2ctx, p2MapFn, p2ReduceFn)
-                else
-                    p2MapFn(p2ctx, 0, self.entries.items.len);
+                break :blk parallelReduceOptional([2]F, self.thread_pool, self.entries.items.len, p2id, p2ctx, p2MapFn, p2ReduceFn);
             };
 
             const s0 = s0s2[0];
@@ -922,11 +919,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         }
                     }
                 }.f;
-                if (self.thread_pool) |tp| {
-                    tp.parallelForForce(2, rwc_bctx, rwcBindFn);
-                } else {
-                    for (0..2) |idx| rwcBindFn(rwc_bctx, idx);
-                }
+                parallelForOptional(self.thread_pool, 2, rwc_bctx, rwcBindFn);
 
                 self.eq_size = half;
 
@@ -1292,11 +1285,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.thread_pool) |tp| {
-                tp.parallelForForce(num_groups, bgctx, bindGroupFn);
-            } else {
-                for (0..num_groups) |g| bindGroupFn(bgctx, g);
-            }
+            parallelForOptional(self.thread_pool, num_groups, bgctx, bindGroupFn);
 
             // Compact: move groups together (removing gaps from upper-bound slack)
             var total_out: usize = 0;

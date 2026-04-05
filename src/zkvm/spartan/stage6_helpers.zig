@@ -20,6 +20,8 @@ const bytecode_entry_mod = @import("bytecode_entries.zig");
 const BytecodeEntry = bytecode_entry_mod.BytecodeEntry;
 const hasLookupTable = bytecode_entry_mod.hasLookupTable;
 
+const transcripts = @import("zolt_arith").transcripts;
+
 const zkvm_debug = @import("../debug.zig");
 const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
@@ -2405,4 +2407,60 @@ pub fn debugBytecodeReadRafFieldComparisons(
 
         dbg("[BCRAF_FIELD_CMP4] Done\n\n", .{});
     }
+}
+
+/// Cache all Stage 6 opening claims to transcript in the exact order expected by the verifier.
+/// This ordering is protocol-critical — any change will cause verification failure.
+pub fn cacheOpeningsToTranscript(
+    comptime F: type,
+    transcript: *transcripts.Blake2bTranscript(F),
+    bytecode_ra_claims: []const F,
+    booleanity_ra_claims: []const F,
+    hamming_weight_claim: F,
+    ram_ra_virtual_claims: []const F,
+    instruction_ra_virtual_claims: []const F,
+    ram_inc_claim: F,
+    rd_inc_claim: F,
+    bytecode_log_k: usize,
+    log_k_chunk: usize,
+) void {
+    dbg("[STAGE6] Transcript before cache_openings: round={}\n", .{transcript.n_rounds});
+
+    // Instance 0: BytecodeReadRaf
+    for (bytecode_ra_claims) |claim| {
+        transcript.appendScalar("opening_claim", claim);
+    }
+    dbg("[STAGE6] After BytecodeReadRaf openings ({}): round={}\n", .{ bytecode_ra_claims.len, transcript.n_rounds });
+
+    // Instance 1: Booleanity
+    // Upstream aliasing: when bytecode_log_k is a multiple of log_k_chunk,
+    // BytecodeRa(0)/Booleanity has the same opening point as BytecodeRa(0)/BytecodeReadRaf
+    // (no zero-padding in compute_r_address_chunks), so the verifier aliases it
+    // and does NOT flush it to transcript.
+    const bytecode_ra0_aliases = (bytecode_log_k % log_k_chunk == 0);
+    const bool_skip_index = instruction_ra_virtual_claims.len;
+    for (booleanity_ra_claims, 0..) |claim, i| {
+        if (bytecode_ra0_aliases and i == bool_skip_index) continue;
+        transcript.appendScalar("opening_claim", claim);
+    }
+
+    // Instance 2: HammingBooleanity
+    transcript.appendScalar("opening_claim", hamming_weight_claim);
+
+    // Instance 3: RamRaVirtual
+    for (ram_ra_virtual_claims) |claim| {
+        transcript.appendScalar("opening_claim", claim);
+    }
+
+    // Instance 4: LookupsRaVirtual
+    for (instruction_ra_virtual_claims) |claim| {
+        transcript.appendScalar("opening_claim", claim);
+    }
+
+    dbg("[STAGE6] After LookupsRaVirtual openings ({}): round={}\n", .{ instruction_ra_virtual_claims.len, transcript.n_rounds });
+
+    // Instance 5: IncClaimReduction
+    transcript.appendScalar("opening_claim", ram_inc_claim);
+    transcript.appendScalar("opening_claim", rd_inc_claim);
+    dbg("[STAGE6] After ALL cache_openings: round={}\n", .{transcript.n_rounds});
 }

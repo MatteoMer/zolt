@@ -22,7 +22,10 @@ const zkvm_debug = @import("../debug.zig");
 const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("zolt_pool").ThreadPool;
+const zolt_pool = @import("zolt_pool");
+const ThreadPool = zolt_pool.ThreadPool;
+const parallelReduceOptional = zolt_pool.parallelReduceOptional;
+const parallelForOptional = zolt_pool.parallelForOptional;
 const UnreducedProductAccum = @import("zolt_arith").field.UnreducedProductAccum;
 
 const mod = @import("mod.zig");
@@ -708,10 +711,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
                     return a.add(b);
                 }
             }.f;
-            const initial_claim = if (pool) |tp|
-                tp.parallelReduce(F, n, F.zero(), claim_ctx, claimMapFn, claimReduceFn)
-            else
-                claimMapFn(claim_ctx, 0, n);
+            const initial_claim = parallelReduceOptional(F, pool, n, F.zero(), claim_ctx, claimMapFn, claimReduceFn);
 
             return Self{
                 .inc_evals = inc_evals,
@@ -906,10 +906,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
             }.f;
 
             const identity = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
-            const evals = if (self.thread_pool) |tp|
-                tp.parallelReduce([4]F, half, identity, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, half);
+            const evals = parallelReduceOptional([4]F, self.thread_pool, half, identity, ctx, mapFn, reduceFn);
 
             return evals;
         }
@@ -964,11 +961,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
                     }
                 }.f;
 
-                if (self.thread_pool) |tp| {
-                    tp.parallelFor(half, mctx, matWaFn);
-                } else {
-                    for (0..half) |i| matWaFn(mctx, i);
-                }
+                parallelForOptional(self.thread_pool, half, mctx, matWaFn);
 
                 // Free lazy state
                 if (self.wa_addrs_owned) {
@@ -1007,11 +1000,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
                     }
                 }.f;
 
-                if (self.thread_pool) |tp| {
-                    tp.parallelForForce(2, bind_ctx, bindFn);
-                } else {
-                    for (0..2) |idx| bindFn(bind_ctx, idx);
-                }
+                parallelForOptional(self.thread_pool, 2, bind_ctx, bindFn);
             }
 
             // Bind split LT polynomial (O(sqrt(T)) work)

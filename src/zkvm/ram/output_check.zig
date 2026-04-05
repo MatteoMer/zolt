@@ -19,7 +19,10 @@ const zkvm_debug = @import("../debug.zig");
 const dbg = zkvm_debug.dbg;
 
 const Allocator = std.mem.Allocator;
-const ThreadPool = @import("zolt_pool").ThreadPool;
+const zolt_pool = @import("zolt_pool");
+const ThreadPool = zolt_pool.ThreadPool;
+const parallelReduceOptional = zolt_pool.parallelReduceOptional;
+const parallelForOptional = zolt_pool.parallelForOptional;
 
 const poly_mod = @import("zolt_arith").poly;
 const jolt_device = @import("../jolt_device.zig");
@@ -434,10 +437,7 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             }.f;
 
             const identity = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
-            const sums = if (self.thread_pool) |tp|
-                tp.parallelReduce([4]F, half, identity, ctx, mapFn, reduceFn)
-            else
-                mapFn(ctx, 0, half);
+            const sums = parallelReduceOptional([4]F, self.thread_pool, half, identity, ctx, mapFn, reduceFn);
 
             const s0 = sums[0];
             const s1 = sums[1];
@@ -481,11 +481,7 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                 }
             }.f;
 
-            if (self.thread_pool) |tp| {
-                tp.parallelForForce(5, bctx, bindOneFn);
-            } else {
-                for (0..5) |idx| bindOneFn(bctx, idx);
-            }
+            parallelForOptional(self.thread_pool, 5, bctx, bindOneFn);
 
             self.current_size = half;
         }

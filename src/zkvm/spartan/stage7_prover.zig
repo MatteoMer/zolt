@@ -13,6 +13,7 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const pool_helpers = @import("zolt_pool").helpers;
 
 const poly_mod = @import("zolt_arith").poly;
 const transcripts = @import("zolt_arith").transcripts;
@@ -248,8 +249,8 @@ pub fn Stage7Prover(comptime F: type) type {
 
             // Iterate over all cycles to populate G_i (parallelized)
             // G_i(k) = Σ_j eq(r_cycle, j) · [addr_chunk_i(j) == k]
-            if (self.thread_pool) |tp| {
-                // Parallel: each chunk accumulates into thread-local G tables, then merge
+            {
+                // Populate G tables (parallelized via map-reduce when pool available)
                 const mask128: u128 = (@as(u128, 1) << @intCast(s6_log_k_chunk)) - 1;
                 const steps_slice = trace.steps.items[0..T_val];
                 const eq_cycle_slice = eq_cycle[0..T_val];
@@ -350,7 +351,7 @@ pub fn Stage7Prover(comptime F: type) type {
                     }
                 }.f;
                 const empty_g: LocalG = &[_][]F{};
-                const result_g = tp.parallelReduce(LocalG, T_val, empty_g, map_ctx, mapFn, reduceFn);
+                const result_g = pool_helpers.parallelReduceOptional(LocalG, self.thread_pool, T_val, empty_g, map_ctx, mapFn, reduceFn);
                 // Copy result into G and free the reduce result
                 if (result_g.len > 0) {
                     for (0..N) |i| {
@@ -358,48 +359,6 @@ pub fn Stage7Prover(comptime F: type) type {
                         self.allocator.free(result_g[i]);
                     }
                     self.allocator.free(result_g);
-                }
-            } else {
-                // Sequential fallback
-                for (0..T_val) |j| {
-                    const step = trace.steps.items[j];
-                    const eq_j = eq_cycle[j];
-                    {
-                        const lookup_idx = stage6_helpers.computeLookupIndex(step);
-                        for (0..s6_instruction_d) |i| {
-                            const shift = s6_log_k_chunk * (s6_instruction_d - 1 - i);
-                            const mask: u128 = (@as(u128, 1) << @intCast(s6_log_k_chunk)) - 1;
-                            const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
-                            if (chunk_val < k_chunk) {
-                                G[i][chunk_val] = G[i][chunk_val].add(eq_j);
-                            }
-                        }
-                    }
-                    {
-                        const pc_idx = pc_map.getPCForStep(step);
-                        for (0..s6_bytecode_d) |i| {
-                            const chunk_val = stage6_helpers.extractChunkMSB(@intCast(pc_idx), i, s6_bytecode_d, s6_log_k_chunk);
-                            const ra_idx = s6_instruction_d + i;
-                            if (chunk_val < k_chunk) {
-                                G[ra_idx][chunk_val] = G[ra_idx][chunk_val].add(eq_j);
-                            }
-                        }
-                    }
-                    {
-                        if (step.memory_addr) |addr| {
-                            if (addr != 0) {
-                                if (memory_layout.remapAddress(addr)) |raddr| {
-                                    for (0..s6_ram_d) |i| {
-                                        const chunk_val = stage6_helpers.extractChunkMSB(raddr, i, s6_ram_d, s6_log_k_chunk);
-                                        const ra_idx = s6_instruction_d + s6_bytecode_d + i;
-                                        if (chunk_val < k_chunk) {
-                                            G[ra_idx][chunk_val] = G[ra_idx][chunk_val].add(eq_j);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
 

@@ -294,6 +294,22 @@ pub fn build(b: *std.Build) void {
     const zolt_arith_field_micro_step = b.step("bench-zolt-arith-field", "Run zolt-arith field microbench");
     zolt_arith_field_micro_step.dependOn(&run_zolt_arith_field_micro.step);
 
+    // Benchmark: zolt-arith pairing microbench (repo-level, optional)
+    const zolt_arith_pairing_micro = b.addExecutable(.{
+        .name = "zolt-arith-pairing-micro",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/zolt_arith/pairing_micro.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_zolt_arith_pairing_micro = b.addRunArtifact(zolt_arith_pairing_micro);
+    const zolt_arith_pairing_micro_step = b.step("bench-zolt-arith-pairing", "Run zolt-arith pairing microbench");
+    zolt_arith_pairing_micro_step.dependOn(&run_zolt_arith_pairing_micro.step);
+
     // Benchmark: ARM64 field verification
     const arm64_verify = b.addExecutable(.{
         .name = "arm64-verify",

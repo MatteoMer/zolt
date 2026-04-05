@@ -177,6 +177,206 @@ pub inline fn arm64Sub192(a: [3]u64, b: [3]u64) [3]u64 {
     return .{ r0, r1, r2 };
 }
 
+/// ARM64 4-limb Montgomery squaring.
+/// Computes a^2 * R^{-1} mod p using the "product then reduce" approach:
+///   Phase 1: compute the 8-limb product a^2 using 10 muls (6 cross + 4 diagonal)
+///            instead of the 16 muls required for generic a*b.
+///   Phase 2: 4 iterations of Montgomery reduction (same as CIOS mul).
+/// Total: ~52 multiply instructions vs ~68 for generic mul(a, a).
+fn arm64MontgomerySquare256(a: *const [4]u64, mod: *const [4]u64, inv: u64) [4]u64 {
+    if (comptime builtin.cpu.arch != .aarch64) unreachable;
+    var r0: u64 = undefined;
+    var r1: u64 = undefined;
+    var r2: u64 = undefined;
+    var r3: u64 = undefined;
+    asm volatile (
+    // ── Load a[0..3] into x4-x7 ──
+        \\ ldp x4, x5, [x13]
+        \\ ldp x6, x7, [x13, #16]
+        //
+        // ════════════════════════════════════════════════
+        // Phase 1: Compute 8-limb product a^2
+        // Strategy: compute cross products (i<j), accumulate,
+        //           double, then add diagonal products.
+        // Accumulator: P[0..7] in {x0, x1, x2, x3, x14, x15, x16, x17}
+        // ════════════════════════════════════════════════
+        //
+        // Cross products accumulated column by column with proper carry:
+        //
+        // a0*a1 → P[1], P[2]
+        \\ mul  x1, x4, x5
+        \\ umulh x2, x4, x5
+        //
+        // a0*a2 → P[2], P[3]
+        \\ mul  x19, x4, x6
+        \\ umulh x3, x4, x6
+        \\ adds x2, x2, x19
+        \\ adc  x3, x3, xzr
+        //
+        // a0*a3 → P[3], P[4]
+        \\ mul  x19, x4, x7
+        \\ umulh x14, x4, x7
+        \\ adds x3, x3, x19
+        \\ adc  x14, x14, xzr
+        //
+        // a1*a2 → P[3], P[4], carry→P[5]
+        \\ mul  x19, x5, x6
+        \\ umulh x20, x5, x6
+        \\ adds x3, x3, x19
+        \\ adcs x14, x14, x20
+        \\ adc  x15, xzr, xzr
+        //
+        // a1*a3 → P[4], P[5], carry→P[6]
+        \\ mul  x19, x5, x7
+        \\ umulh x20, x5, x7
+        \\ adds x14, x14, x19
+        \\ adcs x15, x15, x20
+        \\ adc  x16, xzr, xzr
+        //
+        // a2*a3 → P[5], P[6], carry→P[7]
+        \\ mul  x19, x6, x7
+        \\ umulh x20, x6, x7
+        \\ adds x15, x15, x19
+        \\ adcs x16, x16, x20
+        \\ adc  x17, xzr, xzr
+        //
+        // Step 2: Double cross products (shift left by 1 bit)
+        \\ adds x1, x1, x1
+        \\ adcs x2, x2, x2
+        \\ adcs x3, x3, x3
+        \\ adcs x14, x14, x14
+        \\ adcs x15, x15, x15
+        \\ adcs x16, x16, x16
+        \\ adc  x17, x17, x17
+        //
+        // Step 3: Add diagonal products a[i]^2
+        // a[0]^2 → P[0..1]
+        \\ mul  x0, x4, x4       // lo(a0^2) → P[0]
+        \\ umulh x19, x4, x4     // hi(a0^2)
+        \\ adds x1, x1, x19
+        // a[1]^2 → P[2..3]
+        \\ mul  x19, x5, x5
+        \\ umulh x20, x5, x5
+        \\ adcs x2, x2, x19
+        \\ adcs x3, x3, x20
+        // a[2]^2 → P[4..5]
+        \\ mul  x19, x6, x6
+        \\ umulh x20, x6, x6
+        \\ adcs x14, x14, x19
+        \\ adcs x15, x15, x20
+        // a[3]^2 → P[6..7]
+        \\ mul  x19, x7, x7
+        \\ umulh x20, x7, x7
+        \\ adcs x16, x16, x19
+        \\ adc  x17, x17, x20
+        //
+        // Full product: P[0..7] = {x0, x1, x2, x3, x14, x15, x16, x17}
+        //
+        // ════════════════════════════════════════════════
+        // Phase 2: Montgomery reduction (4 iterations)
+        // Each iteration: k = P[0]*inv, add k*mod, shift right by 64
+        // Load mod[0..3] into x8-x11
+        // ════════════════════════════════════════════════
+        \\ ldp x8, x9, [x26]
+        \\ ldp x10, x11, [x26, #16]
+        //
+        // Iteration 0: window {x0,x1,x2,x3,x14}, carry→x15
+        \\ mul  x4, x0, x12
+        \\ mul  x19, x4, x8
+        \\ umulh x20, x4, x8
+        \\ mul  x21, x4, x9
+        \\ umulh x22, x4, x9
+        \\ mul  x23, x4, x10
+        \\ umulh x24, x4, x10
+        \\ mul  x25, x4, x11
+        \\ umulh x5, x4, x11
+        \\ adds x0, x0, x19
+        \\ adcs x1, x1, x20
+        \\ adcs x2, x2, x22
+        \\ adcs x3, x3, x24
+        \\ adcs x14, x14, x5
+        \\ adc  x15, x15, xzr
+        \\ adds x1, x1, x21
+        \\ adcs x2, x2, x23
+        \\ adcs x3, x3, x25
+        \\ adcs x14, x14, xzr
+        \\ adc  x15, x15, xzr
+        //
+        // Iteration 1: window {x1,x2,x3,x14,x15}, carry→x16
+        \\ mul  x4, x1, x12
+        \\ mul  x19, x4, x8
+        \\ umulh x20, x4, x8
+        \\ mul  x21, x4, x9
+        \\ umulh x22, x4, x9
+        \\ mul  x23, x4, x10
+        \\ umulh x24, x4, x10
+        \\ mul  x25, x4, x11
+        \\ umulh x5, x4, x11
+        \\ adds x1, x1, x19
+        \\ adcs x2, x2, x20
+        \\ adcs x3, x3, x22
+        \\ adcs x14, x14, x24
+        \\ adcs x15, x15, x5
+        \\ adc  x16, x16, xzr
+        \\ adds x2, x2, x21
+        \\ adcs x3, x3, x23
+        \\ adcs x14, x14, x25
+        \\ adcs x15, x15, xzr
+        \\ adc  x16, x16, xzr
+        //
+        // Iteration 2: window {x2,x3,x14,x15,x16}, carry→x17
+        \\ mul  x4, x2, x12
+        \\ mul  x19, x4, x8
+        \\ umulh x20, x4, x8
+        \\ mul  x21, x4, x9
+        \\ umulh x22, x4, x9
+        \\ mul  x23, x4, x10
+        \\ umulh x24, x4, x10
+        \\ mul  x25, x4, x11
+        \\ umulh x5, x4, x11
+        \\ adds x2, x2, x19
+        \\ adcs x3, x3, x20
+        \\ adcs x14, x14, x22
+        \\ adcs x15, x15, x24
+        \\ adcs x16, x16, x5
+        \\ adc  x17, x17, xzr
+        \\ adds x3, x3, x21
+        \\ adcs x14, x14, x23
+        \\ adcs x15, x15, x25
+        \\ adcs x16, x16, xzr
+        \\ adc  x17, x17, xzr
+        //
+        // Iteration 3
+        \\ mul  x4, x3, x12
+        \\ mul  x19, x4, x8
+        \\ umulh x20, x4, x8
+        \\ mul  x21, x4, x9
+        \\ umulh x22, x4, x9
+        \\ mul  x23, x4, x10
+        \\ umulh x24, x4, x10
+        \\ mul  x25, x4, x11
+        \\ umulh x5, x4, x11
+        \\ adds x3, x3, x19
+        \\ adcs x14, x14, x20
+        \\ adcs x15, x15, x22
+        \\ adcs x16, x16, x24
+        \\ adc  x17, x17, x5
+        \\ adds x14, x14, x21
+        \\ adcs x15, x15, x23
+        \\ adcs x16, x16, x25
+        \\ adc  x17, x17, xzr
+        // Final result: {x14, x15, x16, x17}
+        : [_r0] "={x14}" (r0),
+          [_r1] "={x15}" (r1),
+          [_r2] "={x16}" (r2),
+          [_r3] "={x17}" (r3),
+        : [_a] "{x13}" (a),
+          [_mod] "{x26}" (mod),
+          [_inv] "{x12}" (inv),
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x8 = true, .x9 = true, .x10 = true, .x11 = true, .x14 = true, .x15 = true, .x16 = true, .x17 = true, .x19 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .x25 = true, .x26 = true, .nzcv = true, .memory = true });
+    return .{ r0, r1, r2, r3 };
+}
+
 /// ARM64 4-limb CIOS Montgomery multiplication.
 /// Computes a * b * R^{-1} mod p using fully-unrolled CIOS with two-pass
 /// carry accumulation (ARM64 substitute for x86 ADX dual carry chains).
@@ -1099,7 +1299,7 @@ pub fn MontgomeryField(
         pub inline fn square(self: Self) Self {
             if (!@inComptime() and comptime use_arm64_asm) {
                 const mod_arr: [4]u64 = modulus;
-                var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &self.limbs, &mod_arr, montgomery_inv) };
+                var r = Self{ .limbs = arm64MontgomerySquare256(&self.limbs, &mod_arr, montgomery_inv) };
                 if (!r.lessThanModulus()) r = r.subtractModulus();
                 return r;
             }
@@ -1965,7 +2165,7 @@ pub const BN254Scalar = struct {
     /// Saves ~25% multiplications compared to naive multiplication
     pub inline fn square(self: Self) Self {
         if (!@inComptime() and comptime use_arm64_asm) {
-            var r = Self{ .limbs = arm64MontgomeryMul256(&self.limbs, &self.limbs, &BN254_MODULUS, BN254_INV) };
+            var r = Self{ .limbs = arm64MontgomerySquare256(&self.limbs, &BN254_MODULUS, BN254_INV) };
             if (!r.lessThanModulus()) r = r.subtractModulus();
             return r;
         }

@@ -78,6 +78,7 @@ pub fn parseCommand(arg: []const u8) Command {
 }
 
 /// Parse hex string (with optional 0x prefix) into bytes.
+/// Returns null if allocation fails or the hex string contains invalid characters.
 pub fn parseHexInput(allocator: std.mem.Allocator, hex: []const u8) ?[]u8 {
     var clean_hex = hex;
     if (std.mem.startsWith(u8, hex, "0x") or std.mem.startsWith(u8, hex, "0X")) {
@@ -89,7 +90,11 @@ pub fn parseHexInput(allocator: std.mem.Allocator, hex: []const u8) ?[]u8 {
     while (i < buf_len) : (i += 1) {
         const start = i * 2;
         const end = @min(start + 2, clean_hex.len);
-        buf[i] = std.fmt.parseInt(u8, clean_hex[start..end], 16) catch 0;
+        buf[i] = std.fmt.parseInt(u8, clean_hex[start..end], 16) catch {
+            std.debug.print("Error: invalid hex byte '{s}' in --input-hex\n", .{clean_hex[start..end]});
+            allocator.free(buf);
+            return null;
+        };
     }
     return buf;
 }

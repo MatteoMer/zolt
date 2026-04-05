@@ -1361,7 +1361,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 10 => SignedLessThan.evaluateMLE(r),
                 11 => UnsignedLessThan.evaluateMLE(r),
                 12 => Movsign.evaluateMLE(r),
-                13 => F.zero(), // UpperWord - TODO
+                13 => @panic("UpperWord MLE not implemented"),
                 14 => UnsignedLessThanEqual.evaluateMLE(r),
                 // 15 was ValidSignedRemainder (removed in PR #1355)
                 15 => ValidUnsignedRemainder.evaluateMLE(r),
@@ -1371,25 +1371,25 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 19 => LowerHalfWord.evaluateMLE(r),
                 20 => SignExtendHalfWord.evaluateMLE(r),
                 21 => Pow2.evaluateMLE(r),
-                22 => F.zero(), // Pow2W - TODO
+                22 => @panic("Pow2W MLE not implemented"),
                 23 => ShiftRightBitmask.evaluateMLE(r),
-                24 => F.zero(), // VirtualRev8W - TODO
+                24 => @panic("VirtualRev8W MLE not implemented"),
                 25 => VirtualSRL.evaluateMLE(r),
                 26 => VirtualSRA.evaluateMLE(r),
-                27 => F.zero(), // VirtualROTR - TODO
-                28 => F.zero(), // VirtualROTRW - TODO
-                29 => F.zero(), // VirtualChangeDivisor - TODO
-                30 => F.zero(), // VirtualChangeDivisorW - TODO
-                31 => F.zero(), // MulUNoOverflow - TODO
-                32 => F.zero(), // VirtualXORROT32 - TODO
-                33 => F.zero(), // VirtualXORROT24 - TODO
-                34 => F.zero(), // VirtualXORROT16 - TODO
-                35 => F.zero(), // VirtualXORROT63 - TODO
-                36 => F.zero(), // VirtualXORROTW16 - TODO
-                37 => F.zero(), // VirtualXORROTW12 - TODO
-                38 => F.zero(), // VirtualXORROTW8 - TODO
-                39 => F.zero(), // VirtualXORROTW7 - TODO
-                else => F.zero(),
+                27 => @panic("VirtualROTR MLE not implemented"),
+                28 => @panic("VirtualROTRW MLE not implemented"),
+                29 => @panic("VirtualChangeDivisor MLE not implemented"),
+                30 => @panic("VirtualChangeDivisorW MLE not implemented"),
+                31 => @panic("MulUNoOverflow MLE not implemented"),
+                32 => @panic("VirtualXORROT32 MLE not implemented"),
+                33 => @panic("VirtualXORROT24 MLE not implemented"),
+                34 => @panic("VirtualXORROT16 MLE not implemented"),
+                35 => @panic("VirtualXORROT63 MLE not implemented"),
+                36 => @panic("VirtualXORROTW16 MLE not implemented"),
+                37 => @panic("VirtualXORROTW12 MLE not implemented"),
+                38 => @panic("VirtualXORROTW8 MLE not implemented"),
+                39 => @panic("VirtualXORROTW7 MLE not implemented"),
+                else => std.debug.panic("unsupported lookup table index: {}", .{table_index}),
             };
         }
 
@@ -1495,7 +1495,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                     else
                         @bitCast(@as(i64, divisor_i32));
                 },
-                else => 0, // Unimplemented tables return 0
+                else => std.debug.panic("unsupported lookup table index for materializeTableEntry: {}", .{table_index}),
             };
         }
 

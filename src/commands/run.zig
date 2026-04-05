@@ -46,7 +46,10 @@ pub fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, show_regs
         std.debug.print("\n", .{});
         var running = true;
         while (running) {
-            running = emulator.step() catch break;
+            running = emulator.step() catch |err| {
+                std.debug.print("Emulator error during trace: {}\n", .{err});
+                break;
+            };
         }
 
         const max_steps = max_trace_steps orelse 100;
@@ -149,7 +152,10 @@ pub fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, show_regs
             std.debug.print("\nFinal Register State:\n", .{});
             var reg_i: u8 = 0;
             while (reg_i < 32) : (reg_i += 1) {
-                const val = emulator.registers.read(reg_i) catch 0;
+                const val = emulator.registers.read(reg_i) catch |err| {
+                    std.debug.print("  x{d:0>2}: error reading register: {}\n", .{ reg_i, err });
+                    continue;
+                };
                 if (val != 0) {
                     const reg_name = switch (reg_i) {
                         0 => "zero",

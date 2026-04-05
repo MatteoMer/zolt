@@ -802,8 +802,14 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
         ) !void {
             if (!self.enabled) return;
             const entry = Entry.fromMulVirtual(
-                cycle, pc, instruction, rs1_val, rs2_val,
-                do_not_update_pc, is_first_in_sequence, is_compressed,
+                cycle,
+                pc,
+                instruction,
+                rs1_val,
+                rs2_val,
+                do_not_update_pc,
+                is_first_in_sequence,
+                is_compressed,
             );
             try self.entries.append(self.allocator, entry);
         }
@@ -822,8 +828,14 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
         ) !void {
             if (!self.enabled) return;
             const entry = Entry.fromAddVirtual(
-                cycle, pc, instruction, rs1_val, rs2_val,
-                do_not_update_pc, is_first_in_sequence, is_compressed,
+                cycle,
+                pc,
+                instruction,
+                rs1_val,
+                rs2_val,
+                do_not_update_pc,
+                is_first_in_sequence,
+                is_compressed,
             );
             try self.entries.append(self.allocator, entry);
         }

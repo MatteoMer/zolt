@@ -702,9 +702,8 @@ pub fn proverMsgReadChecking(
                                     const in_right = idx >= len / 2;
                                     if (in_right) right_half_nonzero += 1;
                                     dbg("  T{}:Q[{s}][{}] = {x} {s}\n", .{
-                                        table_idx, @tagName(suffixes_list[s_idx]), idx,
-                                        poly[idx].toBytesBE()[24..32].*,
-                                        if (in_right) "RIGHT_HALF!" else "",
+                                        table_idx,                       @tagName(suffixes_list[s_idx]),      idx,
+                                        poly[idx].toBytesBE()[24..32].*, if (in_right) "RIGHT_HALF!" else "",
                                     });
                                 }
                             }
@@ -1800,133 +1799,133 @@ pub fn proverMsgRaf(
     const half_len = len / 2;
 
     if (comptime debug_verbose) {
-    if (left_ps.round == 0 or left_ps.round == 1) {
-        dbg("[RAF_DEBUG R{}] Q_size={}, bound_value_left={x}\n", .{
-            left_ps.round,
-            len,
-            left_ps.bound_value.toBytesBE()[16..32].*,
-        });
-        dbg("[RAF_DEBUG R{}] bound_value_right={x}, bound_value_identity={x}\n", .{
-            left_ps.round,
-            right_ps.bound_value.toBytesBE()[16..32].*,
-            identity_ps.bound_value.toBytesBE()[16..32].*,
-        });
-
-        // Print Q array sums for comparison with Jolt
-        var left_q0_sum = F.zero();
-        var left_q1_sum = F.zero();
-        var right_q0_sum = F.zero();
-        var right_q1_sum = F.zero();
-        var identity_q0_sum = F.zero();
-        var identity_q1_sum = F.zero();
-        for (0..len) |b| {
-            left_q0_sum = left_q0_sum.add(left_ps.Q[0][b]);
-            left_q1_sum = left_q1_sum.add(left_ps.Q[1][b]);
-            right_q0_sum = right_q0_sum.add(right_ps.Q[0][b]);
-            right_q1_sum = right_q1_sum.add(right_ps.Q[1][b]);
-            identity_q0_sum = identity_q0_sum.add(identity_ps.Q[0][b]);
-            identity_q1_sum = identity_q1_sum.add(identity_ps.Q[1][b]);
-        }
-        dbg("[RAF_DEBUG R{}] Q_SUM: left[0]={x}, left[1]={x}\n", .{
-            left_ps.round,
-            left_q0_sum.toBytesBE()[16..32].*,
-            left_q1_sum.toBytesBE()[16..32].*,
-        });
-        dbg("[RAF_DEBUG R{}] Q_SUM: right[0]={x}, right[1]={x}\n", .{
-            left_ps.round,
-            right_q0_sum.toBytesBE()[16..32].*,
-            right_q1_sum.toBytesBE()[16..32].*,
-        });
-        dbg("[RAF_DEBUG R{}] Q_SUM: identity[0]={x}, identity[1]={x}\n", .{
-            left_ps.round,
-            identity_q0_sum.toBytesBE()[16..32].*,
-            identity_q1_sum.toBytesBE()[16..32].*,
-        });
-
-        // Print Q values at index 0 specifically
-        dbg("[RAF_DEBUG R{}] Q_AT_0: left_Q0[0]={x}, left_Q1[0]={x}\n", .{
-            left_ps.round,
-            left_ps.Q[0][0].toBytesBE()[16..32].*,
-            left_ps.Q[1][0].toBytesBE()[16..32].*,
-        });
-        dbg("[RAF_DEBUG R{}] Q_AT_0: right_Q1[0]={x}, identity_Q0[0]={x}, identity_Q1[0]={x}\n", .{
-            left_ps.round,
-            right_ps.Q[1][0].toBytesBE()[16..32].*,
-            identity_ps.Q[0][0].toBytesBE()[16..32].*,
-            identity_ps.Q[1][0].toBytesBE()[16..32].*,
-        });
-
-        // Print prefix MLE values for debugging
-        dbg("[RAF_DEBUG R{}] left prefix_mle_size={}, prefix_mle[0]={x}\n", .{
-            left_ps.round,
-            left_ps.prefix_mle_size,
-            left_ps.prefix_mle[0].toBytesBE()[16..32].*,
-        });
-        if (left_ps.prefix_mle_size >= 2) {
-            const lhalf = left_ps.prefix_mle_size / 2;
-            dbg("[RAF_DEBUG R{}] left prefix_mle[half={d}]={x}\n", .{
+        if (left_ps.round == 0 or left_ps.round == 1) {
+            dbg("[RAF_DEBUG R{}] Q_size={}, bound_value_left={x}\n", .{
                 left_ps.round,
-                lhalf,
-                left_ps.prefix_mle[lhalf].toBytesBE()[16..32].*,
+                len,
+                left_ps.bound_value.toBytesBE()[16..32].*,
+            });
+            dbg("[RAF_DEBUG R{}] bound_value_right={x}, bound_value_identity={x}\n", .{
+                left_ps.round,
+                right_ps.bound_value.toBytesBE()[16..32].*,
+                identity_ps.bound_value.toBytesBE()[16..32].*,
+            });
+
+            // Print Q array sums for comparison with Jolt
+            var left_q0_sum = F.zero();
+            var left_q1_sum = F.zero();
+            var right_q0_sum = F.zero();
+            var right_q1_sum = F.zero();
+            var identity_q0_sum = F.zero();
+            var identity_q1_sum = F.zero();
+            for (0..len) |b| {
+                left_q0_sum = left_q0_sum.add(left_ps.Q[0][b]);
+                left_q1_sum = left_q1_sum.add(left_ps.Q[1][b]);
+                right_q0_sum = right_q0_sum.add(right_ps.Q[0][b]);
+                right_q1_sum = right_q1_sum.add(right_ps.Q[1][b]);
+                identity_q0_sum = identity_q0_sum.add(identity_ps.Q[0][b]);
+                identity_q1_sum = identity_q1_sum.add(identity_ps.Q[1][b]);
+            }
+            dbg("[RAF_DEBUG R{}] Q_SUM: left[0]={x}, left[1]={x}\n", .{
+                left_ps.round,
+                left_q0_sum.toBytesBE()[16..32].*,
+                left_q1_sum.toBytesBE()[16..32].*,
+            });
+            dbg("[RAF_DEBUG R{}] Q_SUM: right[0]={x}, right[1]={x}\n", .{
+                left_ps.round,
+                right_q0_sum.toBytesBE()[16..32].*,
+                right_q1_sum.toBytesBE()[16..32].*,
+            });
+            dbg("[RAF_DEBUG R{}] Q_SUM: identity[0]={x}, identity[1]={x}\n", .{
+                left_ps.round,
+                identity_q0_sum.toBytesBE()[16..32].*,
+                identity_q1_sum.toBytesBE()[16..32].*,
+            });
+
+            // Print Q values at index 0 specifically
+            dbg("[RAF_DEBUG R{}] Q_AT_0: left_Q0[0]={x}, left_Q1[0]={x}\n", .{
+                left_ps.round,
+                left_ps.Q[0][0].toBytesBE()[16..32].*,
+                left_ps.Q[1][0].toBytesBE()[16..32].*,
+            });
+            dbg("[RAF_DEBUG R{}] Q_AT_0: right_Q1[0]={x}, identity_Q0[0]={x}, identity_Q1[0]={x}\n", .{
+                left_ps.round,
+                right_ps.Q[1][0].toBytesBE()[16..32].*,
+                identity_ps.Q[0][0].toBytesBE()[16..32].*,
+                identity_ps.Q[1][0].toBytesBE()[16..32].*,
+            });
+
+            // Print prefix MLE values for debugging
+            dbg("[RAF_DEBUG R{}] left prefix_mle_size={}, prefix_mle[0]={x}\n", .{
+                left_ps.round,
+                left_ps.prefix_mle_size,
+                left_ps.prefix_mle[0].toBytesBE()[16..32].*,
+            });
+            if (left_ps.prefix_mle_size >= 2) {
+                const lhalf = left_ps.prefix_mle_size / 2;
+                dbg("[RAF_DEBUG R{}] left prefix_mle[half={d}]={x}\n", .{
+                    left_ps.round,
+                    lhalf,
+                    left_ps.prefix_mle[lhalf].toBytesBE()[16..32].*,
+                });
+            }
+            dbg("[RAF_DEBUG R{}] identity prefix_mle_size={}, prefix_mle[0]={x}\n", .{
+                left_ps.round,
+                identity_ps.prefix_mle_size,
+                identity_ps.prefix_mle[0].toBytesBE()[16..32].*,
+            });
+            if (identity_ps.prefix_mle_size >= 2) {
+                const ihalf = identity_ps.prefix_mle_size / 2;
+                dbg("[RAF_DEBUG R{}] identity prefix_mle[half={d}]={x}\n", .{
+                    left_ps.round,
+                    ihalf,
+                    identity_ps.prefix_mle[ihalf].toBytesBE()[16..32].*,
+                });
+            }
+
+            // Print prefix evals at b=0
+            const l_pf_0 = left_ps.prefixEvals(0);
+            const r_pf_0 = right_ps.prefixEvals(0);
+            const i_pf_0 = identity_ps.prefixEvals(0);
+            dbg("[RAF_DEBUG R{}] prefix_evals(0): left=({x}, {x})\n", .{
+                left_ps.round,
+                l_pf_0[0].toBytesBE()[16..32].*,
+                l_pf_0[1].toBytesBE()[16..32].*,
+            });
+            dbg("[RAF_DEBUG R{}] prefix_evals(0): right=({x}, {x})\n", .{
+                left_ps.round,
+                r_pf_0[0].toBytesBE()[16..32].*,
+                r_pf_0[1].toBytesBE()[16..32].*,
+            });
+            dbg("[RAF_DEBUG R{}] prefix_evals(0): identity=({x}, {x})\n", .{
+                left_ps.round,
+                i_pf_0[0].toBytesBE()[16..32].*,
+                i_pf_0[1].toBytesBE()[16..32].*,
+            });
+
+            // Compute explicit sum to verify
+            var explicit_left_sum_0 = F.zero();
+            var explicit_right_sum_0 = F.zero();
+            for (0..half_len) |b| {
+                const l_prefix_b = left_ps.prefixEvals(b);
+                const r_prefix_b = right_ps.prefixEvals(b);
+                const i_prefix_b = identity_ps.prefixEvals(b);
+
+                // left contribution: prefix * Q0 + 1 * Q1
+                const l_contrib = l_prefix_b[0].mul(left_ps.Q[0][b]).add(left_ps.Q[1][b]);
+                explicit_left_sum_0 = explicit_left_sum_0.add(l_contrib);
+
+                // right+identity contribution
+                const r_contrib = r_prefix_b[0].mul(right_ps.Q[0][b]).add(right_ps.Q[1][b]);
+                const i_contrib = i_prefix_b[0].mul(identity_ps.Q[0][b]).add(identity_ps.Q[1][b]);
+                explicit_right_sum_0 = explicit_right_sum_0.add(r_contrib).add(i_contrib);
+            }
+            const explicit_raf_0 = gamma.mul(explicit_left_sum_0).add(gamma_sqr.mul(explicit_right_sum_0));
+            dbg("[RAF_DEBUG R{}] explicit_raf_0={x} (should match raf_evals[0])\n", .{
+                left_ps.round,
+                explicit_raf_0.toBytesBE()[16..32].*,
             });
         }
-        dbg("[RAF_DEBUG R{}] identity prefix_mle_size={}, prefix_mle[0]={x}\n", .{
-            left_ps.round,
-            identity_ps.prefix_mle_size,
-            identity_ps.prefix_mle[0].toBytesBE()[16..32].*,
-        });
-        if (identity_ps.prefix_mle_size >= 2) {
-            const ihalf = identity_ps.prefix_mle_size / 2;
-            dbg("[RAF_DEBUG R{}] identity prefix_mle[half={d}]={x}\n", .{
-                left_ps.round,
-                ihalf,
-                identity_ps.prefix_mle[ihalf].toBytesBE()[16..32].*,
-            });
-        }
-
-        // Print prefix evals at b=0
-        const l_pf_0 = left_ps.prefixEvals(0);
-        const r_pf_0 = right_ps.prefixEvals(0);
-        const i_pf_0 = identity_ps.prefixEvals(0);
-        dbg("[RAF_DEBUG R{}] prefix_evals(0): left=({x}, {x})\n", .{
-            left_ps.round,
-            l_pf_0[0].toBytesBE()[16..32].*,
-            l_pf_0[1].toBytesBE()[16..32].*,
-        });
-        dbg("[RAF_DEBUG R{}] prefix_evals(0): right=({x}, {x})\n", .{
-            left_ps.round,
-            r_pf_0[0].toBytesBE()[16..32].*,
-            r_pf_0[1].toBytesBE()[16..32].*,
-        });
-        dbg("[RAF_DEBUG R{}] prefix_evals(0): identity=({x}, {x})\n", .{
-            left_ps.round,
-            i_pf_0[0].toBytesBE()[16..32].*,
-            i_pf_0[1].toBytesBE()[16..32].*,
-        });
-
-        // Compute explicit sum to verify
-        var explicit_left_sum_0 = F.zero();
-        var explicit_right_sum_0 = F.zero();
-        for (0..half_len) |b| {
-            const l_prefix_b = left_ps.prefixEvals(b);
-            const r_prefix_b = right_ps.prefixEvals(b);
-            const i_prefix_b = identity_ps.prefixEvals(b);
-
-            // left contribution: prefix * Q0 + 1 * Q1
-            const l_contrib = l_prefix_b[0].mul(left_ps.Q[0][b]).add(left_ps.Q[1][b]);
-            explicit_left_sum_0 = explicit_left_sum_0.add(l_contrib);
-
-            // right+identity contribution
-            const r_contrib = r_prefix_b[0].mul(right_ps.Q[0][b]).add(right_ps.Q[1][b]);
-            const i_contrib = i_prefix_b[0].mul(identity_ps.Q[0][b]).add(identity_ps.Q[1][b]);
-            explicit_right_sum_0 = explicit_right_sum_0.add(r_contrib).add(i_contrib);
-        }
-        const explicit_raf_0 = gamma.mul(explicit_left_sum_0).add(gamma_sqr.mul(explicit_right_sum_0));
-        dbg("[RAF_DEBUG R{}] explicit_raf_0={x} (should match raf_evals[0])\n", .{
-            left_ps.round,
-            explicit_raf_0.toBytesBE()[16..32].*,
-        });
-    }
     } // end comptime debug_verbose
 
     // Parallel reduce over half-index b for RAF evaluations

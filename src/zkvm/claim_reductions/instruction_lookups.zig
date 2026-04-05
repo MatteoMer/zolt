@@ -385,7 +385,9 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             }.f;
 
             const reduceFn = struct {
-                fn f(a: [2]F, b: [2]F) [2]F { return .{ a[0].add(b[0]), a[1].add(b[1]) }; }
+                fn f(a: [2]F, b: [2]F) [2]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]) };
+                }
             }.f;
 
             const identity = [2]F{ F.zero(), F.zero() };
@@ -429,7 +431,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                     };
                     const bctx = ILBindCtx{
                         .slices = .{
-                            s.eq_evals, s.lookup_outputs, s.left_operands,
+                            s.eq_evals,       s.lookup_outputs,    s.left_operands,
                             s.right_operands, s.left_instr_inputs, s.right_instr_inputs,
                         },
                         .r = challenge,

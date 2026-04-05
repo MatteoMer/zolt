@@ -354,7 +354,6 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
             }.lessThan);
 
-
             // Initialize eq polynomial evaluations: eq(r_cycle, j) for each cycle j
             // r_cycle is in BIG_ENDIAN order (MSB first, as stored in tau)
             // Use O(T) table construction instead of O(T·logT) per-element computation
@@ -532,16 +531,23 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                             var val_0: F = undefined;
                             var val_i: F = undefined;
                             if (even_row[ei].address == odd_row[oi].address) {
-                                ra_0 = even_row[ei].ra_coeff; ra_i = odd_row[oi].ra_coeff.sub(even_row[ei].ra_coeff);
-                                val_0 = even_row[ei].val_coeff; val_i = odd_row[oi].val_coeff.sub(even_row[ei].val_coeff);
-                                ei += 1; oi += 1;
+                                ra_0 = even_row[ei].ra_coeff;
+                                ra_i = odd_row[oi].ra_coeff.sub(even_row[ei].ra_coeff);
+                                val_0 = even_row[ei].val_coeff;
+                                val_i = odd_row[oi].val_coeff.sub(even_row[ei].val_coeff);
+                                ei += 1;
+                                oi += 1;
                             } else if (even_row[ei].address < odd_row[oi].address) {
-                                ra_0 = even_row[ei].ra_coeff; ra_i = F.zero().sub(even_row[ei].ra_coeff);
-                                val_0 = even_row[ei].val_coeff; val_i = even_row[ei].next_val.sub(even_row[ei].val_coeff);
+                                ra_0 = even_row[ei].ra_coeff;
+                                ra_i = F.zero().sub(even_row[ei].ra_coeff);
+                                val_0 = even_row[ei].val_coeff;
+                                val_i = even_row[ei].next_val.sub(even_row[ei].val_coeff);
                                 ei += 1;
                             } else {
-                                ra_0 = F.zero(); ra_i = odd_row[oi].ra_coeff;
-                                val_0 = odd_row[oi].prev_val; val_i = odd_row[oi].val_coeff.sub(odd_row[oi].prev_val);
+                                ra_0 = F.zero();
+                                ra_i = odd_row[oi].ra_coeff;
+                                val_0 = odd_row[oi].prev_val;
+                                val_i = odd_row[oi].val_coeff.sub(odd_row[oi].prev_val);
                                 oi += 1;
                             }
                             local_qc = local_qc.add(E_prefix.mul(ra_0).mul(val_0.add(c.gamma.mul(inc_0.add(val_0)))));
@@ -567,7 +573,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             }.f;
 
             const reduceFn = struct {
-                fn f(a: [2]F, b: [2]F) [2]F { return .{ a[0].add(b[0]), a[1].add(b[1]) }; }
+                fn f(a: [2]F, b: [2]F) [2]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]) };
+                }
             }.f;
 
             const identity = [2]F{ F.zero(), F.zero() };
@@ -709,27 +717,36 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                                 const oe = &c.entries[oi];
                                 if (ee.cycle == oe.cycle) {
                                     const ev = computePhase2Evals(ee, oe, even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
-                                    ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
-                                    even_cp = ee.next_val; odd_cp = oe.next_val;
-                                    ei += 1; oi += 1;
+                                    ls0 = ls0.add(ev[0]);
+                                    ls2 = ls2.add(ev[1]);
+                                    even_cp = ee.next_val;
+                                    odd_cp = oe.next_val;
+                                    ei += 1;
+                                    oi += 1;
                                 } else if (ee.cycle < oe.cycle) {
                                     const ev = computePhase2EvalsEvenOnly(ee, even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
-                                    ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
-                                    even_cp = ee.next_val; ei += 1;
+                                    ls0 = ls0.add(ev[0]);
+                                    ls2 = ls2.add(ev[1]);
+                                    even_cp = ee.next_val;
+                                    ei += 1;
                                 } else {
                                     const ev = computePhase2EvalsOddOnly(oe, even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
-                                    ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
-                                    odd_cp = oe.next_val; oi += 1;
+                                    ls0 = ls0.add(ev[0]);
+                                    ls2 = ls2.add(ev[1]);
+                                    odd_cp = oe.next_val;
+                                    oi += 1;
                                 }
                             }
                             while (ei < odd_start) : (ei += 1) {
                                 const ev = computePhase2EvalsEvenOnly(&c.entries[ei], even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
-                                ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
+                                ls0 = ls0.add(ev[0]);
+                                ls2 = ls2.add(ev[1]);
                                 even_cp = c.entries[ei].next_val;
                             }
                             while (oi < scan) : (oi += 1) {
                                 const ev = computePhase2EvalsOddOnly(&c.entries[oi], even_cp, odd_cp, c.inc_scalar, c.eq_scalar, c.gamma, c.addr_round, c.phase1_end, c.challenges);
-                                ls0 = ls0.add(ev[0]); ls2 = ls2.add(ev[1]);
+                                ls0 = ls0.add(ev[0]);
+                                ls2 = ls2.add(ev[1]);
                                 odd_cp = c.entries[oi].next_val;
                             }
                         }
@@ -738,7 +755,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }.f;
 
                 const p2ReduceFn = struct {
-                    fn f(a: [2]F, b: [2]F) [2]F { return .{ a[0].add(b[0]), a[1].add(b[1]) }; }
+                    fn f(a: [2]F, b: [2]F) [2]F {
+                        return .{ a[0].add(b[0]), a[1].add(b[1]) };
+                    }
                 }.f;
 
                 const p2id = [2]F{ F.zero(), F.zero() };

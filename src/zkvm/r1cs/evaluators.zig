@@ -286,7 +286,6 @@ pub fn UnivariateSkipEvaluator(comptime F: type) type {
 
             return result;
         }
-
     };
 }
 
@@ -553,9 +552,10 @@ pub const RawR1CSInputs = struct {
 
     /// Map from u64_values index to R1CSInputIndex
     pub const U64_INDICES = [NUM_U64_INPUTS]R1CSInputIndex{
-        .LeftInstructionInput, .PC, .UnexpandedPC, .RamAddress,
-        .Rs1Value, .Rs2Value, .RdWriteValue, .RamReadValue, .RamWriteValue,
-        .LeftLookupOperand, .NextUnexpandedPC, .NextPC, .LookupOutput,
+        .LeftInstructionInput, .PC,                .UnexpandedPC,     .RamAddress,
+        .Rs1Value,             .Rs2Value,          .RdWriteValue,     .RamReadValue,
+        .RamWriteValue,        .LeftLookupOperand, .NextUnexpandedPC, .NextPC,
+        .LookupOutput,
     };
     /// Map from signed_values index to R1CSInputIndex
     pub const SIGNED_INDICES = [NUM_SIGNED_INPUTS]R1CSInputIndex{
@@ -567,13 +567,13 @@ pub const RawR1CSInputs = struct {
     };
     /// Map from bool_flags index to R1CSInputIndex
     pub const BOOL_INDICES = [NUM_BOOL_INPUTS]R1CSInputIndex{
-        .ShouldBranch, .NextIsVirtual, .NextIsFirstInSequence, .ShouldJump,
-        .FlagAddOperands, .FlagSubtractOperands, .FlagMultiplyOperands,
-        .FlagLoad, .FlagStore, .FlagJump, .FlagWriteLookupOutputToRD,
-        .FlagVirtualInstruction, .FlagAssert, .FlagDoNotUpdateUnexpandedPC,
-        .FlagAdvice, .FlagIsCompressed, .FlagIsFirstInSequence, .FlagIsLastInSequence,
-        .FlagIsRdNotZero, .FlagBranch, .FlagIsNoop,
-        .FlagLeftOperandIsRs1, .FlagLeftOperandIsPC, .FlagRightOperandIsRs2, .FlagRightOperandIsImm,
+        .ShouldBranch,          .NextIsVirtual,               .NextIsFirstInSequence,     .ShouldJump,
+        .FlagAddOperands,       .FlagSubtractOperands,        .FlagMultiplyOperands,      .FlagLoad,
+        .FlagStore,             .FlagJump,                    .FlagWriteLookupOutputToRD, .FlagVirtualInstruction,
+        .FlagAssert,            .FlagDoNotUpdateUnexpandedPC, .FlagAdvice,                .FlagIsCompressed,
+        .FlagIsFirstInSequence, .FlagIsLastInSequence,        .FlagIsRdNotZero,           .FlagBranch,
+        .FlagIsNoop,            .FlagLeftOperandIsRs1,        .FlagLeftOperandIsPC,       .FlagRightOperandIsRs2,
+        .FlagRightOperandIsImm,
     };
 
     /// Convert a single R1CS input from its native integer type to a Montgomery field element.

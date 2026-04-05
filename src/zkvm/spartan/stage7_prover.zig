@@ -86,7 +86,6 @@ pub fn Stage7Prover(comptime F: type) type {
             const k_chunk: usize = @as(usize, 1) << @intCast(s6_log_k_chunk);
             const T_val: usize = @as(usize, 1) << @intCast(s6_n_cycle_vars);
 
-
             // Extract r_cycle_BE from Booleanity's cycle portion
             // Booleanity challenges[bool_start+log_k_chunk..bool_start+booleanity_rounds] reversed
             var r_cycle_be = try self.allocator.alloc(F, s6_n_cycle_vars);
@@ -94,7 +93,6 @@ pub fn Stage7Prover(comptime F: type) type {
             for (0..s6_n_cycle_vars) |i| {
                 r_cycle_be[i] = s6_challenges[s6_bool_start + s6_booleanity_rounds - 1 - i];
             }
-
 
             // Extract r_addr_bool_BE from Booleanity's address portion
             // challenges[bool_start..bool_start+log_k_chunk] reversed
@@ -439,7 +437,6 @@ pub fn Stage7Prover(comptime F: type) type {
                 self.allocator.free(r_virt_le);
             }
 
-
             // Sample gamma from transcript (matches Jolt's HammingWeightClaimReductionParams::new)
             // IMPORTANT: Jolt's HW code calls transcript.challenge_scalar() which uses
             // challenge_scalar_128_bits() -> F::from_bytes() = from_le_bytes_mod_order().
@@ -476,7 +473,6 @@ pub fn Stage7Prover(comptime F: type) type {
                 input_claim = input_claim.add(gamma_powers[3 * i + 2].mul(virt_claim));
             }
 
-
             // Append input claim to transcript (matches BatchedSumcheck::verify)
             transcript.appendScalar("sumcheck_claim", input_claim);
 
@@ -501,8 +497,6 @@ pub fn Stage7Prover(comptime F: type) type {
 
             for (0..num_rounds) |round| {
                 const half = poly_size / 2;
-
-
 
                 // LowToHigh binding: pair (2*j, 2*j+1) to bind LSB first
                 // Compute round polynomial evaluations at {0, 2}
@@ -597,7 +591,6 @@ pub fn Stage7Prover(comptime F: type) type {
                 // Append to transcript (matches cache_openings → append_sparse)
                 transcript.appendScalar("opening_claim", g_claim);
             }
-
 
             // Debug: Verify expected output claim (what verifier would compute)
             {

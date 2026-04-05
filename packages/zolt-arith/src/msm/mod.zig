@@ -966,7 +966,6 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                     }
                 }
 
-
                 // Dispatch to Pippenger with appropriate bit-width
                 const group_result = if (group_n < 8)
                     naiveMSM(g_bases, g_scalars)

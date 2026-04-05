@@ -434,15 +434,36 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 const claim_be = self.current_claim.toBytesBE();
                 dbg("[ZOLT PRODUCT round {}] t0 last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
                     self.current_round,
-                    t0_be[31], t0_be[30], t0_be[29], t0_be[28], t0_be[27], t0_be[26], t0_be[25], t0_be[24],
+                    t0_be[31],
+                    t0_be[30],
+                    t0_be[29],
+                    t0_be[28],
+                    t0_be[27],
+                    t0_be[26],
+                    t0_be[25],
+                    t0_be[24],
                 });
                 dbg("[ZOLT PRODUCT round {}] t_inf last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
                     self.current_round,
-                    tinf_be[31], tinf_be[30], tinf_be[29], tinf_be[28], tinf_be[27], tinf_be[26], tinf_be[25], tinf_be[24],
+                    tinf_be[31],
+                    tinf_be[30],
+                    tinf_be[29],
+                    tinf_be[28],
+                    tinf_be[27],
+                    tinf_be[26],
+                    tinf_be[25],
+                    tinf_be[24],
                 });
                 dbg("[ZOLT PRODUCT round {}] previous_claim last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
                     self.current_round,
-                    claim_be[31], claim_be[30], claim_be[29], claim_be[28], claim_be[27], claim_be[26], claim_be[25], claim_be[24],
+                    claim_be[31],
+                    claim_be[30],
+                    claim_be[29],
+                    claim_be[28],
+                    claim_be[27],
+                    claim_be[26],
+                    claim_be[25],
+                    claim_be[24],
                 });
                 // Print split_eq state
                 dbg("[ZOLT PRODUCT round {}] split_eq.current_scalar = {any}\n", .{

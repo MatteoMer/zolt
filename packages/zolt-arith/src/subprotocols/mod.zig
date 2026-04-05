@@ -100,7 +100,7 @@ pub fn Sumcheck(comptime F: type) type {
                 }
 
                 dbg("[SUMCHECK PROVER]   g(0)=0x{x}, g(1)=0x{x}\n", .{ g0.limbs[0], g1.limbs[0] });
-                dbg("[SUMCHECK PROVER]   g(0)+g(1)=0x{x}\n", .{ g0.add(g1).limbs[0] });
+                dbg("[SUMCHECK PROVER]   g(0)+g(1)=0x{x}\n", .{g0.add(g1).limbs[0]});
 
                 // Coefficients: [g(0), g(1) - g(0)]
                 const coeffs = try allocator.alloc(F, 2);

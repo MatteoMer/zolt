@@ -83,9 +83,9 @@ pub const GpuPolyOps = struct {
     partials_buf: GpuBuffer(u32),
     /// Pre-allocated scratch buffers for productSumcheckRoundGpu.
     /// Avoids per-round Metal buffer allocation.
-    scratch_pt0: GpuBuffer(u32),   // partial t0 sums (1024 threadgroups)
+    scratch_pt0: GpuBuffer(u32), // partial t0 sums (1024 threadgroups)
     scratch_ptinf: GpuBuffer(u32), // partial tinf sums (1024 threadgroups)
-    scratch_eq: GpuBuffer(u32),    // eq tables (max 262K elements × 8 u32)
+    scratch_eq: GpuBuffer(u32), // eq tables (max 262K elements × 8 u32)
     /// Pre-allocated bind buffers: input (524K elements × 8 u32) and output (262K × 8 u32).
     /// Reused by polyBindLow to avoid per-call Metal buffer allocation.
     scratch_bind_in: GpuBuffer(u32),
@@ -296,8 +296,8 @@ pub const GpuPolyOps = struct {
         try self.gpu.dispatchKernel(
             self.bind_low_pipeline, // uses the SEPARATE input/output kernel
             &.{
-                .{ .buffer = poly.metalBuffer() },    // input (active)
-                .{ .buffer = poly.outputBuffer() },   // output (inactive)
+                .{ .buffer = poly.metalBuffer() }, // input (active)
+                .{ .buffer = poly.outputBuffer() }, // output (inactive)
                 .{ .bytes = .{ .ptr = &r_gpu, .len = 32 } },
             },
             half,
@@ -322,8 +322,8 @@ pub const GpuPolyOps = struct {
         try self.gpu.dispatchKernel(
             self.bind_first_pipeline, // uses the SEPARATE input/output kernel
             &.{
-                .{ .buffer = poly.metalBuffer() },    // input (active)
-                .{ .buffer = poly.outputBuffer() },   // output (inactive)
+                .{ .buffer = poly.metalBuffer() }, // input (active)
+                .{ .buffer = poly.outputBuffer() }, // output (inactive)
                 .{ .bytes = .{ .ptr = &r_gpu, .len = 32 } },
                 .{ .bytes = .{ .ptr = &omr_gpu, .len = 32 } },
                 .{ .bytes = .{ .ptr = &half_u32, .len = 4 } },
@@ -603,7 +603,11 @@ pub const GpuPolyOps = struct {
             return self.productSumcheckRound(
                 // Can't call copy-based from here without CPU slices.
                 // This shouldn't happen for realistic trace sizes.
-                &.{}, &.{}, &.{}, &.{}, 0,
+                &.{},
+                &.{},
+                &.{},
+                &.{},
+                0,
             );
         }
         writeFieldElements(self.scratch_eq.slice()[0 .. e_out.len * 8], e_out);
@@ -1089,7 +1093,10 @@ test "GPU sumcheck protocol: end-to-end" {
         const gpu_r = try state.ops.sumcheckRound(&evals);
         var cpu_g0 = BN254Scalar.zero();
         var cpu_g1 = BN254Scalar.zero();
-        for (0..8) |i| { cpu_g0 = cpu_g0.add(evals[i]); cpu_g1 = cpu_g1.add(evals[i + 8]); }
+        for (0..8) |i| {
+            cpu_g0 = cpu_g0.add(evals[i]);
+            cpu_g1 = cpu_g1.add(evals[i + 8]);
+        }
         try testing.expectEqual(cpu_g0.limbs, gpu_r[0].limbs);
         try testing.expectEqual(cpu_g1.limbs, gpu_r[1].limbs);
     }
@@ -1102,7 +1109,10 @@ test "GPU sumcheck protocol: end-to-end" {
         const gpu_r = try state.ops.sumcheckRound(&e8);
         var cpu_g0 = BN254Scalar.zero();
         var cpu_g1 = BN254Scalar.zero();
-        for (0..4) |i| { cpu_g0 = cpu_g0.add(e8[i]); cpu_g1 = cpu_g1.add(e8[i + 4]); }
+        for (0..4) |i| {
+            cpu_g0 = cpu_g0.add(e8[i]);
+            cpu_g1 = cpu_g1.add(e8[i + 4]);
+        }
         try testing.expectEqual(cpu_g0.limbs, gpu_r[0].limbs);
         try testing.expectEqual(cpu_g1.limbs, gpu_r[1].limbs);
     }
@@ -1115,7 +1125,10 @@ test "GPU sumcheck protocol: end-to-end" {
         const gpu_r = try state.ops.sumcheckRound(&e4);
         var cpu_g0 = BN254Scalar.zero();
         var cpu_g1 = BN254Scalar.zero();
-        for (0..2) |i| { cpu_g0 = cpu_g0.add(e4[i]); cpu_g1 = cpu_g1.add(e4[i + 2]); }
+        for (0..2) |i| {
+            cpu_g0 = cpu_g0.add(e4[i]);
+            cpu_g1 = cpu_g1.add(e4[i + 2]);
+        }
         try testing.expectEqual(cpu_g0.limbs, gpu_r[0].limbs);
         try testing.expectEqual(cpu_g1.limbs, gpu_r[1].limbs);
     }

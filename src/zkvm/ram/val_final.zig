@@ -179,9 +179,8 @@ pub fn ValFinalProver(comptime F: type) type {
                     const wa_val = val_evaluation.computeEqAtPoint(F, params.r_address, remapped);
 
                     dbg("[ValFinal] Injecting synthetic write: cycle={}, addr=0x{X}, remapped={}, inc={}, wa={any}\n", .{
-                        sw.cycle, sw.address, remapped,
-                        if (sw.new_value >= sw.old_value) sw.new_value - sw.old_value else 0,
-                        wa_val.toBytesBE(),
+                        sw.cycle,                                                             sw.address,         remapped,
+                        if (sw.new_value >= sw.old_value) sw.new_value - sw.old_value else 0, wa_val.toBytesBE(),
                     });
 
                     // Add to the polynomial evaluations at this cycle

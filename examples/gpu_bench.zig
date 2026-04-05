@@ -86,7 +86,10 @@ pub fn main() !void {
         for (0..iters) |_| {
             var g0 = BN254Scalar.zero();
             var g1 = BN254Scalar.zero();
-            for (0..n / 2) |i| { g0 = g0.add(evals[i]); g1 = g1.add(evals[i + n / 2]); }
+            for (0..n / 2) |i| {
+                g0 = g0.add(evals[i]);
+                g1 = g1.add(evals[i + n / 2]);
+            }
             std.mem.doNotOptimizeAway(&g0);
             std.mem.doNotOptimizeAway(&g1);
         }
@@ -141,7 +144,10 @@ pub fn main() !void {
                 const hl = cpu_len / 2;
                 var g0 = BN254Scalar.zero();
                 var g1 = BN254Scalar.zero();
-                for (0..hl) |i| { g0 = g0.add(cpu_buf[i]); g1 = g1.add(cpu_buf[i + hl]); }
+                for (0..hl) |i| {
+                    g0 = g0.add(cpu_buf[i]);
+                    g1 = g1.add(cpu_buf[i + hl]);
+                }
                 std.mem.doNotOptimizeAway(&g0);
                 const c = BN254Scalar.fromU64(42);
                 const omr = BN254Scalar.one().sub(c);
@@ -165,7 +171,10 @@ pub fn main() !void {
                 const half_len = len / 2;
                 var g0 = BN254Scalar.zero();
                 var g1 = BN254Scalar.zero();
-                for (0..half_len) |i| { g0 = g0.add(cpu_evals[i]); g1 = g1.add(cpu_evals[i + half_len]); }
+                for (0..half_len) |i| {
+                    g0 = g0.add(cpu_evals[i]);
+                    g1 = g1.add(cpu_evals[i + half_len]);
+                }
                 std.mem.doNotOptimizeAway(&g0);
                 // bindFirst in-place
                 const challenge = BN254Scalar.fromU64(42);

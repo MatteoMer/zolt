@@ -132,7 +132,7 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             // Debug: Print r_address for comparison with Jolt
             dbg("[ZOLT OUTPUT_CHECK] r_address (log_K={}):\n", .{log_K});
             for (r_address, 0..) |r, i| {
-                dbg("[ZOLT OUTPUT_CHECK]   r_address[{}] = {any}\n", .{i, r.toBytesBE()});
+                dbg("[ZOLT OUTPUT_CHECK]   r_address[{}] = {any}\n", .{ i, r.toBytesBE() });
             }
 
             // Allocate arrays
@@ -388,11 +388,16 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             const half = self.current_size / 2;
 
             const OCtx = struct {
-                eq: []const F, io: []const F, vf: []const F, vio: []const F,
+                eq: []const F,
+                io: []const F,
+                vf: []const F,
+                vio: []const F,
             };
             const ctx = OCtx{
-                .eq = self.eq_r_address, .io = self.io_mask,
-                .vf = self.val_final, .vio = self.val_io,
+                .eq = self.eq_r_address,
+                .io = self.io_mask,
+                .vf = self.val_final,
+                .vio = self.val_io,
             };
 
             const mapFn = struct {
@@ -401,8 +406,10 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                     for (start..end) |g| {
                         const idx0 = 2 * g;
                         const idx1 = 2 * g + 1;
-                        const eq0 = c.eq[idx0]; const eq1 = c.eq[idx1];
-                        const io0 = c.io[idx0]; const io1 = c.io[idx1];
+                        const eq0 = c.eq[idx0];
+                        const eq1 = c.eq[idx1];
+                        const io0 = c.io[idx0];
+                        const io1 = c.io[idx1];
                         const v0 = c.vf[idx0].sub(c.vio[idx0]);
                         const v1 = c.vf[idx1].sub(c.vio[idx1]);
                         const deq = eq1.sub(eq0);
@@ -432,7 +439,10 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             else
                 mapFn(ctx, 0, half);
 
-            const s0 = sums[0]; const s1 = sums[1]; const s2 = sums[2]; const s3 = sums[3];
+            const s0 = sums[0];
+            const s1 = sums[1];
+            const s2 = sums[2];
+            const s3 = sums[3];
 
             // Debug: verify sumcheck soundness s0 + s1 == current_claim
             const sum_check = s0.add(s1);

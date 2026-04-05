@@ -422,8 +422,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const identity_3 = [3]F{ F.zero(), F.zero(), F.zero() };
             const t_prime_result = if (self.thread_pool) |tp|
                 tp.parallelReduce(
-                    [3]F, total_pairs, identity_3,
-                    mat_ctx, matFusedMapReduce.mapFn, matFusedMapReduce.reduceFn,
+                    [3]F,
+                    total_pairs,
+                    identity_3,
+                    mat_ctx,
+                    matFusedMapReduce.mapFn,
+                    matFusedMapReduce.reduceFn,
                 )
             else
                 matFusedMapReduce.mapFn(mat_ctx, 0, total_pairs);
@@ -444,7 +448,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const bz_dbg = &(self.bz_poly.?);
                 for (0..@min(4, az_dbg.boundLen())) |idx| {
                     const prod = az_dbg.evaluations[idx].mul(bz_dbg.evaluations[idx]);
-                    dbg("[MATERIALIZE] Az[{d}]*Bz[{d}] = {any}\n", .{idx, idx, prod.toBytes()});
+                    dbg("[MATERIALIZE] Az[{d}]*Bz[{d}] = {any}\n", .{ idx, idx, prod.toBytes() });
                 }
             }
 
@@ -745,7 +749,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                     inline for (0..DEGREE) |j| {
                                         const coeffs = univariate_skip.COEFFS_PER_J[j][0..SECOND_GROUP_SIZE];
                                         const product = evaluators.interpolateAzBzProductSecondGroupInt(
-                                            &cw.az_second, &cw.bz_second, coeffs,
+                                            &cw.az_second,
+                                            &cw.bz_second,
+                                            coeffs,
                                         );
                                         if (!product.isZero()) {
                                             const unreduced = field_mod.mulU192Unreduced(e_in, product.magnitude);
@@ -918,7 +924,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                 if (group == 0) {
                                     inline for (0..DEGREE) |j| {
                                         const product_int = evaluators.interpolateAzBzProductInt(
-                                            &cw.az_first, &cw.bz_first,
+                                            &cw.az_first,
+                                            &cw.bz_first,
                                             &univariate_skip.COEFFS_PER_J[j],
                                         );
                                         if (product_int > 0) {
@@ -932,7 +939,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                     inline for (0..DEGREE) |j| {
                                         const coeffs = univariate_skip.COEFFS_PER_J[j][0..SECOND_GROUP_SIZE];
                                         const product = evaluators.interpolateAzBzProductSecondGroupInt(
-                                            &cw.az_second, &cw.bz_second, coeffs,
+                                            &cw.az_second,
+                                            &cw.bz_second,
+                                            coeffs,
                                         );
                                         if (!product.isZero()) {
                                             const unreduced = field_mod.mulU192Unreduced(e_in, product.magnitude);
@@ -974,8 +983,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const identity: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
             const target_sums = if (thread_pool) |tp|
                 tp.parallelReduceForce(
-                    [DEGREE]F, num_x_out_vals, identity,
-                    ctx, mapReduceFns.mapFn, mapReduceFns.reduceFn,
+                    [DEGREE]F,
+                    num_x_out_vals,
+                    identity,
+                    ctx,
+                    mapReduceFns.mapFn,
+                    mapReduceFns.reduceFn,
                 )
             else
                 mapReduceFns.mapFn(ctx, 0, num_x_out_vals);
@@ -1625,343 +1638,343 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // Use E_out and E_in factored representation for the "head" part,
                 // and sum over the window variable separately.
                 if (comptime debug_verbose) {
-                if (self.az_poly != null and self.bz_poly != null) {
-                    const az_p = &(self.az_poly.?);
-                    const bz_p = &(self.bz_poly.?);
-                    const brute_window: usize = 1;
-                    const brute_grid: usize = 2;
+                    if (self.az_poly != null and self.bz_poly != null) {
+                        const az_p = &(self.az_poly.?);
+                        const bz_p = &(self.bz_poly.?);
+                        const brute_window: usize = 1;
+                        const brute_grid: usize = 2;
 
-                    const eq_tables = self.split_eq.getWindowEqTables(0, brute_window);
-                    const E_out_b = eq_tables.E_out;
-                    const E_in_b = eq_tables.E_in;
-                    const head_in_bits = eq_tables.head_in_bits;
+                        const eq_tables = self.split_eq.getWindowEqTables(0, brute_window);
+                        const E_out_b = eq_tables.E_out;
+                        const E_in_b = eq_tables.E_in;
+                        const head_in_bits = eq_tables.head_in_bits;
 
-                    // w_last is the window variable = tau[current_index - 1]
-                    const w_last = self.split_eq.tau[self.split_eq.current_index - 1];
-                    const one_minus_w_last = F.one().sub(w_last);
+                        // w_last is the window variable = tau[current_index - 1]
+                        const w_last = self.split_eq.tau[self.split_eq.current_index - 1];
+                        const one_minus_w_last = F.one().sub(w_last);
 
-                    dbg("[BRUTE_FORCE2] E_out.len={d}, E_in.len={d}, head_in_bits={d}\n", .{
-                        E_out_b.len, E_in_b.len, head_in_bits,
-                    });
-                    dbg("[BRUTE_FORCE2] current_scalar = {any}\n", .{self.split_eq.current_scalar.toBytes()});
-                    dbg("[BRUTE_FORCE2] w_last = {any}\n", .{w_last.toBytes()});
+                        dbg("[BRUTE_FORCE2] E_out.len={d}, E_in.len={d}, head_in_bits={d}\n", .{
+                            E_out_b.len, E_in_b.len, head_in_bits,
+                        });
+                        dbg("[BRUTE_FORCE2] current_scalar = {any}\n", .{self.split_eq.current_scalar.toBytes()});
+                        dbg("[BRUTE_FORCE2] w_last = {any}\n", .{w_last.toBytes()});
 
-                    var brute_sum2 = F.zero();
-                    for (0..E_out_b.len) |x_out| {
-                        for (0..E_in_b.len) |x_in| {
-                            const i = (x_out << @intCast(head_in_bits)) | x_in;
-                            const eq_weight = E_out_b[x_out].mul(E_in_b[x_in]);
+                        var brute_sum2 = F.zero();
+                        for (0..E_out_b.len) |x_out| {
+                            for (0..E_in_b.len) |x_in| {
+                                const i = (x_out << @intCast(head_in_bits)) | x_in;
+                                const eq_weight = E_out_b[x_out].mul(E_in_b[x_in]);
 
-                            // Sum over grid positions (window variable)
-                            var inner_sum = F.zero();
-                            for (0..brute_grid) |j| {
-                                const idx = brute_grid * i + j;
-                                if (idx < az_p.boundLen()) {
-                                    const az_val = az_p.evaluations[idx];
-                                    const bz_val = bz_p.evaluations[idx];
-                                    // eq_window[0] = (1 - w_last), eq_window[1] = w_last
-                                    const w_j = if (j == 0) one_minus_w_last else w_last;
-                                    inner_sum = inner_sum.add(w_j.mul(az_val.mul(bz_val)));
+                                // Sum over grid positions (window variable)
+                                var inner_sum = F.zero();
+                                for (0..brute_grid) |j| {
+                                    const idx = brute_grid * i + j;
+                                    if (idx < az_p.boundLen()) {
+                                        const az_val = az_p.evaluations[idx];
+                                        const bz_val = bz_p.evaluations[idx];
+                                        // eq_window[0] = (1 - w_last), eq_window[1] = w_last
+                                        const w_j = if (j == 0) one_minus_w_last else w_last;
+                                        inner_sum = inner_sum.add(w_j.mul(az_val.mul(bz_val)));
+                                    }
                                 }
-                            }
-                            brute_sum2 = brute_sum2.add(eq_weight.mul(inner_sum));
-                        }
-                    }
-                    // Include current_scalar from split_eq
-                    brute_sum2 = brute_sum2.mul(self.split_eq.current_scalar);
-
-                    dbg("[BRUTE_FORCE2] sum (with current_scalar) = {any}\n", .{brute_sum2.toBytes()});
-                    dbg("[BRUTE_FORCE2] current_claim (uni_skip_claim) = {any}\n", .{self.current_claim.toBytes()});
-                    dbg("[BRUTE_FORCE2] match = {}\n", .{brute_sum2.eql(self.current_claim)});
-
-                    // Check if the missing factor is R^2
-                    const r_squared = F.rSquared();
-                    const brute_with_r2 = brute_sum2.mul(r_squared);
-                    dbg("[BRUTE_FORCE2] sum * R^2 = {any}\n", .{brute_with_r2.toBytes()});
-                    dbg("[BRUTE_FORCE2] match_with_R2 = {}\n", .{brute_with_r2.eql(self.current_claim)});
-
-                    // Also try claim / R^2
-                    const r_squared_inv = r_squared.inverse().?;
-                    const claim_div_r2 = self.current_claim.mul(r_squared_inv);
-                    dbg("[BRUTE_FORCE2] claim / R^2 = {any}\n", .{claim_div_r2.toBytes()});
-                    dbg("[BRUTE_FORCE2] sum == claim/R^2 = {}\n", .{brute_sum2.eql(claim_div_r2)});
-
-                    // Compute sum WITHOUT current_scalar to isolate the issue
-                    var brute_raw = F.zero();
-                    for (0..E_out_b.len) |x_out| {
-                        for (0..E_in_b.len) |x_in| {
-                            const i = (x_out << @intCast(head_in_bits)) | x_in;
-                            const eq_wt = E_out_b[x_out].mul(E_in_b[x_in]);
-                            var inner_s = F.zero();
-                            for (0..brute_grid) |j| {
-                                const idx = brute_grid * i + j;
-                                if (idx < az_p.boundLen()) {
-                                    const w_jj = if (j == 0) one_minus_w_last else w_last;
-                                    inner_s = inner_s.add(w_jj.mul(az_p.evaluations[idx].mul(bz_p.evaluations[idx])));
-                                }
-                            }
-                            brute_raw = brute_raw.add(eq_wt.mul(inner_s));
-                        }
-                    }
-                    dbg("[BRUTE_FORCE2] raw_sum (without current_scalar) = {any}\n", .{brute_raw.toBytes()});
-                    const raw_with_cs = brute_raw.mul(self.split_eq.current_scalar);
-                    dbg("[BRUTE_FORCE2] raw_sum * current_scalar = {any}\n", .{raw_with_cs.toBytes()});
-                    const raw_with_cs_r2 = raw_with_cs.mul(r_squared);
-                    dbg("[BRUTE_FORCE2] raw_sum * current_scalar * R^2 = {any}\n", .{raw_with_cs_r2.toBytes()});
-                    dbg("[BRUTE_FORCE2] claim == raw*cs*R^2? {}\n", .{raw_with_cs_r2.eql(self.current_claim)});
-
-                    // Also print first few values
-                    for (0..@min(3, E_out_b.len)) |x_out| {
-                        for (0..@min(2, E_in_b.len)) |x_in| {
-                            const i = (x_out << @intCast(head_in_bits)) | x_in;
-                            dbg("[BRUTE_FORCE2] E_out[{d}]={any}  E_in[{d}]={any}\n", .{x_out, E_out_b[x_out].toBytes(), x_in, E_in_b[x_in].toBytes()});
-                            for (0..brute_grid) |j| {
-                                const idx = brute_grid * i + j;
-                                if (idx < az_p.boundLen()) {
-                                    dbg("[BRUTE_FORCE2]   Az[{d}]={any}  Bz[{d}]={any}\n", .{idx, az_p.evaluations[idx].toBytes(), idx, bz_p.evaluations[idx].toBytes()});
-                                }
+                                brute_sum2 = brute_sum2.add(eq_weight.mul(inner_sum));
                             }
                         }
+                        // Include current_scalar from split_eq
+                        brute_sum2 = brute_sum2.mul(self.split_eq.current_scalar);
+
+                        dbg("[BRUTE_FORCE2] sum (with current_scalar) = {any}\n", .{brute_sum2.toBytes()});
+                        dbg("[BRUTE_FORCE2] current_claim (uni_skip_claim) = {any}\n", .{self.current_claim.toBytes()});
+                        dbg("[BRUTE_FORCE2] match = {}\n", .{brute_sum2.eql(self.current_claim)});
+
+                        // Check if the missing factor is R^2
+                        const r_squared = F.rSquared();
+                        const brute_with_r2 = brute_sum2.mul(r_squared);
+                        dbg("[BRUTE_FORCE2] sum * R^2 = {any}\n", .{brute_with_r2.toBytes()});
+                        dbg("[BRUTE_FORCE2] match_with_R2 = {}\n", .{brute_with_r2.eql(self.current_claim)});
+
+                        // Also try claim / R^2
+                        const r_squared_inv = r_squared.inverse().?;
+                        const claim_div_r2 = self.current_claim.mul(r_squared_inv);
+                        dbg("[BRUTE_FORCE2] claim / R^2 = {any}\n", .{claim_div_r2.toBytes()});
+                        dbg("[BRUTE_FORCE2] sum == claim/R^2 = {}\n", .{brute_sum2.eql(claim_div_r2)});
+
+                        // Compute sum WITHOUT current_scalar to isolate the issue
+                        var brute_raw = F.zero();
+                        for (0..E_out_b.len) |x_out| {
+                            for (0..E_in_b.len) |x_in| {
+                                const i = (x_out << @intCast(head_in_bits)) | x_in;
+                                const eq_wt = E_out_b[x_out].mul(E_in_b[x_in]);
+                                var inner_s = F.zero();
+                                for (0..brute_grid) |j| {
+                                    const idx = brute_grid * i + j;
+                                    if (idx < az_p.boundLen()) {
+                                        const w_jj = if (j == 0) one_minus_w_last else w_last;
+                                        inner_s = inner_s.add(w_jj.mul(az_p.evaluations[idx].mul(bz_p.evaluations[idx])));
+                                    }
+                                }
+                                brute_raw = brute_raw.add(eq_wt.mul(inner_s));
+                            }
+                        }
+                        dbg("[BRUTE_FORCE2] raw_sum (without current_scalar) = {any}\n", .{brute_raw.toBytes()});
+                        const raw_with_cs = brute_raw.mul(self.split_eq.current_scalar);
+                        dbg("[BRUTE_FORCE2] raw_sum * current_scalar = {any}\n", .{raw_with_cs.toBytes()});
+                        const raw_with_cs_r2 = raw_with_cs.mul(r_squared);
+                        dbg("[BRUTE_FORCE2] raw_sum * current_scalar * R^2 = {any}\n", .{raw_with_cs_r2.toBytes()});
+                        dbg("[BRUTE_FORCE2] claim == raw*cs*R^2? {}\n", .{raw_with_cs_r2.eql(self.current_claim)});
+
+                        // Also print first few values
+                        for (0..@min(3, E_out_b.len)) |x_out| {
+                            for (0..@min(2, E_in_b.len)) |x_in| {
+                                const i = (x_out << @intCast(head_in_bits)) | x_in;
+                                dbg("[BRUTE_FORCE2] E_out[{d}]={any}  E_in[{d}]={any}\n", .{ x_out, E_out_b[x_out].toBytes(), x_in, E_in_b[x_in].toBytes() });
+                                for (0..brute_grid) |j| {
+                                    const idx = brute_grid * i + j;
+                                    if (idx < az_p.boundLen()) {
+                                        dbg("[BRUTE_FORCE2]   Az[{d}]={any}  Bz[{d}]={any}\n", .{ idx, az_p.evaluations[idx].toBytes(), idx, bz_p.evaluations[idx].toBytes() });
+                                    }
+                                }
+                            }
+                        }
                     }
-                }
                 } // end if (comptime debug_verbose) for BRUTE_FORCE2
 
                 // DEBUG3: Compute sum using UniSkip's factorization but with materialized Az/Bz
                 // This isolates whether the issue is in eq tables or Az/Bz values
                 if (comptime debug_verbose) {
-                if (self.az_poly != null and self.bz_poly != null) {
-                    const az_p3 = &(self.az_poly.?);
-                    const bz_p3 = &(self.bz_poly.?);
+                    if (self.az_poly != null and self.bz_poly != null) {
+                        const az_p3 = &(self.az_poly.?);
+                        const bz_p3 = &(self.bz_poly.?);
 
-                    // Build eq tables using UniSkip's factorization (full_tau, m = full_tau.len/2)
-                    const m_uni = self.full_tau.len / 2;
-                    const wprime_len_uni = if (self.full_tau.len > 0) self.full_tau.len - 1 else 0;
-                    const num_x_in_bits_uni = if (wprime_len_uni > m_uni) wprime_len_uni - m_uni else 0;
-                    const num_x_in_prime_bits_uni = if (num_x_in_bits_uni > 0) num_x_in_bits_uni - 1 else 0;
+                        // Build eq tables using UniSkip's factorization (full_tau, m = full_tau.len/2)
+                        const m_uni = self.full_tau.len / 2;
+                        const wprime_len_uni = if (self.full_tau.len > 0) self.full_tau.len - 1 else 0;
+                        const num_x_in_bits_uni = if (wprime_len_uni > m_uni) wprime_len_uni - m_uni else 0;
+                        const num_x_in_prime_bits_uni = if (num_x_in_bits_uni > 0) num_x_in_bits_uni - 1 else 0;
 
-                    const E_out_uni = self.buildEqTable(self.full_tau[0..m_uni]) catch unreachable;
-                    defer self.allocator.free(E_out_uni);
-                    const E_in_uni = self.buildEqTable(self.full_tau[m_uni .. self.full_tau.len - 1]) catch unreachable;
-                    defer self.allocator.free(E_in_uni);
+                        const E_out_uni = self.buildEqTable(self.full_tau[0..m_uni]) catch unreachable;
+                        defer self.allocator.free(E_out_uni);
+                        const E_in_uni = self.buildEqTable(self.full_tau[m_uni .. self.full_tau.len - 1]) catch unreachable;
+                        defer self.allocator.free(E_in_uni);
 
-                    dbg("[DEBUG3] UniSkip factorization: m={d}, E_out.len={d}, E_in.len={d}\n", .{ m_uni, E_out_uni.len, E_in_uni.len });
-                    dbg("[DEBUG3] E_out_uni[0] = {any}\n", .{E_out_uni[0].toBytesBE()});
-                    dbg("[DEBUG3] E_in_uni[0] = {any}\n", .{E_in_uni[0].toBytesBE()});
+                        dbg("[DEBUG3] UniSkip factorization: m={d}, E_out.len={d}, E_in.len={d}\n", .{ m_uni, E_out_uni.len, E_in_uni.len });
+                        dbg("[DEBUG3] E_out_uni[0] = {any}\n", .{E_out_uni[0].toBytesBE()});
+                        dbg("[DEBUG3] E_in_uni[0] = {any}\n", .{E_in_uni[0].toBytesBE()});
 
-                    // Sum using UniSkip's index mapping but materialized Az/Bz
-                    var sum3 = F.zero();
-                    for (0..E_out_uni.len) |x_out_u| {
-                        for (0..E_in_uni.len) |x_in_u| {
-                            const eq_val3 = E_out_uni[x_out_u].mul(E_in_uni[x_in_u]);
-                            const x_in_prime_u = x_in_u >> 1;
-                            const cycle_u = (x_out_u << @intCast(num_x_in_prime_bits_uni)) | x_in_prime_u;
-                            const group_u: usize = x_in_u & 1;
+                        // Sum using UniSkip's index mapping but materialized Az/Bz
+                        var sum3 = F.zero();
+                        for (0..E_out_uni.len) |x_out_u| {
+                            for (0..E_in_uni.len) |x_in_u| {
+                                const eq_val3 = E_out_uni[x_out_u].mul(E_in_uni[x_in_u]);
+                                const x_in_prime_u = x_in_u >> 1;
+                                const cycle_u = (x_out_u << @intCast(num_x_in_prime_bits_uni)) | x_in_prime_u;
+                                const group_u: usize = x_in_u & 1;
 
-                            // Map to materialized array index
-                            // In materialized layout: full_idx = 2 * i + j where i = x_out' * E_in' + x_in'
-                            // cycle_u corresponds to i when viewed differently
-                            // The materialized array is indexed as: Az[2*cycle + group]
-                            const mat_idx = 2 * cycle_u + group_u;
-                            if (mat_idx < az_p3.boundLen()) {
-                                sum3 = sum3.add(eq_val3.mul(az_p3.evaluations[mat_idx].mul(bz_p3.evaluations[mat_idx])));
+                                // Map to materialized array index
+                                // In materialized layout: full_idx = 2 * i + j where i = x_out' * E_in' + x_in'
+                                // cycle_u corresponds to i when viewed differently
+                                // The materialized array is indexed as: Az[2*cycle + group]
+                                const mat_idx = 2 * cycle_u + group_u;
+                                if (mat_idx < az_p3.boundLen()) {
+                                    sum3 = sum3.add(eq_val3.mul(az_p3.evaluations[mat_idx].mul(bz_p3.evaluations[mat_idx])));
+                                }
                             }
                         }
-                    }
-                    // Scale by current_scalar (lagrange_tau_r0)
-                    sum3 = sum3.mul(self.split_eq.current_scalar);
-                    dbg("[DEBUG3] sum_uniskip_eq_with_mat_AzBz * current_scalar = {any}\n", .{sum3.toBytes()});
-                    dbg("[DEBUG3] matches claim? {}\n", .{sum3.eql(self.current_claim)});
+                        // Scale by current_scalar (lagrange_tau_r0)
+                        sum3 = sum3.mul(self.split_eq.current_scalar);
+                        dbg("[DEBUG3] sum_uniskip_eq_with_mat_AzBz * current_scalar = {any}\n", .{sum3.toBytes()});
+                        dbg("[DEBUG3] matches claim? {}\n", .{sum3.eql(self.current_claim)});
 
-                    // Now compute using split_eq factorization but with UniSkip's cycle mapping
-                    // to see if the issue is in eq tables or cycle mapping
-                    var sum4 = F.zero();
-                    const eq_t4 = self.split_eq.getWindowEqTables(0, 1);
-                    const E_out_4 = eq_t4.E_out;
-                    const E_in_4 = eq_t4.E_in;
-                    const hib4: u6 = @intCast(eq_t4.head_in_bits);
-                    const w_last4 = self.split_eq.tau[self.split_eq.current_index - 1];
-                    const one_minus_w_last4 = F.one().sub(w_last4);
+                        // Now compute using split_eq factorization but with UniSkip's cycle mapping
+                        // to see if the issue is in eq tables or cycle mapping
+                        var sum4 = F.zero();
+                        const eq_t4 = self.split_eq.getWindowEqTables(0, 1);
+                        const E_out_4 = eq_t4.E_out;
+                        const E_in_4 = eq_t4.E_in;
+                        const hib4: u6 = @intCast(eq_t4.head_in_bits);
+                        const w_last4 = self.split_eq.tau[self.split_eq.current_index - 1];
+                        const one_minus_w_last4 = F.one().sub(w_last4);
 
-                    for (0..E_out_4.len) |xo4| {
-                        for (0..E_in_4.len) |xi4| {
-                            const eq_base4 = E_out_4[xo4].mul(E_in_4[xi4]);
-                            const idx4 = (xo4 << hib4) | xi4;
-                            // Use SAME materialized layout: Az[2*i + j]
-                            const az0_4 = if (2 * idx4 < az_p3.boundLen()) az_p3.evaluations[2 * idx4] else F.zero();
-                            const bz0_4 = if (2 * idx4 < bz_p3.boundLen()) bz_p3.evaluations[2 * idx4] else F.zero();
-                            const az1_4 = if (2 * idx4 + 1 < az_p3.boundLen()) az_p3.evaluations[2 * idx4 + 1] else F.zero();
-                            const bz1_4 = if (2 * idx4 + 1 < bz_p3.boundLen()) bz_p3.evaluations[2 * idx4 + 1] else F.zero();
-                            const inner4 = one_minus_w_last4.mul(az0_4.mul(bz0_4)).add(w_last4.mul(az1_4.mul(bz1_4)));
-                            sum4 = sum4.add(eq_base4.mul(inner4));
+                        for (0..E_out_4.len) |xo4| {
+                            for (0..E_in_4.len) |xi4| {
+                                const eq_base4 = E_out_4[xo4].mul(E_in_4[xi4]);
+                                const idx4 = (xo4 << hib4) | xi4;
+                                // Use SAME materialized layout: Az[2*i + j]
+                                const az0_4 = if (2 * idx4 < az_p3.boundLen()) az_p3.evaluations[2 * idx4] else F.zero();
+                                const bz0_4 = if (2 * idx4 < bz_p3.boundLen()) bz_p3.evaluations[2 * idx4] else F.zero();
+                                const az1_4 = if (2 * idx4 + 1 < az_p3.boundLen()) az_p3.evaluations[2 * idx4 + 1] else F.zero();
+                                const bz1_4 = if (2 * idx4 + 1 < bz_p3.boundLen()) bz_p3.evaluations[2 * idx4 + 1] else F.zero();
+                                const inner4 = one_minus_w_last4.mul(az0_4.mul(bz0_4)).add(w_last4.mul(az1_4.mul(bz1_4)));
+                                sum4 = sum4.add(eq_base4.mul(inner4));
+                            }
                         }
-                    }
-                    sum4 = sum4.mul(self.split_eq.current_scalar);
-                    dbg("[DEBUG3] sum_split_eq_with_mat_AzBz * current_scalar = {any}\n", .{sum4.toBytes()});
-                    dbg("[DEBUG3] sum3 == sum4? {}\n", .{sum3.eql(sum4)});
+                        sum4 = sum4.mul(self.split_eq.current_scalar);
+                        dbg("[DEBUG3] sum_split_eq_with_mat_AzBz * current_scalar = {any}\n", .{sum4.toBytes()});
+                        dbg("[DEBUG3] sum3 == sum4? {}\n", .{sum3.eql(sum4)});
 
-                    // Check: claim / current_scalar vs raw sum without scalar
-                    const cs_inv_3 = self.split_eq.current_scalar.inverse();
-                    if (cs_inv_3) |inv3| {
-                        const claim_div_cs3 = self.current_claim.mul(inv3);
-                        // sum3 / current_scalar = raw sum (without current_scalar)
-                        const raw3 = sum3.mul(inv3);
-                        dbg("[DEBUG3] claim / current_scalar = {any}\n", .{claim_div_cs3.toBytes()});
-                        dbg("[DEBUG3] raw_eq_sum (sum3/cs) = {any}\n", .{raw3.toBytes()});
-                        dbg("[DEBUG3] claim/cs == raw_eq_sum? {}\n", .{claim_div_cs3.eql(raw3)});
-                    }
+                        // Check: claim / current_scalar vs raw sum without scalar
+                        const cs_inv_3 = self.split_eq.current_scalar.inverse();
+                        if (cs_inv_3) |inv3| {
+                            const claim_div_cs3 = self.current_claim.mul(inv3);
+                            // sum3 / current_scalar = raw sum (without current_scalar)
+                            const raw3 = sum3.mul(inv3);
+                            dbg("[DEBUG3] claim / current_scalar = {any}\n", .{claim_div_cs3.toBytes()});
+                            dbg("[DEBUG3] raw_eq_sum (sum3/cs) = {any}\n", .{raw3.toBytes()});
+                            dbg("[DEBUG3] claim/cs == raw_eq_sum? {}\n", .{claim_div_cs3.eql(raw3)});
+                        }
 
-                    // KEY TEST: The uni_skip_claim = s1(r0) = L(tau_high, r0) * t1(r0) * R^2
-                    // t1(r0) = Σ eq(tau, x) * AzBz(x, r0)
-                    // raw_sum3 = Σ eq(tau, x) * AzBz_mat(x, r0) (using UniSkip eq tables)
-                    // If AzBz_mat matches AzBz, then t1(r0) should equal raw_sum3
-                    // And claim = current_scalar * t1(r0) * R^2
-                    // But we applied R^2 scaling in the UniSkip extended_evals...
-                    // So claim = L(tau_high, r0) * [Σ eq * AzBz * R^2](r0)
-                    // While sum3 = L(tau_high, r0) * Σ eq * AzBz(r0) (NO R^2 in sum3)
-                    // So: claim = sum3 * R^2 ??? Let me check this
-                    const r_sq_3 = F.rSquared();
-                    dbg("[DEBUG3] sum3 * R^2 = {any}\n", .{sum3.mul(r_sq_3).toBytes()});
-                    dbg("[DEBUG3] claim == sum3 * R^2? {}\n", .{self.current_claim.eql(sum3.mul(r_sq_3))});
+                        // KEY TEST: The uni_skip_claim = s1(r0) = L(tau_high, r0) * t1(r0) * R^2
+                        // t1(r0) = Σ eq(tau, x) * AzBz(x, r0)
+                        // raw_sum3 = Σ eq(tau, x) * AzBz_mat(x, r0) (using UniSkip eq tables)
+                        // If AzBz_mat matches AzBz, then t1(r0) should equal raw_sum3
+                        // And claim = current_scalar * t1(r0) * R^2
+                        // But we applied R^2 scaling in the UniSkip extended_evals...
+                        // So claim = L(tau_high, r0) * [Σ eq * AzBz * R^2](r0)
+                        // While sum3 = L(tau_high, r0) * Σ eq * AzBz(r0) (NO R^2 in sum3)
+                        // So: claim = sum3 * R^2 ??? Let me check this
+                        const r_sq_3 = F.rSquared();
+                        dbg("[DEBUG3] sum3 * R^2 = {any}\n", .{sum3.mul(r_sq_3).toBytes()});
+                        dbg("[DEBUG3] claim == sum3 * R^2? {}\n", .{self.current_claim.eql(sum3.mul(r_sq_3))});
 
-                    // Correct decomposition:
-                    // claim = current_scalar * t1_with_r2(r0)
-                    // t1_with_r2(r0) = claim / current_scalar
-                    // raw_eq_sum = Σ eq * AzBz(r0) = t1(r0) (without R^2)
-                    // So we expect: claim / current_scalar = raw_eq_sum * R^2
-                    {
-                        const cs_inv_32 = self.split_eq.current_scalar.inverse().?;
-                        const t1_r0 = self.current_claim.mul(cs_inv_32);
-                        const raw_sum_3 = sum3.mul(cs_inv_32);
-                        const raw_times_r2 = raw_sum_3.mul(r_sq_3);
-                        dbg("[DEBUG3] t1_with_r2(r0) = claim/cs = {any}\n", .{t1_r0.toBytes()});
-                        dbg("[DEBUG3] raw_sum * R^2 = {any}\n", .{raw_times_r2.toBytes()});
-                        dbg("[DEBUG3] t1_with_r2 == raw*R^2? {}\n", .{t1_r0.eql(raw_times_r2)});
-                    }
+                        // Correct decomposition:
+                        // claim = current_scalar * t1_with_r2(r0)
+                        // t1_with_r2(r0) = claim / current_scalar
+                        // raw_eq_sum = Σ eq * AzBz(r0) = t1(r0) (without R^2)
+                        // So we expect: claim / current_scalar = raw_eq_sum * R^2
+                        {
+                            const cs_inv_32 = self.split_eq.current_scalar.inverse().?;
+                            const t1_r0 = self.current_claim.mul(cs_inv_32);
+                            const raw_sum_3 = sum3.mul(cs_inv_32);
+                            const raw_times_r2 = raw_sum_3.mul(r_sq_3);
+                            dbg("[DEBUG3] t1_with_r2(r0) = claim/cs = {any}\n", .{t1_r0.toBytes()});
+                            dbg("[DEBUG3] raw_sum * R^2 = {any}\n", .{raw_times_r2.toBytes()});
+                            dbg("[DEBUG3] t1_with_r2 == raw*R^2? {}\n", .{t1_r0.eql(raw_times_r2)});
+                        }
 
-                    // Multi-cycle check + direct sum comparison
-                    {
-                        var mismatch_n: usize = 0;
-                        const climit = self.cycle_witnesses.len;
-                        for (0..climit) |cchk| {
-                            for (0..2) |gchk| {
-                                const gsz: usize = if (gchk == 0) FIRST_GROUP_SIZE else SECOND_GROUP_SIZE;
-                                const gid = if (gchk == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
-                                const ww = &self.cycle_witnesses[cchk];
-                                var azd = F.zero();
-                                var bzd = F.zero();
-                                for (0..gsz) |kk| {
-                                    const ccc = constraints.UNIFORM_CONSTRAINTS[gid[kk]];
-                                    const cdv = ccc.condition.evaluate(F, ww.asSlice());
-                                    const mgv = ccc.left.evaluate(F, ww.asSlice()).sub(ccc.right.evaluate(F, ww.asSlice()));
-                                    azd = azd.add(self.lagrange_evals_r0[kk].mul(cdv));
-                                    bzd = bzd.add(self.lagrange_evals_r0[kk].mul(mgv));
-                                }
-                                const midx = 2 * cchk + gchk;
-                                const azm = if (midx < az_p3.boundLen()) az_p3.evaluations[midx] else F.zero();
-                                const bzm = if (midx < bz_p3.boundLen()) bz_p3.evaluations[midx] else F.zero();
-                                if (!azd.eql(azm) or !bzd.eql(bzm)) {
-                                    mismatch_n += 1;
-                                    if (mismatch_n <= 3) {
-                                        dbg("[DEBUG5] AzBz MISMATCH c={d} g={d} mi={d}\n", .{cchk, gchk, midx});
-                                        dbg("[DEBUG5]  Az_d={any}  Az_m={any}\n", .{azd.toBytesBE(), azm.toBytesBE()});
+                        // Multi-cycle check + direct sum comparison
+                        {
+                            var mismatch_n: usize = 0;
+                            const climit = self.cycle_witnesses.len;
+                            for (0..climit) |cchk| {
+                                for (0..2) |gchk| {
+                                    const gsz: usize = if (gchk == 0) FIRST_GROUP_SIZE else SECOND_GROUP_SIZE;
+                                    const gid = if (gchk == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
+                                    const ww = &self.cycle_witnesses[cchk];
+                                    var azd = F.zero();
+                                    var bzd = F.zero();
+                                    for (0..gsz) |kk| {
+                                        const ccc = constraints.UNIFORM_CONSTRAINTS[gid[kk]];
+                                        const cdv = ccc.condition.evaluate(F, ww.asSlice());
+                                        const mgv = ccc.left.evaluate(F, ww.asSlice()).sub(ccc.right.evaluate(F, ww.asSlice()));
+                                        azd = azd.add(self.lagrange_evals_r0[kk].mul(cdv));
+                                        bzd = bzd.add(self.lagrange_evals_r0[kk].mul(mgv));
+                                    }
+                                    const midx = 2 * cchk + gchk;
+                                    const azm = if (midx < az_p3.boundLen()) az_p3.evaluations[midx] else F.zero();
+                                    const bzm = if (midx < bz_p3.boundLen()) bz_p3.evaluations[midx] else F.zero();
+                                    if (!azd.eql(azm) or !bzd.eql(bzm)) {
+                                        mismatch_n += 1;
+                                        if (mismatch_n <= 3) {
+                                            dbg("[DEBUG5] AzBz MISMATCH c={d} g={d} mi={d}\n", .{ cchk, gchk, midx });
+                                            dbg("[DEBUG5]  Az_d={any}  Az_m={any}\n", .{ azd.toBytesBE(), azm.toBytesBE() });
+                                        }
                                     }
                                 }
                             }
-                        }
-                        dbg("[DEBUG5] Checked {d} cycles x 2 groups, {d} mismatches\n", .{climit, mismatch_n});
+                            dbg("[DEBUG5] Checked {d} cycles x 2 groups, {d} mismatches\n", .{ climit, mismatch_n });
 
-                        // Compute direct sum of eq*AzBz at r0 over ALL 512 indices (9 bits)
-                        // using the UniSkip's eq tables and the Lagrange-evaluated Az/Bz
-                        var direct_sum_r0 = F.zero();
-                        for (0..E_out_uni.len) |xou7| {
-                            for (0..E_in_uni.len) |xiu7| {
-                                const eq7 = E_out_uni[xou7].mul(E_in_uni[xiu7]);
-                                const xip7 = xiu7 >> 1;
-                                const cyc7 = (xou7 << @intCast(num_x_in_prime_bits_uni)) | xip7;
-                                const grp7: usize = xiu7 & 1;
+                            // Compute direct sum of eq*AzBz at r0 over ALL 512 indices (9 bits)
+                            // using the UniSkip's eq tables and the Lagrange-evaluated Az/Bz
+                            var direct_sum_r0 = F.zero();
+                            for (0..E_out_uni.len) |xou7| {
+                                for (0..E_in_uni.len) |xiu7| {
+                                    const eq7 = E_out_uni[xou7].mul(E_in_uni[xiu7]);
+                                    const xip7 = xiu7 >> 1;
+                                    const cyc7 = (xou7 << @intCast(num_x_in_prime_bits_uni)) | xip7;
+                                    const grp7: usize = xiu7 & 1;
 
-                                if (cyc7 < climit) {
-                                    const gsz7: usize = if (grp7 == 0) FIRST_GROUP_SIZE else SECOND_GROUP_SIZE;
-                                    const gid7 = if (grp7 == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
-                                    const ww7 = &self.cycle_witnesses[cyc7];
-                                    var az7 = F.zero();
-                                    var bz7 = F.zero();
-                                    for (0..gsz7) |kk7| {
-                                        const cc7 = constraints.UNIFORM_CONSTRAINTS[gid7[kk7]];
-                                        const cd7 = cc7.condition.evaluate(F, ww7.asSlice());
-                                        const mg7 = cc7.left.evaluate(F, ww7.asSlice()).sub(cc7.right.evaluate(F, ww7.asSlice()));
-                                        az7 = az7.add(self.lagrange_evals_r0[kk7].mul(cd7));
-                                        bz7 = bz7.add(self.lagrange_evals_r0[kk7].mul(mg7));
+                                    if (cyc7 < climit) {
+                                        const gsz7: usize = if (grp7 == 0) FIRST_GROUP_SIZE else SECOND_GROUP_SIZE;
+                                        const gid7 = if (grp7 == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
+                                        const ww7 = &self.cycle_witnesses[cyc7];
+                                        var az7 = F.zero();
+                                        var bz7 = F.zero();
+                                        for (0..gsz7) |kk7| {
+                                            const cc7 = constraints.UNIFORM_CONSTRAINTS[gid7[kk7]];
+                                            const cd7 = cc7.condition.evaluate(F, ww7.asSlice());
+                                            const mg7 = cc7.left.evaluate(F, ww7.asSlice()).sub(cc7.right.evaluate(F, ww7.asSlice()));
+                                            az7 = az7.add(self.lagrange_evals_r0[kk7].mul(cd7));
+                                            bz7 = bz7.add(self.lagrange_evals_r0[kk7].mul(mg7));
+                                        }
+                                        direct_sum_r0 = direct_sum_r0.add(eq7.mul(az7.mul(bz7)));
                                     }
-                                    direct_sum_r0 = direct_sum_r0.add(eq7.mul(az7.mul(bz7)));
                                 }
                             }
+                            dbg("[DEBUG6] direct_sum_r0 (eq_uni * AzBz_r0) = {any}\n", .{direct_sum_r0.toBytes()});
+                            dbg("[DEBUG6] mat_sum (sum3/cs) = {any}\n", .{sum3.mul(self.split_eq.current_scalar.inverse().?).toBytes()});
+                            dbg("[DEBUG6] direct == mat? {}\n", .{direct_sum_r0.eql(sum3.mul(self.split_eq.current_scalar.inverse().?))});
+                            dbg("[DEBUG6] claim/cs = {any}\n", .{self.current_claim.mul(self.split_eq.current_scalar.inverse().?).toBytes()});
+                            dbg("[DEBUG6] direct == claim/cs? {}\n", .{direct_sum_r0.eql(self.current_claim.mul(self.split_eq.current_scalar.inverse().?))});
                         }
-                        dbg("[DEBUG6] direct_sum_r0 (eq_uni * AzBz_r0) = {any}\n", .{direct_sum_r0.toBytes()});
-                        dbg("[DEBUG6] mat_sum (sum3/cs) = {any}\n", .{sum3.mul(self.split_eq.current_scalar.inverse().?).toBytes()});
-                        dbg("[DEBUG6] direct == mat? {}\n", .{direct_sum_r0.eql(sum3.mul(self.split_eq.current_scalar.inverse().?))});
-                        dbg("[DEBUG6] claim/cs = {any}\n", .{self.current_claim.mul(self.split_eq.current_scalar.inverse().?).toBytes()});
-                        dbg("[DEBUG6] direct == claim/cs? {}\n", .{direct_sum_r0.eql(self.current_claim.mul(self.split_eq.current_scalar.inverse().?))});
+
+                        // Compare per-cycle Az*Bz between UniSkip and materialization for cycle 0
+                        // UniSkip path: evaluate at extended points, interpolate, evaluate at r0
+                        // Materialization path: Lagrange evaluate directly at r0
+                        if (self.cycle_witnesses.len > 0) {
+                            const w0 = &self.cycle_witnesses[0];
+                            // Compute UniSkip's Az*Bz for cycle 0, group 0 at each target
+                            // First compute base values
+                            var az_base_g0: [FIRST_GROUP_SIZE]F = undefined;
+                            var bz_base_g0: [FIRST_GROUP_SIZE]F = undefined;
+                            for (0..FIRST_GROUP_SIZE) |ii| {
+                                const cidx = constraints.FIRST_GROUP_INDICES[ii];
+                                const cst = constraints.UNIFORM_CONSTRAINTS[cidx];
+                                az_base_g0[ii] = cst.condition.evaluate(F, w0.asSlice());
+                                bz_base_g0[ii] = cst.left.evaluate(F, w0.asSlice())
+                                    .sub(cst.right.evaluate(F, w0.asSlice()));
+                            }
+
+                            // Print base Az*Bz products (should be 0 for correct witness)
+                            for (0..@min(3, FIRST_GROUP_SIZE)) |ii| {
+                                dbg("[DEBUG4] base Az[{d}]*Bz[{d}] = {any}\n", .{
+                                    ii, ii, az_base_g0[ii].mul(bz_base_g0[ii]).toBytesBE(),
+                                });
+                            }
+
+                            // Compute direct Az(r0) and Bz(r0) using lagrange_evals_r0
+                            var az_direct_r0 = F.zero();
+                            var bz_direct_r0 = F.zero();
+                            for (0..FIRST_GROUP_SIZE) |ii| {
+                                az_direct_r0 = az_direct_r0.add(self.lagrange_evals_r0[ii].mul(az_base_g0[ii]));
+                                bz_direct_r0 = bz_direct_r0.add(self.lagrange_evals_r0[ii].mul(bz_base_g0[ii]));
+                            }
+                            dbg("[DEBUG4] Az(r0)_direct = {any}\n", .{az_direct_r0.toBytesBE()});
+                            dbg("[DEBUG4] Bz(r0)_direct = {any}\n", .{bz_direct_r0.toBytesBE()});
+                            dbg("[DEBUG4] Az(r0)*Bz(r0)_direct = {any}\n", .{az_direct_r0.mul(bz_direct_r0).toBytesBE()});
+
+                            // Compare with materialized value
+                            dbg("[DEBUG4] Az_mat[0] = {any}\n", .{az_p3.evaluations[0].toBytesBE()});
+                            dbg("[DEBUG4] Bz_mat[0] = {any}\n", .{bz_p3.evaluations[0].toBytesBE()});
+                            dbg("[DEBUG4] Az_mat*Bz_mat[0] = {any}\n", .{az_p3.evaluations[0].mul(bz_p3.evaluations[0]).toBytesBE()});
+                            dbg("[DEBUG4] Az match? {}\n", .{az_direct_r0.eql(az_p3.evaluations[0])});
+                            dbg("[DEBUG4] Bz match? {}\n", .{bz_direct_r0.eql(bz_p3.evaluations[0])});
+
+                            // Now compute via UniSkip's interpolation approach
+                            // t1_at_r0_cycle0_g0 = Σ_Y t1_vals(Y) * L_Y(r0) / domain_vanishing(r0)
+                            // But actually, the UniSkip computes AzBz at extended points and then
+                            // does polynomial interpolation. Let me instead just evaluate the PRODUCT
+                            // polynomial at r0 by evaluating Az and Bz separately:
+                            //   Az(r0) = Σ_i L_i(r0) * az_base[i]
+                            //   Bz(r0) = Σ_i L_i(r0) * bz_base[i]
+                            // This should equal the materialized Az[0], Bz[0]
+
+                            // The issue might be in lagrange_evals_r0 computation!
+                            // Print first few lagrange_evals_r0
+                            for (0..@min(4, FIRST_GROUP_SIZE)) |ii| {
+                                dbg("[DEBUG4] lagrange_evals_r0[{d}] = {any}\n", .{ ii, self.lagrange_evals_r0[ii].toBytesBE() });
+                            }
+                        }
                     }
-
-                    // Compare per-cycle Az*Bz between UniSkip and materialization for cycle 0
-                    // UniSkip path: evaluate at extended points, interpolate, evaluate at r0
-                    // Materialization path: Lagrange evaluate directly at r0
-                    if (self.cycle_witnesses.len > 0) {
-                        const w0 = &self.cycle_witnesses[0];
-                        // Compute UniSkip's Az*Bz for cycle 0, group 0 at each target
-                        // First compute base values
-                        var az_base_g0: [FIRST_GROUP_SIZE]F = undefined;
-                        var bz_base_g0: [FIRST_GROUP_SIZE]F = undefined;
-                        for (0..FIRST_GROUP_SIZE) |ii| {
-                            const cidx = constraints.FIRST_GROUP_INDICES[ii];
-                            const cst = constraints.UNIFORM_CONSTRAINTS[cidx];
-                            az_base_g0[ii] = cst.condition.evaluate(F, w0.asSlice());
-                            bz_base_g0[ii] = cst.left.evaluate(F, w0.asSlice())
-                                .sub(cst.right.evaluate(F, w0.asSlice()));
-                        }
-
-                        // Print base Az*Bz products (should be 0 for correct witness)
-                        for (0..@min(3, FIRST_GROUP_SIZE)) |ii| {
-                            dbg("[DEBUG4] base Az[{d}]*Bz[{d}] = {any}\n", .{
-                                ii, ii, az_base_g0[ii].mul(bz_base_g0[ii]).toBytesBE(),
-                            });
-                        }
-
-                        // Compute direct Az(r0) and Bz(r0) using lagrange_evals_r0
-                        var az_direct_r0 = F.zero();
-                        var bz_direct_r0 = F.zero();
-                        for (0..FIRST_GROUP_SIZE) |ii| {
-                            az_direct_r0 = az_direct_r0.add(self.lagrange_evals_r0[ii].mul(az_base_g0[ii]));
-                            bz_direct_r0 = bz_direct_r0.add(self.lagrange_evals_r0[ii].mul(bz_base_g0[ii]));
-                        }
-                        dbg("[DEBUG4] Az(r0)_direct = {any}\n", .{az_direct_r0.toBytesBE()});
-                        dbg("[DEBUG4] Bz(r0)_direct = {any}\n", .{bz_direct_r0.toBytesBE()});
-                        dbg("[DEBUG4] Az(r0)*Bz(r0)_direct = {any}\n", .{az_direct_r0.mul(bz_direct_r0).toBytesBE()});
-
-                        // Compare with materialized value
-                        dbg("[DEBUG4] Az_mat[0] = {any}\n", .{az_p3.evaluations[0].toBytesBE()});
-                        dbg("[DEBUG4] Bz_mat[0] = {any}\n", .{bz_p3.evaluations[0].toBytesBE()});
-                        dbg("[DEBUG4] Az_mat*Bz_mat[0] = {any}\n", .{az_p3.evaluations[0].mul(bz_p3.evaluations[0]).toBytesBE()});
-                        dbg("[DEBUG4] Az match? {}\n", .{az_direct_r0.eql(az_p3.evaluations[0])});
-                        dbg("[DEBUG4] Bz match? {}\n", .{bz_direct_r0.eql(bz_p3.evaluations[0])});
-
-                        // Now compute via UniSkip's interpolation approach
-                        // t1_at_r0_cycle0_g0 = Σ_Y t1_vals(Y) * L_Y(r0) / domain_vanishing(r0)
-                        // But actually, the UniSkip computes AzBz at extended points and then
-                        // does polynomial interpolation. Let me instead just evaluate the PRODUCT
-                        // polynomial at r0 by evaluating Az and Bz separately:
-                        //   Az(r0) = Σ_i L_i(r0) * az_base[i]
-                        //   Bz(r0) = Σ_i L_i(r0) * bz_base[i]
-                        // This should equal the materialized Az[0], Bz[0]
-
-                        // The issue might be in lagrange_evals_r0 computation!
-                        // Print first few lagrange_evals_r0
-                        for (0..@min(4, FIRST_GROUP_SIZE)) |ii| {
-                            dbg("[DEBUG4] lagrange_evals_r0[{d}] = {any}\n", .{ii, self.lagrange_evals_r0[ii].toBytesBE()});
-                        }
-                    }
-                }
                 } // end if (comptime debug_verbose) for DEBUG3+DEBUG5+DEBUG6+DEBUG4
             }
 
@@ -2382,10 +2395,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // bound[j] = old[2*j] + r*(old[2*j+1] - old[2*j])
                 // So pair i reads old[4*i..4*i+3]
                 const FusedBindCtx = struct {
-                    az_s: []const F, az_d: []F,
-                    bz_s: []const F, bz_d: []F,
+                    az_s: []const F,
+                    az_d: []F,
+                    bz_s: []const F,
+                    bz_d: []F,
                     r_val: F,
-                    E_out: []const F, E_in: []const F,
+                    E_out: []const F,
+                    E_in: []const F,
                     num_xin_bits: u6,
                     total_pairs: usize,
                     new_size: usize,
@@ -2398,10 +2414,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const bz_dest = if (has_scratch) bz_scratch.? else bz_src;
 
                 const fused_ctx = FusedBindCtx{
-                    .az_s = az_src, .az_d = az_dest,
-                    .bz_s = bz_src, .bz_d = bz_dest,
+                    .az_s = az_src,
+                    .az_d = az_dest,
+                    .bz_s = bz_src,
+                    .bz_d = bz_dest,
                     .r_val = r,
-                    .E_out = E_out, .E_in = E_in,
+                    .E_out = E_out,
+                    .E_in = E_in,
                     .num_xin_bits = num_xin_bits,
                     .total_pairs = total_pairs,
                     .new_size = new_size,
@@ -2924,7 +2943,6 @@ test "StreamingOuterProver: expected_output_claim cross-verification" {
     // Since eq is symmetric in its arguments (eq(a,b) = eq(b,a) for each coordinate),
     // and multiplication is commutative, these should be equal.
     const verifier_eq_factor = lagrange_tau_r0.mul(tau_bound_r_tail_reversed);
-
 
     // The prover's eq factor should match the verifier's eq factor
     try testing.expect(prover_eq_factor.eql(verifier_eq_factor));

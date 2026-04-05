@@ -727,8 +727,6 @@ fn batchAffineAddRows(
     G1Proj.batchNormalize(proj_results, results);
 }
 
-
-
 /// A group of G1/G2 point slices for batched multi-pairing.
 pub const PairGroup = struct {
     g1: []const G1Point,
@@ -841,7 +839,12 @@ pub fn multiPairBatched(comptime N: comptime_int, groups: [N]PairGroup, tp: ?*Th
     }
 
     const miller_accs = tp.?.parallelReduceForce(
-        [N]pairing.Fp12, total, identity, ctx, mapFn, reduceFn,
+        [N]pairing.Fp12,
+        total,
+        identity,
+        ctx,
+        mapFn,
+        reduceFn,
     );
 
     // Final exponentiations — run in parallel via parallelForForce
@@ -1287,7 +1290,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                                 const row_s = row * c.n_cols;
                                 if (row_s >= c.evals_ptr.len) break;
                                 const row_e = @min(row_s + c.n_cols, c.evals_ptr.len);
-                                const rc = msm.MSM(F, Fp).compute(c.params_ptr.g1_vec[0..row_e - row_s], c.evals_ptr[row_s..row_e]);
+                                const rc = msm.MSM(F, Fp).compute(c.params_ptr.g1_vec[0 .. row_e - row_s], c.evals_ptr[row_s..row_e]);
                                 if (row < c.params_ptr.g2_vec.len and !rc.infinity) {
                                     const g1_fp = G1PointFp{ .x = rc.x, .y = rc.y, .infinity = false };
                                     acc = acc.mul(pairing.millerLoopArkworks(g1_fp, c.params_ptr.g2_vec[row]));
@@ -2384,7 +2387,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             defer allocator.free(v_vec);
 
             if (comptime dory_bench_timing) {
-                std.debug.print("    [DORY-VMV] eval_vectors + VMP ({}x{}): {d:.2} ms\n", .{@as(usize, 1) << @intCast(nu), @as(usize, 1) << @intCast(sigma), @as(f64, @floatFromInt(vmv_sub_t.read())) / 1_000_000.0});
+                std.debug.print("    [DORY-VMV] eval_vectors + VMP ({}x{}): {d:.2} ms\n", .{ @as(usize, 1) << @intCast(nu), @as(usize, 1) << @intCast(sigma), @as(f64, @floatFromInt(vmv_sub_t.read())) / 1_000_000.0 });
                 vmv_sub_t.reset();
             }
 
@@ -2483,7 +2486,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     }
                     break :blk2 msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], null);
                 } else msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], null),
-                if (gpu_msm) |gpu| blk2: {
+                if (gpu_msm) |gpu|
+                blk2: {
                     if (e1_bases.len >= 64) {
                         break :blk2 gpu.computeSingleMsm(e1_bases, left_vec, allocator) catch
                             msm.MSM(F, Fp).computeWithPool(e1_bases, left_vec, null);
@@ -2640,11 +2644,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 if (tp) |pool| {
                     const BnG1Ctx = struct { src: []const G1Proj, dst: []G1Point };
                     const BnG2Ctx = struct { src: []const G2Projective, dst: []G2Point };
-                    _ = pool.join(void, void,
+                    _ = pool.join(
+                        void,
+                        void,
                         BnG1Ctx{ .src = v1_proj[0..current_len], .dst = v1_affine[0..current_len] },
-                        struct { fn f(ctx_bn: BnG1Ctx) void { G1Proj.batchNormalize(ctx_bn.src, ctx_bn.dst); } }.f,
+                        struct {
+                            fn f(ctx_bn: BnG1Ctx) void {
+                                G1Proj.batchNormalize(ctx_bn.src, ctx_bn.dst);
+                            }
+                        }.f,
                         BnG2Ctx{ .src = v2_proj[0..current_len], .dst = v2_affine[0..current_len] },
-                        struct { fn f(ctx_bn: BnG2Ctx) void { G2Projective.batchNormalize(ctx_bn.src, ctx_bn.dst); } }.f,
+                        struct {
+                            fn f(ctx_bn: BnG2Ctx) void {
+                                G2Projective.batchNormalize(ctx_bn.src, ctx_bn.dst);
+                            }
+                        }.f,
                     );
                 } else {
                     G1Proj.batchNormalize(v1_proj[0..current_len], v1_affine[0..current_len]);
@@ -2703,7 +2717,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                             }
                             break :blk msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], null);
                         } else msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], null),
-                        if (gpu_msm) |gpu| blk: {
+                        if (gpu_msm) |gpu|
+                        blk: {
                             if (n2 >= 64) {
                                 break :blk gpu.computeSingleMsm(params.g1_vec[0..n2], v_vec[n2..current_len], allocator) catch
                                     msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], null);
@@ -2958,11 +2973,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 if (tp) |pool| {
                     const BnG1Ctx = struct { src: []const G1Proj, dst: []G1Point };
                     const BnG2Ctx = struct { src: []const G2Projective, dst: []G2Point };
-                    _ = pool.join(void, void,
+                    _ = pool.join(
+                        void,
+                        void,
                         BnG1Ctx{ .src = v1_proj[0..current_len], .dst = v1_affine[0..current_len] },
-                        struct { fn f(ctx_bn: BnG1Ctx) void { G1Proj.batchNormalize(ctx_bn.src, ctx_bn.dst); } }.f,
+                        struct {
+                            fn f(ctx_bn: BnG1Ctx) void {
+                                G1Proj.batchNormalize(ctx_bn.src, ctx_bn.dst);
+                            }
+                        }.f,
                         BnG2Ctx{ .src = v2_proj[0..current_len], .dst = v2_affine[0..current_len] },
-                        struct { fn f(ctx_bn: BnG2Ctx) void { G2Projective.batchNormalize(ctx_bn.src, ctx_bn.dst); } }.f,
+                        struct {
+                            fn f(ctx_bn: BnG2Ctx) void {
+                                G2Projective.batchNormalize(ctx_bn.src, ctx_bn.dst);
+                            }
+                        }.f,
                     );
                 } else {
                     G1Proj.batchNormalize(v1_proj[0..current_len], v1_affine[0..current_len]);
@@ -3022,7 +3047,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         }
                         break :blk2 msm.MSM(F, Fp).computeWithPool(v1_affine[0..n2], s2_work[n2..current_len], ThreadPool.getPool());
                     } else msm.MSM(F, Fp).computeWithPool(v1_affine[0..n2], s2_work[n2..current_len], ThreadPool.getPool()),
-                    if (gpu_msm) |gpu| blk2: {
+                    if (gpu_msm) |gpu|
+                    blk2: {
                         if (n2 >= 64) {
                             break :blk2 gpu.computeSingleMsm(v1_affine[n2..current_len], s2_work[0..n2], allocator) catch
                                 msm.MSM(F, Fp).computeWithPool(v1_affine[n2..current_len], s2_work[0..n2], ThreadPool.getPool());

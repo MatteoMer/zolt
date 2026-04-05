@@ -35,14 +35,14 @@ const KECCAK_RC: [24]u64 = .{
 
 /// Rotation offsets for the rho step
 const KECCAK_ROTC: [24]u6 = .{
-    1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14,
-    27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44,
+    1,  3,  6,  10, 15, 21, 28, 36, 45, 55, 2,  14,
+    27, 41, 56, 8,  25, 43, 62, 18, 39, 61, 20, 44,
 };
 
 /// Position indices for the pi step
 const KECCAK_PILN: [24]usize = .{
-    10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4,
-    15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1,
+    10, 7,  11, 17, 18, 3, 5,  16, 8,  21, 24, 4,
+    15, 23, 19, 13, 12, 2, 20, 14, 22, 9,  6,  1,
 };
 
 /// Transcript for Fiat-Shamir transformation

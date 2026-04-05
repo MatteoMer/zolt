@@ -444,7 +444,9 @@ pub fn RafEvaluationProver(comptime F: type) type {
             }.f;
 
             const reduceFn = struct {
-                fn f(a: [2]F, b: [2]F) [2]F { return .{ a[0].add(b[0]), a[1].add(b[1]) }; }
+                fn f(a: [2]F, b: [2]F) [2]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]) };
+                }
             }.f;
 
             const identity = [2]F{ F.zero(), F.zero() };

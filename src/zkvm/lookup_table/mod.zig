@@ -1578,20 +1578,12 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                         positive_remainder_less_than_divisor = positive_remainder_less_than_divisor.mul(F.one().sub(x_i).mul(y_i));
                         negative_divisor_greater_than_remainder = negative_divisor_greater_than_remainder.mul(x_i.mul(F.one().sub(y_i)));
                     } else {
-                        positive_remainder_less_than_divisor = positive_remainder_less_than_divisor.add(
-                            positive_remainder_equals_divisor.mul(F.one().sub(x_i).mul(y_i))
-                        );
-                        negative_divisor_greater_than_remainder = negative_divisor_greater_than_remainder.add(
-                            negative_divisor_equals_remainder.mul(x_i.mul(F.one().sub(y_i)))
-                        );
+                        positive_remainder_less_than_divisor = positive_remainder_less_than_divisor.add(positive_remainder_equals_divisor.mul(F.one().sub(x_i).mul(y_i)));
+                        negative_divisor_greater_than_remainder = negative_divisor_greater_than_remainder.add(negative_divisor_equals_remainder.mul(x_i.mul(F.one().sub(y_i))));
                     }
 
-                    positive_remainder_equals_divisor = positive_remainder_equals_divisor.mul(
-                        x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i)))
-                    );
-                    negative_divisor_equals_remainder = negative_divisor_equals_remainder.mul(
-                        x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i)))
-                    );
+                    positive_remainder_equals_divisor = positive_remainder_equals_divisor.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                    negative_divisor_equals_remainder = negative_divisor_equals_remainder.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
                     remainder_is_zero = remainder_is_zero.mul(F.one().sub(x_i));
                     divisor_is_zero = divisor_is_zero.mul(F.one().sub(y_i));
                 }

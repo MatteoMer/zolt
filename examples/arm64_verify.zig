@@ -35,8 +35,7 @@ noinline fn bareAddLoop(acc: *[4]u64, b: *const [4]u64, n: u64) void {
         : [_acc] "{x9}" (acc),
           [_b] "{x10}" (b),
           [_n] "{x11}" (n),
-        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .nzcv = true, .memory = true }
-    );  // note: Zig requires trailing comma after last clobber field
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .nzcv = true, .memory = true }); // note: Zig requires trailing comma after last clobber field
 }
 
 // ── Claim B: branchless add (adds/adcs + subs/sbcs + csel) ≈ 7 cycles ─────
@@ -78,8 +77,7 @@ noinline fn branchlessAddLoop(acc: *[4]u64, b: *const [4]u64, m: *const [4]u64, 
           [_b] "{x10}" (b),
           [_m] "{x20}" (m),
           [_n] "{x11}" (n),
-        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .x17 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .nzcv = true, .memory = true }
-    );
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .x17 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .nzcv = true, .memory = true });
 }
 
 // ── Claim C: b−p trick with branch ≈ 3 cycles average (0.8 ns) ────────────
@@ -117,8 +115,7 @@ noinline fn bpBranchAddLoop(acc: *[4]u64, bmp: *const [4]u64, m: *const [4]u64, 
           [_bmp] "{x10}" (bmp),
           [_m] "{x20}" (m),
           [_n] "{x11}" (n),
-        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .x20 = true, .nzcv = true, .memory = true }
-    );
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .x20 = true, .nzcv = true, .memory = true });
 }
 
 // ── Claim D: sub with proper sbcs + mask correction ≈ 2 ns ─────────────────
@@ -156,8 +153,7 @@ noinline fn maskSubLoop(acc: *[4]u64, b: *const [4]u64, m: *const [4]u64, n: u64
           [_b] "{x10}" (b),
           [_m] "{x20}" (m),
           [_n] "{x11}" (n),
-        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .x17 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .nzcv = true, .memory = true }
-    );
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .x17 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .nzcv = true, .memory = true });
 }
 
 // ── Claim E: sub with branch (fast path: no borrow) ────────────────────────
@@ -192,8 +188,7 @@ noinline fn branchSubLoop(acc: *[4]u64, b: *const [4]u64, m: *const [4]u64, n: u
           [_b] "{x10}" (b),
           [_m] "{x20}" (m),
           [_n] "{x11}" (n),
-        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .x20 = true, .nzcv = true, .memory = true }
-    );
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x12 = true, .x13 = true, .x14 = true, .x15 = true, .x20 = true, .nzcv = true, .memory = true });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

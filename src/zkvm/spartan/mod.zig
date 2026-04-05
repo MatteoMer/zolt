@@ -15,7 +15,6 @@ const poly = @import("zolt_arith").poly;
 const subprotocols = @import("zolt_arith").subprotocols;
 const r1cs = @import("../r1cs/mod.zig");
 
-
 // Streaming outer prover for Jolt compatibility
 pub const streaming_outer = @import("streaming_outer.zig");
 pub const StreamingOuterProver = streaming_outer.StreamingOuterProver;
@@ -63,7 +62,6 @@ pub const Stage7Result = stage7_prover_mod.Stage7Result;
 
 // Shared sumcheck helper functions
 pub const sumcheck_helpers = @import("sumcheck_helpers.zig");
-
 
 /// Spartan proof for R1CS
 pub fn R1CSProof(comptime F: type) type {

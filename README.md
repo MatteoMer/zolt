@@ -89,7 +89,7 @@ Compared against [Jolt](https://github.com/a16z/jolt) (Rust) on a Hetzner CPX41 
 
 ## Upstream Compatibility
 
-The `jolt-verifier/` crate is pinned to upstream commit [`2e05fe88`](https://github.com/a16z/jolt/commit/2e05fe88). This is the version all 8 programs are verified against. Updating to a newer upstream commit may require adjustments if the verification protocol changes.
+The `jolt-verifier/` and `jolt-bench/` crates are pinned to upstream commit [`997c1543`](https://github.com/a16z/jolt/commit/997c1543). This is the version all 8 programs are verified against. Updating to a newer upstream commit may require adjustments if the verification protocol changes.
 
 ## Project Structure
 

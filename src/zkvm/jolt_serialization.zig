@@ -283,9 +283,9 @@ pub fn ArkworksSerializer(comptime F: type) type {
                                 const be_bytes = entry.claim.toBytesBE();
                                 dbg("[SERIALIZE] InstructionRa({}) {s} FULL:\n", .{ ra_idx, @tagName(v.sumcheck_id) });
                                 dbg("  LE bytes: [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
-                                    le_bytes[0], le_bytes[1], le_bytes[2], le_bytes[3],
-                                    le_bytes[4], le_bytes[5], le_bytes[6], le_bytes[7],
-                                    le_bytes[8], le_bytes[9], le_bytes[10], le_bytes[11],
+                                    le_bytes[0],  le_bytes[1],  le_bytes[2],  le_bytes[3],
+                                    le_bytes[4],  le_bytes[5],  le_bytes[6],  le_bytes[7],
+                                    le_bytes[8],  le_bytes[9],  le_bytes[10], le_bytes[11],
                                     le_bytes[12], le_bytes[13], le_bytes[14], le_bytes[15],
                                     le_bytes[16], le_bytes[17], le_bytes[18], le_bytes[19],
                                     le_bytes[20], le_bytes[21], le_bytes[22], le_bytes[23],
@@ -293,9 +293,9 @@ pub fn ArkworksSerializer(comptime F: type) type {
                                     le_bytes[28], le_bytes[29], le_bytes[30], le_bytes[31],
                                 });
                                 dbg("  BE bytes: [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
-                                    be_bytes[0], be_bytes[1], be_bytes[2], be_bytes[3],
-                                    be_bytes[4], be_bytes[5], be_bytes[6], be_bytes[7],
-                                    be_bytes[8], be_bytes[9], be_bytes[10], be_bytes[11],
+                                    be_bytes[0],  be_bytes[1],  be_bytes[2],  be_bytes[3],
+                                    be_bytes[4],  be_bytes[5],  be_bytes[6],  be_bytes[7],
+                                    be_bytes[8],  be_bytes[9],  be_bytes[10], be_bytes[11],
                                     be_bytes[12], be_bytes[13], be_bytes[14], be_bytes[15],
                                     be_bytes[16], be_bytes[17], be_bytes[18], be_bytes[19],
                                     be_bytes[20], be_bytes[21], be_bytes[22], be_bytes[23],
@@ -319,9 +319,9 @@ pub fn ArkworksSerializer(comptime F: type) type {
                         if (v.poly == .RegistersVal and v.sumcheck_id == .RegistersReadWriteChecking) {
                             const le_bytes = entry.claim.toBytes();
                             dbg("[SERIALIZE] RegistersVal@RegsRWCheck FULL (LE): [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
-                                le_bytes[0], le_bytes[1], le_bytes[2], le_bytes[3],
-                                le_bytes[4], le_bytes[5], le_bytes[6], le_bytes[7],
-                                le_bytes[8], le_bytes[9], le_bytes[10], le_bytes[11],
+                                le_bytes[0],  le_bytes[1],  le_bytes[2],  le_bytes[3],
+                                le_bytes[4],  le_bytes[5],  le_bytes[6],  le_bytes[7],
+                                le_bytes[8],  le_bytes[9],  le_bytes[10], le_bytes[11],
                                 le_bytes[12], le_bytes[13], le_bytes[14], le_bytes[15],
                             });
                         }

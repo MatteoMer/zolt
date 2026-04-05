@@ -296,20 +296,16 @@ pub fn R1CSInputEvaluator(comptime F: type) type {
                         // Reduce inner accumulators and weight by eq_one[x1]
                         // Map results back to R1CS input indices using inline for for comptime index resolution
                         inline for (0..Raw.NUM_U64_INPUTS) |ui| {
-                            outer_accum[Raw.U64_INDICES[ui].toIndex()].addAssign(
-                                Accum.fromMul(eq1_val, acc_u64s[ui].barrettReduce()));
+                            outer_accum[Raw.U64_INDICES[ui].toIndex()].addAssign(Accum.fromMul(eq1_val, acc_u64s[ui].barrettReduce()));
                         }
                         inline for (0..Raw.NUM_SIGNED_INPUTS) |si| {
-                            outer_accum[Raw.SIGNED_INDICES[si].toIndex()].addAssign(
-                                Accum.fromMul(eq1_val, acc_signed[si].barrettReduce()));
+                            outer_accum[Raw.SIGNED_INDICES[si].toIndex()].addAssign(Accum.fromMul(eq1_val, acc_signed[si].barrettReduce()));
                         }
                         inline for (0..Raw.NUM_WIDE_INPUTS) |wi| {
-                            outer_accum[Raw.WIDE_INDICES[wi].toIndex()].addAssign(
-                                Accum.fromMul(eq1_val, acc_wide[wi].barrettReduce()));
+                            outer_accum[Raw.WIDE_INDICES[wi].toIndex()].addAssign(Accum.fromMul(eq1_val, acc_wide[wi].barrettReduce()));
                         }
                         inline for (0..Raw.NUM_BOOL_INPUTS) |bi| {
-                            outer_accum[Raw.BOOL_INDICES[bi].toIndex()].addAssign(
-                                Accum.fromMul(eq1_val, acc_bools[bi].barrettReduce()));
+                            outer_accum[Raw.BOOL_INDICES[bi].toIndex()].addAssign(Accum.fromMul(eq1_val, acc_bools[bi].barrettReduce()));
                         }
                     }
                     return outer_accum;

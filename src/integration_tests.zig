@@ -274,7 +274,6 @@ test "e2e: simple addi program execution trace" {
     try testing.expect(emu.trace.len() > 0);
 }
 
-
 test "e2e: multi-instruction program emulation" {
     // Tests emulator with arithmetic and add instructions
     const allocator = testing.allocator;

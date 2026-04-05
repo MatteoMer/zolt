@@ -498,7 +498,9 @@ fn populateVirtualAssertValidDiv0Entry(
     var cf = &entry.circuit_flags;
     cf[@intFromEnum(CircuitFlags.Assert)] = true;
     if (virtual_sequence_remaining != null) cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
-    if (virtual_sequence_remaining) |vsr| { if (vsr != 0) cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true; }
+    if (virtual_sequence_remaining) |vsr| {
+        if (vsr != 0) cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    }
     if (is_first_in_sequence) cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
     var inf = &entry.instruction_flags;
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
@@ -532,7 +534,9 @@ fn populateVirtualChangeDivisorWEntry(
     var cf = &entry.circuit_flags;
     cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
     if (virtual_sequence_remaining != null) cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
-    if (virtual_sequence_remaining) |vsr| { if (vsr != 0) cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true; }
+    if (virtual_sequence_remaining) |vsr| {
+        if (vsr != 0) cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    }
     if (is_first_in_sequence) cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
     var inf = &entry.instruction_flags;
     inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
@@ -1863,18 +1867,20 @@ fn getOp32RTypeEncoding(variant: preprocessing.JoltInstruction.InstructionVarian
 }
 
 fn getITypeEncoding(variant: preprocessing.JoltInstruction.InstructionVariant) struct { funct3: u3 } {
-    return .{ .funct3 = switch (variant) {
-        .ADDI => 0,
-        .SLTI => 2,
-        .SLTIU => 3,
-        .XORI => 4,
-        .ORI => 6,
-        .ANDI => 7,
-        .SLLI => 1,
-        .SRLI => 5, // funct7 encoded in imm[11:5]
-        .SRAI => 5, // funct7 encoded in imm[11:5] (bit 30 set)
-        else => unreachable,
-    } };
+    return .{
+        .funct3 = switch (variant) {
+            .ADDI => 0,
+            .SLTI => 2,
+            .SLTIU => 3,
+            .XORI => 4,
+            .ORI => 6,
+            .ANDI => 7,
+            .SLLI => 1,
+            .SRLI => 5, // funct7 encoded in imm[11:5]
+            .SRAI => 5, // funct7 encoded in imm[11:5] (bit 30 set)
+            else => unreachable,
+        },
+    };
 }
 
 fn getOpImm32Encoding(variant: preprocessing.JoltInstruction.InstructionVariant) struct { funct3: u3 } {
@@ -3082,11 +3088,19 @@ pub fn buildBytecodeEntries(
                 var inf = [_]bool{false} ** 7;
                 inf[@intFromEnum(InstructionFlags.IsNoop)] = true;
                 entries[k] = BytecodeEntry{
-                    .address = 0, .imm = 0, .rd = 255, .rs1 = 255, .rs2 = 255,
-                    .circuit_flags = cf, .instruction_flags = inf,
-                    .lookup_table_index = 255, .is_interleaved = true,
-                    .virtual_sequence_remaining = null, .is_first_in_sequence = false,
-                    .opcode = 0, .funct3 = 0,
+                    .address = 0,
+                    .imm = 0,
+                    .rd = 255,
+                    .rs1 = 255,
+                    .rs2 = 255,
+                    .circuit_flags = cf,
+                    .instruction_flags = inf,
+                    .lookup_table_index = 255,
+                    .is_interleaved = true,
+                    .virtual_sequence_remaining = null,
+                    .is_first_in_sequence = false,
+                    .opcode = 0,
+                    .funct3 = 0,
                 };
             } else if (is_prep_unimpl) {
                 // Preprocessing has UNIMPL — set entry to UNIMPL (address=0, matching Jolt's Default)
@@ -3103,8 +3117,7 @@ pub fn buildBytecodeEntries(
                 entries[k].is_first_in_sequence = false;
                 entries[k].opcode = 0;
                 entries[k].funct3 = 0;
-            }
-            else {
+            } else {
                 // Real instruction in preprocessing but prover has different/UNIMPL.
                 // Re-decode from raw bytes at the preprocessing's address.
                 if (program_code_bytes) |code_bytes| {
@@ -3187,8 +3200,15 @@ fn isKnownInstruction(opcode: u8, funct3: u3, funct7: u7) bool {
             5 => true, // SRLIW/SRAIW
             else => false,
         },
-        0x03, 0x23, 0x63, 0x37, 0x17, 0x6F, 0x67, // Standard opcodes
-        0x73, 0x0F, // ECALL, FENCE (treated as NoOp in Jolt)
+        0x03,
+        0x23,
+        0x63,
+        0x37,
+        0x17,
+        0x6F,
+        0x67, // Standard opcodes
+        0x73,
+        0x0F, // ECALL, FENCE (treated as NoOp in Jolt)
         => return true,
         // Virtual opcodes (0x0B, 0x2B, 0x5B, 0x02, 0x22) are NOT recognized here
         // since they only appear in virtual sequence entries created by populate functions,

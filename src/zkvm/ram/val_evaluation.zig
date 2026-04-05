@@ -704,7 +704,9 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 }
             }.f;
             const claimReduceFn = struct {
-                fn f(a: F, b: F) F { return a.add(b); }
+                fn f(a: F, b: F) F {
+                    return a.add(b);
+                }
             }.f;
             const initial_claim = if (pool) |tp|
                 tp.parallelReduce(F, n, F.zero(), claim_ctx, claimMapFn, claimReduceFn)
@@ -854,8 +856,12 @@ pub fn ValEvaluationProver(comptime F: type) type {
                             UnreducedProductAccum.zero(), UnreducedProductAccum.zero(),
                         };
                         for (start..end) |i| {
-                            const inc_0 = c.inc[2 * i]; const wa_0 = c.getWaAt(2 * i); const lt_0 = c.lt.getBoundCoeff(2 * i);
-                            const inc_1 = c.inc[2 * i + 1]; const wa_1 = c.getWaAt(2 * i + 1); const lt_1 = c.lt.getBoundCoeff(2 * i + 1);
+                            const inc_0 = c.inc[2 * i];
+                            const wa_0 = c.getWaAt(2 * i);
+                            const lt_0 = c.lt.getBoundCoeff(2 * i);
+                            const inc_1 = c.inc[2 * i + 1];
+                            const wa_1 = c.getWaAt(2 * i + 1);
+                            const lt_1 = c.lt.getBoundCoeff(2 * i + 1);
                             const inc_2 = two.mul(inc_1).sub(inc_0);
                             const wa_2 = two.mul(wa_1).sub(wa_0);
                             const lt_2 = two.mul(lt_1).sub(lt_0);
@@ -874,8 +880,12 @@ pub fn ValEvaluationProver(comptime F: type) type {
                     } else {
                         var local: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
                         for (start..end) |i| {
-                            const inc_0 = c.inc[2 * i]; const wa_0 = c.getWaAt(2 * i); const lt_0 = c.lt.getBoundCoeff(2 * i);
-                            const inc_1 = c.inc[2 * i + 1]; const wa_1 = c.getWaAt(2 * i + 1); const lt_1 = c.lt.getBoundCoeff(2 * i + 1);
+                            const inc_0 = c.inc[2 * i];
+                            const wa_0 = c.getWaAt(2 * i);
+                            const lt_0 = c.lt.getBoundCoeff(2 * i);
+                            const inc_1 = c.inc[2 * i + 1];
+                            const wa_1 = c.getWaAt(2 * i + 1);
+                            const lt_1 = c.lt.getBoundCoeff(2 * i + 1);
                             const inc_2 = two.mul(inc_1).sub(inc_0);
                             const wa_2 = two.mul(wa_1).sub(wa_0);
                             const lt_2 = two.mul(lt_1).sub(lt_0);

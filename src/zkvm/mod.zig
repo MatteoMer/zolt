@@ -330,7 +330,6 @@ pub const VMState = struct {
     }
 };
 
-
 /// Jolt prover
 pub fn JoltProver(comptime F: type) type {
     const ThreadPool = @import("zolt_pool").ThreadPool;
@@ -407,12 +406,14 @@ pub fn JoltProver(comptime F: type) type {
             // This replaces the old buildCompactAndRawWitnesses which decoded field witnesses.
             const trace_witness = @import("r1cs/trace_witness.zig");
             const prebuilt = try trace_witness.buildFromTrace(
-                &emulator.trace, &bytecode_prep_witness.pc_map,
-                emulator.trace.steps.items.len, self.allocator, self.thread_pool,
+                &emulator.trace,
+                &bytecode_prep_witness.pc_map,
+                emulator.trace.steps.items.len,
+                self.allocator,
+                self.thread_pool,
             );
             defer self.allocator.free(prebuilt.compact);
             defer self.allocator.free(prebuilt.raw);
-
 
             // Convert to Jolt format using the proof converter with transcript
             var converter = if (self.thread_pool) |tp|
@@ -523,7 +524,7 @@ pub fn JoltProver(comptime F: type) type {
             const srs_time_ns = phase_timer.read();
             if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] SRS setup: {d:.1} ms\n", .{@as(f64, @floatFromInt(srs_time_ns)) / 1_000_000.0});
 
-            dbg("[SRS] Loaded: g1_vec={}, g2_vec={}\n", .{dory_srs.g1_vec.len, dory_srs.g2_vec.len});
+            dbg("[SRS] Loaded: g1_vec={}, g2_vec={}\n", .{ dory_srs.g1_vec.len, dory_srs.g2_vec.len });
 
             // Debug: print SRS key values for comparison with verifier
             {
@@ -601,7 +602,7 @@ pub fn JoltProver(comptime F: type) type {
 
             dbg("[ZOLT] OneHot params: instruction_d={}, bytecode_d={}, ram_d={}\n", .{ instruction_d, bytecode_d, ram_d });
 
-            dbg("[DORY] Computing {} Dory commitments (instruction_d={}, ram_d={}, bytecode_d={})...\n", .{2 + instruction_d + ram_d + bytecode_d, instruction_d, ram_d, bytecode_d});
+            dbg("[DORY] Computing {} Dory commitments (instruction_d={}, ram_d={}, bytecode_d={})...\n", .{ 2 + instruction_d + ram_d + bytecode_d, instruction_d, ram_d, bytecode_d });
             // Build commitment polynomials and compute Dory commitments
             // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
             //
@@ -1429,15 +1430,13 @@ pub fn JoltProver(comptime F: type) type {
                 }
 
                 dbg("[STAGE8] Dory proof: nu={}, sigma={}, first_messages={}, second_messages={}\n", .{
-                    dory_proof.nu, dory_proof.sigma,
+                    dory_proof.nu,                 dory_proof.sigma,
                     dory_proof.first_messages.len, dory_proof.second_messages.len,
                 });
             }
 
             return result;
         }
-
-
 
         /// Serialize a JoltProofWithDory bundle to bytes
         ///
@@ -1538,11 +1537,8 @@ pub fn JoltProver(comptime F: type) type {
 
             return serializer.toOwnedSlice();
         }
-
-
     };
 }
-
 
 test {
     // Discover tests in sub-modules

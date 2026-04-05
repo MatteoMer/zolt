@@ -1,7 +1,6 @@
 /// MSM Benchmark: Pippenger MSM for BN254 G1 and G2
 /// Tests same sizes as Dory opening proof (2..4096 points)
 /// Outputs machine-readable [MSM-BENCH] lines for comparison with arkworks.
-
 const std = @import("std");
 const zolt = @import("zolt");
 const field = zolt.field;

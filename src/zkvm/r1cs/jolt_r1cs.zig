@@ -697,7 +697,7 @@ test "jolt spartan interface" {
     defer allocator.free(witness);
 
     // Create tau challenge
-    const tau = [_]F{F.fromU64(7), F.fromU64(11), F.fromU64(13), F.fromU64(17), F.fromU64(19)};
+    const tau = [_]F{ F.fromU64(7), F.fromU64(11), F.fromU64(13), F.fromU64(17), F.fromU64(19) };
 
     var spartan = try JoltSpartanInterface(F).init(allocator, &r1cs, witness, &tau);
     defer spartan.deinit();

@@ -418,7 +418,9 @@ pub fn Stage4GruenProver(comptime F: type) type {
                         }
                     }.f;
                     const reduceFn = struct {
-                        fn f(a: F, b: F) F { return a.add(b); }
+                        fn f(a: F, b: F) F {
+                            return a.add(b);
+                        }
                     }.f;
 
                     if (self.thread_pool) |tp| {

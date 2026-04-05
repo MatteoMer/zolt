@@ -1576,16 +1576,24 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const half = self.current_prefix_size / 2;
 
             const P1Ctx = struct {
-                P0o: []const F, Q0o: []const F,
-                P1o: []const F, Q1o: []const F,
-                P0p: []const F, Q0p: []const F,
-                P1p: []const F, Q1p: []const F,
+                P0o: []const F,
+                Q0o: []const F,
+                P1o: []const F,
+                Q1o: []const F,
+                P0p: []const F,
+                Q0p: []const F,
+                P1p: []const F,
+                Q1p: []const F,
             };
             const ctx = P1Ctx{
-                .P0o = self.P_0_outer, .Q0o = self.Q_0_outer,
-                .P1o = self.P_1_outer, .Q1o = self.Q_1_outer,
-                .P0p = self.P_0_prod, .Q0p = self.Q_0_prod,
-                .P1p = self.P_1_prod, .Q1p = self.Q_1_prod,
+                .P0o = self.P_0_outer,
+                .Q0o = self.Q_0_outer,
+                .P1o = self.P_1_outer,
+                .Q1o = self.Q_1_outer,
+                .P0p = self.P_0_prod,
+                .Q0p = self.Q_0_prod,
+                .P1p = self.P_1_prod,
+                .Q1p = self.Q_1_prod,
             };
 
             const mapFn = struct {
@@ -1795,8 +1803,8 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 .slices = .{
                     self.P_0_outer, self.Q_0_outer,
                     self.P_1_outer, self.Q_1_outer,
-                    self.P_0_prod, self.Q_0_prod,
-                    self.P_1_prod, self.Q_1_prod,
+                    self.P_0_prod,  self.Q_0_prod,
+                    self.P_1_prod,  self.Q_1_prod,
                 },
                 .r = r_j,
                 .n = new_prefix_size,
@@ -1987,10 +1995,14 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const eq_mat_ctx = EqMatCtx{
                 .eq_outer = self.phase2_eq_plus_one_outer.?,
                 .eq_prod = self.phase2_eq_plus_one_prod.?,
-                .s0o = suffix_0_outer, .s1o = suffix_1_outer,
-                .s0p = suffix_0_prod, .s1p = suffix_1_prod,
-                .p0o = prefix_0_eval_outer, .p1o = prefix_1_eval_outer,
-                .p0p = prefix_0_eval_prod, .p1p = prefix_1_eval_prod,
+                .s0o = suffix_0_outer,
+                .s1o = suffix_1_outer,
+                .s0p = suffix_0_prod,
+                .s1p = suffix_1_prod,
+                .p0o = prefix_0_eval_outer,
+                .p1o = prefix_1_eval_outer,
+                .p0p = prefix_0_eval_prod,
+                .p1p = prefix_1_eval_prod,
             };
             const eqMatWorker = struct {
                 fn f(c: EqMatCtx, j: usize) void {
@@ -2213,9 +2225,8 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             };
             const bctx = BindP2Ctx{
                 .slices = .{
-                    self.unexpanded_pc, self.pc, self.is_virtual,
-                    self.is_first_in_sequence, self.is_noop,
-                    self.phase2_eq_plus_one_outer,
+                    self.unexpanded_pc,           self.pc,      self.is_virtual,
+                    self.is_first_in_sequence,    self.is_noop, self.phase2_eq_plus_one_outer,
                     self.phase2_eq_plus_one_prod,
                 },
                 .r = r_j,
@@ -2309,7 +2320,6 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 .is_noop = self.is_noop[0],
             };
         }
-
     };
 }
 
@@ -2568,8 +2578,8 @@ fn InstructionInputProver(comptime F: type) type {
         /// Get main arrays as a fixed-size array of pointers (for parallel bind)
         fn getMainSlices(self: *Self) [8][]F {
             return .{
-                self.left_is_rs1, self.rs1_value,
-                self.left_is_pc, self.unexpanded_pc,
+                self.left_is_rs1,  self.rs1_value,
+                self.left_is_pc,   self.unexpanded_pc,
                 self.right_is_rs2, self.rs2_value,
                 self.right_is_imm, self.imm,
             };

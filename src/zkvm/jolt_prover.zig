@@ -131,9 +131,6 @@ pub fn JoltProver(comptime F: type) type {
             self.gpu_msm = msm_ops;
         }
 
-
-
-
         /// Result of Stage 1 sumcheck proof generation
         const Stage1Result = struct {
             /// Accumulated sumcheck challenges (r_stream, r_cycle_bits...)
@@ -447,9 +444,12 @@ pub fn JoltProver(comptime F: type) type {
             // Compute MLE evaluations at r_cycle using typed accumulators
             const R1CSInputEvaluator = r1cs.R1CSInputEvaluator(F);
             const input_evals = try R1CSInputEvaluator.computeClaimedInputsTyped(
-                self.allocator, raw_r1cs_inputs, padded_trace_len, r_cycle, self.thread_pool,
+                self.allocator,
+                raw_r1cs_inputs,
+                padded_trace_len,
+                r_cycle,
+                self.thread_pool,
             );
-
 
             // Compute Lagrange weights at r0
             const FIRST_GROUP_SIZE = 10;
@@ -524,7 +524,6 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // Blend with r_stream
-
 
             // Add R1CS inputs for SpartanOuter with computed evaluations
             // AND append each claim to transcript in Jolt's order (for Fiat-Shamir)
@@ -608,8 +607,6 @@ pub fn JoltProver(comptime F: type) type {
                 .allocator = self.allocator,
             };
         }
-
-
 
         // =================================================================
         // Stage output structs — carry data between proveWithTranscript stages
@@ -734,7 +731,6 @@ pub fn JoltProver(comptime F: type) type {
             const compact_witnesses = config.prebuilt_compact;
             const raw_r1cs_inputs = config.prebuilt_raw;
 
-
             // ==================================================================
             // Execute 7 proving stages, threading data through output structs
             // ==================================================================
@@ -762,7 +758,6 @@ pub fn JoltProver(comptime F: type) type {
 
             return jolt_proof;
         }
-
 
         /// Stage 1: UniSkip + Outer Spartan sumcheck + opening claims.
         fn executeStage1(
@@ -896,7 +891,6 @@ pub fn JoltProver(comptime F: type) type {
             };
         }
 
-
         /// Stage 2: Product virtualization + RAM RAF + Read-Write + output + instruction claim reduction.
         fn executeStage2(
             self: *Self,
@@ -1007,9 +1001,7 @@ pub fn JoltProver(comptime F: type) type {
 
                 // Debug: verify the claim was inserted correctly
                 const inserted_claim = jolt_proof.opening_claims.get(.{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanProductVirtualization } });
-                if (inserted_claim) |_| {
-                } else {
-                }
+                if (inserted_claim) |_| {} else {}
             }
 
             // Stage 2 batches 5 sumcheck instances:
@@ -1200,7 +1192,6 @@ pub fn JoltProver(comptime F: type) type {
             // Instance 4: OutputSumcheck - 1 claim (only RamValFinal; RamValInit is NOT opened)
             transcript.appendScalar("opening_claim", stage2_result.output_val_final_claim);
 
-
             {
                 const s2_claims_ns = bench_timer.read();
                 const s2_total_ns = stage_timer.read();
@@ -1224,7 +1215,6 @@ pub fn JoltProver(comptime F: type) type {
                 .stage2_result = stage2_result,
             };
         }
-
 
         /// Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction.
         fn executeStage3(
@@ -1264,7 +1254,6 @@ pub fn JoltProver(comptime F: type) type {
                     }
                 }
             }
-
 
             const s3_init_ns = bench_timer.read();
             bench_timer.reset();
@@ -1413,7 +1402,6 @@ pub fn JoltProver(comptime F: type) type {
                 .stage3_result = stage3_result,
             };
         }
-
 
         /// Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation.
         fn executeStage4(
@@ -1585,7 +1573,6 @@ pub fn JoltProver(comptime F: type) type {
                 .allocator = self.allocator,
             };
         }
-
 
         /// Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf.
         fn executeStage5(
@@ -1778,7 +1765,6 @@ pub fn JoltProver(comptime F: type) type {
                 .allocator = self.allocator,
             };
         }
-
 
         /// Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction.
         fn executeStage6(
@@ -1994,7 +1980,6 @@ pub fn JoltProver(comptime F: type) type {
             };
         }
 
-
         /// Stage 7: HammingWeightClaimReduction sumcheck.
         fn executeStage7(
             self: *Self,
@@ -2055,7 +2040,6 @@ pub fn JoltProver(comptime F: type) type {
                 try jolt_proof.opening_claims.insert(key, stage7_result.g_claims[i]);
             }
 
-
             {
                 const s7_sumcheck_ns = bench_timer.read();
                 const s7_total_ns = stage_timer.read();
@@ -2112,7 +2096,6 @@ pub fn JoltProver(comptime F: type) type {
             );
         }
 
-
         /// Evaluate polynomial at challenge using Jolt's eval_from_hint formula
         /// Delegates to the shared UniPoly implementation.
         fn evalFromHint(compressed: [3]F, hint: F, x: F) F {
@@ -2146,7 +2129,6 @@ pub fn JoltProver(comptime F: type) type {
             log_ram_k: usize,
             program_inputs: ?[]const u8,
         ) F {
-
             const lowest_address = memory_layout.getLowestAddress();
 
             var result = F.zero();
@@ -2247,7 +2229,6 @@ pub fn JoltProver(comptime F: type) type {
             return p0.mul(L_0).add(p1.mul(L_1)).add(p2.mul(L_2));
         }
 
-
         /// Create a UniSkipFirstRoundProof for Stage 2 with actual base claims and extended evaluations
         ///
         /// This constructs the polynomial s1(Y) = L(tau_high, Y) * t1(Y) where:
@@ -2291,7 +2272,6 @@ pub fn JoltProver(comptime F: type) type {
                 );
             };
 
-
             // Use the existing buildUniskipFirstRoundPoly function
             const uni_poly = try univariate_skip.buildUniskipFirstRoundPoly(
                 F,
@@ -2304,7 +2284,6 @@ pub fn JoltProver(comptime F: type) type {
                 tau_high,
                 self.allocator,
             );
-
 
             // Verify the polynomial satisfies the sum constraint
             // input_claim = Σ L_i(tau_high) * base_evals[i]
@@ -2410,7 +2389,6 @@ test "proof converter: basic initialization" {
     const converter = JoltProver(BN254Scalar).init(testing.allocator);
     _ = converter;
 }
-
 
 test "proof converter: proveWithTranscript uses Blake2b transcript" {
     const F = BN254Scalar;

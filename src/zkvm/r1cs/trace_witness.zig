@@ -333,8 +333,8 @@ fn compactAndRawFromTraceStep(
     // ── RawR1CSInputs ──
     var raw: RawR1CSInputs = undefined;
     raw.u64_values = .{
-        left_input, pc, upc, ram_addr, rs1, rs2, rd_write,
-        ram_read, ram_write, left_lookup, next_upc, next_pc, lookup_out,
+        left_input, pc,        upc,         ram_addr, rs1,     rs2,        rd_write,
+        ram_read,   ram_write, left_lookup, next_upc, next_pc, lookup_out,
     };
     raw.signed_values = .{ right_input_i128, imm };
     raw.wide_values = .{ product_s192, s192FromU128(right_lookup_u128) };
@@ -387,10 +387,16 @@ const OperandFlags = struct {
 
 fn extractOperandFlags(opcode: u8, funct3: u3, funct7: u7, step: TraceStep, has_table: bool) OperandFlags {
     var f = OperandFlags{
-        .left_is_rs1 = false, .left_is_pc = false,
-        .right_is_rs2 = false, .right_is_imm = false,
-        .flag_add = false, .flag_sub = false, .flag_mul = false,
-        .flag_jump = false, .flag_assert = false, .flag_advice = false,
+        .left_is_rs1 = false,
+        .left_is_pc = false,
+        .right_is_rs2 = false,
+        .right_is_imm = false,
+        .flag_add = false,
+        .flag_sub = false,
+        .flag_mul = false,
+        .flag_jump = false,
+        .flag_assert = false,
+        .flag_advice = false,
         .flag_write_lookup = false,
     };
     if (!has_table) return f;
@@ -412,42 +418,102 @@ fn extractOperandFlags(opcode: u8, funct3: u3, funct7: u7, step: TraceStep, has_
             f.left_is_rs1 = true;
             f.right_is_imm = true; // ALL I-type ALU use imm as right operand
             f.flag_write_lookup = true;
-            if (funct3 == 0) { f.flag_add = true; } // ADDI also has flag_add
+            if (funct3 == 0) {
+                f.flag_add = true;
+            } // ADDI also has flag_add
         },
-        0x6F => { f.left_is_pc = true; f.right_is_imm = true; f.flag_jump = true; f.flag_add = true; },
-        0x67 => { f.left_is_rs1 = true; f.right_is_imm = true; f.flag_jump = true; f.flag_add = true; },
-        0x63 => { f.left_is_rs1 = true; f.right_is_rs2 = true; },
-        0x37 => { f.right_is_imm = true; f.flag_add = true; f.flag_write_lookup = true; },
-        0x17 => { f.left_is_pc = true; f.right_is_imm = true; f.flag_add = true; f.flag_write_lookup = true; },
-        0x1B => { f.left_is_rs1 = true; f.right_is_imm = true; f.flag_add = true; f.flag_write_lookup = true; },
+        0x6F => {
+            f.left_is_pc = true;
+            f.right_is_imm = true;
+            f.flag_jump = true;
+            f.flag_add = true;
+        },
+        0x67 => {
+            f.left_is_rs1 = true;
+            f.right_is_imm = true;
+            f.flag_jump = true;
+            f.flag_add = true;
+        },
+        0x63 => {
+            f.left_is_rs1 = true;
+            f.right_is_rs2 = true;
+        },
+        0x37 => {
+            f.right_is_imm = true;
+            f.flag_add = true;
+            f.flag_write_lookup = true;
+        },
+        0x17 => {
+            f.left_is_pc = true;
+            f.right_is_imm = true;
+            f.flag_add = true;
+            f.flag_write_lookup = true;
+        },
+        0x1B => {
+            f.left_is_rs1 = true;
+            f.right_is_imm = true;
+            f.flag_add = true;
+            f.flag_write_lookup = true;
+        },
         0x3B => { // OP-32: left=rs1, right=rs2 always
             f.left_is_rs1 = true;
             f.right_is_rs2 = true;
             f.flag_write_lookup = true;
-            if (funct3 == 0 and funct7 == 0) { f.flag_add = true; } // ADDW
-            else if (funct3 == 0 and funct7 == 0x20) { f.flag_sub = true; } // SUBW
+            if (funct3 == 0 and funct7 == 0) {
+                f.flag_add = true;
+            } // ADDW
+            else if (funct3 == 0 and funct7 == 0x20) {
+                f.flag_sub = true;
+            } // SUBW
         },
-        0x0B => { f.left_is_rs1 = true; f.flag_add = true; f.flag_write_lookup = true; },
+        0x0B => {
+            f.left_is_rs1 = true;
+            f.flag_add = true;
+            f.flag_write_lookup = true;
+        },
         0x2B => {
             f.left_is_rs1 = true;
             f.right_is_imm = true;
             f.flag_write_lookup = true;
-            if (funct3 == 0) { f.flag_mul = true; } else { f.flag_add = true; }
+            if (funct3 == 0) {
+                f.flag_mul = true;
+            } else {
+                f.flag_add = true;
+            }
         },
         0x5B => {
             f.left_is_rs1 = true;
             f.flag_write_lookup = true;
-            if (step.rs2_read) { f.right_is_rs2 = true; } else { f.right_is_imm = true; }
+            if (step.rs2_read) {
+                f.right_is_rs2 = true;
+            } else {
+                f.right_is_imm = true;
+            }
         },
-        0x02 => { f.flag_advice = true; f.flag_write_lookup = true; },
+        0x02 => {
+            f.flag_advice = true;
+            f.flag_write_lookup = true;
+        },
         0x22 => {
             f.left_is_rs1 = true;
             f.flag_assert = true;
-            if (funct3 == 0 or funct3 == 1) { f.right_is_rs2 = true; }
-            else if (funct3 == 2 or funct3 == 3) { f.right_is_imm = true; f.flag_add = true; }
+            if (funct3 == 0 or funct3 == 1) {
+                f.right_is_rs2 = true;
+            } else if (funct3 == 2 or funct3 == 3) {
+                f.right_is_imm = true;
+                f.flag_add = true;
+            }
         },
-        0x42 => { f.left_is_rs1 = true; f.flag_add = true; f.flag_write_lookup = true; },
-        0x62 => { f.left_is_rs1 = true; f.right_is_rs2 = true; f.flag_assert = true; },
+        0x42 => {
+            f.left_is_rs1 = true;
+            f.flag_add = true;
+            f.flag_write_lookup = true;
+        },
+        0x62 => {
+            f.left_is_rs1 = true;
+            f.right_is_rs2 = true;
+            f.flag_assert = true;
+        },
         else => {},
     }
     return f;

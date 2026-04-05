@@ -211,7 +211,9 @@ pub fn DensePolynomial(comptime F: type) type {
             };
 
             const Ctx = struct { src: []const F, dst: []F, r: F };
-            tp.parallelForForce(new_size, Ctx{ .src = self.evaluations, .dst = scratch, .r = value },
+            tp.parallelForForce(
+                new_size,
+                Ctx{ .src = self.evaluations, .dst = scratch, .r = value },
                 struct {
                     fn f(ctx: Ctx, i: usize) void {
                         const low = ctx.src[2 * i];
@@ -669,7 +671,6 @@ pub fn EqPlusOnePrefixSuffixPoly(comptime F: type) type {
         pub fn suffixSize(self: *const Self) usize {
             return self.suffix_0.len;
         }
-
     };
 }
 

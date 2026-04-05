@@ -1317,7 +1317,7 @@ pub fn evaluateRightOperand(comptime F: type, r: []const F) F {
         if (n == 128 and (i < 3 or i >= 61)) {
             if (comptime debug_verbose) {
                 dbg("[RIGHT_OP_DEBUG] i={d}: r[{d}]={x}, power={x}, term={x}, result={x}\n", .{
-                    i, idx, r[idx].toBytesBE()[16..32].*, power.toBytesBE()[16..32].*,
+                    i,                          idx,                          r[idx].toBytesBE()[16..32].*, power.toBytesBE()[16..32].*,
                     term.toBytesBE()[16..32].*, result.toBytesBE()[16..32].*,
                 });
             }
@@ -1347,7 +1347,7 @@ pub fn evaluateIdentity(comptime F: type, r: []const F) F {
         if (n == 128 and (i < 4 or i >= 124)) {
             if (comptime debug_verbose) {
                 dbg("[IDENTITY_DEBUG] i={d}: r[{d}]={x}, power={x}, term={x}, result={x}\n", .{
-                    i, i, r[i].toBytesBE()[16..32].*, power.toBytesBE()[16..32].*,
+                    i,                          i,                            r[i].toBytesBE()[16..32].*, power.toBytesBE()[16..32].*,
                     term.toBytesBE()[16..32].*, result.toBytesBE()[16..32].*,
                 });
             }

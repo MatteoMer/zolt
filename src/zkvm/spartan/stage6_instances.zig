@@ -1558,7 +1558,7 @@ pub fn BooleanityProver(comptime F: type) type {
                         eq_upper[2 * idx] = eq_upper[idx].mul(one_minus_w);
                     }
                     eq_upper_len *= 2;
-                    if (bit == 0) break;  // prevent underflow on usize
+                    if (bit == 0) break; // prevent underflow on usize
                 }
             }
 
@@ -1942,10 +1942,10 @@ pub fn BooleanityProver(comptime F: type) type {
                         const t_pos2 = try self.allocator.alloc(F, tbl_len); // r1*(1-r0)
                         const t_pos3 = try self.allocator.alloc(F, tbl_len); // r1*r0
                         for (0..K) |k| {
-                            t_pos2[k] = r.mul(old_t0[k]);           // r1*(1-r0)*F
-                            t_pos3[k] = r.mul(old_t1[k]);           // r1*r0*F
-                            t_pos0[k] = old_t0[k].sub(t_pos2[k]);  // (1-r1)(1-r0)*F
-                            t_pos1[k] = old_t1[k].sub(t_pos3[k]);  // (1-r1)*r0*F
+                            t_pos2[k] = r.mul(old_t0[k]); // r1*(1-r0)*F
+                            t_pos3[k] = r.mul(old_t1[k]); // r1*r0*F
+                            t_pos0[k] = old_t0[k].sub(t_pos2[k]); // (1-r1)(1-r0)*F
+                            t_pos1[k] = old_t1[k].sub(t_pos3[k]); // (1-r1)*r0*F
                         }
                         t_pos0[K] = F.zero();
                         t_pos1[K] = F.zero();
@@ -2317,6 +2317,5 @@ pub fn BooleanityProver(comptime F: type) type {
             for (0..8) |bi| dbg("{x:0>2}", .{err_be[31 - bi]});
             dbg(", lazy_num_tables={}\n", .{self.lazy_num_tables});
         }
-
     };
 }

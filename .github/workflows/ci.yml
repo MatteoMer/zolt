@@ -1,0 +1,260 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_extended_proofs:
+        description: "Run extended proof jobs (sha256_128)"
+        required: false
+        type: boolean
+        default: false
+
+# Cancel in-progress runs for the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: "0.15.2"
+
+jobs:
+  # ─── Zig: format check ───────────────────────────────────────────
+  zig-fmt:
+    name: Zig Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Check formatting
+        run: zig build fmt -- --check
+
+  # ─── Zig: tests (Linux) ─────────────────────────────────────────
+  zig-test-linux:
+    name: Zig Tests (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Run tests
+        run: zig build test
+
+  # ─── Zig: tests (macOS ARM) ─────────────────────────────────────
+  zig-test-macos:
+    name: Zig Tests (macOS ARM64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Run tests
+        run: zig build test
+
+  # ─── Zig: release build ─────────────────────────────────────────
+  zig-release-build:
+    name: Zig Release Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build in ReleaseFast mode
+        run: zig build -Doptimize=ReleaseFast
+
+  # ─── Metal shaders (macOS only) ─────────────────────────────────
+  metal-shaders:
+    name: Metal Shaders (macOS ARM64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build Metal shaders
+        run: zig build metal-shaders
+
+  # ─── Rust: verifier build & test ─────────────────────────────────
+  rust-verifier:
+    name: Rust Verifier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: jolt-verifier
+      - name: Build
+        run: cargo build --manifest-path jolt-verifier/Cargo.toml
+      - name: Test
+        run: cargo test --manifest-path jolt-verifier/Cargo.toml
+
+  # ─── Rust: bench build check ─────────────────────────────────────
+  rust-bench:
+    name: Rust Bench (build check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: jolt-bench
+      - name: Build
+        run: cargo build --manifest-path jolt-bench/Cargo.toml
+      - name: Test
+        run: cargo test --manifest-path jolt-bench/Cargo.toml
+
+  # ─── CLI smoke test ──────────────────────────────────────────────
+  cli-smoke:
+    name: CLI Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build CLI
+        run: zig build -Doptimize=ReleaseFast
+      - name: zolt run fibonacci
+        run: ./zig-out/bin/zolt run examples/fibonacci.elf
+      - name: zolt run factorial
+        run: ./zig-out/bin/zolt run examples/factorial.elf
+
+  # ─── Prove + Verify (Linux) ─────────────────────────────────────
+  prove-verify-linux:
+    name: Prove + Verify (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: jolt-verifier
+      - name: Build Zolt
+        run: zig build -Doptimize=ReleaseFast
+      - name: Build Rust verifier
+        run: cargo build --release --manifest-path jolt-verifier/Cargo.toml
+      - name: Prove (sum.elf)
+        run: ./zig-out/bin/zolt prove -o proof.bin --export-preprocessing preprocessing.bin examples/sum.elf
+      - name: Verify with Jolt verifier
+        run: ./jolt-verifier/target/release/jolt-verifier --proof proof.bin --preprocessing preprocessing.bin
+
+  # ─── Prove + Verify (macOS ARM) ─────────────────────────────────
+  prove-verify-macos:
+    name: Prove + Verify (macOS ARM64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: jolt-verifier
+      - name: Build Zolt
+        run: zig build -Doptimize=ReleaseFast
+      - name: Build Rust verifier
+        run: cargo build --release --manifest-path jolt-verifier/Cargo.toml
+      - name: Prove (sum.elf)
+        run: ./zig-out/bin/zolt prove -o proof.bin --export-preprocessing preprocessing.bin examples/sum.elf
+      - name: Verify with Jolt verifier
+        run: ./jolt-verifier/target/release/jolt-verifier --proof proof.bin --preprocessing preprocessing.bin
+
+  # ─── Extended: Prove + Verify sha256_128 (Linux) ─────────────────
+  prove-sha256-linux:
+    name: "Extended: Prove sha256_128 (Linux)"
+    if: github.event_name == 'workflow_dispatch' && inputs.run_extended_proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: jolt-verifier
+      - name: Build Zolt
+        run: zig build -Doptimize=ReleaseFast
+      - name: Build Rust verifier
+        run: cargo build --release --manifest-path jolt-verifier/Cargo.toml
+      - name: Prove (sha256_128.elf)
+        run: ./zig-out/bin/zolt prove -o proof.bin --export-preprocessing preprocessing.bin examples/sha256_128.elf
+      - name: Verify with Jolt verifier
+        run: ./jolt-verifier/target/release/jolt-verifier --proof proof.bin --preprocessing preprocessing.bin
+
+  # ─── Extended: Prove + Verify sha256_128 (macOS) ─────────────────
+  prove-sha256-macos:
+    name: "Extended: Prove sha256_128 (macOS ARM64)"
+    if: github.event_name == 'workflow_dispatch' && inputs.run_extended_proofs
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: jolt-verifier
+      - name: Build Zolt
+        run: zig build -Doptimize=ReleaseFast
+      - name: Build Rust verifier
+        run: cargo build --release --manifest-path jolt-verifier/Cargo.toml
+      - name: Prove (sha256_128.elf)
+        run: ./zig-out/bin/zolt prove -o proof.bin --export-preprocessing preprocessing.bin examples/sha256_128.elf
+      - name: Verify with Jolt verifier
+        run: ./jolt-verifier/target/release/jolt-verifier --proof proof.bin --preprocessing preprocessing.bin
+
+  # ─── Gate: all required checks must pass ─────────────────────────
+  ci-pass:
+    name: CI Pass
+    if: always()
+    needs:
+      - zig-fmt
+      - zig-test-linux
+      - zig-test-macos
+      - zig-release-build
+      - metal-shaders
+      - rust-verifier
+      - rust-bench
+      - cli-smoke
+      - prove-verify-linux
+      - prove-verify-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs
+        run: |
+          results=(
+            "${{ needs.zig-fmt.result }}"
+            "${{ needs.zig-test-linux.result }}"
+            "${{ needs.zig-test-macos.result }}"
+            "${{ needs.zig-release-build.result }}"
+            "${{ needs.metal-shaders.result }}"
+            "${{ needs.rust-verifier.result }}"
+            "${{ needs.rust-bench.result }}"
+            "${{ needs.cli-smoke.result }}"
+            "${{ needs.prove-verify-linux.result }}"
+            "${{ needs.prove-verify-macos.result }}"
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" ]]; then
+              echo "One or more CI jobs failed"
+              exit 1
+            fi
+          done
+          echo "All CI checks passed"

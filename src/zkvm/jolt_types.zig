@@ -656,13 +656,13 @@ pub fn OpeningClaims(comptime F: type) type {
                     .Virtual => |v| {
                         switch (v.poly) {
                             .LookupTableFlag => |flag_idx| {
-                                dbg("[SERIALIZE ORDER] Entry {} = Virtual(LookupTableFlag({}), {})\n", .{idx, flag_idx, v.sumcheck_id});
+                                dbg("[SERIALIZE ORDER] Entry {} = Virtual(LookupTableFlag({}), {})\n", .{ idx, flag_idx, v.sumcheck_id });
                             },
                             .InstructionFlags => |flags| {
-                                dbg("[SERIALIZE ORDER] Entry {} = Virtual(InstructionFlags({}), {})\n", .{idx, flags, v.sumcheck_id});
+                                dbg("[SERIALIZE ORDER] Entry {} = Virtual(InstructionFlags({}), {})\n", .{ idx, flags, v.sumcheck_id });
                             },
                             else => if (idx >= 90 and idx <= 150) {
-                                dbg("[SERIALIZE ORDER] Entry {} = Virtual({any}, {})\n", .{idx, v.poly, v.sumcheck_id});
+                                dbg("[SERIALIZE ORDER] Entry {} = Virtual({any}, {})\n", .{ idx, v.poly, v.sumcheck_id });
                             },
                         }
                     },

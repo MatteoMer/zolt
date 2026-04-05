@@ -180,38 +180,6 @@ pub fn build(b: *std.Build) void {
     const bench_scaling_step = b.step("bench-scaling", "Run scaling micro-benchmark (parallelFor, dispatch, bind)");
     bench_scaling_step.dependOn(&run_bench_scaling.step);
 
-    // Benchmark: Parallelism threshold (only built when explicitly requested)
-    const bench_thresh = b.addExecutable(.{
-        .name = "bench-thresh",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/cycle_compute/bench_threshold.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zolt", .module = lib.root_module },
-            },
-        }),
-    });
-    const run_bench_thresh = b.addRunArtifact(bench_thresh);
-    const bench_thresh_step = b.step("bench-thresh", "Run parallelism threshold benchmark");
-    bench_thresh_step.dependOn(&run_bench_thresh.step);
-
-    // Benchmark: Cycle compute kernel (only built when explicitly requested)
-    const bench_cycle = b.addExecutable(.{
-        .name = "bench-cycle",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("bench/cycle_compute/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zolt", .module = lib.root_module },
-            },
-        }),
-    });
-    const run_bench_cycle = b.addRunArtifact(bench_cycle);
-    const bench_cycle_step = b.step("bench-cycle", "Run cycle compute kernel benchmark");
-    bench_cycle_step.dependOn(&run_bench_cycle.step);
-
     // Benchmark: MSM (G1/G2 multi-scalar multiplication)
     const bench_msm = b.addExecutable(.{
         .name = "bench-msm",
@@ -346,7 +314,7 @@ pub fn build(b: *std.Build) void {
     const metal_step = b.step("metal-shaders", "Rebuild Metal shader library from .metal sources");
     if (is_apple_silicon) {
         const dev_dir = "/Applications/Xcode.app/Contents/Developer";
-        const shader_dir = "src/gpu/shaders";
+        const shader_dir = "packages/zolt-arith/src/gpu/shaders";
         const include_flag = b.pathFromRoot(shader_dir);
 
         const compile_smoke = b.addSystemCommand(&.{ "xcrun", "metal", "-c", "-I" });
@@ -387,4 +355,34 @@ pub fn build(b: *std.Build) void {
 
         metal_step.dependOn(&metal_link.step);
     }
+
+    // zig build fmt — run zig fmt on all project sources
+    const fmt_step = b.step("fmt", "Format all Zig source files");
+    const fmt = b.addFmt(.{
+        .paths = &.{
+            "src",
+            "packages",
+            "examples",
+            "bench",
+            "build.zig",
+        },
+    });
+    fmt_step.dependOn(&fmt.step);
+
+    // zig build ci — run all checks that CI enforces
+    const ci_step = b.step("ci", "Run all CI checks (test, fmt check, release build)");
+    ci_step.dependOn(&run_lib_unit_tests.step);
+    ci_step.dependOn(&run_exe_unit_tests.step);
+
+    const fmt_check = b.addFmt(.{
+        .paths = &.{
+            "src",
+            "packages",
+            "examples",
+            "bench",
+            "build.zig",
+        },
+        .check = true,
+    });
+    ci_step.dependOn(&fmt_check.step);
 }

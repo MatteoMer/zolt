@@ -149,7 +149,6 @@ pub fn Stage2Sumcheck(comptime F: type) type {
             const left_instr_input_claim = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const right_instr_input_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
 
-
             // Sample gammas from transcript in the same order as upstream Jolt verifier:
             // 1. RamReadWriteChecking samples gamma first
             // 2. InstructionLookupsClaimReduction samples gamma
@@ -187,7 +186,6 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 .add(gamma_instr_cub.mul(left_instr_input_claim))
                 .add(gamma_instr_quart.mul(right_instr_input_claim));
 
-
             const input_claims = [5]F{
                 input_claim_rwc, // [0] RamReadWriteChecking
                 uni_skip_claim_stage2, // [1] ProductVirtualRemainder
@@ -209,7 +207,6 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 transcript.appendScalar("sumcheck_claim", claim);
             }
 
-
             // Step 2: Sample batching coefficients (input claims already appended at line 1747)
             var batching_coeffs: [5]F = undefined;
             for (0..5) |i| {
@@ -227,7 +224,6 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 }
                 batched_claim = batched_claim.add(scaled_claim.mul(batching_coeffs[i]));
             }
-
 
             // Initialize provers for each instance (upstream ordering):
             // [0] RamReadWriteChecking, [1] ProductVirtualRemainder,
@@ -468,8 +464,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                                     combined_evals[j] = combined_evals[j].add(raf_evals[j].mul(batching_coeffs[i]));
                                 }
                             } else {
-                                if (round_idx == start_round) {
-                                }
+                                if (round_idx == start_round) {}
                                 const remaining_rounds = rounds_per_instance[i] - (round_idx - start_round);
                                 var scaled = individual_claims[i];
                                 for (0..remaining_rounds) |_| scaled = scaled.mul(F.fromU64(2));
@@ -522,8 +517,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 // Convert to compressed coefficients [c0, c2, c3]
                 const compressed = poly_mod.UniPoly(F).evalsToCompressed(combined_evals);
 
-                if (round_idx == 0 or round_idx == 16 or round_idx == max_num_rounds - 1) {
-                }
+                if (round_idx == 0 or round_idx == 16 or round_idx == max_num_rounds - 1) {}
 
                 // Append to proof
                 const coeffs = try allocator.alloc(F, 3);
@@ -550,7 +544,6 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 const old_claim = batched_claim;
                 batched_claim = evalFromHint(compressed, old_claim, challenge);
 
-
                 // Debug: Check claim trajectory for first few and last few rounds
                 if (round_idx < 3 or round_idx >= max_num_rounds - 5) {
                     // Check: s(0) + s(1) should equal old_claim for soundness
@@ -559,20 +552,11 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                         // Print individual instance contributions
                         if (product_evals_this_round) |_| {
                             // Note: pp.current_claim is ALREADY UPDATED for next round at this point!
-                        } else {
-                        }
-                        if (raf_evals_this_round) |_| {
-                        } else {
-                        }
-                        if (rwc_evals_this_round) |_| {
-                        } else {
-                        }
-                        if (output_evals_this_round) |_| {
-                        } else {
-                        }
-                        if (instr_evals_this_round) |_| {
-                        } else {
-                        }
+                        } else {}
+                        if (raf_evals_this_round) |_| {} else {}
+                        if (rwc_evals_this_round) |_| {} else {}
+                        if (output_evals_this_round) |_| {} else {}
+                        if (instr_evals_this_round) |_| {} else {}
                     }
                 }
 
@@ -729,12 +713,10 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 expected_batched = expected_batched.add(individual_claims[4].mul(batching_coeffs[4]));
             }
 
-
             // Debug: Print all challenges in LE format for comparison with Jolt
 
             // Debug: Print prover's final left/right values
-            if (product_prover) |_| {
-            }
+            if (product_prover) |_| {}
 
             // Compute the 8 factor polynomial evaluations at r_cycle
             // r_cycle is the last n_cycle_vars challenges from Stage 2
@@ -756,7 +738,6 @@ pub fn Stage2Sumcheck(comptime F: type) type {
 
             // fused_left = w[0]*l_inst + w[1]*lookup_out + w[2]*j_flag
             // fused_right = w[0]*r_inst + w[1]*branch_flag + w[2]*(1 - next_is_noop)
-
 
             // Compute tau_high_bound_r0 and tau_bound_r_tail_rev for expected_output_claim debug
             // tau_high_bound_r0 = LagrangeKernel(5, tau_high, r0)
@@ -789,9 +770,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
 
             // Compute eq(tau_low, r_cycle_reversed)
 
-
             // Compute expected_output_claim
-
 
             // Copy challenges to return them
             const challenges_copy = try allocator.alloc(F, challenges.items.len);
@@ -885,7 +864,6 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 instr_right_instr_input = instr_opening_claims.right_instr_input;
             }
 
-
             // Get Val_final(r') and Val_init(r') from the OutputSumcheck prover
             // These are the MLE evaluations at the final opening point
             var output_val_final = F.zero();
@@ -928,7 +906,6 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                     r_cycle_rw[phase1_rounds - 1 - i] = F.zero();
                 }
             }
-
 
             // CRITICAL FIX: r_address_raf should be computed from sumcheck challenges, NOT the pre-sampled r_address!
             //

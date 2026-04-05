@@ -70,8 +70,7 @@ inline fn arm64SubMod256(a: [4]u64, b: [4]u64, mod: [4]u64) [4]u64 {
           [m1] "r" (mod[1]),
           [m2] "r" (mod[2]),
           [m3] "r" (mod[3]),
-        : .{ .nzcv = true }
-    );
+        : .{ .nzcv = true });
     return .{ r0, r1, r2, r3 };
 }
 
@@ -99,8 +98,7 @@ inline fn arm64Sub256(a: [4]u64, b: [4]u64) [4]u64 {
           [b1] "r" (b[1]),
           [b2] "r" (b[2]),
           [b3] "r" (b[3]),
-        : .{ .nzcv = true }
-    );
+        : .{ .nzcv = true });
     return .{ r0, r1, r2, r3 };
 }
 
@@ -128,8 +126,7 @@ inline fn arm64Add256(a: [4]u64, b: [4]u64) [4]u64 {
           [b1] "r" (b[1]),
           [b2] "r" (b[2]),
           [b3] "r" (b[3]),
-        : .{ .nzcv = true }
-    );
+        : .{ .nzcv = true });
     return .{ r0, r1, r2, r3 };
 }
 
@@ -152,8 +149,7 @@ pub inline fn arm64Add192(a: [3]u64, b: [3]u64) [3]u64 {
           [b0] "r" (b[0]),
           [b1] "r" (b[1]),
           [b2] "r" (b[2]),
-        : .{ .nzcv = true }
-    );
+        : .{ .nzcv = true });
     return .{ r0, r1, r2 };
 }
 
@@ -176,8 +172,7 @@ pub inline fn arm64Sub192(a: [3]u64, b: [3]u64) [3]u64 {
           [b0] "r" (b[0]),
           [b1] "r" (b[1]),
           [b2] "r" (b[2]),
-        : .{ .nzcv = true }
-    );
+        : .{ .nzcv = true });
     return .{ r0, r1, r2 };
 }
 
@@ -403,13 +398,7 @@ fn arm64MontgomeryMul256(a: *const [4]u64, b: *const [4]u64, mod: *const [4]u64,
           [_b] "{x25}" (b),
           [_mod] "{x26}" (mod),
           [_inv] "{x12}" (inv),
-        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true,
-             .x6 = true, .x7 = true, .x8 = true, .x9 = true, .x10 = true, .x11 = true,
-             .x14 = true, .x15 = true, .x16 = true, .x17 = true,
-             .x19 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true,
-             .x25 = true, .x26 = true,
-             .nzcv = true, .memory = true }
-    );
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x8 = true, .x9 = true, .x10 = true, .x11 = true, .x14 = true, .x15 = true, .x16 = true, .x17 = true, .x19 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .x25 = true, .x26 = true, .nzcv = true, .memory = true });
     return .{ r0, r1, r2, r3 };
 }
 
@@ -1763,7 +1752,7 @@ pub const BN254Scalar = struct {
         var r3: u64 = undefined;
 
         asm volatile (
-            // Clear CF and OF for initial carry chains
+        // Clear CF and OF for initial carry chains
             \\xorq %%r13, %%r13
             //
             // Round 0: limb2 × self[0..3] (first non-zero round)
@@ -1838,8 +1827,7 @@ pub const BN254Scalar = struct {
               [_limb3] "{rsi}" (limb3),
               [_mod] "{r14}" (&mod_arr),
               [_inv] "{rbx}" (BN254_INV),
-            : .{ .rax = true, .rcx = true, .r13 = true, .cc = true, .memory = true }
-        );
+            : .{ .rax = true, .rcx = true, .r13 = true, .cc = true, .memory = true });
 
         var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
         if (!result.lessThanModulus()) {
@@ -2430,7 +2418,6 @@ test "bn254 scalar toBytes/fromBytes roundtrip" {
     const zero_back = BN254Scalar.fromBytes(&zero_bytes);
     try std.testing.expect(zero.eql(zero_back));
 }
-
 
 test {
     // Run accumulator and simd_ops tests

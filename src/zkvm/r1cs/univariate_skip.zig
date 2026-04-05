@@ -691,7 +691,6 @@ pub fn computeProductVirtualExtendedEvals(
     return result;
 }
 
-
 /// Helper: multiply field element by i32 coefficient
 fn mulByI32(comptime F: type, a: F, c: i32) F {
     if (c == 0) return F.zero();

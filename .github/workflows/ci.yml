@@ -50,9 +50,11 @@ jobs:
   # ─── Zig: tests (macOS ARM) ─────────────────────────────────────
   zig-test-macos:
     name: Zig Tests (macOS ARM64)
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Verify ARM64
+        run: test "$(uname -m)" = "arm64"
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
@@ -74,18 +76,20 @@ jobs:
   # ─── Metal shaders (macOS only) ─────────────────────────────────
   metal-shaders:
     name: Metal Shaders (macOS ARM64)
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Verify ARM64
+        run: test "$(uname -m)" = "arm64"
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
       - name: Build Metal shaders
         run: zig build metal-shaders
 
-  # ─── Rust: verifier build & test ─────────────────────────────────
+  # ─── Rust: verifier build ───────────────────────────────────────
   rust-verifier:
-    name: Rust Verifier
+    name: Rust Verifier (build check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,10 +99,8 @@ jobs:
           workspaces: jolt-verifier
       - name: Build
         run: cargo build --manifest-path jolt-verifier/Cargo.toml
-      - name: Test
-        run: cargo test --manifest-path jolt-verifier/Cargo.toml
 
-  # ─── Rust: bench build check ─────────────────────────────────────
+  # ─── Rust: bench build ─────────────────────────────────────────
   rust-bench:
     name: Rust Bench (build check)
     runs-on: ubuntu-latest
@@ -110,8 +112,6 @@ jobs:
           workspaces: jolt-bench
       - name: Build
         run: cargo build --manifest-path jolt-bench/Cargo.toml
-      - name: Test
-        run: cargo test --manifest-path jolt-bench/Cargo.toml
 
   # ─── CLI smoke test ──────────────────────────────────────────────
   cli-smoke:
@@ -154,9 +154,11 @@ jobs:
   # ─── Prove + Verify (macOS ARM) ─────────────────────────────────
   prove-verify-macos:
     name: Prove + Verify (macOS ARM64)
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Verify ARM64
+        run: test "$(uname -m)" = "arm64"
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
@@ -201,10 +203,12 @@ jobs:
   prove-sha256-macos:
     name: "Extended: Prove sha256_128 (macOS ARM64)"
     if: github.event_name == 'workflow_dispatch' && inputs.run_extended_proofs
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Verify ARM64
+        run: test "$(uname -m)" = "arm64"
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}

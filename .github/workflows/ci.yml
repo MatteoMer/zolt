@@ -225,6 +225,59 @@ jobs:
       - name: Verify with Jolt verifier
         run: ./jolt-verifier/target/release/jolt-verifier --proof proof.bin --preprocessing preprocessing.bin
 
+  # ─── zolt-arith: differential fixture tests ────────────────────
+  zolt-arith-diff:
+    name: Differential Fixture Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/zolt-arith-diff/arkworks-fixtures
+      - name: Run differential tests
+        run: zig build test-zolt-arith-diff -Doptimize=ReleaseSafe
+
+  # ─── zolt-arith: fixture freshness check ──────────────────────
+  zolt-arith-fixture-freshness:
+    name: Fixture Freshness Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/zolt-arith-diff/arkworks-fixtures
+      - name: Regenerate fixtures
+        run: cargo run --release --manifest-path tools/zolt-arith-diff/arkworks-fixtures/Cargo.toml -- --out-dir testdata/zolt-arith-diff
+      - name: Check for drift
+        run: git diff --exit-code testdata/zolt-arith-diff/
+
+  # ─── zolt-arith: benchmark reporting (non-blocking) ───────────
+  zolt-arith-bench:
+    name: Arithmetic Benchmarks
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify ARM64
+        run: test "$(uname -m)" = "arm64"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Field microbench
+        run: zig build bench-zolt-arith-field 2>&1 | tee field_bench.txt
+      - name: Pairing microbench
+        run: zig build bench-zolt-arith-pairing 2>&1 | tee pairing_bench.txt
+      - name: Post benchmark summary
+        run: |
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep '\[BENCH\]' field_bench.txt pairing_bench.txt >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
   # ─── Gate: all required checks must pass ─────────────────────────
   ci-pass:
     name: CI Pass
@@ -240,6 +293,8 @@ jobs:
       - cli-smoke
       - prove-verify-linux
       - prove-verify-macos
+      - zolt-arith-diff
+      - zolt-arith-fixture-freshness
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs
@@ -255,6 +310,8 @@ jobs:
             "${{ needs.cli-smoke.result }}"
             "${{ needs.prove-verify-linux.result }}"
             "${{ needs.prove-verify-macos.result }}"
+            "${{ needs.zolt-arith-diff.result }}"
+            "${{ needs.zolt-arith-fixture-freshness.result }}"
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" ]]; then

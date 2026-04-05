@@ -48,4 +48,16 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run zolt-arith tests");
     test_step.dependOn(&run_tests.step);
+
+    // Bench forwarding steps — actual executables live at repo root
+    // because they import the full `zolt` module. Run from repo root:
+    //   zig build bench-zolt-arith-field
+    //   zig build bench-zolt-arith-pairing
+    const bench_field_msg = b.addSystemCommand(&.{ "echo", "Run from repo root: zig build bench-zolt-arith-field" });
+    const bench_field_step = b.step("bench-field", "Field arithmetic microbench (run from repo root)");
+    bench_field_step.dependOn(&bench_field_msg.step);
+
+    const bench_pairing_msg = b.addSystemCommand(&.{ "echo", "Run from repo root: zig build bench-zolt-arith-pairing" });
+    const bench_pairing_step = b.step("bench-pairing", "Pairing microbench (run from repo root)");
+    bench_pairing_step.dependOn(&bench_pairing_msg.step);
 }

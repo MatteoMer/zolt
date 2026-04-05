@@ -7,7 +7,9 @@ use ark_ec::{
     AdditiveGroup, AffineRepr, CurveGroup, PrimeGroup,
 };
 use ark_ff::{BigInteger, CyclotomicMultSubgroup, Field, PrimeField, UniformRand, Zero, One};
+use ark_serialize::CanonicalSerialize;
 use ark_std::rand::{rngs::StdRng, SeedableRng};
+use sha3::{Sha3_256, Digest};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -232,15 +234,16 @@ fn generate_i128_scalars(n: usize) -> Vec<i128> {
 
 fn generate_msm_cases(out_dir: &Path) {
     let g1_sizes = [1usize, 2, 4, 8, 16];
-    let g2_sizes = [1usize, 2, 4, 8];
+    let g2_sizes = [1usize, 2, 4, 8, 16, 32];
     let max_g1 = *g1_sizes.iter().max().unwrap();
     let max_g2 = *g2_sizes.iter().max().unwrap();
+    let max_n = std::cmp::max(max_g1, max_g2);
 
     let g1_bases = generate_g1_bases(max_g1);
     let g2_bases = generate_g2_bases(max_g2);
 
     let mut rng = StdRng::seed_from_u64(0x51ca_4f11);
-    let fr_scalars: Vec<Fr> = (0..max_g1).map(|_| Fr::rand(&mut rng)).collect();
+    let fr_scalars: Vec<Fr> = (0..max_n).map(|_| Fr::rand(&mut rng)).collect();
     let i128_scalars = generate_i128_scalars(max_g1);
 
     let mut g1_fr_out = String::from("# name|scalars_be_hex_csv|expected_infinity|expected_x_le_hex|expected_y_le_hex\n");
@@ -649,6 +652,335 @@ fn generate_extension_field_ops(out_dir: &Path) {
     write_file(out_dir.join("extensions/fp12_ops.txt"), fp12_out);
 }
 
+fn generate_g2_ops(out_dir: &Path) {
+    let mut rng = StdRng::seed_from_u64(0x6200_0001);
+    let gen = G2Affine::generator();
+
+    let mut out = String::from(
+        "# op|arg1_be_hex|arg2_be_hex|expected_infinity|expected_x_c0_le|expected_x_c1_le|expected_y_c0_le|expected_y_c1_le\n",
+    );
+
+    // scalar_mul cases
+    let scalars: Vec<Fr> = vec![
+        Fr::from(0u64),
+        Fr::from(1u64),
+        Fr::from(2u64),
+        Fr::from(3u64),
+        Fr::from(42u64),
+        Fr::from(0xdeadbeef12345678u64),
+        Fr::rand(&mut rng),
+        Fr::rand(&mut rng),
+        Fr::rand(&mut rng),
+    ];
+    for s in &scalars {
+        let result = G2Projective::from(gen)
+            .mul_bigint(s.into_bigint())
+            .into_affine();
+        let (inf, x0, x1, y0, y1) = format_g2_point(result);
+        out.push_str(&format!(
+            "scalar_mul|{}|-|{inf}|{x0}|{x1}|{y0}|{y1}\n",
+            hex_be(s)
+        ));
+    }
+
+    // add cases
+    let add_pairs: Vec<(Fr, Fr)> = vec![
+        (Fr::from(1u64), Fr::from(1u64)),
+        (Fr::from(3u64), Fr::from(5u64)),
+        (Fr::rand(&mut rng), Fr::rand(&mut rng)),
+    ];
+    for (s1, s2) in &add_pairs {
+        let p1 = G2Projective::from(gen).mul_bigint(s1.into_bigint());
+        let p2 = G2Projective::from(gen).mul_bigint(s2.into_bigint());
+        let result = (p1 + p2).into_affine();
+        let (inf, x0, x1, y0, y1) = format_g2_point(result);
+        out.push_str(&format!(
+            "add|{}|{}|{inf}|{x0}|{x1}|{y0}|{y1}\n",
+            hex_be(s1),
+            hex_be(s2)
+        ));
+    }
+
+    // double cases
+    let double_scalars = [Fr::from(1u64), Fr::from(42u64)];
+    for s in &double_scalars {
+        let p = G2Projective::from(gen).mul_bigint(s.into_bigint());
+        let result = p.double().into_affine();
+        let (inf, x0, x1, y0, y1) = format_g2_point(result);
+        out.push_str(&format!(
+            "double|{}|-|{inf}|{x0}|{x1}|{y0}|{y1}\n",
+            hex_be(s)
+        ));
+    }
+
+    // neg cases
+    let neg_scalars = [Fr::from(1u64), Fr::from(42u64)];
+    for s in &neg_scalars {
+        let p = G2Projective::from(gen)
+            .mul_bigint(s.into_bigint())
+            .into_affine();
+        let result = -p;
+        let (inf, x0, x1, y0, y1) = format_g2_point(result);
+        out.push_str(&format!(
+            "neg|{}|-|{inf}|{x0}|{x1}|{y0}|{y1}\n",
+            hex_be(s)
+        ));
+    }
+
+    write_file(out_dir.join("g2/g2_ops.txt"), out);
+}
+
+fn generate_point_compression(out_dir: &Path) {
+    let mut rng = StdRng::seed_from_u64(0xc04d_0001);
+    let g1_gen = G1Affine::generator();
+    let g2_gen = G2Affine::generator();
+
+    // --- G1 ---
+    let mut g1_out = String::from(
+        "# name|uncompressed_x_le|uncompressed_y_le|compressed_hex\n",
+    );
+
+    let g1_scalars: Vec<(String, Fr)> = vec![
+        ("identity".into(), Fr::from(0u64)),
+        ("generator".into(), Fr::from(1u64)),
+        ("double".into(), Fr::from(2u64)),
+        ("scalar_42".into(), Fr::from(42u64)),
+        ("random_0".into(), Fr::rand(&mut rng)),
+        ("random_1".into(), Fr::rand(&mut rng)),
+        ("random_2".into(), Fr::rand(&mut rng)),
+        ("random_3".into(), Fr::rand(&mut rng)),
+    ];
+
+    for (name, s) in &g1_scalars {
+        let point = G1Projective::from(g1_gen)
+            .mul_bigint(s.into_bigint())
+            .into_affine();
+        let mut compressed = Vec::new();
+        point.serialize_compressed(&mut compressed).unwrap();
+        let (_, x, y) = format_g1_point(point);
+        g1_out.push_str(&format!(
+            "{name}|{x}|{y}|{}\n",
+            hex_encode(&compressed)
+        ));
+    }
+
+    write_file(out_dir.join("point_compression/g1_compress.txt"), g1_out);
+
+    // --- G2 ---
+    let mut g2_out = String::from(
+        "# name|x_c0_le|x_c1_le|y_c0_le|y_c1_le|compressed_hex\n",
+    );
+
+    let g2_scalars: Vec<(String, Fr)> = vec![
+        ("identity".into(), Fr::from(0u64)),
+        ("generator".into(), Fr::from(1u64)),
+        ("double".into(), Fr::from(2u64)),
+        ("scalar_42".into(), Fr::from(42u64)),
+        ("random_0".into(), Fr::rand(&mut rng)),
+        ("random_1".into(), Fr::rand(&mut rng)),
+        ("random_2".into(), Fr::rand(&mut rng)),
+        ("random_3".into(), Fr::rand(&mut rng)),
+    ];
+
+    for (name, s) in &g2_scalars {
+        let point = G2Projective::from(g2_gen)
+            .mul_bigint(s.into_bigint())
+            .into_affine();
+        let mut compressed = Vec::new();
+        point.serialize_compressed(&mut compressed).unwrap();
+        let (_, x0, x1, y0, y1) = format_g2_point(point);
+        g2_out.push_str(&format!(
+            "{name}|{x0}|{x1}|{y0}|{y1}|{}\n",
+            hex_encode(&compressed)
+        ));
+    }
+
+    write_file(out_dir.join("point_compression/g2_compress.txt"), g2_out);
+}
+
+fn generate_glv_fixtures(out_dir: &Path) {
+    let mut rng = StdRng::seed_from_u64(0x614f_0001);
+    let g1_gen = G1Affine::generator();
+    let g2_gen = G2Affine::generator();
+
+    let scalars: Vec<(String, Fr)> = vec![
+        ("zero".into(), Fr::from(0u64)),
+        ("one".into(), Fr::from(1u64)),
+        ("two".into(), Fr::from(2u64)),
+        ("small_42".into(), Fr::from(42u64)),
+        ("medium".into(), Fr::from(0xdeadbeef12345678u64)),
+        ("random_0".into(), Fr::rand(&mut rng)),
+        ("random_1".into(), Fr::rand(&mut rng)),
+        ("random_2".into(), Fr::rand(&mut rng)),
+        ("random_3".into(), Fr::rand(&mut rng)),
+        ("random_4".into(), Fr::rand(&mut rng)),
+    ];
+
+    // G1 scalar mul
+    let mut g1_out = String::from(
+        "# name|scalar_be_hex|expected_infinity|expected_x_le|expected_y_le\n",
+    );
+    for (name, s) in &scalars {
+        let result = G1Projective::from(g1_gen)
+            .mul_bigint(s.into_bigint())
+            .into_affine();
+        let (inf, x, y) = format_g1_point(result);
+        g1_out.push_str(&format!("{name}|{}|{inf}|{x}|{y}\n", hex_be(s)));
+    }
+    write_file(out_dir.join("glv/glv_g1_scalar_mul.txt"), g1_out);
+
+    // G2 scalar mul
+    let mut g2_out = String::from(
+        "# name|scalar_be_hex|expected_infinity|expected_x_c0_le|expected_x_c1_le|expected_y_c0_le|expected_y_c1_le\n",
+    );
+    for (name, s) in &scalars {
+        let result = G2Projective::from(g2_gen)
+            .mul_bigint(s.into_bigint())
+            .into_affine();
+        let (inf, x0, x1, y0, y1) = format_g2_point(result);
+        g2_out.push_str(&format!(
+            "{name}|{}|{inf}|{x0}|{x1}|{y0}|{y1}\n",
+            hex_be(s)
+        ));
+    }
+    write_file(out_dir.join("glv/glv_g2_scalar_mul.txt"), g2_out);
+}
+
+fn generate_dory_commit(out_dir: &Path) {
+    // Replicate Zolt's exact SRS generation:
+    //   seed = SHA3-256("Jolt Dory URS seed")
+    //   G1[i] = [SHA3-256(seed || le_u64(i) || "G1") as Fr] * G1::generator
+    //   G2[i] = [SHA3-256(seed || le_u64(i+n) || "G2") as Fr] * G2::generator
+    //   h1 = G1::generator, h2 = G2::generator
+
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"Jolt Dory URS seed");
+    let seed: [u8; 32] = hasher.finalize().into();
+
+    let g1_gen = G1Affine::generator();
+    let g2_gen = G2Affine::generator();
+
+    let mut out = String::from(
+        "# name|max_num_vars|evals_be_csv|expected_commitment_fp12_le_hex\n",
+    );
+
+    for max_num_vars in [2u64, 3, 4] {
+        let sigma = (max_num_vars + 1) / 2;
+        let nu = max_num_vars - sigma;
+        let num_cols = 1usize << sigma;
+        let num_rows = 1usize << nu;
+        let n = std::cmp::max(num_cols, num_rows);
+
+        // Generate SRS points matching Zolt's hash-to-curve
+        let g1_vec: Vec<G1Affine> = (0..n)
+            .map(|i| {
+                let mut h = Sha3_256::new();
+                h.update(&seed);
+                h.update(&(i as u64).to_le_bytes());
+                h.update(b"G1");
+                let hash: [u8; 32] = h.finalize().into();
+                let scalar = Fr::from_le_bytes_mod_order(&hash);
+                G1Projective::from(g1_gen)
+                    .mul_bigint(scalar.into_bigint())
+                    .into_affine()
+            })
+            .collect();
+
+        let g2_vec: Vec<G2Affine> = (0..n)
+            .map(|i| {
+                let mut h = Sha3_256::new();
+                h.update(&seed);
+                h.update(&((i + n) as u64).to_le_bytes());
+                h.update(b"G2");
+                let hash: [u8; 32] = h.finalize().into();
+                let scalar = Fr::from_le_bytes_mod_order(&hash);
+                G2Projective::from(g2_gen)
+                    .mul_bigint(scalar.into_bigint())
+                    .into_affine()
+            })
+            .collect();
+
+        // Known polynomial: [1, 2, ..., 2^max_num_vars]
+        let poly_len = 1usize << max_num_vars;
+        let evals: Vec<Fr> = (1..=poly_len as u64).map(Fr::from).collect();
+
+        // Compute Dory commitment: for each row, MSM(g1_vec, row_evals),
+        // then multi-pairing(row_commits, g2_vec), final exponentiation
+        let mut commitment = Fq12::one();
+        for row in 0..num_rows {
+            let row_start = row * num_cols;
+            let row_end = std::cmp::min(row_start + num_cols, evals.len());
+            let row_evals = &evals[row_start..row_end];
+            let row_commit = G1Projective::msm(&g1_vec[..row_evals.len()], row_evals)
+                .unwrap()
+                .into_affine();
+            if !row_commit.infinity && row < g2_vec.len() {
+                let pairing_result = Bn254::pairing(row_commit, g2_vec[row]).0;
+                commitment *= pairing_result;
+            }
+        }
+
+        let evals_csv = evals.iter().map(hex_be).collect::<Vec<_>>().join(",");
+        out.push_str(&format!(
+            "case_nv{max_num_vars}|{max_num_vars}|{evals_csv}|{}\n",
+            fq12_hex_le(&commitment)
+        ));
+    }
+
+    write_file(out_dir.join("dory/commit_cases.txt"), out);
+}
+
+fn generate_gpu_crossover(out_dir: &Path) {
+    let mut rng = StdRng::seed_from_u64(0x6900_0001);
+
+    let mut out = String::from(
+        "# op|size|a_be_hex_csv|b_be_hex_csv|expected_be_hex_csv\n",
+    );
+
+    let sizes = [4usize, 16, 64];
+    for &size in &sizes {
+        let a: Vec<Fr> = (0..size).map(|_| Fr::rand(&mut rng)).collect();
+        let b: Vec<Fr> = (0..size).map(|_| Fr::rand(&mut rng)).collect();
+
+        // mul
+        let mul_expected: Vec<Fr> = a.iter().zip(b.iter()).map(|(x, y)| *x * *y).collect();
+        out.push_str(&format!(
+            "mul|{size}|{}|{}|{}\n",
+            join_field_scalars(&a),
+            join_field_scalars(&b),
+            join_field_scalars(&mul_expected)
+        ));
+
+        // add
+        let add_expected: Vec<Fr> = a.iter().zip(b.iter()).map(|(x, y)| *x + *y).collect();
+        out.push_str(&format!(
+            "add|{size}|{}|{}|{}\n",
+            join_field_scalars(&a),
+            join_field_scalars(&b),
+            join_field_scalars(&add_expected)
+        ));
+
+        // sub
+        let sub_expected: Vec<Fr> = a.iter().zip(b.iter()).map(|(x, y)| *x - *y).collect();
+        out.push_str(&format!(
+            "sub|{size}|{}|{}|{}\n",
+            join_field_scalars(&a),
+            join_field_scalars(&b),
+            join_field_scalars(&sub_expected)
+        ));
+
+        // neg
+        let neg_expected: Vec<Fr> = a.iter().map(|x| -*x).collect();
+        out.push_str(&format!(
+            "neg|{size}|{}|-|{}\n",
+            join_field_scalars(&a),
+            join_field_scalars(&neg_expected)
+        ));
+    }
+
+    write_file(out_dir.join("gpu/field_crossover.txt"), out);
+}
+
 fn parse_out_dir() -> PathBuf {
     let mut args = env::args().skip(1);
     let mut out_dir = PathBuf::from("testdata/zolt-arith-diff");
@@ -672,5 +1004,10 @@ fn main() {
     generate_accumulator_ops(&out_dir);
     generate_transcript_fixtures(&out_dir);
     generate_extension_field_ops(&out_dir);
+    generate_g2_ops(&out_dir);
+    generate_point_compression(&out_dir);
+    generate_glv_fixtures(&out_dir);
+    generate_dory_commit(&out_dir);
+    generate_gpu_crossover(&out_dir);
     eprintln!("generated zolt-arith differential fixtures under {}", out_dir.display());
 }

@@ -127,12 +127,12 @@ fn printResult(comptime group: []const u8, comptime op_name: []const u8, s: Stat
     std.debug.print(
         "[BENCH] group={s} op={s} min={d:.1}{s} median={d:.1}{s} mean={d:.1}{s} p99={d:.1}{s} stddev={d:.1}{s} samples={d}x{d}\n",
         .{
-            group,      op_name,
-            min_f.val,  min_f.unit,
-            med_f.val,  med_f.unit,
-            mean_f.val, mean_f.unit,
-            p99_f.val,  p99_f.unit,
-            sd_f.val,   sd_f.unit,
+            group,          op_name,
+            min_f.val,      min_f.unit,
+            med_f.val,      med_f.unit,
+            mean_f.val,     mean_f.unit,
+            p99_f.val,      p99_f.unit,
+            sd_f.val,       sd_f.unit,
             s.sample_count, s.iters_per_sample,
         },
     );

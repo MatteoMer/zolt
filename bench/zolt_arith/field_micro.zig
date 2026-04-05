@@ -19,13 +19,27 @@ fn benchField(comptime F: type, comptime field_name: []const u8) void {
         var a: [ELEMENTS]F = undefined;
         var b: [ELEMENTS]F = undefined;
 
-        fn add(i: usize) F { return a[i % ELEMENTS].add(b[i % ELEMENTS]); }
-        fn sub(i: usize) F { return a[i % ELEMENTS].sub(b[i % ELEMENTS]); }
-        fn mul(i: usize) F { return a[i % ELEMENTS].mul(b[i % ELEMENTS]); }
-        fn square(i: usize) F { return a[i % ELEMENTS].square(); }
-        fn inverse(i: usize) F { return a[i % ELEMENTS].inverse() orelse F.zero(); }
-        fn toMontgomery(i: usize) F { return a[i % ELEMENTS].fromMontgomery().toMontgomery(); }
-        fn fromMontgomery(i: usize) F { return a[i % ELEMENTS].fromMontgomery(); }
+        fn add(i: usize) F {
+            return a[i % ELEMENTS].add(b[i % ELEMENTS]);
+        }
+        fn sub(i: usize) F {
+            return a[i % ELEMENTS].sub(b[i % ELEMENTS]);
+        }
+        fn mul(i: usize) F {
+            return a[i % ELEMENTS].mul(b[i % ELEMENTS]);
+        }
+        fn square(i: usize) F {
+            return a[i % ELEMENTS].square();
+        }
+        fn inverse(i: usize) F {
+            return a[i % ELEMENTS].inverse() orelse F.zero();
+        }
+        fn toMontgomery(i: usize) F {
+            return a[i % ELEMENTS].fromMontgomery().toMontgomery();
+        }
+        fn fromMontgomery(i: usize) F {
+            return a[i % ELEMENTS].fromMontgomery();
+        }
         fn sumOfProducts(i: usize) F {
             const idx = i % ELEMENTS;
             return F.sumOfProducts(.{ a[idx], b[idx] }, .{ b[idx], a[idx] });

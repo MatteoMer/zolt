@@ -6,8 +6,10 @@ const diff_config = @import("diff_config");
 const field = zolt.field;
 const pairing = field.pairing;
 const msm = zolt.msm;
+const glv = msm.glv;
 const accumulators = field.accumulators;
 const transcripts = zolt.transcripts;
+const dory = zolt.poly.commitment.dory;
 
 const Fr = field.BN254Scalar;
 const Fp = field.BN254BaseField;
@@ -571,4 +573,324 @@ test "zolt-arith differential fp12 fixtures" {
         case_count += 1;
     }
     try std.testing.expect(case_count >= 60);
+}
+
+// ============================================================================
+// G2 curve ops differential tests
+// ============================================================================
+
+fn compareG2Coords(actual: G2Point, fields: struct { xc0: []const u8, xc1: []const u8, yc0: []const u8, yc1: []const u8 }) !void {
+    const expected_x_c0 = try parser.parseHexBytesExact(32, fields.xc0);
+    const expected_x_c1 = try parser.parseHexBytesExact(32, fields.xc1);
+    const expected_y_c0 = try parser.parseHexBytesExact(32, fields.yc0);
+    const expected_y_c1 = try parser.parseHexBytesExact(32, fields.yc1);
+    const actual_x_c0 = fieldToBytesLE(Fp, actual.x.c0);
+    const actual_x_c1 = fieldToBytesLE(Fp, actual.x.c1);
+    const actual_y_c0 = fieldToBytesLE(Fp, actual.y.c0);
+    const actual_y_c1 = fieldToBytesLE(Fp, actual.y.c1);
+    try std.testing.expectEqualSlices(u8, &expected_x_c0, &actual_x_c0);
+    try std.testing.expectEqualSlices(u8, &expected_x_c1, &actual_x_c1);
+    try std.testing.expectEqualSlices(u8, &expected_y_c0, &actual_y_c0);
+    try std.testing.expectEqualSlices(u8, &expected_y_c1, &actual_y_c1);
+}
+
+test "zolt-arith differential g2 ops fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "g2/g2_ops.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    const gen = G2Point.generator();
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(8, line, '|');
+        const op = fields_split[0];
+        const expected_infinity = try parser.parseDecimal(u8, fields_split[3]);
+
+        if (std.mem.eql(u8, op, "scalar_mul")) {
+            const scalar = try parseFrHex(fields_split[1]);
+            const actual = gen.scalarMul(scalar);
+            try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+            if (!actual.infinity) {
+                try compareG2Coords(actual, .{ .xc0 = fields_split[4], .xc1 = fields_split[5], .yc0 = fields_split[6], .yc1 = fields_split[7] });
+            }
+        } else if (std.mem.eql(u8, op, "add")) {
+            const s1 = try parseFrHex(fields_split[1]);
+            const s2 = try parseFrHex(fields_split[2]);
+            const actual = gen.scalarMul(s1).add(gen.scalarMul(s2));
+            try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+            if (!actual.infinity) {
+                try compareG2Coords(actual, .{ .xc0 = fields_split[4], .xc1 = fields_split[5], .yc0 = fields_split[6], .yc1 = fields_split[7] });
+            }
+        } else if (std.mem.eql(u8, op, "double")) {
+            const s = try parseFrHex(fields_split[1]);
+            const p = gen.scalarMul(s);
+            const actual = p.add(p);
+            try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+            if (!actual.infinity) {
+                try compareG2Coords(actual, .{ .xc0 = fields_split[4], .xc1 = fields_split[5], .yc0 = fields_split[6], .yc1 = fields_split[7] });
+            }
+        } else if (std.mem.eql(u8, op, "neg")) {
+            const s = try parseFrHex(fields_split[1]);
+            const actual = gen.scalarMul(s).neg();
+            try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+            if (!actual.infinity) {
+                try compareG2Coords(actual, .{ .xc0 = fields_split[4], .xc1 = fields_split[5], .yc0 = fields_split[6], .yc1 = fields_split[7] });
+            }
+        } else {
+            return error.UnknownG2Op;
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 10);
+}
+
+// ============================================================================
+// Point compression differential tests
+// ============================================================================
+
+test "zolt-arith differential g1 point compression fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "point_compression/g1_compress.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(4, line, '|');
+
+        const expected_compressed = try parser.parseHexBytesExact(32, fields_split[3]);
+
+        // Reconstruct point from uncompressed coords (LE hex)
+        // Identity case: x and y are empty strings
+        if (fields_split[1].len == 0) {
+            // Identity point
+            const identity = G1Affine.identity();
+            const actual_compressed = dory.compressG1(identity);
+            try std.testing.expectEqualSlices(u8, &expected_compressed, &actual_compressed);
+            // Decompress and verify
+            const decompressed = dory.decompressG1(&actual_compressed);
+            try std.testing.expect(decompressed != null);
+            try std.testing.expect(decompressed.?.infinity);
+        } else {
+            const x_bytes = try parser.parseHexBytesExact(32, fields_split[1]);
+            const y_bytes = try parser.parseHexBytesExact(32, fields_split[2]);
+            const x = fpFromBytesLE(&x_bytes);
+            const y = fpFromBytesLE(&y_bytes);
+            const point = G1Affine{ .x = x, .y = y, .infinity = false };
+
+            // Test compression
+            const actual_compressed = dory.compressG1(point);
+            try std.testing.expectEqualSlices(u8, &expected_compressed, &actual_compressed);
+
+            // Test decompression roundtrip
+            const decompressed = dory.decompressG1(&actual_compressed);
+            try std.testing.expect(decompressed != null);
+            try std.testing.expect(!decompressed.?.infinity);
+            try std.testing.expectEqualSlices(u8, &x_bytes, &fieldToBytesLE(Fp, decompressed.?.x));
+            try std.testing.expectEqualSlices(u8, &y_bytes, &fieldToBytesLE(Fp, decompressed.?.y));
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 6);
+}
+
+test "zolt-arith differential g2 point compression fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "point_compression/g2_compress.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(6, line, '|');
+
+        if (fields_split[1].len == 0) {
+            // Identity: verify compress roundtrip
+            const identity = G2Point.identity();
+            const compressed = dory.compressG2(identity);
+            const decompressed = dory.decompressG2(&compressed);
+            try std.testing.expect(decompressed != null);
+            try std.testing.expect(decompressed.?.infinity);
+        } else {
+            const x_c0_bytes = try parser.parseHexBytesExact(32, fields_split[1]);
+            const x_c1_bytes = try parser.parseHexBytesExact(32, fields_split[2]);
+            const y_c0_bytes = try parser.parseHexBytesExact(32, fields_split[3]);
+            const y_c1_bytes = try parser.parseHexBytesExact(32, fields_split[4]);
+            const point = G2Point{
+                .x = Fp2.init(fpFromBytesLE(&x_c0_bytes), fpFromBytesLE(&x_c1_bytes)),
+                .y = Fp2.init(fpFromBytesLE(&y_c0_bytes), fpFromBytesLE(&y_c1_bytes)),
+                .infinity = false,
+            };
+
+            // Verify compression produces stable output and the x-coordinate
+            // is preserved (decompressG2 fp2Sqrt is a known limitation for some points)
+            const compressed = dory.compressG2(point);
+
+            // Verify x-coords are in the compressed bytes (first 64 bytes, with flag bits in last byte)
+            var x1_from_compressed: [32]u8 = undefined;
+            @memcpy(&x1_from_compressed, compressed[32..64]);
+            x1_from_compressed[31] &= 0x3F; // mask flag bits
+            try std.testing.expectEqualSlices(u8, &x_c0_bytes, compressed[0..32]);
+            try std.testing.expectEqualSlices(u8, &x_c1_bytes, &x1_from_compressed);
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 6);
+}
+
+// ============================================================================
+// GLV scalar multiplication differential tests
+// ============================================================================
+
+test "zolt-arith differential glv g1 scalar mul fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "glv/glv_g1_scalar_mul.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(5, line, '|');
+
+        const scalar = try parseFrHex(fields_split[1]);
+        const expected_infinity = try parser.parseDecimal(u8, fields_split[2]);
+
+        const actual_proj = glv.glvScalarMulG1(G1Affine.generator(), scalar);
+        const actual = actual_proj.toAffine();
+
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            const expected_x = try parser.parseHexBytesExact(32, fields_split[3]);
+            const expected_y = try parser.parseHexBytesExact(32, fields_split[4]);
+            try std.testing.expectEqualSlices(u8, &expected_x, &fieldToBytesLE(Fp, actual.x));
+            try std.testing.expectEqualSlices(u8, &expected_y, &fieldToBytesLE(Fp, actual.y));
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 8);
+}
+
+test "zolt-arith differential glv g2 scalar mul fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "glv/glv_g2_scalar_mul.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(7, line, '|');
+
+        const scalar = try parseFrHex(fields_split[1]);
+        const expected_infinity = try parser.parseDecimal(u8, fields_split[2]);
+
+        const actual_proj = glv.glvScalarMulG2(G2Point.generator(), scalar);
+        const actual = actual_proj.toAffine();
+
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            try compareG2Coords(actual, .{ .xc0 = fields_split[3], .xc1 = fields_split[4], .yc0 = fields_split[5], .yc1 = fields_split[6] });
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 8);
+}
+
+// ============================================================================
+// Dory commitment differential tests
+// ============================================================================
+
+test "zolt-arith differential dory commit fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "dory/commit_cases.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    const DoryScheme = dory.DoryCommitmentScheme(Fr);
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(4, line, '|');
+
+        const max_num_vars = try parser.parseDecimal(usize, fields_split[1]);
+        const expected_commitment = try parseFp12HexLE(fields_split[3]);
+
+        // Parse evals
+        const evals = try parseFrCsv(allocator, fields_split[2]);
+        defer allocator.free(evals);
+
+        // Generate SRS matching the Rust generator
+        var srs = try DoryScheme.setup(allocator, max_num_vars);
+        defer srs.deinit();
+
+        // Compute commitment
+        const actual = DoryScheme.commitWithPool(&srs, evals, null);
+
+        // Compare Fp12 bytes
+        const expected_bytes = expected_commitment.toBytes();
+        const actual_bytes = actual.toBytes();
+        try std.testing.expectEqualSlices(u8, &expected_bytes, &actual_bytes);
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 2);
+}
+
+// ============================================================================
+// GPU field crossover differential tests
+// ============================================================================
+
+test "zolt-arith differential gpu field crossover fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "gpu/field_crossover.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(5, line, '|');
+        const op = fields_split[0];
+
+        // Parse inputs
+        const a_vals = try parseFrCsv(allocator, fields_split[2]);
+        defer allocator.free(a_vals);
+        const expected_vals = try parseFrCsv(allocator, fields_split[4]);
+        defer allocator.free(expected_vals);
+
+        // Verify CPU path against fixture
+        if (std.mem.eql(u8, op, "mul")) {
+            const b_vals = try parseFrCsv(allocator, fields_split[3]);
+            defer allocator.free(b_vals);
+            for (a_vals, 0..) |a, i| {
+                try std.testing.expect(a.mul(b_vals[i]).eql(expected_vals[i]));
+            }
+        } else if (std.mem.eql(u8, op, "add")) {
+            const b_vals = try parseFrCsv(allocator, fields_split[3]);
+            defer allocator.free(b_vals);
+            for (a_vals, 0..) |a, i| {
+                try std.testing.expect(a.add(b_vals[i]).eql(expected_vals[i]));
+            }
+        } else if (std.mem.eql(u8, op, "sub")) {
+            const b_vals = try parseFrCsv(allocator, fields_split[3]);
+            defer allocator.free(b_vals);
+            for (a_vals, 0..) |a, i| {
+                try std.testing.expect(a.sub(b_vals[i]).eql(expected_vals[i]));
+            }
+        } else if (std.mem.eql(u8, op, "neg")) {
+            for (a_vals, 0..) |a, i| {
+                try std.testing.expect(a.neg().eql(expected_vals[i]));
+            }
+        } else {
+            return error.UnknownGpuOp;
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 10);
 }

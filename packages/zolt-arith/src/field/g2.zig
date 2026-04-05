@@ -879,3 +879,45 @@ test "batchInverseFp2 correctness" {
         try std.testing.expect(product.eql(Fp2.one()));
     }
 }
+
+test "g2 scalar mul fixture vectors" {
+    const testdata = @import("../testdata.zig");
+    const fixture_text = @embedFile("../testdata/g2/g2_scalar_mul_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    const gen = G2Point.generator();
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(8, line, '|');
+
+        const scalar_bytes = try testdata.parseHexBytesExact(32, fields[1]);
+        const scalar = BN254Scalar.fromBytesBE(&scalar_bytes);
+        const expected_infinity = try testdata.parseDecimal(u8, fields[3]);
+
+        const actual = gen.scalarMul(scalar);
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            const expected_x_c0 = try testdata.parseHexBytesExact(32, fields[4]);
+            const expected_x_c1 = try testdata.parseHexBytesExact(32, fields[5]);
+            const expected_y_c0 = try testdata.parseHexBytesExact(32, fields[6]);
+            const expected_y_c1 = try testdata.parseHexBytesExact(32, fields[7]);
+            try std.testing.expectEqualSlices(u8, &expected_x_c0, &fpToBytesLE(actual.x.c0));
+            try std.testing.expectEqualSlices(u8, &expected_x_c1, &fpToBytesLE(actual.x.c1));
+            try std.testing.expectEqualSlices(u8, &expected_y_c0, &fpToBytesLE(actual.y.c0));
+            try std.testing.expectEqualSlices(u8, &expected_y_c1, &fpToBytesLE(actual.y.c1));
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 5);
+}
+
+fn fpToBytesLE(value: Fp) [32]u8 {
+    const standard = value.fromMontgomery();
+    var bytes: [32]u8 = undefined;
+    inline for (0..4) |i| {
+        std.mem.writeInt(u64, bytes[i * 8 ..][0..8], standard.limbs[i], .little);
+    }
+    return bytes;
+}

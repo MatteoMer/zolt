@@ -621,3 +621,72 @@ test "glv scalar mul G2 larger scalar" {
 
     try std.testing.expect(glv_result.eql(naive_result));
 }
+
+fn fpToBytesLE(value: Fp) [32]u8 {
+    const standard = value.fromMontgomery();
+    var bytes: [32]u8 = undefined;
+    inline for (0..4) |i| {
+        std.mem.writeInt(u64, bytes[i * 8 ..][0..8], standard.limbs[i], .little);
+    }
+    return bytes;
+}
+
+test "glv g1 scalar mul fixture vectors" {
+    const testdata = @import("../testdata.zig");
+    const fixture_text = @embedFile("../testdata/glv/glv_g1_scalar_mul.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(5, line, '|');
+
+        const scalar_bytes = try testdata.parseHexBytesExact(32, fields[1]);
+        const scalar = Fr.fromBytesBE(&scalar_bytes);
+        const expected_infinity = try testdata.parseDecimal(u8, fields[2]);
+
+        const actual = glvScalarMulG1(G1Affine.generator(), scalar).toAffine();
+
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            const expected_x = try testdata.parseHexBytesExact(32, fields[3]);
+            const expected_y = try testdata.parseHexBytesExact(32, fields[4]);
+            try std.testing.expectEqualSlices(u8, &expected_x, &fpToBytesLE(actual.x));
+            try std.testing.expectEqualSlices(u8, &expected_y, &fpToBytesLE(actual.y));
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 8);
+}
+
+test "glv g2 scalar mul fixture vectors" {
+    const testdata = @import("../testdata.zig");
+    const fixture_text = @embedFile("../testdata/glv/glv_g2_scalar_mul.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(7, line, '|');
+
+        const scalar_bytes = try testdata.parseHexBytesExact(32, fields[1]);
+        const scalar = Fr.fromBytesBE(&scalar_bytes);
+        const expected_infinity = try testdata.parseDecimal(u8, fields[2]);
+
+        const actual = glvScalarMulG2(G2Point.generator(), scalar).toAffine();
+
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            const expected_x_c0 = try testdata.parseHexBytesExact(32, fields[3]);
+            const expected_x_c1 = try testdata.parseHexBytesExact(32, fields[4]);
+            const expected_y_c0 = try testdata.parseHexBytesExact(32, fields[5]);
+            const expected_y_c1 = try testdata.parseHexBytesExact(32, fields[6]);
+            try std.testing.expectEqualSlices(u8, &expected_x_c0, &fpToBytesLE(actual.x.c0));
+            try std.testing.expectEqualSlices(u8, &expected_x_c1, &fpToBytesLE(actual.x.c1));
+            try std.testing.expectEqualSlices(u8, &expected_y_c0, &fpToBytesLE(actual.y.c0));
+            try std.testing.expectEqualSlices(u8, &expected_y_c1, &fpToBytesLE(actual.y.c1));
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 8);
+}

@@ -1642,8 +1642,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 init_sub_timer.reset();
             }
 
-
-
             // Run the batched sumcheck
             if (comptime debug_verbose) {
                 dbg("[STAGE5] Entering main sumcheck loop, max_num_rounds={}\n", .{max_num_rounds});

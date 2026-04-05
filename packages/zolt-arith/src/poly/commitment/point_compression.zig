@@ -469,3 +469,96 @@ test "g2 compressed bytes for arkworks validation" {
     file.writeAll(&compressed_42) catch return;
     std.debug.print("Wrote 3 compressed G2 points to /tmp/zolt_g2_test_points.bin\n", .{});
 }
+
+fn fpToBytesLE(value: Fp) [32]u8 {
+    const standard = value.fromMontgomery();
+    var bytes: [32]u8 = undefined;
+    inline for (0..4) |i| {
+        std.mem.writeInt(u64, bytes[i * 8 ..][0..8], standard.limbs[i], .little);
+    }
+    return bytes;
+}
+
+fn fpFromBytesLE(bytes: *const [32]u8) Fp {
+    var limbs: [4]u64 = undefined;
+    inline for (0..4) |i| {
+        limbs[i] = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .little);
+    }
+    const raw = Fp{ .limbs = limbs };
+    return raw.toMontgomery();
+}
+
+test "g1 point compression fixture vectors" {
+    const testdata = @import("../../testdata.zig");
+    const fixture_text = @embedFile("../../testdata/point_compression/g1_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(4, line, '|');
+
+        const expected_compressed = try testdata.parseHexBytesExact(32, fields[3]);
+
+        if (fields[1].len == 0) {
+            const identity = G1Point.identity();
+            const actual_compressed = compressG1(identity);
+            try std.testing.expectEqualSlices(u8, &expected_compressed, &actual_compressed);
+        } else {
+            const x_bytes = try testdata.parseHexBytesExact(32, fields[1]);
+            const y_bytes = try testdata.parseHexBytesExact(32, fields[2]);
+            const point = G1Point{ .x = fpFromBytesLE(&x_bytes), .y = fpFromBytesLE(&y_bytes), .infinity = false };
+
+            const actual_compressed = compressG1(point);
+            try std.testing.expectEqualSlices(u8, &expected_compressed, &actual_compressed);
+
+            const decompressed = decompressG1(&actual_compressed);
+            try std.testing.expect(decompressed != null);
+            try std.testing.expectEqualSlices(u8, &x_bytes, &fpToBytesLE(decompressed.?.x));
+            try std.testing.expectEqualSlices(u8, &y_bytes, &fpToBytesLE(decompressed.?.y));
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 6);
+}
+
+test "g2 point compression fixture vectors" {
+    const testdata = @import("../../testdata.zig");
+    const fixture_text = @embedFile("../../testdata/point_compression/g2_vectors.txt");
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = testdata.cleanLine(raw_line) orelse continue;
+        const fields = try testdata.splitFieldsExact(6, line, '|');
+
+        if (fields[1].len == 0) {
+            const identity = pairing.G2Point.identity();
+            const compressed = compressG2(identity);
+            const decompressed = decompressG2(&compressed);
+            try std.testing.expect(decompressed != null);
+            try std.testing.expect(decompressed.?.infinity);
+        } else {
+            const x_c0 = try testdata.parseHexBytesExact(32, fields[1]);
+            const x_c1 = try testdata.parseHexBytesExact(32, fields[2]);
+            const point = pairing.G2Point{
+                .x = Fp2.init(fpFromBytesLE(&x_c0), fpFromBytesLE(&x_c1)),
+                .y = Fp2.init(
+                    fpFromBytesLE(&(try testdata.parseHexBytesExact(32, fields[3]))),
+                    fpFromBytesLE(&(try testdata.parseHexBytesExact(32, fields[4]))),
+                ),
+                .infinity = false,
+            };
+
+            // Verify x-coordinate is preserved in compressed form
+            const compressed = compressG2(point);
+            var x1_from_compressed: [32]u8 = undefined;
+            @memcpy(&x1_from_compressed, compressed[32..64]);
+            x1_from_compressed[31] &= 0x3F;
+            try std.testing.expectEqualSlices(u8, &x_c0, compressed[0..32]);
+            try std.testing.expectEqualSlices(u8, &x_c1, &x1_from_compressed);
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 6);
+}

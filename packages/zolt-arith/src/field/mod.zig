@@ -1319,14 +1319,14 @@ pub fn MontgomeryField(
             var r3: u64 = undefined;
 
             asm volatile (
-                // ═════════════════════════��═════════════
-                // Phase 1: 8-limb product a^2
-                // P[0..7] in r8,r9,r10,r11,r12,r13,r15,rcx
-                // ═══════════════════════════════════════
-                //
-                // Cross products, column by column:
-                //
-                // a[0]*a[1] → P[1],P[2]
+            // ═════════════════════════��═════════════
+            // Phase 1: 8-limb product a^2
+            // P[0..7] in r8,r9,r10,r11,r12,r13,r15,rcx
+            // ═══════════════════════════════════════
+            //
+            // Cross products, column by column:
+            //
+            // a[0]*a[1] → P[1],P[2]
                 \\movq (%%rdi), %%rdx
                 \\mulxq 8(%%rdi), %%r9, %%r10
                 //
@@ -2079,10 +2079,10 @@ pub const BN254Scalar = struct {
         var r3: u64 = undefined;
 
         asm volatile (
-            // Phase 1: 8-limb product a^2
-            // P[0..7] in r8,r9,r10,r11,r12,r13,r15,rsi
-            //
-            // Cross products, column by column:
+        // Phase 1: 8-limb product a^2
+        // P[0..7] in r8,r9,r10,r11,r12,r13,r15,rsi
+        //
+        // Cross products, column by column:
             \\movq (%%rdi), %%rdx
             \\mulxq 8(%%rdi), %%r9, %%r10
             \\mulxq 16(%%rdi), %%rax, %%r11

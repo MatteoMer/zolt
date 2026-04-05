@@ -1,0 +1,234 @@
+const std = @import("std");
+const parser = @import("vector_parser.zig");
+const zolt = @import("zolt");
+const diff_config = @import("diff_config");
+
+const field = zolt.field;
+const pairing = field.pairing;
+const msm = zolt.msm;
+
+const Fr = field.BN254Scalar;
+const Fp = field.BN254BaseField;
+const G1Affine = msm.AffinePoint(Fp);
+const G2Point = pairing.G2Point;
+const G1MSM = msm.MSM(Fr, Fp);
+
+fn readFixtureAlloc(allocator: std.mem.Allocator, relative_path: []const u8) ![]u8 {
+    const full_path = try std.fs.path.join(allocator, &.{ diff_config.fixtures_root, relative_path });
+    defer allocator.free(full_path);
+    return std.fs.cwd().readFileAlloc(allocator, full_path, 16 * 1024 * 1024);
+}
+
+fn fieldToBytesLE(comptime F: type, value: F) [32]u8 {
+    const standard = value.fromMontgomery();
+    var bytes: [32]u8 = undefined;
+    inline for (0..4) |i| {
+        std.mem.writeInt(u64, bytes[i * 8 ..][0..8], standard.limbs[i], .little);
+    }
+    return bytes;
+}
+
+fn parseFrHex(text: []const u8) !Fr {
+    const bytes = try parser.parseHexBytesExact(32, text);
+    return Fr.fromBytesBE(&bytes);
+}
+
+fn parseFpHex(text: []const u8) !Fp {
+    const bytes = try parser.parseHexBytesExact(32, text);
+    return Fp.fromBytesBE(&bytes);
+}
+
+fn generateG1Bases(allocator: std.mem.Allocator, n: usize) ![]G1Affine {
+    var bases = try allocator.alloc(G1Affine, n);
+    const gen = G1Affine.generator();
+    var proj = msm.ProjectivePoint(Fp).fromAffine(gen);
+    for (0..n) |i| {
+        bases[i] = proj.toAffine();
+        proj = proj.double();
+    }
+    return bases;
+}
+
+fn generateG2Bases(allocator: std.mem.Allocator, n: usize) ![]G2Point {
+    var bases = try allocator.alloc(G2Point, n);
+    const gen = G2Point.generator();
+    var acc = pairing.G2Projective.fromAffine(gen);
+    for (0..n) |i| {
+        bases[i] = acc.toAffine();
+        acc = acc.double();
+    }
+    return bases;
+}
+
+fn parseFrCsv(allocator: std.mem.Allocator, text: []const u8) ![]Fr {
+    return parser.parseCsvExact(Fr, text, allocator, parseFrHex);
+}
+
+fn parseI128Csv(allocator: std.mem.Allocator, text: []const u8) ![]i128 {
+    return parser.parseCsvExact(i128, text, allocator, struct {
+        fn parseOne(part: []const u8) !i128 {
+            return parser.parseDecimal(i128, part);
+        }
+    }.parseOne);
+}
+
+test "zolt-arith differential field fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_sets = [_]struct { path: []const u8, field_type: type }{
+        .{ .path = "field/fr_ops.txt", .field_type = Fr },
+        .{ .path = "field/fp_ops.txt", .field_type = Fp },
+    };
+
+    inline for (fixture_sets) |fixture_set| {
+        const fixture_text = try readFixtureAlloc(allocator, fixture_set.path);
+        defer allocator.free(fixture_text);
+        var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+        while (lines.next()) |raw_line| {
+            const line = parser.cleanLine(raw_line) orelse continue;
+            const fields_split = try parser.splitFieldsExact(4, line, '|');
+
+            const F = fixture_set.field_type;
+            const a_bytes = try parser.parseHexBytesExact(32, fields_split[1]);
+            const expected_bytes = try parser.parseHexBytesExact(32, fields_split[3]);
+            const a = F.fromBytesBE(&a_bytes);
+            const expected = F.fromBytesBE(&expected_bytes);
+
+            if (std.mem.eql(u8, fields_split[0], "inv")) {
+                try std.testing.expect(a.inverse().?.eql(expected));
+                continue;
+            }
+
+            const b_bytes = try parser.parseHexBytesExact(32, fields_split[2]);
+            const b = F.fromBytesBE(&b_bytes);
+            if (std.mem.eql(u8, fields_split[0], "add")) {
+                try std.testing.expect(a.add(b).eql(expected));
+            } else if (std.mem.eql(u8, fields_split[0], "sub")) {
+                try std.testing.expect(a.sub(b).eql(expected));
+            } else if (std.mem.eql(u8, fields_split[0], "mul")) {
+                try std.testing.expect(a.mul(b).eql(expected));
+            } else {
+                return error.UnknownFieldOperation;
+            }
+        }
+    }
+}
+
+test "zolt-arith differential pairing fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "pairing/generator_cases.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(4, line, '|');
+
+        const g1_scalar = Fr.fromU64(try parser.parseDecimal(u64, fields_split[1]));
+        const g2_scalar = Fr.fromU64(try parser.parseDecimal(u64, fields_split[2]));
+
+        const g1_affine = G1MSM.scalarMul(pairing.G1PointInFp.generator(), g1_scalar).toAffine();
+        const g1 = pairing.G1PointFp{
+            .x = g1_affine.x,
+            .y = g1_affine.y,
+            .infinity = g1_affine.infinity,
+        };
+        const g2 = G2Point.generator().scalarMul(g2_scalar);
+
+        const expected = try parser.parseHexBytesExact(384, fields_split[3]);
+        const actual = pairing.pairingFp(g1, g2).toBytes();
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+    }
+}
+
+test "zolt-arith differential msm g1 fr fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "msm/g1_fr_cases.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(5, line, '|');
+        const scalars = try parseFrCsv(allocator, fields_split[1]);
+        defer allocator.free(scalars);
+
+        const bases = try generateG1Bases(allocator, scalars.len);
+        defer allocator.free(bases);
+
+        const actual = G1MSM.computeWithPool(bases, scalars, null);
+        const expected_infinity = try parser.parseDecimal(u8, fields_split[2]);
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            const expected_x = try parser.parseHexBytesExact(32, fields_split[3]);
+            const expected_y = try parser.parseHexBytesExact(32, fields_split[4]);
+            const actual_x = fieldToBytesLE(Fp, actual.x);
+            const actual_y = fieldToBytesLE(Fp, actual.y);
+            try std.testing.expectEqualSlices(u8, &expected_x, &actual_x);
+            try std.testing.expectEqualSlices(u8, &expected_y, &actual_y);
+        }
+    }
+}
+
+test "zolt-arith differential msm g1 i128 fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "msm/g1_i128_cases.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(5, line, '|');
+        const scalars = try parseI128Csv(allocator, fields_split[1]);
+        defer allocator.free(scalars);
+
+        const bases = try generateG1Bases(allocator, scalars.len);
+        defer allocator.free(bases);
+
+        const actual = G1MSM.computeI128(bases, scalars, null);
+        const expected_infinity = try parser.parseDecimal(u8, fields_split[2]);
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            const expected_x = try parser.parseHexBytesExact(32, fields_split[3]);
+            const expected_y = try parser.parseHexBytesExact(32, fields_split[4]);
+            const actual_x = fieldToBytesLE(Fp, actual.x);
+            const actual_y = fieldToBytesLE(Fp, actual.y);
+            try std.testing.expectEqualSlices(u8, &expected_x, &actual_x);
+            try std.testing.expectEqualSlices(u8, &expected_y, &actual_y);
+        }
+    }
+}
+
+test "zolt-arith differential msm g2 fr fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "msm/g2_fr_cases.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(7, line, '|');
+        const scalars = try parseFrCsv(allocator, fields_split[1]);
+        defer allocator.free(scalars);
+
+        const bases = try generateG2Bases(allocator, scalars.len);
+        defer allocator.free(bases);
+
+        const actual = zolt.poly.commitment.dory.msmG2Bench(Fr, bases, scalars, null);
+        const expected_infinity = try parser.parseDecimal(u8, fields_split[2]);
+        try std.testing.expectEqual(expected_infinity == 1, actual.infinity);
+        if (!actual.infinity) {
+            const expected_x_c0 = try parser.parseHexBytesExact(32, fields_split[3]);
+            const expected_x_c1 = try parser.parseHexBytesExact(32, fields_split[4]);
+            const expected_y_c0 = try parser.parseHexBytesExact(32, fields_split[5]);
+            const expected_y_c1 = try parser.parseHexBytesExact(32, fields_split[6]);
+            const actual_x_c0 = fieldToBytesLE(Fp, actual.x.c0);
+            const actual_x_c1 = fieldToBytesLE(Fp, actual.x.c1);
+            const actual_y_c0 = fieldToBytesLE(Fp, actual.y.c0);
+            const actual_y_c1 = fieldToBytesLE(Fp, actual.y.c1);
+            try std.testing.expectEqualSlices(u8, &expected_x_c0, &actual_x_c0);
+            try std.testing.expectEqualSlices(u8, &expected_x_c1, &actual_x_c1);
+            try std.testing.expectEqualSlices(u8, &expected_y_c0, &actual_y_c0);
+            try std.testing.expectEqualSlices(u8, &expected_y_c1, &actual_y_c1);
+        }
+    }
+}

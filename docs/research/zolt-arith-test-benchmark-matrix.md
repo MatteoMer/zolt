@@ -322,3 +322,15 @@ For `zolt-arith`, the right baseline is:
 - use `arkworks` and `gnark-crypto` as BN254 oracles
 - reuse existing MSM benchmarking first
 - add package-local field and pairing benches before lower-value benchmark work
+
+## Implementation Note
+
+The first differential implementation is intentionally repo-level and optional:
+
+- external fixtures live under `testdata/zolt-arith-diff/`
+- the arkworks generator lives under `tools/zolt-arith-diff/`
+- optional verification runs via `zig build test-zolt-arith-diff`
+- optional generation runs via `zig build gen-zolt-arith-diff-fixtures`
+- the dedicated field microbench runs via `zig build bench-zolt-arith-field`
+
+This keeps Rust and differential verification out of the normal `packages/zolt-arith` build while still making dedicated CI jobs straightforward.

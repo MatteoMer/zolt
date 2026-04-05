@@ -278,6 +278,22 @@ pub fn build(b: *std.Build) void {
     const field_bench_step = b.step("bench-field", "Run field arithmetic benchmark");
     field_bench_step.dependOn(&run_field_bench.step);
 
+    // Benchmark: zolt-arith field microbench (repo-level, optional)
+    const zolt_arith_field_micro = b.addExecutable(.{
+        .name = "zolt-arith-field-micro",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/zolt_arith/field_micro.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_zolt_arith_field_micro = b.addRunArtifact(zolt_arith_field_micro);
+    const zolt_arith_field_micro_step = b.step("bench-zolt-arith-field", "Run zolt-arith field microbench");
+    zolt_arith_field_micro_step.dependOn(&run_zolt_arith_field_micro.step);
+
     // Benchmark: ARM64 field verification
     const arm64_verify = b.addExecutable(.{
         .name = "arm64-verify",
@@ -309,6 +325,40 @@ pub fn build(b: *std.Build) void {
     const run_gpu_bench = b.addRunArtifact(gpu_bench);
     const gpu_bench_step = b.step("bench-gpu", "Run GPU vs CPU benchmark");
     gpu_bench_step.dependOn(&run_gpu_bench.step);
+
+    // Optional: differential fixture generation outside the package
+    const gen_zolt_arith_diff = b.addSystemCommand(&.{
+        "cargo",
+        "run",
+        "--release",
+        "--manifest-path",
+        "tools/zolt-arith-diff/arkworks-fixtures/Cargo.toml",
+        "--",
+        "--out-dir",
+        "testdata/zolt-arith-diff",
+    });
+    const gen_zolt_arith_diff_step = b.step("gen-zolt-arith-diff-fixtures", "Generate optional zolt-arith differential fixtures via arkworks");
+    gen_zolt_arith_diff_step.dependOn(&gen_zolt_arith_diff.step);
+
+    // Optional: differential fixture verification outside the package
+    const zolt_arith_diff_options = b.addOptions();
+    zolt_arith_diff_options.addOption([]const u8, "fixtures_root", b.pathFromRoot("testdata/zolt-arith-diff"));
+
+    const zolt_arith_diff_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/zolt-arith-diff/check.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+                .{ .name = "diff_config", .module = zolt_arith_diff_options.createModule() },
+            },
+        }),
+    });
+    if (is_apple_silicon) linkMetalFrameworks(zolt_arith_diff_tests.root_module);
+    const run_zolt_arith_diff_tests = b.addRunArtifact(zolt_arith_diff_tests);
+    const zolt_arith_diff_step = b.step("test-zolt-arith-diff", "Run optional zolt-arith differential fixtures");
+    zolt_arith_diff_step.dependOn(&run_zolt_arith_diff_tests.step);
 
     // Optional: rebuild Metal shaders from .metal sources
     // Usage: zig build metal-shaders

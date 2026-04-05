@@ -1,12 +1,12 @@
 mod transcript;
 
-use ark_bn254::{Bn254, Fq, Fq12, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
+use ark_bn254::{Bn254, Fq, Fq2, Fq6, Fq12, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{
     pairing::Pairing,
     scalar_mul::variable_base::{msm_i128, VariableBaseMSM},
     AdditiveGroup, AffineRepr, CurveGroup, PrimeGroup,
 };
-use ark_ff::{BigInteger, Field, PrimeField, UniformRand, Zero};
+use ark_ff::{BigInteger, CyclotomicMultSubgroup, Field, PrimeField, UniformRand, Zero, One};
 use ark_std::rand::{rngs::StdRng, SeedableRng};
 use std::{
     env, fs,
@@ -56,6 +56,32 @@ fn fq12_hex_le(value: &Fq12) -> String {
     ];
 
     let mut bytes = Vec::with_capacity(384);
+    for coord in coords {
+        let mut le = coord.into_bigint().to_bytes_le();
+        le.resize(32, 0);
+        bytes.extend_from_slice(&le);
+    }
+    hex_encode(&bytes)
+}
+
+fn fq2_hex_le(value: &Fq2) -> String {
+    let coords = [&value.c0, &value.c1];
+    let mut bytes = Vec::with_capacity(64);
+    for coord in coords {
+        let mut le = coord.into_bigint().to_bytes_le();
+        le.resize(32, 0);
+        bytes.extend_from_slice(&le);
+    }
+    hex_encode(&bytes)
+}
+
+fn fq6_hex_le(value: &Fq6) -> String {
+    let coords = [
+        &value.c0.c0, &value.c0.c1,
+        &value.c1.c0, &value.c1.c1,
+        &value.c2.c0, &value.c2.c1,
+    ];
+    let mut bytes = Vec::with_capacity(192);
     for coord in coords {
         let mut le = coord.into_bigint().to_bytes_le();
         le.resize(32, 0);
@@ -511,6 +537,118 @@ fn generate_transcript_fixtures(out_dir: &Path) {
     write_file(out_dir.join("transcript/challenge_vectors.txt"), chal_out);
 }
 
+fn generate_extension_field_ops(out_dir: &Path) {
+    let mut rng = StdRng::seed_from_u64(0xe47f_1e1d);
+
+    // --- Fp2 ---
+    let fp2_cases: Vec<(Fq2, Fq2)> = vec![
+        (Fq2::zero(), Fq2::one()),
+        (Fq2::one(), Fq2::one()),
+        (Fq2::new(Fq::from(3u64), Fq::from(0u64)), Fq2::new(Fq::from(0u64), Fq::from(7u64))),
+        (Fq2::new(Fq::from(5u64), Fq::from(11u64)), Fq2::new(Fq::from(13u64), Fq::from(17u64))),
+        (Fq2::rand(&mut rng), Fq2::rand(&mut rng)),
+        (Fq2::rand(&mut rng), Fq2::rand(&mut rng)),
+        (Fq2::rand(&mut rng), Fq2::rand(&mut rng)),
+        (Fq2::rand(&mut rng), Fq2::rand(&mut rng)),
+    ];
+
+    let mut fp2_out = String::from("# op|a_le_hex|b_le_hex|expected_le_hex\n");
+    for (a, b) in &fp2_cases {
+        fp2_out.push_str(&format!("add|{}|{}|{}\n", fq2_hex_le(a), fq2_hex_le(b), fq2_hex_le(&(*a + *b))));
+        fp2_out.push_str(&format!("sub|{}|{}|{}\n", fq2_hex_le(a), fq2_hex_le(b), fq2_hex_le(&(*a - *b))));
+        fp2_out.push_str(&format!("mul|{}|{}|{}\n", fq2_hex_le(a), fq2_hex_le(b), fq2_hex_le(&(*a * *b))));
+        fp2_out.push_str(&format!("square|{}|-|{}\n", fq2_hex_le(a), fq2_hex_le(&a.square())));
+        if !a.is_zero() {
+            fp2_out.push_str(&format!("inv|{}|-|{}\n", fq2_hex_le(a), fq2_hex_le(&a.inverse().unwrap())));
+        }
+        {
+            let mut conj = *a;
+            conj.conjugate_in_place();
+            fp2_out.push_str(&format!("conjugate|{}|-|{}\n", fq2_hex_le(a), fq2_hex_le(&conj)));
+        }
+    }
+    write_file(out_dir.join("extensions/fp2_ops.txt"), fp2_out);
+
+    // --- Fp6 ---
+    let fp6_cases: Vec<(Fq6, Fq6)> = vec![
+        (Fq6::zero(), Fq6::one()),
+        (Fq6::one(), Fq6::one()),
+        (Fq6::new(Fq2::new(Fq::from(1u64), Fq::from(2u64)),
+                   Fq2::new(Fq::from(3u64), Fq::from(4u64)),
+                   Fq2::new(Fq::from(5u64), Fq::from(6u64))),
+         Fq6::new(Fq2::new(Fq::from(7u64), Fq::from(8u64)),
+                   Fq2::new(Fq::from(9u64), Fq::from(10u64)),
+                   Fq2::new(Fq::from(11u64), Fq::from(12u64)))),
+        (Fq6::rand(&mut rng), Fq6::rand(&mut rng)),
+        (Fq6::rand(&mut rng), Fq6::rand(&mut rng)),
+        (Fq6::rand(&mut rng), Fq6::rand(&mut rng)),
+        (Fq6::rand(&mut rng), Fq6::rand(&mut rng)),
+        (Fq6::rand(&mut rng), Fq6::rand(&mut rng)),
+    ];
+
+    let mut fp6_out = String::from("# op|a_le_hex|b_le_hex|expected_le_hex\n");
+    for (a, b) in &fp6_cases {
+        fp6_out.push_str(&format!("add|{}|{}|{}\n", fq6_hex_le(a), fq6_hex_le(b), fq6_hex_le(&(*a + *b))));
+        fp6_out.push_str(&format!("sub|{}|{}|{}\n", fq6_hex_le(a), fq6_hex_le(b), fq6_hex_le(&(*a - *b))));
+        fp6_out.push_str(&format!("mul|{}|{}|{}\n", fq6_hex_le(a), fq6_hex_le(b), fq6_hex_le(&(*a * *b))));
+        fp6_out.push_str(&format!("square|{}|-|{}\n", fq6_hex_le(a), fq6_hex_le(&a.square())));
+        if !a.is_zero() {
+            fp6_out.push_str(&format!("inv|{}|-|{}\n", fq6_hex_le(a), fq6_hex_le(&a.inverse().unwrap())));
+        }
+    }
+    write_file(out_dir.join("extensions/fp6_ops.txt"), fp6_out);
+
+    // --- Fp12 ---
+    let fp12_cases: Vec<(Fq12, Fq12)> = vec![
+        (Fq12::zero(), Fq12::one()),
+        (Fq12::one(), Fq12::one()),
+        (Fq12::new(
+            Fq6::new(Fq2::new(Fq::from(1u64), Fq::from(2u64)),
+                     Fq2::new(Fq::from(3u64), Fq::from(4u64)),
+                     Fq2::new(Fq::from(5u64), Fq::from(6u64))),
+            Fq6::new(Fq2::new(Fq::from(7u64), Fq::from(8u64)),
+                     Fq2::new(Fq::from(9u64), Fq::from(10u64)),
+                     Fq2::new(Fq::from(11u64), Fq::from(12u64)))),
+         Fq12::new(
+            Fq6::new(Fq2::new(Fq::from(13u64), Fq::from(14u64)),
+                     Fq2::new(Fq::from(15u64), Fq::from(16u64)),
+                     Fq2::new(Fq::from(17u64), Fq::from(18u64))),
+            Fq6::new(Fq2::new(Fq::from(19u64), Fq::from(20u64)),
+                     Fq2::new(Fq::from(21u64), Fq::from(22u64)),
+                     Fq2::new(Fq::from(23u64), Fq::from(24u64))))),
+        (Fq12::rand(&mut rng), Fq12::rand(&mut rng)),
+        (Fq12::rand(&mut rng), Fq12::rand(&mut rng)),
+        (Fq12::rand(&mut rng), Fq12::rand(&mut rng)),
+        (Fq12::rand(&mut rng), Fq12::rand(&mut rng)),
+        (Fq12::rand(&mut rng), Fq12::rand(&mut rng)),
+    ];
+
+    let mut fp12_out = String::from("# op|a_le_hex|b_le_hex|expected_le_hex\n");
+    for (a, b) in &fp12_cases {
+        fp12_out.push_str(&format!("add|{}|{}|{}\n", fq12_hex_le(a), fq12_hex_le(b), fq12_hex_le(&(*a + *b))));
+        fp12_out.push_str(&format!("sub|{}|{}|{}\n", fq12_hex_le(a), fq12_hex_le(b), fq12_hex_le(&(*a - *b))));
+        fp12_out.push_str(&format!("mul|{}|{}|{}\n", fq12_hex_le(a), fq12_hex_le(b), fq12_hex_le(&(*a * *b))));
+        fp12_out.push_str(&format!("square|{}|-|{}\n", fq12_hex_le(a), fq12_hex_le(&a.square())));
+        if !a.is_zero() {
+            fp12_out.push_str(&format!("inv|{}|-|{}\n", fq12_hex_le(a), fq12_hex_le(&a.inverse().unwrap())));
+        }
+        {
+            let mut conj = *a;
+            conj.conjugate_in_place();
+            fp12_out.push_str(&format!("conjugate|{}|-|{}\n", fq12_hex_le(a), fq12_hex_le(&conj)));
+        }
+        fp12_out.push_str(&format!("frobenius|{}|-|{}\n", fq12_hex_le(a), fq12_hex_le(&a.frobenius_map(1))));
+        fp12_out.push_str(&format!("frobenius2|{}|-|{}\n", fq12_hex_le(a), fq12_hex_le(&a.frobenius_map(2))));
+        fp12_out.push_str(&format!("frobenius3|{}|-|{}\n", fq12_hex_le(a), fq12_hex_le(&a.frobenius_map(3))));
+        if !a.is_zero() {
+            let mut cyc = *a;
+            cyc.cyclotomic_square_in_place();
+            fp12_out.push_str(&format!("cyclotomic_square|{}|-|{}\n", fq12_hex_le(a), fq12_hex_le(&cyc)));
+        }
+    }
+    write_file(out_dir.join("extensions/fp12_ops.txt"), fp12_out);
+}
+
 fn parse_out_dir() -> PathBuf {
     let mut args = env::args().skip(1);
     let mut out_dir = PathBuf::from("testdata/zolt-arith-diff");
@@ -533,5 +671,6 @@ fn main() {
     generate_msm_cases(&out_dir);
     generate_accumulator_ops(&out_dir);
     generate_transcript_fixtures(&out_dir);
+    generate_extension_field_ops(&out_dir);
     eprintln!("generated zolt-arith differential fixtures under {}", out_dir.display());
 }

@@ -11,6 +11,9 @@ const transcripts = zolt.transcripts;
 
 const Fr = field.BN254Scalar;
 const Fp = field.BN254BaseField;
+const Fp2 = pairing.Fp2;
+const Fp6 = pairing.Fp6;
+const Fp12 = pairing.Fp12;
 const G1Affine = msm.AffinePoint(Fp);
 const G2Point = pairing.G2Point;
 const G1MSM = msm.MSM(Fr, Fp);
@@ -419,4 +422,153 @@ test "zolt-arith differential transcript challenge fixtures" {
             try std.testing.expectEqual(expected_high, challenge.limbs[3]);
         }
     }
+}
+
+// ============================================================================
+// Extension field differential tests
+// ============================================================================
+
+fn fpFromBytesLE(bytes: *const [32]u8) Fp {
+    var limbs: [4]u64 = undefined;
+    inline for (0..4) |i| {
+        limbs[i] = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .little);
+    }
+    const raw = Fp{ .limbs = limbs };
+    return raw.toMontgomery();
+}
+
+fn parseFp2HexLE(text: []const u8) !Fp2 {
+    const bytes = try parser.parseHexBytesExact(64, text);
+    return Fp2.init(fpFromBytesLE(bytes[0..32]), fpFromBytesLE(bytes[32..64]));
+}
+
+fn parseFp6HexLE(text: []const u8) !Fp6 {
+    const bytes = try parser.parseHexBytesExact(192, text);
+    return Fp6{
+        .c0 = Fp2.init(fpFromBytesLE(bytes[0..32]), fpFromBytesLE(bytes[32..64])),
+        .c1 = Fp2.init(fpFromBytesLE(bytes[64..96]), fpFromBytesLE(bytes[96..128])),
+        .c2 = Fp2.init(fpFromBytesLE(bytes[128..160]), fpFromBytesLE(bytes[160..192])),
+    };
+}
+
+fn parseFp12HexLE(text: []const u8) !Fp12 {
+    const bytes = try parser.parseHexBytesExact(384, text);
+    return Fp12.fromBytes(&bytes);
+}
+
+test "zolt-arith differential fp2 fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "extensions/fp2_ops.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(4, line, '|');
+        const op = fields_split[0];
+        const a = try parseFp2HexLE(fields_split[1]);
+        const expected = try parseFp2HexLE(fields_split[3]);
+
+        if (std.mem.eql(u8, op, "add")) {
+            const b = try parseFp2HexLE(fields_split[2]);
+            try std.testing.expect(a.add(b).eql(expected));
+        } else if (std.mem.eql(u8, op, "sub")) {
+            const b = try parseFp2HexLE(fields_split[2]);
+            try std.testing.expect(a.sub(b).eql(expected));
+        } else if (std.mem.eql(u8, op, "mul")) {
+            const b = try parseFp2HexLE(fields_split[2]);
+            try std.testing.expect(a.mul(b).eql(expected));
+        } else if (std.mem.eql(u8, op, "square")) {
+            try std.testing.expect(a.square().eql(expected));
+        } else if (std.mem.eql(u8, op, "inv")) {
+            try std.testing.expect(a.inverse().?.eql(expected));
+        } else if (std.mem.eql(u8, op, "conjugate")) {
+            try std.testing.expect(a.conjugate().eql(expected));
+        } else {
+            return error.UnknownExtensionFieldOp;
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 40);
+}
+
+test "zolt-arith differential fp6 fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "extensions/fp6_ops.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(4, line, '|');
+        const op = fields_split[0];
+        const a = try parseFp6HexLE(fields_split[1]);
+        const expected = try parseFp6HexLE(fields_split[3]);
+
+        if (std.mem.eql(u8, op, "add")) {
+            const b = try parseFp6HexLE(fields_split[2]);
+            try std.testing.expect(a.add(b).eql(expected));
+        } else if (std.mem.eql(u8, op, "sub")) {
+            const b = try parseFp6HexLE(fields_split[2]);
+            try std.testing.expect(a.sub(b).eql(expected));
+        } else if (std.mem.eql(u8, op, "mul")) {
+            const b = try parseFp6HexLE(fields_split[2]);
+            try std.testing.expect(a.mul(b).eql(expected));
+        } else if (std.mem.eql(u8, op, "square")) {
+            try std.testing.expect(a.square().eql(expected));
+        } else if (std.mem.eql(u8, op, "inv")) {
+            try std.testing.expect(a.inverse().?.eql(expected));
+        } else {
+            return error.UnknownExtensionFieldOp;
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 30);
+}
+
+test "zolt-arith differential fp12 fixtures" {
+    const allocator = std.testing.allocator;
+    const fixture_text = try readFixtureAlloc(allocator, "extensions/fp12_ops.txt");
+    defer allocator.free(fixture_text);
+    var lines = std.mem.splitScalar(u8, fixture_text, '\n');
+    var case_count: usize = 0;
+
+    while (lines.next()) |raw_line| {
+        const line = parser.cleanLine(raw_line) orelse continue;
+        const fields_split = try parser.splitFieldsExact(4, line, '|');
+        const op = fields_split[0];
+        const a = try parseFp12HexLE(fields_split[1]);
+        const expected = try parseFp12HexLE(fields_split[3]);
+
+        if (std.mem.eql(u8, op, "add")) {
+            const b = try parseFp12HexLE(fields_split[2]);
+            try std.testing.expect(a.add(b).eql(expected));
+        } else if (std.mem.eql(u8, op, "sub")) {
+            const b = try parseFp12HexLE(fields_split[2]);
+            try std.testing.expect(a.sub(b).eql(expected));
+        } else if (std.mem.eql(u8, op, "mul")) {
+            const b = try parseFp12HexLE(fields_split[2]);
+            try std.testing.expect(a.mul(b).eql(expected));
+        } else if (std.mem.eql(u8, op, "square")) {
+            try std.testing.expect(a.square().eql(expected));
+        } else if (std.mem.eql(u8, op, "inv")) {
+            try std.testing.expect(a.inverse().?.eql(expected));
+        } else if (std.mem.eql(u8, op, "conjugate")) {
+            try std.testing.expect(a.conjugate().eql(expected));
+        } else if (std.mem.eql(u8, op, "frobenius")) {
+            try std.testing.expect(a.frobenius().eql(expected));
+        } else if (std.mem.eql(u8, op, "frobenius2")) {
+            try std.testing.expect(a.frobenius2().eql(expected));
+        } else if (std.mem.eql(u8, op, "frobenius3")) {
+            try std.testing.expect(a.frobenius3().eql(expected));
+        } else if (std.mem.eql(u8, op, "cyclotomic_square")) {
+            try std.testing.expect(a.cyclotomicSquare().eql(expected));
+        } else {
+            return error.UnknownExtensionFieldOp;
+        }
+        case_count += 1;
+    }
+    try std.testing.expect(case_count >= 60);
 }

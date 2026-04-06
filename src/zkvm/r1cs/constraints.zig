@@ -31,6 +31,33 @@ const instruction = @import("../instruction/mod.zig");
 const tracer = @import("../../tracer/mod.zig");
 const CircuitFlags = instruction.CircuitFlags;
 
+/// Atomic counter for debug printing (only first N steps are printed)
+var debug_step_counter = std.atomic.Value(u32).init(0);
+const DEBUG_MAX_STEPS: u32 = 0;
+
+/// Human-readable constraint names (indexed by UNIFORM_CONSTRAINTS order)
+const CONSTRAINT_NAMES = [_][]const u8{
+    "C0:  RamAddrEqRs1PlusImmIfLoadStore",
+    "C1:  RamAddrEqZeroIfNotLoadStore",
+    "C2:  RamReadEqRamWriteIfLoad",
+    "C3:  RamReadEqRdWriteIfLoad",
+    "C4:  Rs2EqRamWriteIfStore",
+    "C5:  LeftLookupZeroUnlessAddSubMul",
+    "C6:  LeftLookupEqLeftInputOtherwise",
+    "C7:  RightLookupAdd",
+    "C8:  RightLookupSub",
+    "C9:  RightLookupEqProductIfMul",
+    "C10: RightLookupEqRightInputOtherwise",
+    "C11: AssertLookupOne",
+    "C12: RdWriteEqLookupIfWriteLookupToRd",
+    "C13: RdWriteEqPCPlusConstIfWritePCtoRD",
+    "C14: NextUnexpPCEqLookupIfShouldJump",
+    "C15: NextUnexpPCEqPCPlusImmIfShouldBranch",
+    "C16: NextUnexpPCUpdateOtherwise",
+    "C17: NextPCEqPCPlusOneIfInline",
+    "C18: MustStartSequenceFromBeginning",
+};
+
 // Re-export witness types from dedicated module
 const witness_types = @import("witness_types.zig");
 pub const R1CSInputIndex = witness_types.R1CSInputIndex;
@@ -514,11 +541,12 @@ pub fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
         0x67 => true, // JALR
         0x0B => true, // VirtualSignExtendWord - uses SignExtendHalfWord table
         0x2B => true, // VirtualMULI - uses RangeCheck table
-        0x5B => true, // VirtualSRLI - uses VirtualSRL table
+        0x5B => (funct3 == 0 or funct3 == 5), // VirtualSRLI/VirtualSRAI only (funct3=0/5); VirtualHostIO (other funct3) has no table
         0x02 => true, // VirtualAdvice - uses RangeCheck table (Advice)
         0x22 => true, // VirtualAssertEQ - uses Equal table (Assert)
         0x42 => true, // VirtualZeroExtendWord - uses LowerHalfWord table (AddOperands)
         0x62 => true, // VirtualAssertValidUnsignedRemainder - uses ValidUnsignedRemainder table (Assert)
+        0x6B => true, // VirtualROTRI/VirtualROTRIW - uses VirtualROTR/VirtualROTRW tables
         0x03 => false, // Load - no table
         0x23 => false, // Store - no table
         else => false,
@@ -741,30 +769,41 @@ fn computeInstructionInputs(comptime F: type, step: tracer.TraceStep) Instructio
             }
         },
         // Virtual instructions on opcode 0x5B, dispatched by funct3 and rs2_read:
-        //   I-type (rs2_read=false): VirtualSRLI (funct3=0) or VirtualSRAI (funct3=5)
-        //     left=rs1, right=bitmask (computed from total shift in imm field)
-        //   R-type (rs2_read=true): VirtualSRL (funct3=0) or VirtualSRA (funct3=5)
-        //     left=rs1, right=rs2 (bitmask from virtual register)
+        //   funct3=0/5 (VirtualSRLI/VirtualSRAI/VirtualSRL/VirtualSRA): virtual shift instructions
+        //     I-type (rs2_read=false): left=rs1, right=bitmask (computed from total shift in imm field)
+        //     R-type (rs2_read=true): left=rs1, right=rs2 (bitmask from virtual register)
+        //   funct3 != 0/5 (VirtualHostIO): NOP-like Jolt SDK instruction, no operands
         0x5B => {
-            if (step.rs2_read) {
-                // R-type VirtualSRL/VirtualSRA: left=rs1, right=rs2
-                return .{
-                    .left = F.fromU64(step.rs1_value),
-                    .right = F.fromU64(step.rs2_value),
-                    .right_is_signed = false,
-                    .right_i128 = @as(i128, step.rs2_value),
-                };
+            const funct3_5b: u3 = @truncate((step.instruction >> 12) & 0x7);
+            if (funct3_5b == 0 or funct3_5b == 5) {
+                if (step.rs2_read) {
+                    // R-type VirtualSRL/VirtualSRA: left=rs1, right=rs2
+                    return .{
+                        .left = F.fromU64(step.rs1_value),
+                        .right = F.fromU64(step.rs2_value),
+                        .right_is_signed = false,
+                        .right_i128 = @as(i128, step.rs2_value),
+                    };
+                } else {
+                    // I-type VirtualSRLI/VirtualSRAI: left=rs1, right=bitmask from shift amount
+                    const total_shift_raw: u32 = step.instruction >> 20;
+                    const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
+                    const bitmask: u64 = @truncate(ones << total_shift);
+                    return .{
+                        .left = F.fromU64(step.rs1_value),
+                        .right = F.fromU64(bitmask),
+                        .right_is_signed = false,
+                        .right_i128 = @as(i128, bitmask),
+                    };
+                }
             } else {
-                // I-type VirtualSRLI/VirtualSRAI: left=rs1, right=bitmask from shift amount
-                const total_shift_raw: u32 = step.instruction >> 20;
-                const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
-                const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
-                const bitmask: u64 = @truncate(ones << total_shift);
+                // VirtualHostIO (funct3 != 0/5): NOP-like, no operands
                 return .{
-                    .left = F.fromU64(step.rs1_value),
-                    .right = F.fromU64(bitmask),
+                    .left = F.zero(),
+                    .right = F.zero(),
                     .right_is_signed = false,
-                    .right_i128 = @as(i128, bitmask),
+                    .right_i128 = 0,
                 };
             }
         },
@@ -787,6 +826,38 @@ fn computeInstructionInputs(comptime F: type, step: tracer.TraceStep) Instructio
                 .right_is_signed = false,
                 .right_i128 = 0,
             };
+        },
+        // Virtual instructions on opcode 0x6B: VirtualROTRI (funct3=0) and VirtualROTRIW (funct3=1)
+        // Both use interleaved(rs1, bitmask) where bitmask is computed from rotation in I-type imm field
+        0x6B => {
+            const funct3_6b: u3 = @truncate((step.instruction >> 12) & 0x7);
+            const rotation_raw: u32 = step.instruction >> 20;
+            if (funct3_6b == 0) {
+                // VirtualROTRI: 64-bit rotation
+                const rotation: u7 = @truncate(rotation_raw & 0x3F);
+                const bitmask: u64 = if (rotation == 0) 0xFFFFFFFF_FFFFFFFF else blk: {
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, rotation))) - 1;
+                    break :blk @truncate(ones << @intCast(rotation));
+                };
+                return .{
+                    .left = F.fromU64(step.rs1_value),
+                    .right = F.fromU64(bitmask),
+                    .right_is_signed = false,
+                    .right_i128 = @as(i128, bitmask),
+                };
+            } else {
+                // VirtualROTRIW: 32-bit rotation
+                const rotation_w: u6 = @truncate(rotation_raw & 0x1F);
+                const bitmask_w: u64 = if (rotation_w == 0) 0xFFFFFFFF else blk: {
+                    break :blk ((@as(u64, 1) << @intCast(32 - @as(u8, rotation_w))) - 1) << @intCast(rotation_w);
+                };
+                return .{
+                    .left = F.fromU64(step.rs1_value),
+                    .right = F.fromU64(bitmask_w),
+                    .right_is_signed = false,
+                    .right_i128 = @as(i128, bitmask_w),
+                };
+            }
         },
         // Default: treat as no inputs (matching Jolt's default behavior for unknown instructions)
         // This ensures right_is_rs2*rs2 + right_is_imm*imm = RightInstructionInput = 0
@@ -949,21 +1020,26 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                         break :blk_imm F.zero();
                     }
                 }
-                // Virtual instructions on opcode 0x5B:
+                // Virtual instructions on opcode 0x5B (funct3=0/5 only):
                 //   I-type (rs2_read=false): VirtualSRLI/VirtualSRAI: IMM = bitmask from shift
                 //   R-type (rs2_read=true): VirtualSRL/VirtualSRA: IMM = 0 (uses rs2 not imm)
+                // VirtualHostIO (funct3 != 0/5) has no lookup table so IMM is irrelevant (falls through to default).
                 if (opcode == 0x5B) {
-                    if (step.rs2_read) {
-                        // R-type: right operand is rs2, not imm
-                        break :blk_imm F.zero();
-                    } else {
-                        // I-type: bitmask computed from total shift amount in imm field
-                        const total_shift_raw: u32 = step.instruction >> 20;
-                        const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
-                        const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
-                        const bitmask: u64 = @truncate(ones << total_shift);
-                        break :blk_imm F.fromU64(bitmask);
+                    const funct3_5b: u3 = @truncate((step.instruction >> 12) & 0x7);
+                    if (funct3_5b == 0 or funct3_5b == 5) {
+                        if (step.rs2_read) {
+                            // R-type: right operand is rs2, not imm
+                            break :blk_imm F.zero();
+                        } else {
+                            // I-type: bitmask computed from total shift amount in imm field
+                            const total_shift_raw: u32 = step.instruction >> 20;
+                            const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
+                            const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
+                            const bitmask: u64 = @truncate(ones << total_shift);
+                            break :blk_imm F.fromU64(bitmask);
+                        }
                     }
+                    // VirtualHostIO: fall through to default IMM computation
                 }
                 // VirtualAssertHalfwordAlignment (0x22, funct3=2) and
                 // VirtualAssertWordAlignment (0x22, funct3=3):
@@ -983,6 +1059,26 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     }
                     // funct3=0,1 (VirtualAssertEQ, VirtualAssertValidDiv0): no imm used
                     break :blk_imm F.zero();
+                }
+                // Virtual instructions on opcode 0x6B: VirtualROTRI/VirtualROTRIW
+                // IMM = bitmask computed from rotation amount in I-type imm field
+                if (opcode == 0x6B) {
+                    const funct3_6b: u3 = @truncate((step.instruction >> 12) & 0x7);
+                    const rot_raw: u32 = step.instruction >> 20;
+                    if (funct3_6b == 0) {
+                        // VirtualROTRI: 64-bit rotation
+                        const rot: u7 = @truncate(rot_raw & 0x3F);
+                        const bitmask_6b: u64 = if (rot == 0) 0xFFFFFFFF_FFFFFFFF else blk_6b: {
+                            const ones_6b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, rot))) - 1;
+                            break :blk_6b @truncate(ones_6b << @intCast(rot));
+                        };
+                        break :blk_imm F.fromU64(bitmask_6b);
+                    } else {
+                        // VirtualROTRIW: 32-bit rotation
+                        const rot_w: u6 = @truncate(rot_raw & 0x1F);
+                        const bitmask_6b_w: u64 = if (rot_w == 0) 0xFFFFFFFF else ((@as(u64, 1) << @intCast(32 - @as(u8, rot_w))) - 1) << @intCast(rot_w);
+                        break :blk_imm F.fromU64(bitmask_6b_w);
+                    }
                 }
                 const is_identity_add = switch (opcode) {
                     0x13 => (step.instruction >> 12) & 0x7 == 0, // ADDI
@@ -1012,8 +1108,10 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // Instructions that DON'T read rs1 (Rs1Value = 0):
             //   U-type: 0x37 (LUI), 0x17 (AUIPC)
             //   J-type: 0x6f (JAL)
+            const funct3_5b_r: u3 = @truncate((step.instruction >> 12) & 0x7);
             const reads_rs1 = switch (opcode) {
-                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B, 0x5B => true,
+                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B, 0x6B => true,
+                0x5B => (funct3_5b_r == 0 or funct3_5b_r == 5), // VirtualSRLI/VirtualSRAI only; VirtualHostIO does NOT read rs1
                 0x22 => true, // VirtualAssertEQ: left = rs1 (LeftOperandIsRs1Value)
                 0x42 => true, // VirtualZeroExtendWord: left = rs1 (LeftOperandIsRs1Value)
                 0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1 (LeftOperandIsRs1Value)
@@ -1040,7 +1138,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     const f3_22: u3 = @truncate((step.instruction >> 12) & 0x7);
                     break :blk_22_rs2 (f3_22 == 0 or f3_22 == 1);
                 },
-                0x5B => step.rs2_read, // R-type VirtualSRL/VirtualSRA read rs2
+                0x5B => (funct3_5b_r == 0 or funct3_5b_r == 5) and step.rs2_read, // R-type VirtualSRL/VirtualSRA read rs2; VirtualHostIO does NOT
                 0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2 (RightOperandIsRs2Value)
                 else => false,
             };
@@ -1152,6 +1250,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x0B => F.one(), // VirtualSignExtendWord: left = rs1 (LeftOperandIsRs1Value)
                 0x2B => F.one(), // VirtualMULI: left = rs1 (LeftOperandIsRs1Value)
                 0x5B => F.one(), // VirtualSRLI: left = rs1 (LeftOperandIsRs1Value)
+                0x6B => F.one(), // VirtualROTRI/W: left = rs1 (LeftOperandIsRs1Value)
                 0x02 => F.zero(), // VirtualAdvice: no operands (instruction_inputs = (0,0))
                 0x22 => F.one(), // VirtualAssertEQ: left = rs1 (LeftOperandIsRs1Value)
                 0x42 => F.one(), // VirtualZeroExtendWord: left = rs1 (LeftOperandIsRs1Value)
@@ -1187,6 +1286,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x1B => F.one(), // OP-IMM-32: right = imm (ADDIW, etc.)
                 0x2B => F.one(), // VirtualMULI/VirtualPow2/VirtualShiftRightBitmask: all use RightOperandIsImm
                 0x5B => if (step.rs2_read) F.zero() else F.one(), // I-type uses imm, R-type uses rs2
+                0x6B => F.one(), // VirtualROTRI/W: right = bitmask (RightOperandIsImm)
                 0x22 => blk_22_rim: {
                     // funct3=2,3 (alignment assertions): right = imm (RightOperandIsImm)
                     // funct3=0,1 (VirtualAssertEQ, VirtualAssertValidDiv0): right = rs2
@@ -1255,6 +1355,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // - RISC-V programs typically end with ECALL or jump at termination
             // - The tracer stops at infinite loop detection (before the loop instruction)
             if (next_step) |ns| {
+                // Debug removed
                 if (ns.is_noop and !ns.is_termination_store) {
                     // Next is NoOp padding: set all Next* values to 0 (matching Jolt)
                     // In Jolt: NoOp.normalize().address = 0 and get_pc(NoOp) = 0
@@ -1279,15 +1380,17 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 //   - It is a VirtualSignExtendWord instruction (opcode 0x0B, which has vsr=Some(0) but is still virtual)
                 //   - It is a VirtualMULI instruction (opcode 0x2B, which has vsr=Some(0) for standalone SLLI)
                 const next_opcode: u8 = @truncate(ns.instruction & 0x7F);
+                const next_funct3_5b: u3 = @truncate((ns.instruction >> 12) & 0x7);
                 const next_is_virtual = (!ns.is_noop and ns.virtual_sequence_remaining > 0) or
                     (!ns.is_noop and ns.is_last_in_sequence) or // last step of virtual sequence (vsr=0 but still virtual)
                     (next_opcode == 0x0B) or // VirtualSignExtendWord is always virtual (vsr=Some(0))
                     (next_opcode == 0x2B) or // VirtualMULI is always virtual (standalone SLLI has vsr=Some(0))
-                    (next_opcode == 0x5B) or // VirtualSRLI is always virtual (standalone SRLI has vsr=Some(0))
+                    (next_opcode == 0x5B and (next_funct3_5b == 0 or next_funct3_5b == 5)) or // VirtualSRLI/VirtualSRAI only (not VirtualHostIO)
                     (next_opcode == 0x02) or // VirtualAdvice is always virtual
                     (next_opcode == 0x22) or // VirtualAssertEQ is always virtual
                     (next_opcode == 0x42) or // VirtualZeroExtendWord is always virtual
-                    (next_opcode == 0x62); // VirtualAssertValidUnsignedRemainder is always virtual
+                    (next_opcode == 0x62) or // VirtualAssertValidUnsignedRemainder is always virtual
+                    (next_opcode == 0x6B); // VirtualROTRI/W is always virtual
                 inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = if (next_is_virtual) F.one() else F.zero();
 
                 // NextIsFirstInSequence must match FlagIsFirstInSequence of the NEXT cycle's witness.
@@ -1382,6 +1485,17 @@ pub fn R1CSCycleInputs(comptime F: type) type {
 
             // Instruction operand flags already set earlier (before computing instruction inputs)
             // This ensures consistency between flags and LeftInstructionInput/RightInstructionInput
+
+            // Debug: check constraints and only print on FAILURE
+            {
+                const idx = debug_step_counter.fetchAdd(1, .monotonic);
+                if (idx < DEBUG_MAX_STEPS) {
+                    if (inputs.checkConstraintSatisfaction()) |fail_idx| {
+                        std.debug.print("\n[R1CS FAIL] step={} constraint={} ({s})\n", .{ idx, fail_idx, CONSTRAINT_NAMES[fail_idx] });
+                        inputs.debugPrintWitnessAndCheck(idx, step);
+                    }
+                }
+            }
 
             return inputs;
         }
@@ -1789,28 +1903,33 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                         self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
                     }
                 },
-                0x5B => { // Virtual instructions on opcode 0x5B (I-type and R-type)
-                    // Both I-type (VirtualSRLI/VirtualSRAI) and R-type (VirtualSRL/VirtualSRA)
-                    // use WriteLookupOutputToRD with interleaved operands (NO Add/Sub/Mul)
-                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
-                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
-                    // VirtualInstruction: ALWAYS true for all 0x5B instructions.
-                    // Cases:
-                    //   Standalone SRLI/SRAI: vsr=Some(0), VirtInstr=true, IsFirst=true, DoNotUpdateUPC=false
-                    //   SRLIW/SRAIW middle step: vsr=Some(1), VirtInstr=true, IsFirst=false, DoNotUpdateUPC=true
-                    //   R-type VirtualSRL/VirtualSRA (SRL/SRA step 2): vsr=Some(0), VirtInstr=true, IsLast=true
-                    self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
-                    if (step.virtual_sequence_remaining == 0) {
-                        // vsr=0: standalone SRLI/SRAI or last step of decomposed load (LBU/LHU/LWU/LB/LH).
-                        // IsFirstInSequence is set from step.is_first_in_sequence (line 1535),
-                        // not from instruction type, because the same I-type 0x5B can appear
-                        // in both standalone (IsFirst=true) and decomposed-last-step (IsFirst=false) contexts.
-                        // R-type with vsr=0: IsFirstInSequence stays false (it's step 2 of SRL/SRA).
-                    } else {
-                        // Middle step (vsr>0): DoNotUpdateUnexpandedPC = true.
-                        self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                0x5B => { // Virtual instructions on opcode 0x5B
+                    const funct3_5b_f: u3 = @truncate((step.instruction >> 12) & 0x7);
+                    if (funct3_5b_f == 0 or funct3_5b_f == 5) {
+                        // VirtualSRLI/VirtualSRAI (I-type) and VirtualSRL/VirtualSRA (R-type)
+                        // use WriteLookupOutputToRD with interleaved operands (NO Add/Sub/Mul)
+                        self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                        // VirtualInstruction: ALWAYS true for funct3=0/5.
+                        // Cases:
+                        //   Standalone SRLI/SRAI: vsr=Some(0), VirtInstr=true, IsFirst=true, DoNotUpdateUPC=false
+                        //   SRLIW/SRAIW middle step: vsr=Some(1), VirtInstr=true, IsFirst=false, DoNotUpdateUPC=true
+                        //   R-type VirtualSRL/VirtualSRA (SRL/SRA step 2): vsr=Some(0), VirtInstr=true, IsLast=true
+                        self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                        if (step.virtual_sequence_remaining == 0) {
+                            // vsr=0: standalone SRLI/SRAI or last step of decomposed load (LBU/LHU/LWU/LB/LH).
+                            // IsFirstInSequence is set from step.is_first_in_sequence (line 1535),
+                            // not from instruction type, because the same I-type 0x5B can appear
+                            // in both standalone (IsFirst=true) and decomposed-last-step (IsFirst=false) contexts.
+                            // R-type with vsr=0: IsFirstInSequence stays false (it's step 2 of SRL/SRA).
+                        } else {
+                            // Middle step (vsr>0): DoNotUpdateUnexpandedPC = true.
+                            self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                        }
                     }
+                    // VirtualHostIO (funct3 != 0/5): NOP-like, no flags set (all false).
+                    // Falls through with no flags, like ECALL/FENCE.
                 },
                 0x02 => { // VirtualAdvice: Advice, WriteLookupOutputToRD
                     // VirtualAdvice injects oracle value; uses RangeCheck table (identity)
@@ -1919,6 +2038,17 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                         self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
                     }
                 },
+                0x6B => { // VirtualROTRI/VirtualROTRIW: WriteLookupOutputToRD, interleaved operands
+                    // Both use interleaved(rs1, bitmask) where bitmask is the right_input (from imm)
+                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                    // Always part of a virtual sequence
+                    self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                    if (step.virtual_sequence_remaining > 0) {
+                        self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                    }
+                },
                 else => {
                     // Default: NOT Add+Sub+Mul, so use constraint 6 and 10
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
@@ -1935,6 +2065,130 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         /// Get all values as slice
         pub fn asSlice(self: *const Self) []const F {
             return &self.values;
+        }
+
+        /// Check all 19 uniform R1CS constraints against the current witness values.
+        /// Returns the index of the FIRST failing constraint, or null if all pass.
+        pub fn checkConstraintSatisfaction(self: *const Self) ?usize {
+            const witness = self.asSlice();
+            for (UNIFORM_CONSTRAINTS, 0..) |constraint, i| {
+                if (!constraint.isSatisfied(F, witness)) {
+                    return i;
+                }
+            }
+            return null;
+        }
+
+        /// Debug: print all witness values and check all constraints.
+        /// Prints detailed info for debugging R1CS constraint failures.
+        pub fn debugPrintWitnessAndCheck(self: *const Self, step_idx: u32, step: tracer.TraceStep) void {
+            const opcode: u8 = @truncate(step.instruction & 0x7F);
+            const funct3: u3 = @truncate((step.instruction >> 12) & 0x7);
+            const funct7: u7 = @truncate(step.instruction >> 25);
+            const rd: u5 = @truncate((step.instruction >> 7) & 0x1F);
+            const rs1: u5 = @truncate((step.instruction >> 15) & 0x1F);
+            const rs2: u5 = @truncate((step.instruction >> 20) & 0x1F);
+
+            std.debug.print("\n===== R1CS DEBUG step={d} instr=0x{x:0>8} =====\n", .{ step_idx, step.instruction });
+            std.debug.print("  opcode=0x{x:0>2} funct3={d} funct7=0x{x:0>2} rd={d} rs1={d} rs2={d}\n", .{ opcode, @as(u8, funct3), @as(u8, funct7), @as(u8, rd), @as(u8, rs1), @as(u8, rs2) });
+            std.debug.print("  pc=0x{x} unexpanded_pc=0x{x} vsr={d} is_first={} is_last={}\n", .{
+                step.pc, step.unexpanded_pc, step.virtual_sequence_remaining,
+                step.is_first_in_sequence, step.is_last_in_sequence,
+            });
+            std.debug.print("  rs1_val=0x{x} rs2_val=0x{x} rd_val=0x{x} rd_idx={d} rd_written={}\n", .{
+                step.rs1_value, step.rs2_value, step.rd_value, step.rd_index, step.rd_written,
+            });
+            if (step.memory_value) |mv| {
+                std.debug.print("  mem_val=0x{x}", .{mv});
+            } else {
+                std.debug.print("  mem_val=null", .{});
+            }
+            if (step.memory_pre_value) |mpv| {
+                std.debug.print(" mem_pre_val=0x{x}", .{mpv});
+            } else {
+                std.debug.print(" mem_pre_val=null", .{});
+            }
+            std.debug.print(" is_compressed={}\n", .{step.is_compressed});
+
+            // Print circuit flags (indices 21-34 = FlagAddOperands .. FlagIsLastInSequence)
+            std.debug.print("  CircuitFlags[0..13]: ", .{});
+            inline for (0..14) |fi| {
+                const flag_idx = 21 + fi; // FlagAddOperands starts at 21
+                const val = self.values[flag_idx].toU64();
+                std.debug.print("{d}", .{val});
+                if (fi < 13) std.debug.print(",", .{});
+            }
+            std.debug.print("\n", .{});
+
+            // Print instruction flags (indices 38-41)
+            std.debug.print("  InstrFlags(LeftRs1,LeftPC,RightRs2,RightImm): ", .{});
+            inline for (0..4) |fi| {
+                const flag_idx = 38 + fi;
+                const val = self.values[flag_idx].toU64();
+                std.debug.print("{d}", .{val});
+                if (fi < 3) std.debug.print(",", .{});
+            }
+            std.debug.print("\n", .{});
+
+            // Print key values
+            std.debug.print("  LeftInput=0x{x} RightInput=0x{x} Product=0x{x}\n", .{
+                self.values[R1CSInputIndex.LeftInstructionInput.toIndex()].toU64(),
+                self.values[R1CSInputIndex.RightInstructionInput.toIndex()].toU64(),
+                self.values[R1CSInputIndex.Product.toIndex()].toU64(),
+            });
+            std.debug.print("  PC={d} UnexpPC=0x{x} NextPC={d} NextUnexpPC=0x{x}\n", .{
+                self.values[R1CSInputIndex.PC.toIndex()].toU64(),
+                self.values[R1CSInputIndex.UnexpandedPC.toIndex()].toU64(),
+                self.values[R1CSInputIndex.NextPC.toIndex()].toU64(),
+                self.values[R1CSInputIndex.NextUnexpandedPC.toIndex()].toU64(),
+            });
+            std.debug.print("  ShouldBranch={d} ShouldJump={d} LookupOut=0x{x}\n", .{
+                self.values[R1CSInputIndex.ShouldBranch.toIndex()].toU64(),
+                self.values[R1CSInputIndex.ShouldJump.toIndex()].toU64(),
+                self.values[R1CSInputIndex.LookupOutput.toIndex()].toU64(),
+            });
+            std.debug.print("  Imm=0x{x} RamAddr=0x{x} RamRead=0x{x} RamWrite=0x{x} RdWrite=0x{x}\n", .{
+                self.values[R1CSInputIndex.Imm.toIndex()].toU64(),
+                self.values[R1CSInputIndex.RamAddress.toIndex()].toU64(),
+                self.values[R1CSInputIndex.RamReadValue.toIndex()].toU64(),
+                self.values[R1CSInputIndex.RamWriteValue.toIndex()].toU64(),
+                self.values[R1CSInputIndex.RdWriteValue.toIndex()].toU64(),
+            });
+            std.debug.print("  Rs1Val=0x{x} Rs2Val=0x{x}\n", .{
+                self.values[R1CSInputIndex.Rs1Value.toIndex()].toU64(),
+                self.values[R1CSInputIndex.Rs2Value.toIndex()].toU64(),
+            });
+            std.debug.print("  LeftLookup=0x{x} RightLookup=0x{x}\n", .{
+                self.values[R1CSInputIndex.LeftLookupOperand.toIndex()].toU64(),
+                self.values[R1CSInputIndex.RightLookupOperand.toIndex()].toU64(),
+            });
+            std.debug.print("  NextIsVirtual={d} NextIsFirstInSeq={d} IsRdNotZero={d} Branch={d} IsNoop={d}\n", .{
+                self.values[R1CSInputIndex.NextIsVirtual.toIndex()].toU64(),
+                self.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()].toU64(),
+                self.values[R1CSInputIndex.FlagIsRdNotZero.toIndex()].toU64(),
+                self.values[R1CSInputIndex.FlagBranch.toIndex()].toU64(),
+                self.values[R1CSInputIndex.FlagIsNoop.toIndex()].toU64(),
+            });
+
+            // Check all constraints
+            const witness = self.asSlice();
+            var any_fail = false;
+            for (UNIFORM_CONSTRAINTS, 0..) |constraint, i| {
+                const satisfied = constraint.isSatisfied(F, witness);
+                if (!satisfied) {
+                    const cond_val = constraint.condition.evaluate(F, witness).toU64();
+                    const left_val = constraint.left.evaluate(F, witness).toU64();
+                    const right_val = constraint.right.evaluate(F, witness).toU64();
+                    std.debug.print("  ** FAIL {s} cond={d} left=0x{x} right=0x{x}\n", .{
+                        CONSTRAINT_NAMES[i], cond_val, left_val, right_val,
+                    });
+                    any_fail = true;
+                }
+            }
+            if (!any_fail) {
+                std.debug.print("  All 19 constraints PASS\n", .{});
+            }
+            std.debug.print("=====\n", .{});
         }
 
         /// Create witness values for a NoOp padding cycle.

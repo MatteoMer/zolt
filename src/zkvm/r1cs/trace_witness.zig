@@ -97,7 +97,8 @@ pub fn buildFromTrace(
 
             // Also fall back for VirtualAssert alignment (0x22 funct3=2/3)
             const f3_op: u3 = @truncate((step.instruction >> 12) & 0x7);
-            const needs_field_fallback_ext = needs_field_fallback or (op == 0x22 and (f3_op == 2 or f3_op == 3));
+            const debug_force_field = false;
+            const needs_field_fallback_ext = needs_field_fallback or (op == 0x22 and (f3_op == 2 or f3_op == 3)) or debug_force_field;
             if (needs_field_fallback_ext) {
                 @setEvalBranchQuota(10000);
                 const F = field_mod.BN254Scalar;
@@ -237,16 +238,21 @@ fn compactAndRawFromTraceStep(
 
     // ── Circuit flags (boolean) ──
     const is_compressed = step.is_compressed;
+    const is_5b_virtual = (opcode == 0x5B and (funct3 == 0 or funct3 == 5));
+    const is_virtual_opcode = if (opcode == 0x5B) is_5b_virtual else isVirtualOpcode(opcode);
     const vi = (step.virtual_sequence_remaining > 0 and !step.is_termination_store) or
-        step.is_last_in_sequence or isVirtualOpcode(opcode);
+        step.is_last_in_sequence or is_virtual_opcode;
     const dont_update = step.virtual_sequence_remaining > 0 and !step.is_termination_store;
     const is_last = step.is_last_in_sequence and opcode == 0x67;
     const next_is_virtual = if (next_step) |ns| blk: {
         const nop = ns.is_noop;
         const no: u8 = @truncate(ns.instruction & 0x7F);
+        const nf3: u3 = @truncate((ns.instruction >> 12) & 0x7);
+        const n5b_virt = (no == 0x5B and (nf3 == 0 or nf3 == 5));
+        const n_is_virt_op = if (no == 0x5B) n5b_virt else isVirtualOpcode(no);
         break :blk (!nop and ns.virtual_sequence_remaining > 0) or
             (!nop and ns.is_last_in_sequence) or
-            isVirtualOpcode(no);
+            n_is_virt_op;
     } else false;
     const next_is_first = if (next_step) |ns| !ns.is_noop and ns.is_first_in_sequence else false;
     const should_jump_bool = flags.flag_jump and !isNoopStep(next_step);
@@ -477,12 +483,14 @@ fn extractOperandFlags(opcode: u8, funct3: u3, funct7: u7, step: TraceStep, has_
             }
         },
         0x5B => {
-            f.left_is_rs1 = true;
-            f.flag_write_lookup = true;
-            if (step.rs2_read) {
-                f.right_is_rs2 = true;
-            } else {
-                f.right_is_imm = true;
+            if (funct3 == 0 or funct3 == 5) {
+                f.left_is_rs1 = true;
+                f.flag_write_lookup = true;
+                if (step.rs2_read) {
+                    f.right_is_rs2 = true;
+                } else {
+                    f.right_is_imm = true;
+                }
             }
         },
         0x02 => {
@@ -515,9 +523,12 @@ fn extractOperandFlags(opcode: u8, funct3: u3, funct7: u7, step: TraceStep, has_
 }
 
 fn readsRs1(opcode: u8, step: TraceStep) bool {
-    _ = step;
     return switch (opcode) {
-        0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B, 0x5B, 0x22, 0x42, 0x62 => true,
+        0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B, 0x22, 0x42, 0x62, 0x6B => true,
+        0x5B => blk: {
+            const f3: u3 = @truncate((step.instruction >> 12) & 0x7);
+            break :blk (f3 == 0 or f3 == 5);
+        },
         else => false,
     };
 }
@@ -545,6 +556,8 @@ fn decodeImmediateInt(instr: u32, step: TraceStep) i128 {
         return 0;
     }
     if (opcode == 0x5B) {
+        const f3_5b: u3 = @truncate((instr >> 12) & 0x7);
+        if (f3_5b != 0 and f3_5b != 5) return 0;
         if (step.rs2_read) return 0;
         const total_shift: u7 = @truncate((instr >> 20) & 0x3F);
         const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
@@ -766,8 +779,12 @@ fn computeUnsignedImmediate(instr: u32) u64 {
 }
 
 fn isVirtualOpcode(opcode: u8) bool {
+    // Note: 0x5B is NOT always virtual — only funct3=0/5 (VirtualSRLI/VirtualSRAI).
+    // VirtualHostIO (funct3=2) and other SDK funct3 values are NOT virtual.
+    // However, this function only checks opcode and can't distinguish funct3.
+    // Callers must handle 0x5B specially if needed.
     return switch (opcode) {
-        0x0B, 0x2B, 0x5B, 0x02, 0x22, 0x42, 0x62 => true,
+        0x0B, 0x2B, 0x5B, 0x02, 0x22, 0x42, 0x62, 0x6B => true,
         else => false,
     };
 }

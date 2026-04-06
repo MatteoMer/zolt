@@ -116,12 +116,19 @@ fn buildBytecodeWords(
 /// This value is used as bytecode_K in the proof and must match Jolt's preprocessing.
 /// Must account for W-extension decomposition: each W-ext instruction becomes 2 bytecode entries.
 pub fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
+    return computeBytecodeCodeSizeWithTextSize(program_bytecode, program_bytecode.len);
+}
+
+/// Compute bytecode code_size, only decoding up to text_size bytes as instructions.
+/// Bytes beyond text_size are treated as data (.rodata) and NOT decoded.
+pub fn computeBytecodeCodeSizeWithTextSize(program_bytecode: []const u8, text_size: usize) usize {
     const zkvm_instruction = @import("instruction/mod.zig");
+    const decode_limit = @min(text_size, program_bytecode.len);
 
     // Count bytecode entries, accounting for W-extension decomposition
     var num_entries: usize = 0;
     var offset: usize = 0;
-    while (offset < program_bytecode.len) {
+    while (offset < decode_limit) {
         // Check if compressed (RVC): lowest 2 bits != 0b11
         if (offset + 2 <= program_bytecode.len) {
             const first_halfword = std.mem.readInt(u16, program_bytecode[offset..][0..2], .little);
@@ -178,6 +185,46 @@ pub fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
                     2 => @as(usize, 15), // SW
                     else => @as(usize, 1), // shouldn't happen
                 };
+            } else if (opcode == 0x0B) {
+                // Jolt inline instruction (SHA256, etc.)
+                // Count expanded entries by building the sequence
+                const sha256_inline = @import("../tracer/sha256_inline.zig");
+                const rs1: u8 = @truncate((instr_word >> 15) & 0x1f);
+                const rs2: u8 = @truncate((instr_word >> 20) & 0x1f);
+                const inline_funct3: u3 = @truncate((instr_word >> 12) & 0x7);
+                const inline_funct7: u7 = @truncate((instr_word >> 25) & 0x7f);
+                const is_sha256 = (inline_funct7 == 0x00 and (inline_funct3 == 0x00 or inline_funct3 == 0x01));
+                if (is_sha256) {
+                    const initial = (inline_funct3 == 0x01);
+                    var seq = sha256_inline.buildSha256Sequence(
+                        std.heap.page_allocator,
+                        rs1,
+                        rs2,
+                        initial,
+                    ) catch @panic("failed to build sha256 sequence for code_size");
+                    defer seq.deinit(std.heap.page_allocator);
+                    num_entries += seq.items.len;
+                } else {
+                    num_entries += 1; // Unknown inline type
+                }
+            } else if (opcode == 0x73) {
+                // SYSTEM instructions: ECALL, EBREAK, CSRRW, CSRRS, MRET
+                const sys_rd: u8 = @truncate((instr_word >> 7) & 0x1f);
+                const sys_rs1: u8 = @truncate((instr_word >> 15) & 0x1f);
+                const bytecode_preproc = @import("bytecode_preprocessing.zig");
+                if (funct3 == 1) {
+                    // CSRRW: 1, 2, or 3 entries depending on rd/rs1
+                    num_entries += bytecode_preproc.csrrwEntryCount(sys_rd, sys_rs1);
+                } else if (funct3 == 2) {
+                    // CSRRS: 1, 2, or 3 entries depending on rd/rs1
+                    num_entries += bytecode_preproc.csrrsEntryCount(sys_rd, sys_rs1);
+                } else if (funct3 == 0 and ((instr_word >> 20) & 0xFFF) == 0x302) {
+                    // MRET: 1 entry (JALR)
+                    num_entries += 1;
+                } else {
+                    // ECALL/EBREAK: 1 entry
+                    num_entries += 1;
+                }
             } else {
                 const is_w_ext_2 = switch (opcode) {
                     0x1b => switch (funct3) {
@@ -499,7 +546,8 @@ pub fn JoltProver(comptime F: type) type {
             const log_k_chunk: usize = 4; // Must match convert_config below
             const LOG_K_INSTRUCTION: usize = 128; // XLEN * 2 = 64 * 2
             // Compute bytecode_K early so we can use it for bytecode_d
-            const bytecode_K_for_onehot = computeBytecodeCodeSize(program_bytecode);
+            const text_sz_for_onehot = text_size_opt orelse program_bytecode.len;
+            const bytecode_K_for_onehot = computeBytecodeCodeSizeWithTextSize(program_bytecode, text_sz_for_onehot);
             const log_bytecode_k: usize = if (bytecode_K_for_onehot <= 1) 0 else std.math.log2_int(usize, bytecode_K_for_onehot);
             const log_ram_k: usize = @intCast(log_k); // ram_K = 2^log_k
 
@@ -951,13 +999,18 @@ pub fn JoltProver(comptime F: type) type {
             const memory_trace_ptr: *const ram.MemoryTrace = &emulator.ram.trace;
 
             // Compute bytecode_K to match Jolt's BytecodePreprocessing.code_size
-            const bytecode_code_size_dory = computeBytecodeCodeSize(program_bytecode);
+            const text_sz_for_K = text_size_opt orelse program_bytecode.len;
+            const bytecode_code_size_dory = computeBytecodeCodeSizeWithTextSize(program_bytecode, text_sz_for_K);
             dbg("[ZOLT] bytecode_code_size (Dory path): {}\n", .{bytecode_code_size_dory});
 
             // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
+            // CRITICAL: Pass device.memory_layout.termination so the synthetic
+            // LUI/ADDI/SD termination entries have the same imm values as the
+            // exported preprocessing seen by the verifier. Otherwise val_poly
+            // would diverge between prover and verifier.
             const preproc = @import("preprocessing.zig");
             const text_sz = text_size_opt orelse program_bytecode.len;
-            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, null, text_sz);
+            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, device.memory_layout.termination, text_sz);
             defer bytecode_prep_dory.deinit();
 
             // Convert to Jolt-compatible format with transcript integration

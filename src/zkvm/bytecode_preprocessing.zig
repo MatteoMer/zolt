@@ -14,6 +14,8 @@ const jolt_device = @import("jolt_device.zig");
 const MemoryLayout = jolt_device.MemoryLayout;
 const common = @import("../common/mod.zig");
 
+const sha256_inline = @import("../tracer/sha256_inline.zig");
+
 pub const jolt_instruction = @import("jolt_instruction.zig");
 pub const JoltInstruction = jolt_instruction.JoltInstruction;
 
@@ -22,6 +24,40 @@ pub const decodeToJoltInstruction = instruction_decoder.decodeToJoltInstruction;
 
 pub const bytecode_pc_mapper = @import("bytecode_pc_mapper.zig");
 pub const BytecodePCMapper = bytecode_pc_mapper.BytecodePCMapper;
+
+/// Map CSR address to Jolt virtual register index.
+/// mstatus (0x300) → VR 39
+/// mtvec   (0x305) → VR 34
+/// mscratch(0x340) → VR 35
+/// mepc    (0x341) → VR 36
+/// mcause  (0x342) → VR 37
+/// mtval   (0x343) → VR 38
+pub fn csrToVirtualReg(csr_addr: u12) u8 {
+    return switch (csr_addr) {
+        0x300 => 39, // mstatus
+        0x305 => 34, // mtvec
+        0x340 => 35, // mscratch
+        0x341 => 36, // mepc
+        0x342 => 37, // mcause
+        0x343 => 38, // mtval
+        else => 39, // Unknown CSR → map to mstatus as fallback
+    };
+}
+
+/// Compute the number of bytecode entries for a CSRRW instruction.
+pub fn csrrwEntryCount(rd: u8, rs1: u8) usize {
+    if (rd == 0) return 1; // csrw pseudo
+    if (rd == rs1) return 3; // need temp
+    return 2; // read old, write new
+}
+
+/// Compute the number of bytecode entries for a CSRRS instruction.
+pub fn csrrsEntryCount(rd: u8, rs1: u8) usize {
+    if (rs1 == 0) return 1; // csrr pseudo (read-only)
+    if (rd == 0) return 1; // csrs pseudo (set-only)
+    if (rd == rs1) return 3; // need temp
+    return 2; // read + set
+}
 
 /// BytecodePreprocessing - matches Jolt's BytecodePreprocessing
 pub const BytecodePreprocessing = struct {
@@ -1693,6 +1729,345 @@ pub const BytecodePreprocessing = struct {
                         .operands = .{ .FormatS = .{ .rs1 = v1, .rs2 = v2, .imm = 0 } },
                         .virtual_sequence_remaining = 0,
                         .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .UNIMPL => {
+                    // Check if this is a Jolt inline instruction (opcode 0x0B with FormatInline operands)
+                    if (jolt_instr.operands == .FormatInline) {
+                        const il = jolt_instr.operands.FormatInline;
+                        const is_sha256 = (il.funct7 == 0x00 and (il.funct3 == 0x00 or il.funct3 == 0x01));
+                        if (is_sha256) {
+                            const initial = (il.funct3 == 0x01);
+                            // Build the SHA256 virtual instruction sequence.
+                            // The sequence structure is deterministic (independent of register values),
+                            // so we use the actual rs1/rs2 from the instruction encoding.
+                            var sequence = try sha256_inline.buildSha256Sequence(allocator, il.rs1, il.rs2, initial);
+                            defer sequence.deinit(allocator);
+
+                            const seq_len = sequence.items.len;
+                            for (sequence.items, 0..) |instr_item, idx| {
+                                const vsr: u16 = @intCast(seq_len - 1 - idx);
+                                const is_first_step = (idx == 0);
+                                const is_last_step = (idx == seq_len - 1);
+
+                                // Map each InlineInstr to a JoltInstruction variant+operands
+                                const jolt_entry: JoltInstruction = switch (instr_item.kind) {
+                                    .ADD => .{
+                                        .variant = .ADD,
+                                        .address = addr,
+                                        .operands = .{ .FormatR = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .rs2 = instr_item.rs2 } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .ADDI => .{
+                                        .variant = .ADDI,
+                                        .address = addr,
+                                        .operands = .{ .FormatI = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = @bitCast(instr_item.imm) } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .XOR => .{
+                                        .variant = .XOR,
+                                        .address = addr,
+                                        .operands = .{ .FormatR = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .rs2 = instr_item.rs2 } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .XORI => .{
+                                        .variant = .XORI,
+                                        .address = addr,
+                                        .operands = .{ .FormatI = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = @bitCast(instr_item.imm) } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .AND => .{
+                                        .variant = .AND,
+                                        .address = addr,
+                                        .operands = .{ .FormatR = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .rs2 = instr_item.rs2 } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .ANDI => .{
+                                        .variant = .ANDI,
+                                        .address = addr,
+                                        .operands = .{ .FormatI = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = @bitCast(instr_item.imm) } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .OR => .{
+                                        .variant = .OR,
+                                        .address = addr,
+                                        .operands = .{ .FormatR = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .rs2 = instr_item.rs2 } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .ANDN => .{
+                                        .variant = .ANDN,
+                                        .address = addr,
+                                        .operands = .{ .FormatR = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .rs2 = instr_item.rs2 } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .VirtualMULI => .{
+                                        .variant = .VirtualMULI,
+                                        .address = addr,
+                                        .operands = .{ .FormatI = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = instr_item.imm } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .VirtualSRLI => .{
+                                        .variant = .VirtualSRLI,
+                                        .address = addr,
+                                        .operands = .{ .FormatI = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = instr_item.imm } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .VirtualSignExtendWord => .{
+                                        .variant = .VirtualSignExtendWord,
+                                        .address = addr,
+                                        .operands = .{ .FormatI = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = 0 } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .VirtualZeroExtendWord => .{
+                                        .variant = .VirtualZeroExtendWord,
+                                        .address = addr,
+                                        .operands = .{ .FormatI = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = 0 } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .VirtualROTRIW => .{
+                                        .variant = .VirtualROTRIW,
+                                        .address = addr,
+                                        .operands = .{ .FormatVirtualRightShiftI = .{
+                                            .rd = instr_item.rd,
+                                            .rs1 = instr_item.rs1,
+                                            .imm = instr_item.imm, // rotation amount stored as imm
+                                        } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .LD => .{
+                                        .variant = .LD,
+                                        .address = addr,
+                                        .operands = .{ .FormatLoad = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = @bitCast(instr_item.imm) } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                    .SD => .{
+                                        .variant = .SD,
+                                        .address = addr,
+                                        .operands = .{ .FormatS = .{ .rs1 = instr_item.rs1, .rs2 = instr_item.rs2, .imm = @bitCast(instr_item.imm) } },
+                                        .virtual_sequence_remaining = vsr,
+                                        .is_first_in_sequence = is_first_step,
+                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    },
+                                };
+                                try self.bytecode.append(allocator, jolt_entry);
+                            }
+                        } else {
+                            // Unsupported inline type: append as-is (single UNIMPL entry)
+                            try self.bytecode.append(allocator, jolt_instr);
+                        }
+                    } else {
+                        // Regular UNIMPL (unknown opcode): append as-is
+                        try self.bytecode.append(allocator, jolt_instr);
+                    }
+                },
+                .CSRRW => {
+                    // CSRRW rd, csr, rs1 → decomposed into ADDI virtual sequence
+                    // CSR address (bits[31:20]) maps to virtual registers 34-39
+                    const rd_val = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    const rs1_val = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rs1,
+                        else => 0,
+                    };
+                    const csr_imm = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.imm,
+                        else => 0,
+                    };
+                    const csr_addr: u12 = @truncate(csr_imm & 0xFFF);
+                    const virtual_reg = csrToVirtualReg(csr_addr);
+                    const temp_reg: u8 = 40; // v40 for temp
+
+                    if (rd_val == 0) {
+                        // csrw pseudo: ADDI virtual_reg, rs1, 0 (1 step)
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = virtual_reg, .rs1 = rs1_val, .imm = 0 } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = true,
+                            .is_compressed = is_compressed,
+                        });
+                    } else if (rd_val == rs1_val) {
+                        // rd == rs1: need temp (3 steps)
+                        // Step 1: ADDI temp, rs1, 0
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = temp_reg, .rs1 = rs1_val, .imm = 0 } },
+                            .virtual_sequence_remaining = 2,
+                            .is_first_in_sequence = true,
+                            .is_compressed = false,
+                        });
+                        // Step 2: ADDI rd, virtual_reg, 0
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = rd_val, .rs1 = virtual_reg, .imm = 0 } },
+                            .virtual_sequence_remaining = 1,
+                            .is_first_in_sequence = false,
+                            .is_compressed = false,
+                        });
+                        // Step 3: ADDI virtual_reg, temp, 0
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = virtual_reg, .rs1 = temp_reg, .imm = 0 } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = false,
+                            .is_compressed = is_compressed,
+                        });
+                    } else {
+                        // rd != rs1, rd != 0: 2 steps
+                        // Step 1: ADDI rd, virtual_reg, 0
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = rd_val, .rs1 = virtual_reg, .imm = 0 } },
+                            .virtual_sequence_remaining = 1,
+                            .is_first_in_sequence = true,
+                            .is_compressed = false,
+                        });
+                        // Step 2: ADDI virtual_reg, rs1, 0
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = virtual_reg, .rs1 = rs1_val, .imm = 0 } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = false,
+                            .is_compressed = is_compressed,
+                        });
+                    }
+                },
+                .CSRRS => {
+                    // CSRRS rd, csr, rs1 → decomposed into ADDI/OR virtual sequence
+                    const rd_val = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    const rs1_val = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rs1,
+                        else => 0,
+                    };
+                    const csr_imm = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.imm,
+                        else => 0,
+                    };
+                    const csr_addr: u12 = @truncate(csr_imm & 0xFFF);
+                    const virtual_reg = csrToVirtualReg(csr_addr);
+                    const temp_reg: u8 = 40; // v40 for temp
+
+                    if (rs1_val == 0) {
+                        // csrr pseudo (read-only): ADDI rd, virtual_reg, 0 (1 step)
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = rd_val, .rs1 = virtual_reg, .imm = 0 } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = true,
+                            .is_compressed = is_compressed,
+                        });
+                    } else if (rd_val == 0) {
+                        // csrs pseudo (set-only): OR virtual_reg, virtual_reg, rs1 (1 step)
+                        try self.bytecode.append(allocator, .{
+                            .variant = .OR,
+                            .address = addr,
+                            .operands = .{ .FormatR = .{ .rd = virtual_reg, .rs1 = virtual_reg, .rs2 = rs1_val } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = true,
+                            .is_compressed = is_compressed,
+                        });
+                    } else if (rd_val == rs1_val) {
+                        // rd == rs1: need temp (3 steps)
+                        // Step 1: ADDI temp, rs1, 0
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = temp_reg, .rs1 = rs1_val, .imm = 0 } },
+                            .virtual_sequence_remaining = 2,
+                            .is_first_in_sequence = true,
+                            .is_compressed = false,
+                        });
+                        // Step 2: ADDI rd, virtual_reg, 0
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = rd_val, .rs1 = virtual_reg, .imm = 0 } },
+                            .virtual_sequence_remaining = 1,
+                            .is_first_in_sequence = false,
+                            .is_compressed = false,
+                        });
+                        // Step 3: OR virtual_reg, virtual_reg, temp
+                        try self.bytecode.append(allocator, .{
+                            .variant = .OR,
+                            .address = addr,
+                            .operands = .{ .FormatR = .{ .rd = virtual_reg, .rs1 = virtual_reg, .rs2 = temp_reg } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = false,
+                            .is_compressed = is_compressed,
+                        });
+                    } else {
+                        // rd != rs1, both nonzero: 2 steps
+                        // Step 1: ADDI rd, virtual_reg, 0
+                        try self.bytecode.append(allocator, .{
+                            .variant = .ADDI,
+                            .address = addr,
+                            .operands = .{ .FormatI = .{ .rd = rd_val, .rs1 = virtual_reg, .imm = 0 } },
+                            .virtual_sequence_remaining = 1,
+                            .is_first_in_sequence = true,
+                            .is_compressed = false,
+                        });
+                        // Step 2: OR virtual_reg, virtual_reg, rs1
+                        try self.bytecode.append(allocator, .{
+                            .variant = .OR,
+                            .address = addr,
+                            .operands = .{ .FormatR = .{ .rd = virtual_reg, .rs1 = virtual_reg, .rs2 = rs1_val } },
+                            .virtual_sequence_remaining = 0,
+                            .is_first_in_sequence = false,
+                            .is_compressed = is_compressed,
+                        });
+                    }
+                },
+                .MRET => {
+                    // MRET → JALR v40, mepc(vr36), 0 (1 step)
+                    const mepc_reg: u8 = 36; // mepc virtual register
+                    const temp_reg: u8 = 40; // v40 for return address (unused but matches Jolt)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .JALR,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = temp_reg, .rs1 = mepc_reg, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = true,
                         .is_compressed = is_compressed,
                     });
                 },

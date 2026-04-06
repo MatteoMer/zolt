@@ -67,7 +67,8 @@ pub fn Helpers(comptime F: type) type {
 
             // First compute left_input and right_input (same as R1CS)
             const left_is_rs1: bool = switch (opcode) {
-                0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x6B => true,
+                0x5B => (funct3 == 0 or funct3 == 5), // VirtualSRLI/VirtualSRAI only; VirtualHostIO does NOT read rs1
                 0x22 => true, // VirtualAssertEQ: left = rs1
                 0x42 => true, // VirtualZeroExtendWord: left = rs1
                 0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1
@@ -82,13 +83,13 @@ pub fn Helpers(comptime F: type) type {
                 0x33, 0x63, 0x3b => true,
                 0x22 => (funct3 == 0 or funct3 == 1), // VirtualAssertEQ/ValidDiv0: right = rs2; alignment: right = imm
                 0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
-                0x5B => step.rs2_read, // VirtualSRL/VirtualSRA R-type: rs2; VirtualSRLI/VirtualSRAI I-type: imm
+                0x5B => (funct3 == 0 or funct3 == 5) and step.rs2_read, // VirtualSRL/VirtualSRA R-type only; VirtualHostIO: false
                 else => false,
             };
             const right_is_imm: bool = switch (opcode) {
-                0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x6B => true,
                 0x22 => (funct3 == 2 or funct3 == 3), // alignment assertions: right = imm
-                0x5B => !step.rs2_read, // I-type: imm; R-type: not imm
+                0x5B => (funct3 == 0 or funct3 == 5) and !step.rs2_read, // I-type VirtualSRLI/VirtualSRAI only; VirtualHostIO: false
                 else => false,
             };
 
@@ -114,7 +115,8 @@ pub fn Helpers(comptime F: type) type {
                     // VirtualPow2/VirtualShiftRightBitmask: IMM = 0
                     break :blk F.zero();
                 }
-            } else if (opcode == 0x5B) blk: {
+            } else if (opcode == 0x5B and (funct3 == 0 or funct3 == 5)) blk: {
+                // VirtualSRLI/VirtualSRAI/VirtualSRL/VirtualSRA only (not VirtualHostIO)
                 if (step.rs2_read) {
                     // VirtualSRL/VirtualSRA R-type: no immediate (rs2 used instead)
                     break :blk F.zero();
@@ -125,6 +127,23 @@ pub fn Helpers(comptime F: type) type {
                     const ones2: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift2))) - 1;
                     const bitmask2: u64 = @truncate(ones2 << total_shift2);
                     break :blk F.fromU64(bitmask2);
+                }
+            } else if (opcode == 0x6B) blk: {
+                // VirtualROTRI/VirtualROTRIW: IMM = bitmask computed from rotation
+                const rot_raw: u32 = instr >> 20;
+                if (funct3 == 0) {
+                    // VirtualROTRI: 64-bit rotation
+                    const rot: u7 = @truncate(rot_raw & 0x3F);
+                    const bitmask_6b: u64 = if (rot == 0) 0xFFFFFFFF_FFFFFFFF else blk2: {
+                        const ones_6b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, rot))) - 1;
+                        break :blk2 @truncate(ones_6b << @intCast(rot));
+                    };
+                    break :blk F.fromU64(bitmask_6b);
+                } else {
+                    // VirtualROTRIW: 32-bit rotation
+                    const rot_w: u6 = @truncate(rot_raw & 0x1F);
+                    const bitmask_6b_w: u64 = if (rot_w == 0) 0xFFFFFFFF else ((@as(u64, 1) << @intCast(32 - @as(u8, rot_w))) - 1) << @intCast(rot_w);
+                    break :blk F.fromU64(bitmask_6b_w);
                 }
             } else if (opcode == 0x22 and (funct3 == 2 or funct3 == 3)) blk: {
                 // VirtualAssertHalfwordAlignment/WordAlignment: SIGNED IMM encoding
@@ -560,6 +579,8 @@ pub fn Helpers(comptime F: type) type {
                         break :blk @as(u64, @bitCast(imm_signed));
                     },
                     0x5B => blk5b: {
+                        // Only VirtualSRLI/VirtualSRAI (funct3=0/5) reach here;
+                        // VirtualHostIO has no lookup table so table_idx < 0 zeros everything.
                         if (step.rs2_read) {
                             // VirtualSRL/VirtualSRA R-type: right operand is rs2
                             break :blk5b step.rs2_value;
@@ -569,6 +590,23 @@ pub fn Helpers(comptime F: type) type {
                             const ts: u7 = @truncate(ts_raw & 0x3F);
                             const ones_5b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts))) - 1;
                             break :blk5b @truncate(ones_5b << ts);
+                        }
+                    },
+                    0x6B => blk6b: {
+                        // VirtualROTRI/VirtualROTRIW: right operand is bitmask from rotation
+                        const rot_raw_6b: u32 = instr >> 20;
+                        const funct3_6b: u3 = @truncate((instr >> 12) & 0x7);
+                        if (funct3_6b == 0) {
+                            // VirtualROTRI: 64-bit rotation
+                            const rot_6b: u7 = @truncate(rot_raw_6b & 0x3F);
+                            if (rot_6b == 0) break :blk6b @as(u64, 0xFFFFFFFF_FFFFFFFF);
+                            const ones_6b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, rot_6b))) - 1;
+                            break :blk6b @truncate(ones_6b << @intCast(rot_6b));
+                        } else {
+                            // VirtualROTRIW: 32-bit rotation
+                            const rot_6b_w: u6 = @truncate(rot_raw_6b & 0x1F);
+                            if (rot_6b_w == 0) break :blk6b @as(u64, 0xFFFFFFFF);
+                            break :blk6b ((@as(u64, 1) << @intCast(32 - @as(u8, rot_6b_w))) - 1) << @intCast(rot_6b_w);
                         }
                     },
                     else => step.rs2_value,
@@ -1475,9 +1513,10 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
             if (funct3 == 2) break :blk2b 23; // VirtualShiftRightBitmask -> ShiftRightBitmaskTable
             break :blk2b 0; // VirtualMULI (funct3=0) -> RangeCheckTable
         },
-        0x5B => blk5b: { // Virtual shift right
+        0x5B => blk5b: { // Virtual shift right (funct3=0/5 only)
             if (funct3 == 5) break :blk5b 26; // VirtualSRAI -> VirtualSRATable
-            break :blk5b 25; // VirtualSRLI -> VirtualSRLTable (funct3=0)
+            if (funct3 == 0) break :blk5b 25; // VirtualSRLI -> VirtualSRLTable
+            break :blk5b -1; // VirtualHostIO (other funct3) -> no lookup table
         },
         0x02 => 0, // VirtualAdvice -> RangeCheckTable
         0x22 => blk22: { // Virtual assert
@@ -1488,6 +1527,10 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
         },
         0x42 => 19, // VirtualZeroExtendWord -> LowerHalfWordTable
         0x62 => 15, // VirtualAssertValidUnsignedRemainder -> ValidUnsignedRemainderTable
+        0x6B => blk6b: { // VirtualROTRI/VirtualROTRIW
+            if (funct3 == 0) break :blk6b 27; // VirtualROTRI -> VirtualROTRTable
+            break :blk6b 28; // VirtualROTRIW -> VirtualROTRWTable
+        },
         0x37 => 0, // LUI -> RangeCheckTable
         0x17 => 0, // AUIPC -> RangeCheckTable
         0x6f => 0, // JAL -> RangeCheckTable

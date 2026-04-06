@@ -496,6 +496,25 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
         // Jolt's to_lookup_index() returns rs1 directly (like SignExtendWord)
         return @as(u128, step.rs1_value);
     }
+    if (opcode == 0x6B) {
+        // VirtualROTRI/VirtualROTRIW: interleaved(rs1_value, bitmask)
+        const funct3_6b: u3 = @truncate((instr >> 12) & 0x7);
+        const rot_raw: u32 = instr >> 20;
+        if (funct3_6b == 0) {
+            // VirtualROTRI: 64-bit rotation
+            const rotation: u7 = @truncate(rot_raw & 0x3F);
+            const bitmask: u64 = if (rotation == 0) 0xFFFFFFFF_FFFFFFFF else blk: {
+                const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, rotation))) - 1;
+                break :blk @truncate(ones << @intCast(rotation));
+            };
+            return interleaveBits(step.rs1_value, bitmask);
+        } else {
+            // VirtualROTRIW: 32-bit rotation
+            const rotation_w: u6 = @truncate(rot_raw & 0x1F);
+            const bitmask_w: u64 = if (rotation_w == 0) 0xFFFFFFFF else ((@as(u64, 1) << @intCast(32 - @as(u8, rotation_w))) - 1) << @intCast(rotation_w);
+            return interleaveBits(step.rs1_value, bitmask_w);
+        }
+    }
     if (opcode == 0x62) {
         // VirtualAssertValidUnsignedRemainder: interleaved(rs1_value, rs2_value)
         // LeftOperandIsRs1Value, RightOperandIsRs2Value → interleave

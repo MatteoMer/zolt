@@ -209,6 +209,9 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         // Virtual alignment assertions
         VirtualAssertHalfwordAlignment,
         VirtualAssertWordAlignment,
+        // Virtual rotate-right via bitmask (for jolt-inline SHA256)
+        VirtualROTR,
+        VirtualROTRW,
 
         const Self = @This();
         const Table = lookup_table.LookupTable(@import("zolt_arith").field.BN254Scalar, XLEN);
@@ -327,6 +330,23 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
                     // VirtualAssertWordAlignment: AddOperands table, index = rs1 + imm (not interleaved)
                     const addr: u64 = @truncate(index);
                     break :blk if (addr & 3 == 0) @as(u64, 1) else @as(u64, 0);
+                },
+                .VirtualROTR => blk: {
+                    // VirtualROTR: rotate-right using bitmask encoding
+                    // interleaveBits(value, bitmask) → x=value (odd), y=bitmask (even)
+                    const bits = lookup_table.uninterleaveBits(index);
+                    const value = bits.x;
+                    const bitmask = bits.y;
+                    const rotation: u6 = if (bitmask == 0) 0 else @intCast(@ctz(bitmask));
+                    break :blk std.math.rotr(u64, value, rotation);
+                },
+                .VirtualROTRW => blk: {
+                    // VirtualROTRW: 32-bit rotate-right using bitmask encoding
+                    const bits = lookup_table.uninterleaveBits(index);
+                    const value: u32 = @truncate(bits.x);
+                    const bitmask: u32 = @truncate(bits.y);
+                    const rotation: u5 = if (bitmask == 0) 0 else @intCast(@min(@as(u6, @intCast(@ctz(bitmask))), 31));
+                    break :blk @as(u64, std.math.rotr(u32, value, rotation));
                 },
             };
         }

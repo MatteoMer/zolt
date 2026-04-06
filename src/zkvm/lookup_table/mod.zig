@@ -1326,6 +1326,97 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
         };
 
+        /// VirtualROTR: rotate-right using bitmask encoding
+        /// The index interleaves value bits (x) and bitmask bits (y).
+        /// result = first_sum + second_sum where:
+        ///   first_sum: accumulates x*y terms (right-shifted portion)
+        ///   second_sum: accumulates x*(1-y) terms with positional weights (left-shifted portion)
+        /// Reference: jolt-core/src/zkvm/lookup_table/virtual_rotr.rs
+        pub const VirtualROTR = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                var x: u64 = 0;
+                var y: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    x |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
+                    y |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
+                }
+                var prod_one_plus_y: u128 = 1;
+                var first_sum: u64 = 0;
+                var second_sum: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    const bit_pos = XLEN - 1 - i;
+                    const x_i: u64 = (x >> bit_pos) & 1;
+                    const y_i: u64 = (y >> bit_pos) & 1;
+                    first_sum = first_sum *% (1 + y_i) +% (x_i *% y_i);
+                    second_sum +%= @as(u64, @truncate(x_i *% ((1 -% y_i) *% @as(u64, @truncate(prod_one_plus_y))) *% (@as(u64, 1) << @intCast(bit_pos))));
+                    prod_one_plus_y *%= 1 + @as(u128, y_i);
+                }
+                return first_sum +% second_sum;
+            }
+
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                var prod_one_plus_y = F.one();
+                var first_sum = F.zero();
+                var second_sum = F.zero();
+                inline for (0..XLEN) |i| {
+                    const r_x = r[2 * i];
+                    const r_y = r[2 * i + 1];
+                    // first_sum = first_sum * (1 + r_y) + r_x * r_y
+                    first_sum = first_sum.mul(F.one().add(r_y)).add(r_x.mul(r_y));
+                    // second_sum += r_x * (1 - r_y) * prod_one_plus_y * 2^(XLEN-1-i)
+                    second_sum = second_sum.add(r_x.mul(F.one().sub(r_y)).mul(prod_one_plus_y).mul(F.fromU64(@as(u64, 1) << @intCast(XLEN - 1 - i))));
+                    // prod_one_plus_y *= (1 + r_y)
+                    prod_one_plus_y = prod_one_plus_y.mul(F.one().add(r_y));
+                }
+                return first_sum.add(second_sum);
+            }
+        };
+
+        /// VirtualROTRW: rotate-right-word (32-bit) using bitmask encoding
+        /// Same algorithm as VirtualROTR but only processes the lower XLEN/2 bits.
+        /// Reference: jolt-core/src/zkvm/lookup_table/virtual_rotrw.rs
+        pub const VirtualROTRW = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                var x: u64 = 0;
+                var y: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    x |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
+                    y |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
+                }
+                var prod_one_plus_y: u64 = 1;
+                var first_sum: u64 = 0;
+                var second_sum: u64 = 0;
+                // Only process bits XLEN-1 down to XLEN/2 (i.e., the lower 32 bits of the value)
+                inline for (0..XLEN / 2) |i| {
+                    const bit_pos = XLEN - 1 - (XLEN / 2) - i;
+                    const x_i: u64 = (x >> bit_pos) & 1;
+                    const y_i: u64 = (y >> bit_pos) & 1;
+                    first_sum = first_sum *% (1 + y_i) +% (x_i *% y_i);
+                    second_sum +%= x_i *% (1 -% y_i) *% prod_one_plus_y *% (@as(u64, 1) << @intCast(bit_pos));
+                    prod_one_plus_y *%= 1 + y_i;
+                }
+                return first_sum +% second_sum;
+            }
+
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                var prod_one_plus_y = F.one();
+                var first_sum = F.zero();
+                var second_sum = F.zero();
+                // Skip the first XLEN/2 pairs (upper bits), process only lower 32-bit pairs
+                const half = XLEN / 2;
+                inline for (half..XLEN) |i| {
+                    const r_x = r[2 * i];
+                    const r_y = r[2 * i + 1];
+                    first_sum = first_sum.mul(F.one().add(r_y)).add(r_x.mul(r_y));
+                    second_sum = second_sum.add(r_x.mul(F.one().sub(r_y)).mul(prod_one_plus_y).mul(F.fromU64(@as(u64, 1) << @intCast(XLEN - 1 - i))));
+                    prod_one_plus_y = prod_one_plus_y.mul(F.one().add(r_y));
+                }
+                return first_sum.add(second_sum);
+            }
+        };
+
         /// Number of lookup tables in Jolt
         pub const NUM_TABLES: usize = 42;
 
@@ -1376,8 +1467,8 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 24 => @panic("VirtualRev8W MLE not implemented"),
                 25 => VirtualSRL.evaluateMLE(r),
                 26 => VirtualSRA.evaluateMLE(r),
-                27 => @panic("VirtualROTR MLE not implemented"),
-                28 => @panic("VirtualROTRW MLE not implemented"),
+                27 => VirtualROTR.evaluateMLE(r),
+                28 => VirtualROTRW.evaluateMLE(r),
                 29 => @panic("VirtualChangeDivisor MLE not implemented"),
                 30 => @panic("VirtualChangeDivisorW MLE not implemented"),
                 31 => @panic("MulUNoOverflow MLE not implemented"),
@@ -1481,6 +1572,8 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                     const sign_bit = (value >> (XLEN - 1)) & 1;
                     break :blk27 if (sign_bit == 1) (value & bitmask) | ~bitmask else value & bitmask;
                 },
+                28 => VirtualROTR.materializeEntry(index), // VirtualROTR: interleaved(value, bitmask)
+                29 => VirtualROTRW.materializeEntry(index), // VirtualROTRW: interleaved(value, bitmask)
                 31 => blk31: {
                     // VirtualChangeDivisorW: interleaved(dividend, divisor)
                     // For XLEN=64: truncate to 32-bit signed values

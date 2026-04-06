@@ -3942,3 +3942,158 @@ pub fn VirtualAssertValidUnsignedRemainderLookup(comptime XLEN: comptime_int) ty
         }
     };
 }
+
+// ============================================================================
+// Jolt-Inline Instruction Lookups
+// ============================================================================
+
+/// ANDN instruction lookup: rd = rs1 & ~rs2
+/// Uses Andn lookup table (table index 3), interleaved operands.
+pub fn AndnLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+        rs1_val: u64,
+        rs2_val: u64,
+        is_virtual: bool,
+        do_not_update_pc: bool,
+        is_first_in_sequence: bool,
+        is_compressed: bool,
+        is_rd_not_zero: bool,
+
+        pub fn init(rs1_val: u64, rs2_val: u64, is_virtual: bool, do_not_update_pc: bool, is_first_in_sequence: bool, is_compressed: bool, is_rd_not_zero: bool) Self {
+            return Self{ .rs1_val = rs1_val, .rs2_val = rs2_val, .is_virtual = is_virtual, .do_not_update_pc = do_not_update_pc, .is_first_in_sequence = is_first_in_sequence, .is_compressed = is_compressed, .is_rd_not_zero = is_rd_not_zero };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .Andn;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            return self.rs1_val & ~self.rs2_val;
+        }
+
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        pub fn instructionFlags(self: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            if (self.is_rd_not_zero) flags.set(.IsRdNotZero);
+            return flags;
+        }
+    };
+}
+
+/// VirtualROTRI instruction lookup: rd = rotate_right(rs1, trailing_zeros(bitmask))
+/// Uses VirtualROTR lookup table (table index 27), interleaved operands.
+pub fn VirtualROTRILookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+        rs1_val: u64,
+        bitmask: u64,
+        is_virtual: bool,
+        do_not_update_pc: bool,
+        is_first_in_sequence: bool,
+        is_compressed: bool,
+        is_rd_not_zero: bool,
+
+        pub fn init(rs1_val: u64, bitmask: u64, is_virtual: bool, do_not_update_pc: bool, is_first_in_sequence: bool, is_compressed: bool, is_rd_not_zero: bool) Self {
+            return Self{ .rs1_val = rs1_val, .bitmask = bitmask, .is_virtual = is_virtual, .do_not_update_pc = do_not_update_pc, .is_first_in_sequence = is_first_in_sequence, .is_compressed = is_compressed, .is_rd_not_zero = is_rd_not_zero };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .VirtualROTR;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return interleaveBits(self.rs1_val, self.bitmask);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const rotation: u6 = if (self.bitmask == 0) 0 else @intCast(@ctz(self.bitmask));
+            return std.math.rotr(u64, self.rs1_val, rotation);
+        }
+
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        pub fn instructionFlags(self: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            if (self.is_rd_not_zero) flags.set(.IsRdNotZero);
+            return flags;
+        }
+    };
+}
+
+/// VirtualROTRIW instruction lookup: rd = rotate_right_32(rs1, trailing_zeros(bitmask))
+/// Uses VirtualROTRW lookup table (table index 28), interleaved operands.
+pub fn VirtualROTRIWLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+        rs1_val: u64,
+        bitmask: u64,
+        is_virtual: bool,
+        do_not_update_pc: bool,
+        is_first_in_sequence: bool,
+        is_compressed: bool,
+        is_rd_not_zero: bool,
+
+        pub fn init(rs1_val: u64, bitmask: u64, is_virtual: bool, do_not_update_pc: bool, is_first_in_sequence: bool, is_compressed: bool, is_rd_not_zero: bool) Self {
+            return Self{ .rs1_val = rs1_val, .bitmask = bitmask, .is_virtual = is_virtual, .do_not_update_pc = do_not_update_pc, .is_first_in_sequence = is_first_in_sequence, .is_compressed = is_compressed, .is_rd_not_zero = is_rd_not_zero };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .VirtualROTRW;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return interleaveBits(self.rs1_val, self.bitmask);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const val32: u32 = @truncate(self.rs1_val);
+            const bm32: u32 = @truncate(self.bitmask);
+            const rotation: u5 = if (bm32 == 0) 0 else @intCast(@min(@as(u6, @intCast(@ctz(bm32))), 31));
+            return @as(u64, std.math.rotr(u32, val32, rotation));
+        }
+
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        pub fn instructionFlags(self: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            if (self.is_rd_not_zero) flags.set(.IsRdNotZero);
+            return flags;
+        }
+    };
+}

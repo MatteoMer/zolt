@@ -6613,7 +6613,6 @@ pub const Emulator = struct {
                     self.recordTerminationWrite() catch |term_err| {
                         dbg("[TRACE] Warning: failed to record termination write: {any}\n", .{term_err});
                     };
-                    if (std.posix.getenv("ZOLT_DUMP_TRACE") != null) self.dumpTraceSummary();
                     return;
                 },
                 else => return err,
@@ -6623,30 +6622,8 @@ pub const Emulator = struct {
                 self.recordTerminationWrite() catch |term_err| {
                     dbg("[TRACE] Warning: failed to record termination write: {any}\n", .{term_err});
                 };
-                if (std.posix.getenv("ZOLT_DUMP_TRACE") != null) self.dumpTraceSummary();
                 return;
             }
-        }
-    }
-
-    fn dumpTraceSummary(self: *const Emulator) void {
-        var op_counts: [128]usize = [_]usize{0} ** 128;
-        var op_5b_f3_counts: [8]usize = [_]usize{0} ** 8;
-        for (self.trace.steps.items) |s| {
-            if (s.is_noop) continue;
-            const op: u8 = @truncate(s.instruction & 0x7F);
-            op_counts[op] += 1;
-            if (op == 0x5B) {
-                const f3: u3 = @truncate((s.instruction >> 12) & 0x7);
-                op_5b_f3_counts[f3] += 1;
-            }
-        }
-        std.debug.print("[TRACE_SUMMARY] total_steps={} (non-noop)\n", .{self.trace.steps.items.len});
-        for (op_counts, 0..) |c, op| {
-            if (c > 0) std.debug.print("  opcode 0x{x:0>2}: {} cycles\n", .{ op, c });
-        }
-        for (op_5b_f3_counts, 0..) |c, f3| {
-            if (c > 0) std.debug.print("  opcode 0x5B funct3={}: {} cycles\n", .{ f3, c });
         }
     }
 

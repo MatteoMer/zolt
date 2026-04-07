@@ -530,6 +530,13 @@ fn extractOperandFlags(opcode: u8, funct3: u3, funct7: u7, step: TraceStep, has_
             f.right_is_rs2 = true;
             f.flag_assert = true;
         },
+        0x6B => {
+            // VirtualROTRI/W (rotate-right-by-bitmask): interleaved-path,
+            // LeftOperandIsRs1Value + RightOperandIsImm + WriteLookupOutputToRD.
+            f.left_is_rs1 = true;
+            f.right_is_imm = true;
+            f.flag_write_lookup = true;
+        },
         else => {},
     }
     return f;
@@ -588,6 +595,21 @@ fn decodeImmediateInt(instr: u32, step: TraceStep) i128 {
     }
     // VirtualRev8W (0x7B, internal synthetic opcode): no immediate
     if (opcode == 0x7B) return 0;
+
+    // VirtualROTRI/W (0x6B): imm encodes the rotation amount directly; the
+    // bitmask is reconstructed from (1 << (64 - rot)) - 1) << rot. We store
+    // the reconstructed bitmask in the i128 immediate so Stage 1's val_poly
+    // matches the bytecode entry (which stores the bitmask in its imm field).
+    if (opcode == 0x6B) {
+        const f3_6b: u3 = @truncate((instr >> 12) & 0x7);
+        const rot_raw: u32 = (instr >> 20) & 0x3F;
+        const width: u8 = if (f3_6b == 1) 32 else 64;
+        const rot_mod: u8 = if (f3_6b == 1) @intCast(rot_raw & 0x1F) else @intCast(rot_raw & 0x3F);
+        if (rot_mod == 0) return 0;
+        const ones: u128 = (@as(u128, 1) << @intCast(width - rot_mod)) - 1;
+        const bitmask: u128 = ones << @intCast(rot_mod);
+        return @as(i128, @as(i128, @bitCast(@as(u128, @truncate(bitmask)))));
+    }
 
     // Identity-add path: store as UNSIGNED u64 representation
     const is_identity_add = switch (opcode) {

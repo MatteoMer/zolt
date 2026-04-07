@@ -225,6 +225,14 @@ pub fn computeBytecodeCodeSizeWithTextSize(program_bytecode: []const u8, text_si
                     // ECALL/EBREAK: 1 entry
                     num_entries += 1;
                 }
+            } else if (opcode == 0x5B) {
+                // Jolt SDK custom-2: VirtualRev8W, VirtualHostIO, AdviceLB/H/W/D, VirtualAdviceLen
+                // AdviceLB/LH/LW expand to 3 entries (VirtualAdvice + VirtualMULI + VirtualSRAI).
+                // AdviceLD expands to 1 entry. Others are 1 entry.
+                num_entries += switch (funct3) {
+                    0b011, 0b100, 0b101 => @as(usize, 3), // AdviceLB/LH/LW
+                    else => @as(usize, 1), // VirtualRev8W(0), VirtualHostIO(2), AdviceLD(6), VirtualAdviceLen(7)
+                };
             } else {
                 const is_w_ext_2 = switch (opcode) {
                     0x1b => switch (funct3) {

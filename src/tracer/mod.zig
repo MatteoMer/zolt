@@ -181,6 +181,9 @@ pub const Emulator = struct {
     is_compressed: bool,
     /// Previous PC for infinite loop detection (matching Jolt's termination heuristic)
     prev_pc: u64,
+    /// Advice tape read position (consumed by AdviceLB/H/W/D).
+    /// Returns 0 when tape is exhausted (valid externally-supplied witness).
+    advice_pos: usize,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, config: *const common.MemoryConfig) Emulator {
@@ -193,6 +196,7 @@ pub const Emulator = struct {
             .lookup_trace = zkvm.instruction.LookupTraceCollector(64).init(allocator),
             .is_compressed = false,
             .prev_pc = 0, // Will be set to initial PC on first step
+            .advice_pos = 0,
             .allocator = allocator,
         };
     }
@@ -203,6 +207,187 @@ pub const Emulator = struct {
         self.device.deinit();
         self.trace.deinit();
         self.lookup_trace.deinit();
+    }
+
+    /// Read `num_bytes` (1, 2, 4, or 8) from the untrusted advice tape.
+    /// Advances `advice_pos`. Returns 0 when the tape is exhausted (valid
+    /// witness — advice is externally supplied and only range-checked).
+    fn adviceTapeRead(self: *Emulator, num_bytes: usize) u64 {
+        std.debug.assert(num_bytes == 1 or num_bytes == 2 or num_bytes == 4 or num_bytes == 8);
+        var value: u64 = 0;
+        const tape = self.device.untrusted_advice.items;
+        for (0..num_bytes) |i| {
+            const byte: u8 = if (self.advice_pos + i < tape.len) tape[self.advice_pos + i] else 0;
+            value |= @as(u64, byte) << @intCast(i * 8);
+        }
+        self.advice_pos += num_bytes;
+        return value;
+    }
+
+    /// Execute AdviceLB/LH/LW/LD as the inline sequence expansion
+    /// (VirtualAdviceLoad [+ VirtualMULI (SLLI) + VirtualSRAI (SRAI)]).
+    /// For num_bytes=8 (AdviceLD) it's just one VirtualAdviceLoad cycle.
+    /// For num_bytes=1/2/4 it's 3 cycles: VirtualAdviceLoad, VirtualMULI (SLLI × shift),
+    /// VirtualSRAI (SRAI × shift) where shift = 64 - num_bytes*8 to sign-extend.
+    fn stepAdviceLoadSignExt(
+        self: *Emulator,
+        decoded: zkvm.instruction.DecodedInstruction,
+        num_bytes: usize,
+    ) !bool {
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+        const base_pc = self.state.pc;
+        const rd: u8 = decoded.rd;
+        const shift_amount: u6 = @intCast(64 - num_bytes * 8);
+
+        // ── Step 1 (always): VirtualAdvice(rd) reads `num_bytes` from advice tape ──
+        const advice_value: u64 = self.adviceTapeRead(num_bytes);
+        const rd_pre = try self.registers.read(rd);
+        if (rd != 0) try self.registers.write(rd, advice_value);
+
+        const advice_load_instr: u32 = buildVirtualAdviceInstr(rd);
+        const is_single_cycle = (num_bytes == 8);
+
+        try self.lookup_trace.recordVirtualAdvice(
+            @intCast(self.state.cycle),
+            base_pc,
+            advice_load_instr,
+            advice_value,
+            true, // is_virtual
+            !is_single_cycle, // do_not_update_pc (unless it's the only cycle)
+            true, // is_first_in_sequence
+            if (is_single_cycle) self.is_compressed else false,
+        );
+
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = base_pc,
+            .unexpanded_pc = base_pc,
+            .instruction = advice_load_instr,
+            .rs1_value = 0,
+            .rs2_value = 0,
+            .rd_pre_value = rd_pre,
+            .rd_value = advice_value,
+            .rd_index = rd,
+            .rs1_index = 0,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = false,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = if (is_single_cycle) base_pc + pc_increment else base_pc,
+            .is_compressed = if (is_single_cycle) self.is_compressed else false,
+            .virtual_sequence_remaining = if (is_single_cycle) 0 else 2,
+            .is_first_in_sequence = true,
+            .is_last_in_sequence = is_single_cycle,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        if (is_single_cycle) {
+            self.prev_pc = base_pc;
+            self.state.pc = base_pc + pc_increment;
+            return true;
+        }
+
+        // ── Step 2: VirtualMULI(rd, rd, 1 << shift_amount) — matches SLLI decomposition ──
+        const multiplier: u64 = @as(u64, 1) << shift_amount;
+        const shifted_left: u64 = advice_value *% multiplier;
+        const rd_pre_step2 = try self.registers.read(rd);
+        if (rd != 0) try self.registers.write(rd, shifted_left);
+
+        const vmuli_instr: u32 = buildVirtualMULIInstr(rd, rd, @intCast(shift_amount));
+        try self.lookup_trace.recordVirtualMULI(
+            @intCast(self.state.cycle),
+            base_pc,
+            vmuli_instr,
+            advice_value,
+            multiplier,
+            true, // is_virtual
+            true, // do_not_update_pc: middle of sequence (vsr=1)
+            false, // is_first_in_sequence
+            false, // is_compressed (not last)
+        );
+
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = base_pc,
+            .unexpanded_pc = base_pc,
+            .instruction = vmuli_instr,
+            .rs1_value = advice_value,
+            .rs2_value = 0,
+            .rd_pre_value = rd_pre_step2,
+            .rd_value = shifted_left,
+            .rd_index = rd,
+            .rs1_index = rd,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = base_pc,
+            .is_compressed = false,
+            .virtual_sequence_remaining = 1,
+            .is_first_in_sequence = false,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ── Step 3: VirtualSRAI(rd, rd, bitmask) — matches SRAI decomposition ──
+        const signed_left: i64 = @bitCast(shifted_left);
+        const result_signed: i64 = signed_left >> @intCast(shift_amount);
+        const result: u64 = @bitCast(result_signed);
+        const rd_pre_step3 = try self.registers.read(rd);
+        if (rd != 0) try self.registers.write(rd, result);
+
+        const vsrai_instr: u32 = buildVirtualSRAIInstr(rd, rd, @intCast(shift_amount));
+        try self.lookup_trace.recordVirtualSRAI(
+            @intCast(self.state.cycle),
+            base_pc,
+            vsrai_instr,
+            shifted_left,
+            true, // is_virtual
+            false, // do_not_update_pc: last in sequence (vsr=0)
+            false, // is_first_in_sequence
+            self.is_compressed, // is_compressed propagated to last step
+        );
+
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = base_pc,
+            .unexpanded_pc = base_pc,
+            .instruction = vsrai_instr,
+            .rs1_value = shifted_left,
+            .rs2_value = 0,
+            .rd_pre_value = rd_pre_step3,
+            .rd_value = result,
+            .rd_index = rd,
+            .rs1_index = rd,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = base_pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 0,
+            .is_first_in_sequence = false,
+            .is_last_in_sequence = true,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        self.prev_pc = base_pc;
+        self.state.pc = base_pc + pc_increment;
+        return true;
     }
 
     /// Load a program into memory at a specific base address
@@ -729,8 +914,17 @@ pub const Emulator = struct {
         // VirtualRev8W (opcode 0x5B funct3=0): byte-swap each 32-bit half
         const op_raw: u8 = @truncate(instruction & 0x7F);
         const f3_raw: u3 = @truncate((instruction >> 12) & 0x7);
-        if (op_raw == 0x5B and f3_raw == 0) {
-            return try self.stepVirtualRev8W(instruction, decoded);
+        if (op_raw == 0x5B) {
+            switch (f3_raw) {
+                0 => return try self.stepVirtualRev8W(instruction, decoded),
+                3 => return try self.stepAdviceLoadSignExt(decoded, 1), // AdviceLB
+                4 => return try self.stepAdviceLoadSignExt(decoded, 2), // AdviceLH
+                5 => return try self.stepAdviceLoadSignExt(decoded, 4), // AdviceLW
+                6 => return try self.stepAdviceLoadSignExt(decoded, 8), // AdviceLD (single cycle)
+                // funct3 = 1, 2, 7: fall through to stepNormal (VirtualAssertEQ,
+                // VirtualHostIO, VirtualAdviceLen — NoOp passthroughs).
+                else => {},
+            }
         }
 
         // Standard (non-W-extension) instruction execution

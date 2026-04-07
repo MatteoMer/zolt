@@ -2071,6 +2071,66 @@ pub const BytecodePreprocessing = struct {
                         .is_compressed = is_compressed,
                     });
                 },
+                .AdviceLB, .AdviceLH, .AdviceLW => {
+                    // AdviceLB/LH/LW: inline-expanded to VirtualAdvice + SLLI + SRAI
+                    // where SLLI → VirtualMULI and SRAI → VirtualSRAI (matching our
+                    // internal decomposition). 3-cycle virtual sequence: vsr=2,1,0.
+                    const num_bytes: u8 = switch (jolt_instr.variant) {
+                        .AdviceLB => 1,
+                        .AdviceLH => 2,
+                        .AdviceLW => 4,
+                        else => unreachable,
+                    };
+                    const shift: u8 = 64 - num_bytes * 8;
+                    const rd_val = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    // Step 1: VirtualAdvice(rd)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAdvice,
+                        .address = addr,
+                        .operands = .{ .FormatJ = .{ .rd = rd_val, .imm = @as(u64, num_bytes) } },
+                        .virtual_sequence_remaining = 2,
+                        .is_first_in_sequence = true,
+                        .is_compressed = false,
+                    });
+                    // Step 2: VirtualMULI(rd, rd, 1<<shift)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd_val, .rs1 = rd_val, .imm = @as(u64, 1) << @intCast(shift) } },
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = false,
+                    });
+                    // Step 3: VirtualSRAI(rd, rd, bitmask)
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift))) - 1;
+                    const bitmask: u64 = @truncate(ones << @intCast(shift));
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRAI,
+                        .address = addr,
+                        .operands = .{ .FormatVirtualRightShiftI = .{ .rd = rd_val, .rs1 = rd_val, .imm = bitmask } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .AdviceLD => {
+                    // AdviceLD: single VirtualAdvice(rd) cycle (already 64-bit, no sign-extend).
+                    const rd_val = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAdvice,
+                        .address = addr,
+                        .operands = .{ .FormatJ = .{ .rd = rd_val, .imm = 8 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                },
                 else => {
                     // Non-decomposed instructions: append as-is
                     try self.bytecode.append(allocator, jolt_instr);

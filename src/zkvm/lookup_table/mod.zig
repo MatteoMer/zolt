@@ -283,6 +283,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             /// This can be expressed as:
             /// sum_{j=0}^{XLEN-1} (1-r_x[j]) * r_y[j] * prod_{k=0}^{j-1} eq(r_x[k], r_y[k])
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
 
                 var result = F.zero();
@@ -340,6 +341,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             /// - If x positive, y negative: x_sign=0, y_sign=1, so contribution = -1
             /// - If same sign: x_sign - y_sign = 0, use unsigned comparison
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
 
                 const one = F.one();
@@ -449,6 +451,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             /// Simpler: x <= y = NOT(x > y) = NOT(y < x)
             /// We need to swap operands to compute y < x
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
 
                 // Compute y < x by swapping operands
@@ -1398,6 +1401,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
 
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
                 var prod_one_plus_y = F.one();
                 var first_sum = F.zero();
@@ -1443,6 +1447,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
 
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
                 var prod_one_plus_y = F.one();
                 var first_sum = F.zero();
@@ -1469,6 +1474,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// 6: Equal, 7: SignedGreaterThanEqual, 8: UnsignedGreaterThanEqual, 9: NotEqual,
         /// 10: SignedLessThan, 11: UnsignedLessThan, 12: Movsign, ...
         pub fn evaluateTableMLE(table_index: usize, r: []const F) F {
+            @setEvalBranchQuota(2_000_000);
             return switch (table_index) {
                 0 => RangeCheck.evaluateMLE(r),
                 1 => blk_rca: {
@@ -1495,7 +1501,17 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 10 => SignedLessThan.evaluateMLE(r),
                 11 => UnsignedLessThan.evaluateMLE(r),
                 12 => Movsign.evaluateMLE(r),
-                13 => @panic("UpperWord MLE not implemented"),
+                13 => blk_upper: {
+                    // UpperWord MLE: upper XLEN bits of the 2*XLEN-bit interleaved index
+                    // evaluate_mle = Σ_{i=0..XLEN-1} r[i] * 2^(XLEN-1-i)
+                    @setEvalBranchQuota(200_000);
+                    var uw_result = F.zero();
+                    inline for (0..XLEN) |i| {
+                        const coeff = F.fromU64(@as(u64, 1) << @intCast(XLEN - 1 - i));
+                        uw_result = uw_result.add(coeff.mul(r[i]));
+                    }
+                    break :blk_upper uw_result;
+                },
                 14 => UnsignedLessThanEqual.evaluateMLE(r),
                 // 15 was ValidSignedRemainder (removed in PR #1355)
                 15 => ValidUnsignedRemainder.evaluateMLE(r),
@@ -1504,7 +1520,23 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 18 => WordAlignment.evaluateMLE(r),
                 19 => LowerHalfWord.evaluateMLE(r),
                 20 => SignExtendHalfWord.evaluateMLE(r),
-                21 => Pow2.evaluateMLE(r),
+                21 => blk_pow2_dispatch: {
+                    // Pow2 MLE matching Jolt's evaluate_mle for r.len() == 2*XLEN.
+                    // result = ∏_{i=0..log2(XLEN)} (1 + (2^(2^i) - 1) * r[r.len()-1-i])
+                    @setEvalBranchQuota(200_000);
+                    if (r.len == XLEN) break :blk_pow2_dispatch Pow2.evaluateMLE(r);
+                    std.debug.assert(r.len == 2 * XLEN);
+                    var pow2_res = F.one();
+                    const log2_xlen: usize = std.math.log2_int(usize, XLEN);
+                    inline for (0..6) |i| { // log2(64) = 6
+                        if (i < log2_xlen) {
+                            const coeff = F.fromU64((@as(u64, 1) << @intCast(@as(u64, 1) << @intCast(i))) - 1);
+                            const idx = r.len - 1 - i;
+                            pow2_res = pow2_res.mul(F.one().add(coeff.mul(r[idx])));
+                        }
+                    }
+                    break :blk_pow2_dispatch pow2_res;
+                },
                 22 => @panic("Pow2W MLE not implemented"),
                 23 => ShiftRightBitmask.evaluateMLE(r),
                 24 => VirtualRev8W.evaluateMLE(r),

@@ -427,6 +427,7 @@ pub fn Helpers(comptime F: type) type {
                 0x67 => true, // JALR (AddOperands)
                 0x02 => true, // VirtualAdvice (Advice flag → identity path)
                 0x42 => true, // VirtualZeroExtendWord (AddOperands → identity path)
+                0x7B => true, // VirtualRev8W (AddOperands → identity path, single operand rs1)
                 0x03 => false, // Load: uses (rs1, imm) format, NOT identity path
                 0x23 => false, // Store: uses (rs1, imm) format, NOT identity path
                 0x22 => (funct3 == 2 or funct3 == 3), // Alignment assertions: AddOperands (identity); AssertEQ/ValidDiv0: interleaved
@@ -527,6 +528,8 @@ pub fn Helpers(comptime F: type) type {
                     },
                     // VirtualSignExtendWord: index = rs1 (the value to sign-extend)
                     0x0B => @as(u128, step.rs1_value),
+                    // VirtualRev8W: index = rs1 (single operand, byte-swap-per-32-bit-half)
+                    0x7B => @as(u128, step.rs1_value),
                     // VirtualMULI/Pow2/ShiftRightBitmask: dispatch on funct3
                     0x2B => blk128: {
                         if (funct3 == 0) {
@@ -1518,6 +1521,7 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
             if (funct3 == 0) break :blk5b 25; // VirtualSRLI -> VirtualSRLTable
             break :blk5b -1; // VirtualHostIO (other funct3) -> no lookup table
         },
+        0x7B => 24, // VirtualRev8W (internal synthetic opcode) -> VirtualRev8WTable
         0x02 => 0, // VirtualAdvice -> RangeCheckTable
         0x22 => blk22: { // Virtual assert
             if (funct3 == 1) break :blk22 16; // VirtualAssertValidDiv0 -> ValidDiv0Table

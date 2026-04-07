@@ -1740,16 +1740,18 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             if (is_compressed) entry.circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
         },
 
-        // VirtualRev8W (0x5B funct3=0): byte-swap each 32-bit half of rs1 → rd
+        // VirtualRev8W (0x5B funct3=0 in ELF, 0x7B internally): byte-swap each 32-bit half.
         // Jolt: AddOperands=true, WriteLookupOutputToRD=true, LeftOperandIsRs1Value=true,
         // lookup_table = VirtualRev8WTable (index 24 in pinned Jolt 997c1543).
+        // We use synthetic opcode 0x7B internally to distinguish from VirtualSRLI which
+        // uses 0x5B funct3=0 as its synthetic trace encoding.
         .VirtualRev8W => {
             entry.address = instr.address;
             entry.imm = 0;
             entry.rd = rd;
             entry.rs1 = rs1;
             entry.rs2 = 255;
-            entry.opcode = 0x5B;
+            entry.opcode = 0x7B;
             entry.funct3 = 0;
             entry.circuit_flags = [_]bool{false} ** 14;
             entry.instruction_flags = [_]bool{false} ** 7;
@@ -3439,6 +3441,8 @@ fn isKnownInstruction(opcode: u8, funct3: u3, funct7: u7) bool {
         //   funct3=7 → VirtualAdviceLen
         // funct3=1 is unused in pinned Jolt 997c1543 (newer revs use it for VirtualAssertEQ).
         0x5B => return funct3 != 1,
+        // 0x7B is our internal synthetic opcode for VirtualRev8W trace cycles
+        0x7B => return true,
         // Other virtual opcodes only appear in virtual sequence entries, not ELF bytes.
         else => return false,
     }
@@ -3537,6 +3541,7 @@ pub fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
         0x6B => if (funct3 == 0) @as(u8, 27) // VirtualROTRI → VirtualROTR
         else if (funct3 == 1) 28 // VirtualROTRIW → VirtualROTRW
         else 255,
+        0x7B => 24, // VirtualRev8W (internal synthetic) → VirtualRev8W table
         else => 255, // Load, Store, ECALL, FENCE - no lookup table
     };
 }

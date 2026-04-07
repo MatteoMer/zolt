@@ -499,6 +499,13 @@ fn extractOperandFlags(opcode: u8, funct3: u3, funct7: u7, step: TraceStep, has_
                 }
             }
         },
+        0x7B => {
+            // VirtualRev8W (internal synthetic opcode): identity-path, single operand rs1.
+            // AddOperands + WriteLookupOutputToRD + LeftOperandIsRs1Value.
+            f.left_is_rs1 = true;
+            f.flag_add = true;
+            f.flag_write_lookup = true;
+        },
         0x02 => {
             f.flag_advice = true;
             f.flag_write_lookup = true;
@@ -530,7 +537,7 @@ fn extractOperandFlags(opcode: u8, funct3: u3, funct7: u7, step: TraceStep, has_
 
 fn readsRs1(opcode: u8, step: TraceStep) bool {
     return switch (opcode) {
-        0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B, 0x22, 0x42, 0x62, 0x6B => true,
+        0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B, 0x22, 0x42, 0x62, 0x6B, 0x7B => true,
         0x5B => blk: {
             const f3: u3 = @truncate((step.instruction >> 12) & 0x7);
             break :blk (f3 == 0 or f3 == 5);
@@ -579,6 +586,9 @@ fn decodeImmediateInt(instr: u32, step: TraceStep) i128 {
         }
         return 0;
     }
+    // VirtualRev8W (0x7B, internal synthetic opcode): no immediate
+    if (opcode == 0x7B) return 0;
+
     // Identity-add path: store as UNSIGNED u64 representation
     const is_identity_add = switch (opcode) {
         0x13 => (instr >> 12) & 0x7 == 0,
@@ -748,6 +758,8 @@ fn computeU128LookupOperandInt(instr: u32, step: TraceStep) u128 {
             return @as(u128, step.rs1_value);
         },
         0x42 => return @as(u128, step.rs1_value),
+        // VirtualRev8W (0x7B): identity path, index = rs1 (single operand)
+        0x7B => return @as(u128, step.rs1_value),
         0x22 => {
             const f3_22: u3 = @truncate(funct3);
             if (f3_22 == 2 or f3_22 == 3) {

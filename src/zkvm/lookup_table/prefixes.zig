@@ -2471,10 +2471,12 @@ fn xorRotWUpdateCheckpoint(
 // ============================================================================
 // Rev8W Prefix Implementation
 // ============================================================================
-/// Byte-reverse a 32-bit word
-fn rev8w(x: u64) u64 {
-    const masked = x & 0xFFFFFFFF;
-    return @as(u64, @byteSwap(@as(u32, @truncate(masked))));
+/// Reverse bytes in each 32-bit word of a u64.
+/// Matches Jolt: `(v as u32).swap_bytes() as u64 + ((((v >> 32) as u32).swap_bytes()) as u64) << 32`
+fn rev8w(v: u64) u64 {
+    const lo: u32 = @truncate(v);
+    const hi: u32 = @truncate(v >> 32);
+    return @as(u64, @byteSwap(lo)) + (@as(u64, @byteSwap(hi)) << 32);
 }
 fn rev8wPrefixMle(
     comptime F: type,

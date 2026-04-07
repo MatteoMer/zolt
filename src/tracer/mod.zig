@@ -1535,6 +1535,10 @@ pub const Emulator = struct {
             else
                 0;
 
+            // Captured before writeWordWithIO inside the SD branch, so the
+            // TraceStep can record the actual pre-store doubleword value.
+            var inline_sd_pre_value: u64 = 0;
+
             // Compute result based on instruction kind
             const rd_val: u64 = switch (instr.kind) {
                 .ADD => rs1_val +% rs2_val,
@@ -1577,8 +1581,13 @@ pub const Emulator = struct {
                     break :blk try self.readWordWithIO(addr);
                 },
                 .SD => blk: {
-                    // For stores, rs2_val is what gets written
+                    // For stores, rs2_val is what gets written. Capture the
+                    // pre-value BEFORE calling writeWordWithIO so we can record
+                    // it on the TraceStep — once writeWordWithIO runs, ram.memory
+                    // already holds the post-value and reading it back would
+                    // give us the wrong RamInc in Stage 6.
                     const addr: u64 = @bitCast(@as(i64, @bitCast(rs1_val)) +% @as(i64, @bitCast(instr.imm)));
+                    inline_sd_pre_value = if (self.ram.memory.get(addr & ~@as(u64, 7))) |v| v else 0;
                     // CRITICAL: writes to the program output region must populate
                     // device.outputs (not RAM), otherwise val_final and val_io
                     // disagree at OutputSumcheck and Stage 2 verification fails.
@@ -1768,7 +1777,9 @@ pub const Emulator = struct {
             } else if (instr.kind == .SD) {
                 memory_addr = @bitCast(@as(i64, @bitCast(rs1_val)) +% @as(i64, @bitCast(instr.imm)));
                 memory_value = rs2_val;
-                memory_pre_value = if (self.ram.memory.get(memory_addr.?)) |v| v else 0;
+                // Use the pre-store value captured BEFORE writeWordWithIO;
+                // reading ram.memory here would return the post-value.
+                memory_pre_value = inline_sd_pre_value;
                 is_memory_write = true;
             }
 

@@ -873,6 +873,12 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
         /// from an SRS with the exact same dimensions (sigma, nu, n).
         dory_srs_log_size: u32,
 
+        /// Public-input bytes captured from the emulator's JoltDevice.
+        /// Owned by the bundle (allocated with `allocator`).
+        program_inputs: []u8 = &.{},
+        program_outputs: []u8 = &.{},
+        program_panic: bool = false,
+
         allocator: Allocator,
 
         pub fn init(allocator: Allocator) Self {
@@ -915,6 +921,8 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
             // Note: opening_point is already freed by self.proof.deinit() above
             // (JoltProof.deinit frees its own opening_point), so don't double-free here.
             if (self.dory_opening_proof) |*p| p.deinit();
+            if (self.program_inputs.len > 0) self.allocator.free(self.program_inputs);
+            if (self.program_outputs.len > 0) self.allocator.free(self.program_outputs);
         }
     };
 }

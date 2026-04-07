@@ -88,6 +88,47 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
     std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ jolt_bytes.len, @as(f64, @floatFromInt(jolt_bytes.len)) / 1024.0 });
     std.debug.print("  Proof saved successfully!\n", .{});
 
+    // Write program I/O sidecar (used by jolt-verifier to reconstruct the public
+    // input transcript). Format: ark-serialize JoltDevice (inputs, trusted_advice,
+    // untrusted_advice, outputs, panic, memory_layout).
+    {
+        const io_path = try std.fmt.allocPrint(allocator, "{s}.io", .{output_path});
+        defer allocator.free(io_path);
+
+        var io_buffer = std.ArrayListUnmanaged(u8){};
+        defer io_buffer.deinit(allocator);
+        const w = io_buffer.writer(allocator);
+
+        // Compute matching memory layout from the same MemoryConfig used by the prover
+        const ml_config = zolt.common.MemoryConfig{
+            .program_size = program.bytecode.len,
+            .heap_size = 32768,
+        };
+        const ml = zolt.common.MemoryLayout.init(&ml_config);
+        // inputs (Vec<u8>): u64 len + bytes
+        try w.writeInt(u64, @intCast(jolt_bundle.program_inputs.len), .little);
+        if (jolt_bundle.program_inputs.len > 0) try w.writeAll(jolt_bundle.program_inputs);
+        // trusted_advice (Vec<u8>): empty
+        try w.writeInt(u64, 0, .little);
+        // untrusted_advice (Vec<u8>): empty
+        try w.writeInt(u64, 0, .little);
+        // outputs (Vec<u8>)
+        try w.writeInt(u64, @intCast(jolt_bundle.program_outputs.len), .little);
+        if (jolt_bundle.program_outputs.len > 0) try w.writeAll(jolt_bundle.program_outputs);
+        // panic (bool, 1 byte)
+        try w.writeByte(if (jolt_bundle.program_panic) 1 else 0);
+        // memory_layout (20 * u64 LE)
+        try ml.serialize(w);
+
+        const io_file = std.fs.cwd().createFile(io_path, .{}) catch |err| {
+            std.debug.print("  Warning: could not create IO sidecar at {s}: {s}\n", .{ io_path, @errorName(err) });
+            return err;
+        };
+        defer io_file.close();
+        try io_file.writeAll(io_buffer.items);
+        std.debug.print("  IO sidecar written: {s} (outputs={} bytes, panic={})\n", .{ io_path, jolt_bundle.program_outputs.len, jolt_bundle.program_panic });
+    }
+
     // Export preprocessing if requested
     if (preprocessing_path) |pp_path| {
         std.debug.print("\nExporting preprocessing to: {s}\n", .{pp_path});

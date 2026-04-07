@@ -420,6 +420,18 @@ pub fn JoltProver(comptime F: type) type {
             const actual_outputs = emulator.getOutputs();
             const actual_panic = emulator.device.panic;
 
+            // Trim trailing zero bytes off the outputs slice. Jolt's verifier
+            // does the same truncation in `RV64IMACVerifier::new` before the
+            // Fiat-Shamir preamble runs (see jolt-core/src/zkvm/verifier.rs:
+            // `program_io.outputs.truncate(...)`); the prover MUST trim too,
+            // otherwise the prover/verifier transcripts diverge for any
+            // program whose output ends with zeros.
+            const trimmed_outputs: []const u8 = blk_trim: {
+                var end: usize = actual_outputs.len;
+                while (end > 0 and actual_outputs[end - 1] == 0) : (end -= 1) {}
+                break :blk_trim actual_outputs[0..end];
+            };
+
             // DEBUG: Print Fiat-Shamir preamble values
             dbg("\n=== Zolt Fiat-Shamir Preamble Debug (WithDory) ===\n", .{});
             dbg("inputs.len = {d}\n", .{inputs.len});
@@ -428,11 +440,11 @@ pub fn JoltProver(comptime F: type) type {
             } else if (inputs.len > 32) {
                 dbg("inputs[0..32] = {any}...\n", .{inputs[0..32]});
             }
-            dbg("outputs.len = {d}\n", .{actual_outputs.len});
-            if (actual_outputs.len > 0 and actual_outputs.len <= 32) {
-                dbg("outputs = {any}\n", .{actual_outputs});
-            } else if (actual_outputs.len > 32) {
-                dbg("outputs[0..32] = {any}...\n", .{actual_outputs[0..32]});
+            dbg("outputs.len = {d}\n", .{trimmed_outputs.len});
+            if (trimmed_outputs.len > 0 and trimmed_outputs.len <= 32) {
+                dbg("outputs = {any}\n", .{trimmed_outputs});
+            } else if (trimmed_outputs.len > 32) {
+                dbg("outputs[0..32] = {any}...\n", .{trimmed_outputs[0..32]});
             }
             dbg("panic = {}\n", .{actual_panic});
             dbg("=================================================\n\n", .{});
@@ -440,7 +452,7 @@ pub fn JoltProver(comptime F: type) type {
             var device = try jolt_device.JoltDevice.fromEmulator(
                 self.allocator,
                 inputs,
-                actual_outputs,
+                trimmed_outputs,
                 actual_panic,
                 @intCast(program_bytecode.len),
                 config.heap_size, // Pass memory_size from config
@@ -511,6 +523,18 @@ pub fn JoltProver(comptime F: type) type {
             // Build and store polynomial evaluations
             var result = JoltProofWithDory.init(self.allocator);
             result.dory_srs_log_size = log_size;
+
+            // Capture program I/O so the prove command can write a sidecar file
+            // that the verifier reads to reconstruct the public-input transcript.
+            // Use the trimmed outputs (matches what the preamble appended and
+            // what Jolt's verifier truncates internally).
+            if (inputs.len > 0) {
+                result.program_inputs = try self.allocator.dupe(u8, inputs);
+            }
+            if (trimmed_outputs.len > 0) {
+                result.program_outputs = try self.allocator.dupe(u8, trimmed_outputs);
+            }
+            result.program_panic = actual_panic;
 
             // Store bytecode/memory/register eval polynomials (for opening proof later)
             result.bytecode_evals = try self.allocator.alloc(F, bytecode_poly_size);

@@ -457,11 +457,19 @@ pub const Emulator = struct {
     fn writeWordWithIO(self: *Emulator, address: u64, value: u64) !void {
         const aligned_addr = address & ~@as(u64, 7);
         if (self.isIOAddress(aligned_addr)) {
-            // Write 8 bytes to I/O
+            // Write 8 bytes to device.outputs / panic / termination so the
+            // Fiat-Shamir preamble (which appends device.outputs) sees them.
+            // We ALSO mirror the doubleword to RAM below so that:
+            //   1. subsequent ram.read calls (e.g. inside the SB/SH/SW
+            //      read-modify-write decomposition) observe the previously
+            //      stored byte values, AND
+            //   2. val_final (built from emulator.ram.memory) matches val_io
+            //      at the IO region — both polynomials carry the same per-
+            //      address byte value, so OutputSumcheck and the val-derived
+            //      Stage 4 polynomials are internally consistent.
             for (0..8) |i| {
                 try self.device.store(aligned_addr + i, @truncate(value >> (@as(u6, @intCast(i)) * 8)));
             }
-            return;
         }
         return self.ram.write(aligned_addr, value, self.state.cycle);
     }
@@ -5547,7 +5555,7 @@ pub const Emulator = struct {
                 const v1_val = try self.registers.read(v1);
                 const v2_val = try self.registers.read(v2);
                 const sd_instr = buildSDInstr(v1, v2);
-                try self.ram.write(aligned_addr, v2_val, self.state.cycle);
+                try self.writeWordWithIO(aligned_addr, v2_val);
                 const sd_decoded = zkvm.instruction.DecodedInstruction.decode(sd_instr);
                 try self.lookup_trace.recordInstruction(
                     @intCast(self.state.cycle),
@@ -6002,7 +6010,7 @@ pub const Emulator = struct {
                 const v1_val = try self.registers.read(v1);
                 const v2_val = try self.registers.read(v2);
                 const sd_instr = buildSDInstr(v1, v2);
-                try self.ram.write(aligned_addr, v2_val, self.state.cycle);
+                try self.writeWordWithIO(aligned_addr, v2_val);
                 const sd_decoded = zkvm.instruction.DecodedInstruction.decode(sd_instr);
                 try self.lookup_trace.recordInstruction(
                     @intCast(self.state.cycle),

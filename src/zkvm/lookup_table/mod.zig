@@ -1252,37 +1252,62 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
 
             pub fn evaluateMLE(r: []const F) F {
-                // Single-operand table: iterate over all XLEN possible shift amounts
-                // For XLEN=64 this is only 64 entries (the shift amount is only log2(XLEN) bits)
-                std.debug.assert(r.len >= XLEN);
-                // The input is the shift amount, which only uses log2(XLEN) bits.
-                // But the table is indexed by the full XLEN-bit operand.
-                // We need to sum over all 2^XLEN entries, but only the lower log2(XLEN) bits matter.
-                // For bits >= log2(XLEN), they don't affect the result. The result is the same
-                // regardless of those higher bits since we mask with (XLEN-1).
-                // So MLE = (product of (1-r[i]) for i >= log2(XLEN)) * sum_over_shift_amounts
-                const log_xlen = if (XLEN == 64) 6 else 5;
-                // Factor out high bits: they must all be 0 for a valid shift amount
-                var high_factor = F.one();
-                for (log_xlen..XLEN) |i| {
-                    high_factor = high_factor.mul(F.one().sub(r[i]));
+                @setEvalBranchQuota(200_000);
+                // ShiftRightBitmask is a single-operand identity-path table. Jolt's
+                // evaluate_mle expects r.len == 2 * XLEN and uses only the LAST log2(XLEN)
+                // elements (the low bits of the address encoding), interpreting them as
+                // the shift amount modulo XLEN.
+                if (r.len != 2 * XLEN) {
+                    // Legacy single-operand path (r.len == XLEN): brute-force lookup for
+                    // small XLEN used by some tests.
+                    std.debug.assert(r.len >= XLEN);
+                    const log_xlen_legacy = if (XLEN == 64) 6 else 5;
+                    var high_factor = F.one();
+                    for (log_xlen_legacy..XLEN) |i| {
+                        high_factor = high_factor.mul(F.one().sub(r[i]));
+                    }
+                    var sum = F.zero();
+                    for (0..XLEN) |shift| {
+                        const val = materializeEntry(@intCast(shift));
+                        var basis = F.one();
+                        for (0..log_xlen_legacy) |b| {
+                            const bit: u1 = @truncate(shift >> @truncate(b));
+                            if (bit == 1) {
+                                basis = basis.mul(r[b]);
+                            } else {
+                                basis = basis.mul(F.one().sub(r[b]));
+                            }
+                        }
+                        sum = sum.add(F.fromU64(val).mul(basis));
+                    }
+                    return high_factor.mul(sum);
                 }
-                // Sum over valid shift amounts (0..XLEN-1)
-                var sum = F.zero();
-                for (0..XLEN) |shift| {
-                    const val = materializeEntry(@intCast(shift));
-                    var basis = F.one();
-                    for (0..log_xlen) |b| {
-                        const bit: u1 = @truncate(shift >> @truncate(b));
-                        if (bit == 1) {
-                            basis = basis.mul(r[b]);
-                        } else {
-                            basis = basis.mul(F.one().sub(r[b]));
+
+                // 2*XLEN path — matches Jolt exactly. For XLEN=64, log_w = 6 and
+                // only r[r.len()-6..] is used. r[r.len()-1] is the LSB of shift, and
+                // r[r.len()-log_w] is the MSB of shift (BIG_ENDIAN across shift bits).
+                const log_w: usize = if (XLEN == 64) 6 else std.math.log2_int(usize, XLEN);
+                const r_tail = r[r.len - log_w ..];
+                var sum_bitmask = F.zero();
+                inline for (0..XLEN) |s| {
+                    // bitmask = ((1 << (XLEN - s)) - 1) << s
+                    const ones: u128 = (@as(u128, 1) << @intCast(XLEN - s)) - 1;
+                    const bitmask_u64: u64 = @truncate(ones << @intCast(s));
+                    var eq_val = F.one();
+                    inline for (0..6) |i| {
+                        if (i < log_w) {
+                            const bit = (s >> i) & 1;
+                            const idx = log_w - i - 1;
+                            if (bit == 0) {
+                                eq_val = eq_val.mul(F.one().sub(r_tail[idx]));
+                            } else {
+                                eq_val = eq_val.mul(r_tail[idx]);
+                            }
                         }
                     }
-                    sum = sum.add(F.fromU64(val).mul(basis));
+                    sum_bitmask = sum_bitmask.add(F.fromU64(bitmask_u64).mul(eq_val));
                 }
-                return high_factor.mul(sum);
+                return sum_bitmask;
             }
         };
 
@@ -1308,24 +1333,24 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 return entry;
             }
 
-            /// MLE follows the same interleave convention as VirtualSRL.
-            /// r[2*i] corresponds to even bit positions (first arg in interleaveBits),
-            /// r[2*i+1] corresponds to odd bit positions (second arg in interleaveBits).
-            /// The sign bit is the MSB of the value operand.
+            /// MLE follows Jolt's convention: r[0] is the sign bit (MSB of value), and
+            /// r[2*i]/r[2*i+1] for i in 0..XLEN index value/bitmask bit pairs.
+            /// Reference: jolt-core/src/zkvm/lookup_table/virtual_sra.rs evaluate_mle.
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
-                // Follow VirtualSRL's convention: r[2*i] and r[2*i+1] map to the
-                // interleaved bit positions. The formula is the same recurrence but
-                // with sign_bit * (1 - y_i) added.
-                // Sign bit (MSB of value) is at the same relative position as VirtualSRL's MSB
-                const sign_bit = r[2 * (XLEN - 1)];
                 var result = F.zero();
+                var sign_extension = F.zero();
                 inline for (0..XLEN) |i| {
-                    const x_i = r[2 * i]; // same convention as VirtualSRL
-                    const y_i = r[2 * i + 1]; // same convention as VirtualSRL
-                    result = result.mul(F.one().add(y_i)).add(x_i.mul(y_i)).add(sign_bit.mul(F.one().sub(y_i)));
+                    const x_i = r[2 * i];
+                    const y_i = r[2 * i + 1];
+                    result = result.mul(F.one().add(y_i)).add(x_i.mul(y_i));
+                    if (i != 0) {
+                        const coeff = F.fromU64(@as(u64, 1) << @intCast(i));
+                        sign_extension = sign_extension.add(coeff.mul(F.one().sub(y_i)));
+                    }
                 }
-                return result;
+                return result.add(r[0].mul(sign_extension));
             }
         };
 

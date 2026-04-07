@@ -1772,7 +1772,10 @@ pub const Emulator = struct {
                 .rd_index = instr.rd,
                 .rs1_index = instr.rs1,
                 .rs2_index = instr.rs2,
-                .rd_written = !is_store and instr.rd != 0,
+                // Jolt includes rd=0 writes in the RdWa polynomial (cpu.x[0] is captured
+                // pre and post with both = 0). So rd_written must be TRUE for any instruction
+                // with an rd field, even when rd=0. Only stores (rd=None) are excluded.
+                .rd_written = !is_store,
                 .rs1_read = true,
                 .rs2_read = (instr.kind == .ANDN or instr.kind == .AND or instr.kind == .XOR or instr.kind == .OR or instr.kind == .ADD or instr.kind == .SD),
                 .memory_addr = memory_addr,

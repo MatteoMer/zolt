@@ -1817,13 +1817,21 @@ pub const BytecodePreprocessing = struct {
                                         .is_first_in_sequence = is_first_step,
                                         .is_compressed = if (is_last_step) is_compressed else false,
                                     },
-                                    .VirtualMULI => .{
-                                        .variant = .VirtualMULI,
-                                        .address = addr,
-                                        .operands = .{ .FormatI = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = instr_item.imm } },
-                                        .virtual_sequence_remaining = vsr,
-                                        .is_first_in_sequence = is_first_step,
-                                        .is_compressed = if (is_last_step) is_compressed else false,
+                                    .VirtualMULI => blk_vmuli: {
+                                        // sha256_inline.zig stores the shamt in instr_item.imm
+                                        // (treated as SLLI by N). Jolt's VirtualMULI expects the
+                                        // multiplier (1 << shamt) in the instruction's operand
+                                        // imm field. Convert here to match standalone SLLI path.
+                                        const shamt_val: u8 = @intCast(instr_item.imm & 0x3F);
+                                        const multiplier_val: u64 = @as(u64, 1) << @intCast(shamt_val);
+                                        break :blk_vmuli .{
+                                            .variant = .VirtualMULI,
+                                            .address = addr,
+                                            .operands = .{ .FormatI = .{ .rd = instr_item.rd, .rs1 = instr_item.rs1, .imm = multiplier_val } },
+                                            .virtual_sequence_remaining = vsr,
+                                            .is_first_in_sequence = is_first_step,
+                                            .is_compressed = if (is_last_step) is_compressed else false,
+                                        };
                                     },
                                     .VirtualSRLI => .{
                                         .variant = .VirtualSRLI,

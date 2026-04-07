@@ -547,6 +547,7 @@ pub fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
         0x42 => true, // VirtualZeroExtendWord - uses LowerHalfWord table (AddOperands)
         0x62 => true, // VirtualAssertValidUnsignedRemainder - uses ValidUnsignedRemainder table (Assert)
         0x6B => true, // VirtualROTRI/VirtualROTRIW - uses VirtualROTR/VirtualROTRW tables
+        0x7B => true, // VirtualRev8W (internal synthetic opcode) - uses VirtualRev8W table
         0x03 => false, // Load - no table
         0x23 => false, // Store - no table
         else => false,

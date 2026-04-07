@@ -72,6 +72,7 @@ pub fn Helpers(comptime F: type) type {
                 0x22 => true, // VirtualAssertEQ: left = rs1
                 0x42 => true, // VirtualZeroExtendWord: left = rs1
                 0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1
+                0x7B => true, // VirtualRev8W: left = rs1
                 // 0x02 (VirtualAdvice): left_is_rs1 = false (instruction_inputs = (0,0))
                 else => false,
             };
@@ -359,6 +360,12 @@ pub fn Helpers(comptime F: type) type {
                     // R1CS: LeftLookupOperand=0, RightLookupOperand=F.fromU128(rs1_value)
                     // AddOperands: left=0, right=left_input+right_input
                     // Here left_input=rs1, right_input=0, so right=rs1
+                    left_op = F.zero();
+                    right_op = F.fromU128(@as(u128, step.rs1_value));
+                },
+                0x7B => { // VirtualRev8W: AddOperands flag (identity path), single operand rs1
+                    // R1CS: LeftLookupOperand=0, RightLookupOperand=F.fromU128(rs1_value)
+                    // Mirrors VirtualZeroExtendWord (0x42) which is also AddOperands single-rs1.
                     left_op = F.zero();
                     right_op = F.fromU128(@as(u128, step.rs1_value));
                 },
@@ -1467,7 +1474,8 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
         0x33 => blk: { // R-type
             if (funct3 == 0 and funct7 == 0) break :blk 0; // ADD -> RangeCheckTable
             if (funct3 == 0 and funct7 == 0x20) break :blk 0; // SUB -> RangeCheckTable
-            if (funct3 == 7) break :blk 2; // AND -> AndTable
+            if (funct3 == 7 and funct7 == 0) break :blk 2; // AND -> AndTable
+            if (funct3 == 7 and funct7 == 0x20) break :blk 3; // ANDN (Zbb) -> AndnTable
             if (funct3 == 6) break :blk 4; // OR -> OrTable
             if (funct3 == 4) break :blk 5; // XOR -> XorTable
             if (funct3 == 1) break :blk -1; // SLL -> uses virtual decomposition

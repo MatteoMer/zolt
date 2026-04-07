@@ -1564,12 +1564,17 @@ pub const Emulator = struct {
                 },
                 .LD => blk: {
                     const addr: u64 = @bitCast(@as(i64, @bitCast(rs1_val)) +% @as(i64, @bitCast(instr.imm)));
-                    break :blk try self.ram.read(addr, @intCast(self.state.cycle));
+                    // Use IO-aware read so that loads from the input/advice region pull
+                    // through device.load instead of returning RAM zeroes.
+                    break :blk try self.readWordWithIO(addr);
                 },
                 .SD => blk: {
                     // For stores, rs2_val is what gets written
                     const addr: u64 = @bitCast(@as(i64, @bitCast(rs1_val)) +% @as(i64, @bitCast(instr.imm)));
-                    try self.ram.write(addr, rs2_val, @intCast(self.state.cycle));
+                    // CRITICAL: writes to the program output region must populate
+                    // device.outputs (not RAM), otherwise val_final and val_io
+                    // disagree at OutputSumcheck and Stage 2 verification fails.
+                    try self.writeWordWithIO(addr, rs2_val);
                     break :blk 0;
                 },
             };

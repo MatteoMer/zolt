@@ -1067,6 +1067,38 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
 
         /// Record lookup for an ANDN instruction (rs1 & ~rs2)
         /// Uses Andn lookup table (interleaved)
+        /// Record lookup for VirtualRev8W (opcode 0x5B funct3=0): byte-swap each 32-bit half.
+        /// Single-operand: index = rs1_val (no interleaving). Lookup table = VirtualRev8W (24).
+        pub fn recordVirtualRev8W(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+            const Rev8WLkp = lookups.VirtualRev8WLookup(XLEN);
+            const lkp = Rev8WLkp.init(rs1_val, is_virtual, do_not_update_pc, is_first_in_sequence, is_compressed, rd != 0);
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = Rev8WLkp.lookupTable(),
+                .index = lkp.toLookupIndex(),
+                .result = lkp.computeResult(),
+                .left_operand = 0,
+                .right_operand = rs1_val,
+                .circuit_flags = lkp.circuitFlags(),
+                .instruction_flags = lkp.instructionFlags(),
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
         pub fn recordANDN(
             self: *Self,
             cycle: usize,

@@ -237,9 +237,17 @@ fn compactAndRawFromTraceStep(
     const next_upc: u64 = if (next_is_real_noop) 0 else next_step.?.unexpanded_pc;
 
     // ── Circuit flags (boolean) ──
+    // NOTE: opcode 0x5B (Custom-2) is NOT always virtual. Per upstream Jolt:
+    //   funct3=0 → VirtualRev8W (first-class ELF instruction, NOT virtual)
+    //   funct3=1 → VirtualAssertEQ
+    //   funct3=2 → VirtualHostIO (NOT virtual)
+    //   funct3=3..6 → AdviceLB/LH/LW/LD (NOT virtual when standalone in ELF)
+    //   funct3=7 → VirtualAdviceLen
+    // The "VirtualInstruction" flag is determined by virtual_sequence_remaining,
+    // not by opcode. Internal expansions (e.g., SHA256 inline → VirtualSRLI)
+    // set vsr > 0 for non-final steps, so they get caught by the vsr check.
     const is_compressed = step.is_compressed;
-    const is_5b_virtual = (opcode == 0x5B and (funct3 == 0 or funct3 == 5));
-    const is_virtual_opcode = if (opcode == 0x5B) is_5b_virtual else isVirtualOpcode(opcode);
+    const is_virtual_opcode = if (opcode == 0x5B) false else isVirtualOpcode(opcode);
     const vi = (step.virtual_sequence_remaining > 0 and !step.is_termination_store) or
         step.is_last_in_sequence or is_virtual_opcode;
     const dont_update = step.virtual_sequence_remaining > 0 and !step.is_termination_store;
@@ -247,9 +255,7 @@ fn compactAndRawFromTraceStep(
     const next_is_virtual = if (next_step) |ns| blk: {
         const nop = ns.is_noop;
         const no: u8 = @truncate(ns.instruction & 0x7F);
-        const nf3: u3 = @truncate((ns.instruction >> 12) & 0x7);
-        const n5b_virt = (no == 0x5B and (nf3 == 0 or nf3 == 5));
-        const n_is_virt_op = if (no == 0x5B) n5b_virt else isVirtualOpcode(no);
+        const n_is_virt_op = if (no == 0x5B) false else isVirtualOpcode(no);
         break :blk (!nop and ns.virtual_sequence_remaining > 0) or
             (!nop and ns.is_last_in_sequence) or
             n_is_virt_op;

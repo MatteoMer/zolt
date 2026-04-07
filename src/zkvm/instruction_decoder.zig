@@ -208,14 +208,18 @@ pub fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bo
                 .funct7 = funct7,
             } };
         },
-        0b1011011 => { // Custom-2 (0x5B): Jolt SDK instructions
+        0b1011011 => { // Custom-2 (0x5B): Jolt SDK / virtual instructions
             const imm = decodeIImmediate(instruction);
             operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
             variant = switch (funct3) {
-                0b010 => .VirtualHostIO,
-                0b011, 0b100, 0b101, 0b110 => .VirtualAdviceLoad,
-                0b111 => .VirtualAdviceLen,
-                else => .UNIMPL,
+                0b000 => .VirtualRev8W, // byte-swap each 32-bit half
+                0b010 => .VirtualHostIO, // host I/O / print / cycle tracking
+                0b011 => .AdviceLB, // advice byte load
+                0b100 => .AdviceLH, // advice halfword load
+                0b101 => .AdviceLW, // advice word load
+                0b110 => .AdviceLD, // advice doubleword load
+                0b111 => .VirtualAdviceLen, // advice tape remaining length
+                else => .UNIMPL, // funct3=1 reserved (VirtualAssertEQ in newer Jolt)
             };
         },
         else => {

@@ -98,8 +98,13 @@ pub const JoltInstruction = struct {
         CSRRS,
         MRET,
         // Jolt SDK instructions (opcode 0x5B) — names must match Jolt's Instruction enum
+        VirtualRev8W, // 0x5B funct3=0 (byte-swap each 32-bit half of a 64-bit register)
         VirtualHostIO, // 0x5B funct3=2 (host I/O, cycle tracking, print)
-        VirtualAdviceLoad, // 0x5B funct3=3-6 (advice tape byte/halfword/word/doubleword loads)
+        AdviceLB, // 0x5B funct3=3 (advice tape byte load, sign-extended)
+        AdviceLH, // 0x5B funct3=4 (advice tape halfword load, sign-extended)
+        AdviceLW, // 0x5B funct3=5 (advice tape word load, sign-extended)
+        AdviceLD, // 0x5B funct3=6 (advice tape doubleword load)
+        VirtualAdviceLoad, // emitted by AdviceLB/H/W/D inline_sequence
         VirtualAdviceLen, // 0x5B funct3=7 (get advice tape remaining length)
         // Atomics (placeholder)
         // Virtual instructions (names must match Jolt's Rust enum exactly for JSON serialization)

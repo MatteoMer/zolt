@@ -1740,22 +1740,51 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             if (is_compressed) entry.circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
         },
 
-        // CSR/MRET — should not reach here (decomposed to ADDI/OR/JALR in preprocessing),
-        // but handle defensively as ECALL-like (NOP-like, no lookup)
-        .VirtualHostIO, .VirtualAdviceLoad, .VirtualAdviceLen => {
-            // Jolt SDK instructions: NOP-like with real address, no flags, no lookup.
-            // Matches Jolt's VirtualHostIO circuit_flags=[false; 14], instruction_flags=[false; 7].
+        // VirtualRev8W (0x5B funct3=0): byte-swap each 32-bit half of rs1 → rd
+        // Jolt: AddOperands=true, WriteLookupOutputToRD=true, LeftOperandIsRs1Value=true,
+        // lookup_table = VirtualRev8WTable (index 24 in pinned Jolt 997c1543).
+        .VirtualRev8W => {
             entry.address = instr.address;
             entry.imm = 0;
             entry.rd = rd;
             entry.rs1 = rs1;
             entry.rs2 = 255;
             entry.opcode = 0x5B;
-            // funct3 for VirtualHostIO=2, VirtualAdviceLoad=3-6, VirtualAdviceLen=7
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 24; // VirtualRev8W table
+            entry.is_interleaved = false; // AddOperands set
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        // SDK NoOp-like (no lookup): VirtualHostIO, AdviceLB/H/W/D, VirtualAdviceLoad, VirtualAdviceLen
+        .VirtualHostIO, .AdviceLB, .AdviceLH, .AdviceLW, .AdviceLD, .VirtualAdviceLoad, .VirtualAdviceLen => {
+            // Jolt SDK instructions: NOP-like with real address, no flags, no lookup.
+            // Matches Jolt's VirtualHostIO circuit_flags=[false; 14], instruction_flags=[false; 7].
+            // NOTE: AdviceLB/H/W/D should be expanded to VirtualAdviceLoad+SLLI+SRAI in
+            // preprocessing for full correctness; this is a fallback path.
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x5B;
             entry.funct3 = switch (instr.variant) {
                 .VirtualHostIO => 2,
-                .VirtualAdviceLoad => 3, // Could be 3-6 but we just need a non-0/5 value
+                .AdviceLB => 3,
+                .AdviceLH => 4,
+                .AdviceLW => 5,
+                .AdviceLD => 6,
                 .VirtualAdviceLen => 7,
+                .VirtualAdviceLoad => 3,
                 else => 2,
             };
             entry.circuit_flags = [_]bool{false} ** 14;
@@ -3403,12 +3432,13 @@ fn isKnownInstruction(opcode: u8, funct3: u3, funct7: u7) bool {
         0x73,
         0x0F, // ECALL, FENCE (treated as NoOp in Jolt)
         => return true,
-        // Jolt SDK VirtualHostIO (0x5B with funct3 != 0/5) appears in SDK ELFs
-        // It's a NOP-like instruction with a real address (not UNIMPL).
-        0x5B => return switch (funct3) {
-            0, 5 => false, // VirtualSRLI/VirtualSRAI only in virtual sequences
-            else => true, // VirtualHostIO/advice loads from Jolt SDK
-        },
+        // Jolt SDK / virtual instructions at opcode 0x5B
+        //   funct3=0 → VirtualRev8W (real instruction in jolt-inlines/sha2 ELFs)
+        //   funct3=2 → VirtualHostIO
+        //   funct3=3,4,5,6 → AdviceLB/LH/LW/LD
+        //   funct3=7 → VirtualAdviceLen
+        // funct3=1 is unused in pinned Jolt 997c1543 (newer revs use it for VirtualAssertEQ).
+        0x5B => return funct3 != 1,
         // Other virtual opcodes only appear in virtual sequence entries, not ELF bytes.
         else => return false,
     }
@@ -3485,9 +3515,15 @@ pub fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
             else => 0, // VirtualMULI (funct3=0) → RangeCheck
         },
         0x5B => switch (funct3) {
+            // NOTE: opcode 0x5B funct3=0/5 is shared between two distinct cases:
+            //   - Internal: VirtualSRLI/VirtualSRL (table 25), VirtualSRAI/VirtualSRA (table 26)
+            //   - External (Jolt 997c1543): VirtualRev8W (funct3=0, table 24), AdviceLW (funct3=5, no table)
+            // The raw-decode path here matches our internal usage (VirtualSRL family). External
+            // VirtualRev8W from a real ELF is handled by the prep-first path via the
+            // .VirtualRev8W variant in populateEntryFromJoltInstruction (which sets table 24).
             0 => @as(u8, 25), // VirtualSRLI/VirtualSRL → VirtualSRL
             5 => @as(u8, 26), // VirtualSRAI/VirtualSRA → VirtualSRA
-            else => 255, // Jolt SDK VirtualHostIO/advice (funct3=1-4,6-7) → no lookup table
+            else => 255, // VirtualHostIO/Advice* — no lookup table at raw decode
         },
         0x02 => 0, // VirtualAdvice → RangeCheck
         0x22 => switch (funct3) { // Virtual assert

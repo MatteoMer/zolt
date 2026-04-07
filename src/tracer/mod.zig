@@ -726,8 +726,76 @@ pub const Emulator = struct {
         if (isCSRRS(decoded)) return try self.stepCSRRS(instruction, decoded);
         if (isMRET(instruction)) return try self.stepMRET(instruction, decoded);
 
+        // VirtualRev8W (opcode 0x5B funct3=0): byte-swap each 32-bit half
+        const op_raw: u8 = @truncate(instruction & 0x7F);
+        const f3_raw: u3 = @truncate((instruction >> 12) & 0x7);
+        if (op_raw == 0x5B and f3_raw == 0) {
+            return try self.stepVirtualRev8W(instruction, decoded);
+        }
+
         // Standard (non-W-extension) instruction execution
         return try self.stepNormal(instruction, decoded);
+    }
+
+    /// Execute VirtualRev8W: rd = rev8w(rs1) where rev8w byte-swaps each 32-bit half.
+    /// Single-cycle trace step. Format: I-type (rd, rs1).
+    fn stepVirtualRev8W(
+        self: *Emulator,
+        instruction: u32,
+        decoded: zkvm.instruction.DecodedInstruction,
+    ) !bool {
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+        const rs1_value = try self.registers.read(decoded.rs1);
+        const rd_pre = try self.registers.read(decoded.rd);
+
+        // rev8w: swap bytes in each 32-bit half independently
+        const lo: u32 = @byteSwap(@as(u32, @truncate(rs1_value)));
+        const hi: u32 = @byteSwap(@as(u32, @truncate(rs1_value >> 32)));
+        const result: u64 = @as(u64, lo) | (@as(u64, hi) << 32);
+
+        if (decoded.rd != 0) {
+            try self.registers.write(decoded.rd, result);
+        }
+
+        try self.lookup_trace.recordVirtualRev8W(
+            @intCast(self.state.cycle),
+            self.state.pc,
+            instruction,
+            rs1_value,
+            false, // is_virtual: standalone instruction (not in inline sequence)
+            false, // do_not_update_pc
+            false, // is_first_in_sequence
+            self.is_compressed,
+        );
+
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = instruction,
+            .rs1_value = rs1_value,
+            .rs2_value = 0,
+            .rd_pre_value = if (decoded.rd == 0) 0 else rd_pre,
+            .rd_value = if (decoded.rd == 0) 0 else result,
+            .rd_index = decoded.rd,
+            .rs1_index = decoded.rs1,
+            .rs2_index = 0,
+            .rd_written = decoded.rd != 0,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+        });
+
+        self.prev_pc = self.state.pc;
+        self.state.pc += pc_increment;
+        self.state.cycle += 1;
+        self.registers.tick();
+        return true;
     }
 
     /// Execute a standard (non-W-extension) instruction as a single trace step

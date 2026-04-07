@@ -212,6 +212,8 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         // Virtual rotate-right via bitmask (for jolt-inline SHA256)
         VirtualROTR,
         VirtualROTRW,
+        // Byte-swap each 32-bit half (jolt-inlines/sha2 swap_bytes helper)
+        VirtualRev8W,
 
         const Self = @This();
         const Table = lookup_table.LookupTable(@import("zolt_arith").field.BN254Scalar, XLEN);
@@ -347,6 +349,14 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
                     const bitmask: u32 = @truncate(bits.y);
                     const rotation: u5 = if (bitmask == 0) 0 else @intCast(@min(@as(u6, @intCast(@ctz(bitmask))), 31));
                     break :blk @as(u64, std.math.rotr(u32, value, rotation));
+                },
+                .VirtualRev8W => blk: {
+                    // VirtualRev8W: rev8w(rs1) — byte-swap each 32-bit half
+                    // index = rs1 directly (no interleaving)
+                    const v: u64 = @truncate(index);
+                    const lo: u32 = @byteSwap(@as(u32, @truncate(v)));
+                    const hi: u32 = @byteSwap(@as(u32, @truncate(v >> 32)));
+                    break :blk @as(u64, lo) | (@as(u64, hi) << 32);
                 },
             };
         }

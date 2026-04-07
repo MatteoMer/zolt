@@ -1197,6 +1197,49 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// Input: shift amount (0..XLEN-1). Uses AddOperands (rs1+0=rs1).
         /// output = ((1 << (XLEN - shift)) - 1) << shift
         /// For shift=0: all 1s. For shift=63: only MSB.
+        /// VirtualRev8W: byte-swap each 32-bit half of a 64-bit register.
+        /// Computes: rev8w(rs1) where bytes [b7 b6 b5 b4 | b3 b2 b1 b0] become
+        /// [b4 b5 b6 b7 | b0 b1 b2 b3]. Single-operand identity-style table.
+        /// Reference: jolt-core/src/zkvm/lookup_table/virtual_rev8w.rs
+        pub const VirtualRev8W = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                const v: u64 = @truncate(index);
+                const lo: u32 = @byteSwap(@as(u32, @truncate(v)));
+                const hi: u32 = @byteSwap(@as(u32, @truncate(v >> 32)));
+                return @as(u64, lo) | (@as(u64, hi) << 32);
+            }
+
+            /// Evaluate the MLE at point r (length 2*XLEN).
+            /// Mirrors Jolt's evaluation: iterate r in reverse, group into 8-bit
+            /// chunks (with bit at position i contributing 2^i), then reassemble
+            /// as [d, c, b, a, h, g, f, e] (byte-swap per 32-bit half).
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                // Group r (read in reverse, i.e. from index r.len()-1 down to 0)
+                // into 8 bytes a..h (LSB to MSB of input).
+                var bytes: [8]F = undefined;
+                inline for (0..8) |byte_idx| {
+                    var byte_val = F.zero();
+                    inline for (0..8) |i| {
+                        const r_idx = r.len - 1 - byte_idx * 8 - i;
+                        const coeff = F.fromU64(@as(u64, 1) << @intCast(i));
+                        byte_val = byte_val.add(r[r_idx].mul(coeff));
+                    }
+                    bytes[byte_idx] = byte_val;
+                }
+                // Reassemble: input [a, b, c, d, e, f, g, h] → output [d, c, b, a, h, g, f, e]
+                const reassembled = [_]F{
+                    bytes[3], bytes[2], bytes[1], bytes[0], bytes[7], bytes[6], bytes[5], bytes[4],
+                };
+                var result = F.zero();
+                inline for (reassembled, 0..) |b, i| {
+                    const coeff = F.fromU64(@as(u64, 1) << @intCast(i * 8));
+                    result = result.add(b.mul(coeff));
+                }
+                return result;
+            }
+        };
+
         pub const ShiftRightBitmask = struct {
             pub fn materializeEntry(index: u128) u64 {
                 const shift: u7 = @truncate(index & (XLEN - 1));
@@ -1464,7 +1507,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 21 => Pow2.evaluateMLE(r),
                 22 => @panic("Pow2W MLE not implemented"),
                 23 => ShiftRightBitmask.evaluateMLE(r),
-                24 => @panic("VirtualRev8W MLE not implemented"),
+                24 => VirtualRev8W.evaluateMLE(r),
                 25 => VirtualSRL.evaluateMLE(r),
                 26 => VirtualSRA.evaluateMLE(r),
                 27 => VirtualROTR.evaluateMLE(r),

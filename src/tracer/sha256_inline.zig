@@ -668,8 +668,11 @@ test "buildSha256Sequence initial starts with message loads" {
         try std.testing.expectEqual(@as(u8, 11), ld_instr.rs1); // rs2 = input pointer
 
         const srli_instr = seq.items[i * 2 + 1];
-        try std.testing.expectEqual(InstrKind.SRLI, srli_instr.kind);
-        try std.testing.expectEqual(@as(u64, 32), srli_instr.imm);
+        try std.testing.expectEqual(InstrKind.VirtualSRLI, srli_instr.kind);
+        // VirtualSRLI stores the bitmask, not the shift amount. For SRLI by 32,
+        // the bitmask is the upper-32-bit mask: ((1 << 32) - 1) << 32.
+        const expected_bitmask: u64 = @as(u64, 0xFFFFFFFF) << 32;
+        try std.testing.expectEqual(expected_bitmask, srli_instr.imm);
     }
 }
 

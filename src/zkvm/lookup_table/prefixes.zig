@@ -2562,3 +2562,430 @@ test "EqPrefix basic" {
     const eq_01 = eqPrefixMle(F, &checkpoints, null, 0, &b, 0);
     try std.testing.expect(eq_01.eql(F.zero())); // (0 eq 1) = 0
 }
+
+// =============================================================================
+// Prefix-suffix decomposition tests
+// Ports Jolt's prefix_suffix_test (jolt-core/src/zkvm/lookup_table/test.rs:49)
+// for specific tables. Verifies that for a random lookup_index and a sequence
+// of random sumcheck-style challenges, the combine(prefix_evals, suffix_evals)
+// result equals the table MLE evaluated at the reconstructed point.
+//
+// A failure indicates a bug in either the prefix MLE, the suffix MLE, the
+// table combine function, or the prefix checkpoint updates.
+// =============================================================================
+fn psd_randField(comptime F: type, rng: *std.Random.DefaultPrng) F {
+    const rand = rng.random();
+    const lo: u64 = rand.int(u64);
+    const hi: u64 = rand.int(u64);
+    // Simple conversion: treat as raw u128 and reduce via fromU128.
+    return F.fromU128(@as(u128, lo) | (@as(u128, hi) << 64));
+}
+
+/// Convert an integer `value` into a field bit-vector in MSB-first order,
+/// matching Jolt's `index_to_field_bitvector`. `len` is the total number of
+/// bits. Appends the bits to the provided ArrayList.
+fn psd_appendBits(comptime F: type, list: *std.ArrayList(F), value: u128, len: usize, allocator: std.mem.Allocator) !void {
+    if (len == 0) return;
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const bit_pos: u7 = @intCast(len - 1 - i);
+        const bit = (value >> bit_pos) & 1;
+        try list.append(allocator, if (bit == 1) F.one() else F.zero());
+    }
+}
+
+/// Generic prefix-suffix decomposition test. Runs `num_trials` random trials
+/// of Jolt's `prefix_suffix_test` convention for a single table:
+///   for phase in 0..8:
+///     split lookup_index into (prefix_bits[16], suffix_bits[suffix_len])
+///     compute suffix_evals once
+///     for round_in_phase in 0..16:
+///       pop MSB of prefix_bits (current sumcheck variable)
+///       pick c ∈ {0, 2}
+///       build eval_point = r_vec ++ [c] ++ prefix_bits ++ suffix_bits
+///       compare combineFn(prefix_evals, suffix_evals) against evalMleFn(eval_point)
+///       push a random r to r_vec; every 2 rounds update checkpoints
+fn psd_runTest(
+    comptime F: type,
+    comptime num_trials: usize,
+    comptime suffix_list: []const suffixes_mod.Suffixes,
+    comptime evalMleFn: fn ([]const F) F,
+    comptime combineFn: fn (prefix_evals: [Prefixes.COUNT]F, suffix_evals: []const F) F,
+    comptime table_label: []const u8,
+) !void {
+    @setEvalBranchQuota(1_000_000);
+    const LOG_K_local: usize = 128;
+    const ROUNDS_PER_PHASE: usize = 16;
+    const TOTAL_PHASES: usize = LOG_K_local / ROUNDS_PER_PHASE; // 8
+
+    const allocator = std.testing.allocator;
+    var rng = std.Random.DefaultPrng.init(12345);
+
+    var trial: usize = 0;
+    while (trial < num_trials) : (trial += 1) {
+        const lookup_index: u128 = @as(u128, rng.random().int(u64)) |
+            (@as(u128, rng.random().int(u64)) << 64);
+
+        var checkpoints: PrefixCheckpoints(F) = .{null} ** Prefixes.COUNT;
+        var r_vec: std.ArrayList(F) = .{};
+        defer r_vec.deinit(allocator);
+
+        var j: usize = 0;
+        var phase: usize = 0;
+        while (phase < TOTAL_PHASES) : (phase += 1) {
+            const suffix_len = (TOTAL_PHASES - 1 - phase) * ROUNDS_PER_PHASE;
+            const top_len: usize = LOG_K_local - phase * ROUNDS_PER_PHASE;
+            const top_mask: u128 = if (top_len == 128) ~@as(u128, 0) else ((@as(u128, 1) << @intCast(top_len)) - 1);
+            const top_value: u128 = lookup_index & top_mask;
+            const suffix_mask: u128 = if (suffix_len == 0) 0 else ((@as(u128, 1) << @intCast(suffix_len)) - 1);
+            const suffix_bits_val: u128 = top_value & suffix_mask;
+            const prefix_bits_val: u128 = top_value >> @intCast(suffix_len);
+            const prefix_len_initial: usize = top_len - suffix_len;
+
+            const s_lb = LookupBits(128).new(suffix_bits_val, suffix_len);
+            var suffix_evals: [suffix_list.len]F = undefined;
+            inline for (suffix_list, 0..) |sfx, si| {
+                suffix_evals[si] = F.fromU64(suffixes_mod.suffixMle(sfx, s_lb));
+            }
+
+            var prefix_bits_live = LookupBits(128).new(prefix_bits_val, prefix_len_initial);
+
+            var rnd_in_phase: usize = 0;
+            while (rnd_in_phase < ROUNDS_PER_PHASE) : (rnd_in_phase += 1) {
+                const c_u: u32 = if (rng.random().boolean()) 0 else 2;
+                _ = prefix_bits_live.popMsb();
+
+                var eval_point: std.ArrayList(F) = .{};
+                defer eval_point.deinit(allocator);
+                try eval_point.appendSlice(allocator, r_vec.items);
+                try eval_point.append(allocator, F.fromU64(@as(u64, c_u)));
+                try psd_appendBits(F, &eval_point, prefix_bits_live.value, prefix_bits_live.len, allocator);
+                try psd_appendBits(F, &eval_point, suffix_bits_val, suffix_len, allocator);
+                try std.testing.expectEqual(LOG_K_local, eval_point.items.len);
+
+                const expected_mle = evalMleFn(eval_point.items);
+
+                const r_x: ?F = if (j % 2 == 1) r_vec.items[r_vec.items.len - 1] else null;
+
+                var prefix_evals: [Prefixes.COUNT]F = undefined;
+                inline for (0..Prefixes.COUNT) |pi| {
+                    var b_copy = prefix_bits_live;
+                    const prefix_enum: Prefixes = @enumFromInt(pi);
+                    prefix_evals[pi] = prefixMle(F, prefix_enum, &checkpoints, r_x, c_u, &b_copy, j);
+                }
+
+                const combined = combineFn(prefix_evals, suffix_evals[0..]);
+
+                if (!combined.eql(expected_mle)) {
+                    std.debug.print("\n[PSD_TEST_FAIL:{s}] trial={} phase={} j={} c={}\n", .{ table_label, trial, phase, j, c_u });
+                    std.debug.print("  lookup_index = 0x{x}\n", .{lookup_index});
+                    std.debug.print("  prefix_bits_live (after pop) = 0x{x} len={}\n", .{ prefix_bits_live.value, prefix_bits_live.len });
+                    std.debug.print("  suffix_bits = 0x{x} len={}\n", .{ suffix_bits_val, suffix_len });
+                    inline for (suffix_list, 0..) |sfx, si| {
+                        std.debug.print("  suffix_evals[{s}] = {x}\n", .{ @tagName(sfx), suffix_evals[si].toBytesBE()[24..32].* });
+                    }
+                    // Also dump the relevant prefix evals referenced by the combine
+                    const relevant_prefixes = [_]Prefixes{
+                        .Andn,                 .LowerHalfWord,
+                        .RightShiftW,          .LeftShiftW,
+                        .LeftShiftWHelper,     .RightShift,
+                        .LeftShift,            .LeftShiftHelper,
+                    };
+                    for (relevant_prefixes) |p| {
+                        const pv = prefix_evals[@intFromEnum(p)];
+                        std.debug.print("  prefix_evals[{s}] = {x}\n", .{ @tagName(p), pv.toBytesBE()[24..32].* });
+                    }
+                    std.debug.print("  combined  = {x}\n", .{combined.toBytesBE()[24..32].*});
+                    std.debug.print("  expected  = {x}\n", .{expected_mle.toBytesBE()[24..32].*});
+                }
+                try std.testing.expect(combined.eql(expected_mle));
+
+                try r_vec.append(allocator, psd_randField(F, &rng));
+
+                if (r_vec.items.len % 2 == 0) {
+                    const r_prev = r_vec.items[r_vec.items.len - 2];
+                    const r_curr = r_vec.items[r_vec.items.len - 1];
+                    updateAllCheckpoints(F, &checkpoints, r_prev, r_curr, j, suffix_len);
+                }
+
+                j += 1;
+            }
+        }
+    }
+}
+
+const suffixes_mod = @import("suffixes.zig");
+
+test "prefix_suffix_decomposition: Andn table (sha256_inline)" {
+    const F = @import("zolt_arith").field.BN254Scalar;
+    const TableMod = @import("mod.zig");
+    const Table = TableMod.LookupTable(F, 64).Andn;
+    const combineFn = struct {
+        fn f(prefix_evals: [Prefixes.COUNT]F, suffix_evals: []const F) F {
+            // Table 3: prefixes[Andn] * one + andn
+            return prefix_evals[@intFromEnum(Prefixes.Andn)].mul(suffix_evals[0]).add(suffix_evals[1]);
+        }
+    }.f;
+    try psd_runTest(
+        F,
+        50,
+        &[_]suffixes_mod.Suffixes{ .One, .NotAnd },
+        Table.evaluateMLE,
+        combineFn,
+        "Andn",
+    );
+}
+
+test "prefix_suffix_decomposition: LowerHalfWord table (sha256_inline)" {
+    const F = @import("zolt_arith").field.BN254Scalar;
+    const TableMod = @import("mod.zig");
+    const Table = TableMod.LookupTable(F, 64).LowerHalfWord;
+    const combineFn = struct {
+        fn f(prefix_evals: [Prefixes.COUNT]F, suffix_evals: []const F) F {
+            // Table 19: LowerHalfWord * one + lower_half_word
+            return prefix_evals[@intFromEnum(Prefixes.LowerHalfWord)].mul(suffix_evals[0]).add(suffix_evals[1]);
+        }
+    }.f;
+    try psd_runTest(
+        F,
+        50,
+        &[_]suffixes_mod.Suffixes{ .One, .LowerHalfWord },
+        Table.evaluateMLE,
+        combineFn,
+        "LowerHalfWord",
+    );
+}
+
+test "VirtualROTRW suffix decomposition matches MLE on simple ROTR inputs" {
+    // Isolated test: for a specific (x, y) where y is a ROTRW bitmask for
+    // rotation = r, verify that the SUFFIX-ONLY contribution (at phase 0, j=0
+    // where all prefix MLEs are 0/1) equals the full MLE value.
+    //
+    // At phase 0 j=0, prefix_evals for RightShiftW/LeftShiftW are 0 and
+    // LeftShiftWHelper is 1. So combined = rsw_suffix + lsw_suffix.
+    // This should equal materializeEntry(interleave(x, y)).
+    const F = @import("zolt_arith").field.BN254Scalar;
+    const TableMod = @import("mod.zig");
+    const Table = TableMod.LookupTable(F, 64).VirtualROTRW;
+    const stage6_helpers = @import("../spartan/stage6_helpers.zig");
+
+    const TestCase = struct { x: u32, rot: u5 };
+    const cases = [_]TestCase{
+        .{ .x = 0x1234_5678, .rot = 2 },
+        .{ .x = 0xdead_beef, .rot = 7 },
+        .{ .x = 0xffff_ffff, .rot = 16 },
+        .{ .x = 0x0000_0001, .rot = 31 },
+        .{ .x = 0xabcd_ef01, .rot = 1 },
+    };
+
+    for (cases) |tc| {
+        // Bitmask for rot: ((1 << (32 - rot)) - 1) << rot
+        const rot_u5: u5 = tc.rot;
+        const thirty_two_minus_rot: u5 = @intCast(@as(u6, 32) - @as(u6, rot_u5));
+        const y_mask: u32 = if (rot_u5 == 0)
+            0xFFFF_FFFF
+        else
+            (((@as(u32, 1) << thirty_two_minus_rot) - 1) << rot_u5);
+        const idx: u128 = stage6_helpers.interleaveBits(tc.x, @as(u64, y_mask));
+        const expected_rotrw: u32 = std.math.rotr(u32, tc.x, tc.rot);
+        const mat_entry: u64 = Table.materializeEntry(idx);
+        try std.testing.expectEqual(@as(u64, expected_rotrw), mat_entry);
+
+        // Now compute rsw_suffix(idx) + lsw_suffix(idx). This corresponds to
+        // the combine formula at j=0 where prefix_evals are all 0 except
+        // LeftShiftWHelper=1.
+        const b = LookupBits(128).new(idx, 64);
+        const rsw = suffixes_mod.suffixMle(.RightShiftW, b);
+        const lsw = suffixes_mod.suffixMle(.LeftShiftW, b);
+        const decomp: u64 = rsw + lsw;
+
+        if (decomp != mat_entry) {
+            std.debug.print("\n[ROTRW_SIMPLE] x=0x{x} rot={} y=0x{x} idx=0x{x}\n", .{
+                tc.x, tc.rot, y_mask, idx,
+            });
+            std.debug.print("  rsw_suffix = 0x{x}\n", .{rsw});
+            std.debug.print("  lsw_suffix = 0x{x}\n", .{lsw});
+            std.debug.print("  decomp     = 0x{x}\n", .{decomp});
+            std.debug.print("  expected   = 0x{x}\n", .{mat_entry});
+        }
+        try std.testing.expectEqual(mat_entry, decomp);
+    }
+}
+
+test "VirtualROTRW MLE matches materialize on random inputs" {
+    // Sanity check: verify that Zolt's VirtualROTRW.evaluateMLE at boolean
+    // points equals materializeEntry on the underlying 128-bit index. If
+    // this fails, the MLE is wrong independently of any decomposition.
+    const F = @import("zolt_arith").field.BN254Scalar;
+    const TableMod = @import("mod.zig");
+    const Table = TableMod.LookupTable(F, 64).VirtualROTRW;
+
+    const allocator = std.testing.allocator;
+    var rng = std.Random.DefaultPrng.init(0xabcdef);
+    var trial: usize = 0;
+    while (trial < 20) : (trial += 1) {
+        const idx: u128 = @as(u128, rng.random().int(u64)) |
+            (@as(u128, rng.random().int(u64)) << 64);
+        var eval_point: std.ArrayList(F) = .{};
+        defer eval_point.deinit(allocator);
+        try psd_appendBits(F, &eval_point, idx, 128, allocator);
+        const expected = Table.materializeEntry(idx);
+        const mle = Table.evaluateMLE(eval_point.items);
+        const expected_f = F.fromU64(expected);
+        if (!mle.eql(expected_f)) {
+            std.debug.print("[VROTRW_MLE] idx=0x{x} expected={x} mle={x}\n", .{
+                idx,
+                expected,
+                mle.toBytesBE()[24..32].*,
+            });
+        }
+        try std.testing.expect(mle.eql(expected_f));
+    }
+}
+
+/// Generic prefix-suffix decomposition test with a caller-provided
+/// lookup_index generator. Some tables (shift/rotate) only have MLE semantics
+/// defined on a subset of the index space (e.g., bitmask-format y operand),
+/// so we need a custom index generator per table.
+fn psd_runTestWithGenerator(
+    comptime F: type,
+    comptime num_trials: usize,
+    comptime suffix_list: []const suffixes_mod.Suffixes,
+    comptime evalMleFn: fn ([]const F) F,
+    comptime combineFn: fn (prefix_evals: [Prefixes.COUNT]F, suffix_evals: []const F) F,
+    comptime indexGen: fn (rng: *std.Random.DefaultPrng) u128,
+    comptime table_label: []const u8,
+) !void {
+    @setEvalBranchQuota(1_000_000);
+    const LOG_K_local: usize = 128;
+    const ROUNDS_PER_PHASE: usize = 16;
+    const TOTAL_PHASES: usize = LOG_K_local / ROUNDS_PER_PHASE; // 8
+
+    const allocator = std.testing.allocator;
+    var rng = std.Random.DefaultPrng.init(12345);
+
+    var trial: usize = 0;
+    while (trial < num_trials) : (trial += 1) {
+        const lookup_index: u128 = indexGen(&rng);
+
+        var checkpoints: PrefixCheckpoints(F) = .{null} ** Prefixes.COUNT;
+        var r_vec: std.ArrayList(F) = .{};
+        defer r_vec.deinit(allocator);
+
+        var j: usize = 0;
+        var phase: usize = 0;
+        while (phase < TOTAL_PHASES) : (phase += 1) {
+            const suffix_len = (TOTAL_PHASES - 1 - phase) * ROUNDS_PER_PHASE;
+            const top_len: usize = LOG_K_local - phase * ROUNDS_PER_PHASE;
+            const top_mask: u128 = if (top_len == 128) ~@as(u128, 0) else ((@as(u128, 1) << @intCast(top_len)) - 1);
+            const top_value: u128 = lookup_index & top_mask;
+            const suffix_mask: u128 = if (suffix_len == 0) 0 else ((@as(u128, 1) << @intCast(suffix_len)) - 1);
+            const suffix_bits_val: u128 = top_value & suffix_mask;
+            const prefix_bits_val: u128 = top_value >> @intCast(suffix_len);
+            const prefix_len_initial: usize = top_len - suffix_len;
+
+            const s_lb = LookupBits(128).new(suffix_bits_val, suffix_len);
+            var suffix_evals: [suffix_list.len]F = undefined;
+            inline for (suffix_list, 0..) |sfx, si| {
+                suffix_evals[si] = F.fromU64(suffixes_mod.suffixMle(sfx, s_lb));
+            }
+
+            var prefix_bits_live = LookupBits(128).new(prefix_bits_val, prefix_len_initial);
+
+            var rnd_in_phase: usize = 0;
+            while (rnd_in_phase < ROUNDS_PER_PHASE) : (rnd_in_phase += 1) {
+                const c_u: u32 = if (rng.random().boolean()) 0 else 2;
+                _ = prefix_bits_live.popMsb();
+
+                var eval_point: std.ArrayList(F) = .{};
+                defer eval_point.deinit(allocator);
+                try eval_point.appendSlice(allocator, r_vec.items);
+                try eval_point.append(allocator, F.fromU64(@as(u64, c_u)));
+                try psd_appendBits(F, &eval_point, prefix_bits_live.value, prefix_bits_live.len, allocator);
+                try psd_appendBits(F, &eval_point, suffix_bits_val, suffix_len, allocator);
+                try std.testing.expectEqual(LOG_K_local, eval_point.items.len);
+
+                const expected_mle = evalMleFn(eval_point.items);
+
+                const r_x: ?F = if (j % 2 == 1) r_vec.items[r_vec.items.len - 1] else null;
+
+                var prefix_evals: [Prefixes.COUNT]F = undefined;
+                inline for (0..Prefixes.COUNT) |pi| {
+                    var b_copy = prefix_bits_live;
+                    const prefix_enum: Prefixes = @enumFromInt(pi);
+                    prefix_evals[pi] = prefixMle(F, prefix_enum, &checkpoints, r_x, c_u, &b_copy, j);
+                }
+
+                const combined = combineFn(prefix_evals, suffix_evals[0..]);
+
+                if (!combined.eql(expected_mle)) {
+                    std.debug.print("\n[PSD_TEST_FAIL:{s}] trial={} phase={} j={} c={}\n", .{ table_label, trial, phase, j, c_u });
+                    std.debug.print("  lookup_index = 0x{x}\n", .{lookup_index});
+                    std.debug.print("  prefix_bits_live (after pop) = 0x{x} len={}\n", .{ prefix_bits_live.value, prefix_bits_live.len });
+                    std.debug.print("  suffix_bits = 0x{x} len={}\n", .{ suffix_bits_val, suffix_len });
+                    inline for (suffix_list, 0..) |sfx, si| {
+                        std.debug.print("  suffix_evals[{s}] = {x}\n", .{ @tagName(sfx), suffix_evals[si].toBytesBE()[24..32].* });
+                    }
+                    const relevant_prefixes = [_]Prefixes{
+                        .Andn,             .LowerHalfWord,
+                        .RightShiftW,      .LeftShiftW,
+                        .LeftShiftWHelper,
+                    };
+                    for (relevant_prefixes) |p| {
+                        const pv = prefix_evals[@intFromEnum(p)];
+                        std.debug.print("  prefix_evals[{s}] = {x}\n", .{ @tagName(p), pv.toBytesBE()[24..32].* });
+                    }
+                    std.debug.print("  combined  = {x}\n", .{combined.toBytesBE()[24..32].*});
+                    std.debug.print("  expected  = {x}\n", .{expected_mle.toBytesBE()[24..32].*});
+                }
+                try std.testing.expect(combined.eql(expected_mle));
+
+                try r_vec.append(allocator, psd_randField(F, &rng));
+
+                if (r_vec.items.len % 2 == 0) {
+                    const r_prev = r_vec.items[r_vec.items.len - 2];
+                    const r_curr = r_vec.items[r_vec.items.len - 1];
+                    updateAllCheckpoints(F, &checkpoints, r_prev, r_curr, j, suffix_len);
+                }
+
+                j += 1;
+            }
+        }
+    }
+}
+
+/// Generate a bitmask-format lookup index: interleave(random_x, bitmask_y)
+/// where bitmask_y has a contiguous run of leading 1s followed by trailing 0s.
+/// Matches Jolt's `gen_bitmask_lookup_index` at test.rs:42.
+fn psd_genBitmaskIndex(rng: *std.Random.DefaultPrng) u128 {
+    const stage6_helpers = @import("../spartan/stage6_helpers.zig");
+    const x: u64 = rng.random().int(u64);
+    const zeros: u6 = @intCast(rng.random().uintLessThan(u32, 64));
+    const y: u64 = if (zeros == 0) ~@as(u64, 0) else (~@as(u64, 0)) << zeros;
+    return stage6_helpers.interleaveBits(x, y);
+}
+
+test "prefix_suffix_decomposition: VirtualROTRW table (sha256_inline)" {
+    const F = @import("zolt_arith").field.BN254Scalar;
+    const TableMod = @import("mod.zig");
+    const Table = TableMod.LookupTable(F, 64).VirtualROTRW;
+    const combineFn = struct {
+        fn f(prefix_evals: [Prefixes.COUNT]F, suffix_evals: []const F) F {
+            // Table 28: RightShiftW*helper + right_shift_w + LeftShiftWHelper*left_shift_w + LeftShiftW*one
+            var r = prefix_evals[@intFromEnum(Prefixes.RightShiftW)].mul(suffix_evals[0]);
+            r = r.add(suffix_evals[1]);
+            r = r.add(prefix_evals[@intFromEnum(Prefixes.LeftShiftWHelper)].mul(suffix_evals[2]));
+            r = r.add(prefix_evals[@intFromEnum(Prefixes.LeftShiftW)].mul(suffix_evals[3]));
+            return r;
+        }
+    }.f;
+    try psd_runTestWithGenerator(
+        F,
+        50,
+        &[_]suffixes_mod.Suffixes{ .RightShiftWHelper, .RightShiftW, .LeftShiftW, .One },
+        Table.evaluateMLE,
+        combineFn,
+        psd_genBitmaskIndex,
+        "VirtualROTRW",
+    );
+}

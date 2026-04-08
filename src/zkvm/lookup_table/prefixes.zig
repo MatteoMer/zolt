@@ -2965,6 +2965,31 @@ fn psd_genBitmaskIndex(rng: *std.Random.DefaultPrng) u128 {
     return stage6_helpers.interleaveBits(x, y);
 }
 
+test "prefix_suffix_decomposition: SignExtendHalfWord table (sha256_inline via SRLIW)" {
+    // VirtualSignExtendWord (opcode 0x0B) maps to SignExtendHalfWord (table 20).
+    // Used by the SRLIW decomposition inside sha256_inline's sequence builder.
+    const F = @import("zolt_arith").field.BN254Scalar;
+    const TableMod = @import("mod.zig");
+    const Table = TableMod.LookupTable(F, 64).SignExtendHalfWord;
+    const combineFn = struct {
+        fn f(prefix_evals: [Prefixes.COUNT]F, suffix_evals: []const F) F {
+            // Table 20: LowerHalfWord*one + lower_half_word + SignExtensionUpperHalf*sign_ext
+            var r = prefix_evals[@intFromEnum(Prefixes.LowerHalfWord)].mul(suffix_evals[0]);
+            r = r.add(suffix_evals[1]);
+            r = r.add(prefix_evals[@intFromEnum(Prefixes.SignExtensionUpperHalf)].mul(suffix_evals[2]));
+            return r;
+        }
+    }.f;
+    try psd_runTest(
+        F,
+        50,
+        &[_]suffixes_mod.Suffixes{ .One, .LowerHalfWord, .SignExtensionUpperHalf },
+        Table.evaluateMLE,
+        combineFn,
+        "SignExtendHalfWord",
+    );
+}
+
 test "prefix_suffix_decomposition: VirtualROTRW table (sha256_inline)" {
     const F = @import("zolt_arith").field.BN254Scalar;
     const TableMod = @import("mod.zig");

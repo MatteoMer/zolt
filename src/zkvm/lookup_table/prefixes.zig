@@ -2125,13 +2125,17 @@ fn rightShiftWPrefixMle(
     const y_bits_w = LookupBits(128).new(uninterleaved.right, half_len);
     const leading_w = y_bits_w.leadingOnes();
     const trailing_w = y_bits_w.trailingZeros();
-    if (leading_w >= 64) {
-        return result;
-    }
-    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(leading_w)));
-    const x_val_w: u64 = @truncate(x_bits_w.value);
-    const shifted_x_w: u64 = if (trailing_w >= 64) 0 else x_val_w >> @intCast(trailing_w);
-    result = result.add(F.fromU64(shifted_x_w));
+    // Match Jolt's `F::from_u32(1 << y.leading_ones())` semantics: u32 wrapping shift.
+    // Rust release mode masks the shift count to (BITS - 1), so `1u32 << n` for any
+    // `n` becomes `1u32 << (n & 31)`. For n in [0, 31] this is `1 << n`; for n = 32
+    // (y is all-ones in its `len` bits) this wraps to `1 << 0 = 1`, NOT 0.
+    const factor_u32: u32 = @as(u32, 1) << @intCast(leading_w & 31);
+    result = result.mul(F.fromU64(@as(u64, factor_u32)));
+    // Match Jolt's `F::from_u32(u32::from(x) >> y.trailing_zeros())` semantics: u32
+    // wrapping shift. For trailing_zeros = 32 (y == 0), this wraps to `x >> 0 = x`.
+    const x_val_u32: u32 = @truncate(x_bits_w.value);
+    const shifted_x_u32: u32 = x_val_u32 >> @intCast(trailing_w & 31);
+    result = result.add(F.fromU64(@as(u64, shifted_x_u32)));
     return result;
 }
 fn rightShiftWUpdateCheckpoint(
@@ -2176,8 +2180,10 @@ fn leftShiftWHelperPrefixMle(
     const lswh_half_len = b.len / 2;
     const lswh_y_bits = LookupBits(128).new(b.uninterleave().right, lswh_half_len);
     const lswh_leading = lswh_y_bits.leadingOnes();
-    if (lswh_leading >= 64) return result;
-    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(lswh_leading)));
+    // Match Jolt's `F::from_u32(1 << y.leading_ones())` semantics: u32 wrapping shift.
+    // For leading_ones = 32 (y is all-ones), this wraps to `1 << 0 = 1`, NOT 0.
+    const factor_u32: u32 = @as(u32, 1) << @intCast(lswh_leading & 31);
+    result = result.mul(F.fromU64(@as(u64, factor_u32)));
     return result;
 }
 fn leftShiftWHelperUpdateCheckpoint(

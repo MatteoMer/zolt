@@ -10,6 +10,13 @@ use std::time::Instant;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::{fmt, EnvFilter};
 
+// Force-link the SHA-256 inline registrar. `jolt-inlines-sha2`'s host module
+// has a `#[ctor::ctor]` that registers the sequence builder at startup, but
+// that only fires if the crate is actually linked into the binary. Without an
+// explicit reference here, rustc may drop the crate entirely.
+#[allow(unused_imports)]
+use jolt_inlines_sha2 as _;
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -80,13 +87,23 @@ fn main() {
         entry_address
     );
 
-    // Build memory config
+    // Build memory config using the jolt-sdk macro's default sizes for
+    // stack/io/advice. The io/advice sizes here MUST match those used by
+    // any `#[jolt::provable]` guest being benched, otherwise the macro's
+    // compile-time `output_start` constant will not match the runtime
+    // layout and the tracer will panic with an "I/O overflow" read.
+    //
+    // (The historical values — heap_size 32 MiB, stack_size 32 MiB,
+    // max_input_size 2_000_000, advice 0 — were chosen for benchmarks
+    // against the old software-SHA guests where stack-size mismatches
+    // were hidden by the lack of MMU bounds checks. They don't work for
+    // any SDK guest that doesn't override all of these attributes too.)
     let memory_config = MemoryConfig {
-        heap_size: 33554432,
-        stack_size: 33554432,
-        max_input_size: 2000000,
-        max_untrusted_advice_size: 0,
-        max_trusted_advice_size: 0,
+        heap_size: 65536,
+        stack_size: 65536,
+        max_input_size: 4096,
+        max_untrusted_advice_size: 4096,
+        max_trusted_advice_size: 4096,
         max_output_size: 4096,
         program_size: Some(program_size),
     };

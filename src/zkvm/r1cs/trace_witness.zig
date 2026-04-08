@@ -97,7 +97,8 @@ pub fn buildFromTrace(
 
             // Also fall back for VirtualAssert alignment (0x22 funct3=2/3)
             const f3_op: u3 = @truncate((step.instruction >> 12) & 0x7);
-            const needs_field_fallback_ext = needs_field_fallback or (op == 0x22 and (f3_op == 2 or f3_op == 3));
+            const debug_force_field = false;
+            const needs_field_fallback_ext = needs_field_fallback or (op == 0x22 and (f3_op == 2 or f3_op == 3)) or debug_force_field;
             if (needs_field_fallback_ext) {
                 @setEvalBranchQuota(10000);
                 const F = field_mod.BN254Scalar;
@@ -236,17 +237,28 @@ fn compactAndRawFromTraceStep(
     const next_upc: u64 = if (next_is_real_noop) 0 else next_step.?.unexpanded_pc;
 
     // ── Circuit flags (boolean) ──
+    // NOTE: opcode 0x5B (Custom-2) is NOT always virtual. Per upstream Jolt:
+    //   funct3=0 → VirtualRev8W (first-class ELF instruction, NOT virtual)
+    //   funct3=1 → VirtualAssertEQ
+    //   funct3=2 → VirtualHostIO (NOT virtual)
+    //   funct3=3..6 → AdviceLB/LH/LW/LD (NOT virtual when standalone in ELF)
+    //   funct3=7 → VirtualAdviceLen
+    // The "VirtualInstruction" flag is determined by virtual_sequence_remaining,
+    // not by opcode. Internal expansions (e.g., SHA256 inline → VirtualSRLI)
+    // set vsr > 0 for non-final steps, so they get caught by the vsr check.
     const is_compressed = step.is_compressed;
+    const is_virtual_opcode = if (opcode == 0x5B) false else isVirtualOpcode(opcode);
     const vi = (step.virtual_sequence_remaining > 0 and !step.is_termination_store) or
-        step.is_last_in_sequence or isVirtualOpcode(opcode);
+        step.is_last_in_sequence or is_virtual_opcode;
     const dont_update = step.virtual_sequence_remaining > 0 and !step.is_termination_store;
     const is_last = step.is_last_in_sequence and opcode == 0x67;
     const next_is_virtual = if (next_step) |ns| blk: {
         const nop = ns.is_noop;
         const no: u8 = @truncate(ns.instruction & 0x7F);
+        const n_is_virt_op = if (no == 0x5B) false else isVirtualOpcode(no);
         break :blk (!nop and ns.virtual_sequence_remaining > 0) or
             (!nop and ns.is_last_in_sequence) or
-            isVirtualOpcode(no);
+            n_is_virt_op;
     } else false;
     const next_is_first = if (next_step) |ns| !ns.is_noop and ns.is_first_in_sequence else false;
     const should_jump_bool = flags.flag_jump and !isNoopStep(next_step);
@@ -477,13 +489,22 @@ fn extractOperandFlags(opcode: u8, funct3: u3, funct7: u7, step: TraceStep, has_
             }
         },
         0x5B => {
-            f.left_is_rs1 = true;
-            f.flag_write_lookup = true;
-            if (step.rs2_read) {
-                f.right_is_rs2 = true;
-            } else {
-                f.right_is_imm = true;
+            if (funct3 == 0 or funct3 == 5) {
+                f.left_is_rs1 = true;
+                f.flag_write_lookup = true;
+                if (step.rs2_read) {
+                    f.right_is_rs2 = true;
+                } else {
+                    f.right_is_imm = true;
+                }
             }
+        },
+        0x7B => {
+            // VirtualRev8W (internal synthetic opcode): identity-path, single operand rs1.
+            // AddOperands + WriteLookupOutputToRD + LeftOperandIsRs1Value.
+            f.left_is_rs1 = true;
+            f.flag_add = true;
+            f.flag_write_lookup = true;
         },
         0x02 => {
             f.flag_advice = true;
@@ -509,15 +530,25 @@ fn extractOperandFlags(opcode: u8, funct3: u3, funct7: u7, step: TraceStep, has_
             f.right_is_rs2 = true;
             f.flag_assert = true;
         },
+        0x6B => {
+            // VirtualROTRI/W (rotate-right-by-bitmask): interleaved-path,
+            // LeftOperandIsRs1Value + RightOperandIsImm + WriteLookupOutputToRD.
+            f.left_is_rs1 = true;
+            f.right_is_imm = true;
+            f.flag_write_lookup = true;
+        },
         else => {},
     }
     return f;
 }
 
 fn readsRs1(opcode: u8, step: TraceStep) bool {
-    _ = step;
     return switch (opcode) {
-        0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B, 0x5B, 0x22, 0x42, 0x62 => true,
+        0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B, 0x22, 0x42, 0x62, 0x6B, 0x7B => true,
+        0x5B => blk: {
+            const f3: u3 = @truncate((step.instruction >> 12) & 0x7);
+            break :blk (f3 == 0 or f3 == 5);
+        },
         else => false,
     };
 }
@@ -545,6 +576,8 @@ fn decodeImmediateInt(instr: u32, step: TraceStep) i128 {
         return 0;
     }
     if (opcode == 0x5B) {
+        const f3_5b: u3 = @truncate((instr >> 12) & 0x7);
+        if (f3_5b != 0 and f3_5b != 5) return 0;
         if (step.rs2_read) return 0;
         const total_shift: u7 = @truncate((instr >> 20) & 0x3F);
         const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
@@ -560,6 +593,26 @@ fn decodeImmediateInt(instr: u32, step: TraceStep) i128 {
         }
         return 0;
     }
+    // VirtualRev8W (0x7B, internal synthetic opcode): no immediate
+    if (opcode == 0x7B) return 0;
+
+    // VirtualROTRI/W (0x6B): imm encodes the rotation amount; the bitmask is
+    // reconstructed as ((1 << (width - rot)) - 1) << rot. When rot == 0, the
+    // bitmask is all-ones for the given width (matching Stage 5 and Jolt).
+    if (opcode == 0x6B) {
+        const f3_6b: u3 = @truncate((instr >> 12) & 0x7);
+        const rot_raw: u32 = (instr >> 20) & 0x3F;
+        const width: u8 = if (f3_6b == 1) 32 else 64;
+        const rot_mod: u8 = if (f3_6b == 1) @intCast(rot_raw & 0x1F) else @intCast(rot_raw & 0x3F);
+        if (rot_mod == 0) {
+            const all_ones: u64 = if (width == 32) 0xFFFFFFFF else 0xFFFFFFFFFFFFFFFF;
+            return @as(i128, all_ones);
+        }
+        const ones: u128 = (@as(u128, 1) << @intCast(width - rot_mod)) - 1;
+        const bitmask: u64 = @truncate(ones << @intCast(rot_mod));
+        return @as(i128, bitmask);
+    }
+
     // Identity-add path: store as UNSIGNED u64 representation
     const is_identity_add = switch (opcode) {
         0x13 => (instr >> 12) & 0x7 == 0,
@@ -568,7 +621,15 @@ fn decodeImmediateInt(instr: u32, step: TraceStep) i128 {
         else => false,
     };
     if (is_identity_add) {
+        if (step.has_full_imm) {
+            return @as(i128, step.inline_full_imm);
+        }
         return @as(i128, computeUnsignedImmediate(instr));
+    }
+    // Inline-emitted XORI/ANDI (interleaved I-type at opcode 0x13 with funct3 != 0)
+    // also need the wide immediate when set.
+    if ((opcode == 0x13 or opcode == 0x1b) and step.has_full_imm) {
+        return @as(i128, step.inline_full_imm);
     }
     // Signed path for Load/Store/Branch/U-type
     return deriveImmediateInt(instr);
@@ -679,6 +740,9 @@ fn computeU128LookupOperandInt(instr: u32, step: TraceStep) u128 {
         },
         0x13 => {
             if (funct3 == 0) {
+                if (step.has_full_imm) {
+                    return @as(u128, step.rs1_value) + @as(u128, step.inline_full_imm);
+                }
                 const imm_u64 = computeUnsignedImmediate(instr);
                 return @as(u128, step.rs1_value) + @as(u128, imm_u64);
             }
@@ -686,6 +750,9 @@ fn computeU128LookupOperandInt(instr: u32, step: TraceStep) u128 {
         },
         0x1b => {
             if (funct3 == 0) {
+                if (step.has_full_imm) {
+                    return @as(u128, step.rs1_value) + @as(u128, step.inline_full_imm);
+                }
                 const imm_u64 = computeUnsignedImmediate(instr);
                 return @as(u128, step.rs1_value) + @as(u128, imm_u64);
             }
@@ -729,6 +796,8 @@ fn computeU128LookupOperandInt(instr: u32, step: TraceStep) u128 {
             return @as(u128, step.rs1_value);
         },
         0x42 => return @as(u128, step.rs1_value),
+        // VirtualRev8W (0x7B): identity path, index = rs1 (single operand)
+        0x7B => return @as(u128, step.rs1_value),
         0x22 => {
             const f3_22: u3 = @truncate(funct3);
             if (f3_22 == 2 or f3_22 == 3) {
@@ -766,8 +835,12 @@ fn computeUnsignedImmediate(instr: u32) u64 {
 }
 
 fn isVirtualOpcode(opcode: u8) bool {
+    // Note: 0x5B is NOT always virtual — only funct3=0/5 (VirtualSRLI/VirtualSRAI).
+    // VirtualHostIO (funct3=2) and other SDK funct3 values are NOT virtual.
+    // However, this function only checks opcode and can't distinguish funct3.
+    // Callers must handle 0x5B specially if needed.
     return switch (opcode) {
-        0x0B, 0x2B, 0x5B, 0x02, 0x22, 0x42, 0x62 => true,
+        0x0B, 0x2B, 0x5B, 0x02, 0x22, 0x42, 0x62, 0x6B => true,
         else => false,
     };
 }

@@ -867,7 +867,10 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
         const canonical_funct7: u7 = switch (funct3_raw) {
             0 => if (funct7_raw == 0x20) @as(u7, 0x20) else if (funct7_raw == 0x01) @as(u7, 0x01) else 0,
             5 => if (funct7_raw == 0x20) @as(u7, 0x20) else 0,
-            1, 2, 3, 4, 6, 7 => if (funct7_raw == 0x01) @as(u7, 0x01) else 0,
+            7 => if (funct7_raw == 0x20) @as(u7, 0x20) // ANDN (Zbb)
+            else if (funct7_raw == 0x01) @as(u7, 0x01) // REMU
+            else 0,
+            1, 2, 3, 4, 6 => if (funct7_raw == 0x01) @as(u7, 0x01) else 0,
         };
         norm_instr = (instr & ~(@as(u32, 0x7F) << 25)) | (@as(u32, canonical_funct7) << 25);
     }
@@ -900,7 +903,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
             else => decoded.rs1,
         };
         entry.rs2 = switch (opcode) {
-            0x13, 0x03, 0x67, 0x1b, 0x37, 0x17, 0x6f, 0x0B, 0x2B, 0x5B => 255, // I-type, U-type, J-type, Virtual: no rs2
+            0x13, 0x03, 0x67, 0x1b, 0x37, 0x17, 0x6f, 0x0B, 0x2B, 0x5B, 0x6B => 255, // I-type, U-type, J-type, Virtual: no rs2
             else => decoded.rs2,
         };
     }
@@ -926,6 +929,26 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
         entry.is_first_in_sequence = false;
         entry.opcode = 0;
         entry.funct3 = 0;
+        return;
+    }
+
+    // VirtualHostIO (opcode 0x5B, funct3 != 0/5): NOP-like with real address, no flags.
+    // In Jolt, VirtualHostIO has circuit_flags=[false; 14] and instruction_flags=[false; 7].
+    // It preserves the address but has no lookup, no register writes, no operand flags.
+    if (opcode == 0x5B and funct3 != 0 and funct3 != 5) {
+        entry.address = elf_address;
+        entry.imm = 0;
+        entry.rd = 0; // rd=0 from instruction encoding
+        entry.rs1 = 0; // rs1=0 from instruction encoding
+        entry.rs2 = 255; // no rs2
+        entry.opcode = opcode;
+        entry.funct3 = funct3;
+        entry.circuit_flags = [_]bool{false} ** 14;
+        entry.instruction_flags = [_]bool{false} ** 7;
+        entry.lookup_table_index = 255;
+        entry.is_interleaved = true;
+        entry.virtual_sequence_remaining = null;
+        entry.is_first_in_sequence = false;
         return;
     }
 
@@ -1025,7 +1048,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     // LeftOperandIsRs1Value
     if (has_lookup) {
         switch (opcode) {
-            0x33, 0x13, 0x67, 0x63, 0x1B, 0x3B, 0x0B, 0x2B, 0x5B => {
+            0x33, 0x13, 0x67, 0x63, 0x1B, 0x3B, 0x0B, 0x2B, 0x5B, 0x6B => {
                 inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             },
             else => {},
@@ -1035,7 +1058,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     // RightOperandIsImm
     if (has_lookup) {
         switch (opcode) {
-            0x13, 0x67, 0x37, 0x17, 0x6F, 0x1B, 0x0B, 0x2B, 0x5B => {
+            0x13, 0x67, 0x37, 0x17, 0x6F, 0x1B, 0x0B, 0x2B, 0x5B, 0x6B => {
                 inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
             },
             else => {},
@@ -1061,6 +1084,10 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     if (decoded.rd != 0 and opcode != 0x23 and opcode != 0x63) {
         inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
     }
+
+    // FENCE and ECALL: In Jolt, these have ALL flags false (circuit and instruction).
+    // Jolt's Flags impl for FENCE/ECALL only sets IsFirstInSequence and IsCompressed,
+    // which are always false for standalone instructions. NO DoNotUpdateUnexpandedPC, NO IsNoop.
 
     // Lookup table index and interleaving
     entry.lookup_table_index = getLookupTableIndex(opcode, funct3, funct7);
@@ -1121,6 +1148,15 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
         .FormatAssert => |a| {
             rs1 = a.rs1;
             imm = a.imm;
+        },
+        .FormatInline => |il| {
+            rs1 = il.rs1;
+            rs2 = il.rs2;
+        },
+        .FormatVirtualRightShiftI => |vrs| {
+            rd = vrs.rd;
+            rs1 = vrs.rs1;
+            imm = @bitCast(vrs.imm);
         },
         .None => {},
     }
@@ -1510,6 +1546,54 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             entry.virtual_sequence_remaining = vsr;
             entry.is_first_in_sequence = is_first;
         },
+        .VirtualROTRI => {
+            // VirtualROTRI: opcode 0x6B, funct3=0, interleaved(rs1, bitmask)
+            // The imm from FormatVirtualRightShiftI IS already the bitmask
+            entry.address = instr.address;
+            entry.imm = imm; // imm is already the bitmask from FormatVirtualRightShiftI
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x6B;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 27; // VirtualROTR
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        .VirtualROTRIW => {
+            // VirtualROTRIW: opcode 0x6B, funct3=1, interleaved(rs1, bitmask)
+            // The imm from FormatVirtualRightShiftI IS already the bitmask
+            entry.address = instr.address;
+            entry.imm = imm; // imm is already the bitmask from FormatVirtualRightShiftI
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x6B;
+            entry.funct3 = 1;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf_w = &entry.circuit_flags;
+            cf_w[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf_w, vsr, is_first, is_compressed);
+            var inf_w = &entry.instruction_flags;
+            inf_w[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            inf_w[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            if (rd != 0 and rd != 255) inf_w[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 28; // VirtualROTRW
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
 
         // =====================================================================
         // Standard RISC-V instructions — build a 32-bit word and delegate
@@ -1517,7 +1601,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
 
         // R-type (opcode 0x33): ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND,
         //                       MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
-        .ADD, .SUB, .SLL, .SLT, .SLTU, .XOR, .SRL, .SRA, .OR, .AND, .MUL, .MULH, .MULHSU, .MULHU, .DIV, .DIVU, .REM, .REMU => {
+        .ADD, .SUB, .SLL, .SLT, .SLTU, .XOR, .SRL, .SRA, .OR, .AND, .ANDN, .MUL, .MULH, .MULHSU, .MULHU, .DIV, .DIVU, .REM, .REMU => {
             const info = getRTypeEncoding(instr.variant);
             const word = buildRType(info.funct7, rs2, rs1, info.funct3, rd, 0x33);
             populateEntryFromInstruction(entry, word, instr.address);
@@ -1538,6 +1622,10 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             const imm_u64: u64 = @bitCast(imm);
             const word = buildIType(imm_u64, rs1, info.funct3, rd, 0x13);
             populateEntryFromInstruction(entry, word, instr.address);
+            // populateEntryFromInstruction decodes entry.imm from the encoded 12-bit
+            // field, which truncates wide inline immediates (e.g. SHA-256 K[i]).
+            // Restore the full u64 to keep bytecode consistent with the trace witness.
+            entry.imm = imm;
             applyVirtualAndCompressedFlags(entry, rd, rs1, 255, vsr, is_first, is_compressed);
         },
 
@@ -1547,6 +1635,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             const imm_u64: u64 = @bitCast(imm);
             const word = buildIType(imm_u64, rs1, info.funct3, rd, 0x1b);
             populateEntryFromInstruction(entry, word, instr.address);
+            entry.imm = imm;
             applyVirtualAndCompressedFlags(entry, rd, rs1, 255, vsr, is_first, is_compressed);
         },
 
@@ -1591,11 +1680,13 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
 
         // J-type: JAL (0x6F)
         .JAL => {
+            // Preprocessing already remapped rd=0 → rd=40 for JAL x0
+            const raw_rd: u8 = if (rd == 40) 0 else rd; // undo remapping for instruction word
             const imm_u64: u64 = @bitCast(imm);
-            const word = buildJType(imm_u64, rd, 0x6F);
+            const word = buildJType(imm_u64, raw_rd, 0x6F);
             populateEntryFromInstruction(entry, word, instr.address);
             // JAL x0 → vr40 remapping
-            if (rd == 0) {
+            if (rd == 0 or rd == 40) {
                 entry.rd = 40;
                 entry.instruction_flags[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
             }
@@ -1604,11 +1695,13 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
 
         // JALR (opcode 0x67)
         .JALR => {
+            // Preprocessing already remapped rd=0 → rd=40 for JALR x0
+            const raw_rd: u8 = if (rd == 40) 0 else rd; // undo remapping for instruction word
             const imm_u64: u64 = @bitCast(imm);
-            const word = buildIType(imm_u64, rs1, 0, rd, 0x67);
+            const word = buildIType(imm_u64, rs1, 0, raw_rd, 0x67);
             populateEntryFromInstruction(entry, word, instr.address);
             // JALR x0 → vr40 remapping
-            if (rd == 0) {
+            if (rd == 0 or rd == 40) {
                 entry.rd = 40;
                 entry.instruction_flags[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
             }
@@ -1624,10 +1717,10 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             entry.rs2 = 255;
             entry.opcode = 0x0F;
             entry.funct3 = 0;
+            // Jolt's FENCE circuit_flags: only IsFirstInSequence and IsCompressed (both false for standalone)
+            // Jolt's FENCE instruction_flags: all false (NO IsNoop, NO DoNotUpdateUnexpandedPC!)
             entry.circuit_flags = [_]bool{false} ** 14;
             entry.instruction_flags = [_]bool{false} ** 7;
-            entry.instruction_flags[@intFromEnum(InstructionFlags.IsNoop)] = true;
-            entry.circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
             entry.lookup_table_index = 255;
             entry.is_interleaved = true;
             entry.virtual_sequence_remaining = vsr;
@@ -1635,6 +1728,80 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             if (is_compressed) entry.circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
         },
         .ECALL => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            // Jolt's ECALL FormatI: rd=Some(rd), rs1=Some(rs1), rs2=None
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x73;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            entry.lookup_table_index = 255;
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+            if (is_compressed) entry.circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+        },
+
+        // VirtualRev8W (0x5B funct3=0 in ELF, 0x7B internally): byte-swap each 32-bit half.
+        // Jolt: AddOperands=true, WriteLookupOutputToRD=true, LeftOperandIsRs1Value=true,
+        // lookup_table = VirtualRev8WTable (index 24 in pinned Jolt 997c1543).
+        // We use synthetic opcode 0x7B internally to distinguish from VirtualSRLI which
+        // uses 0x5B funct3=0 as its synthetic trace encoding.
+        .VirtualRev8W => {
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x7B;
+            entry.funct3 = 0;
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            var cf = &entry.circuit_flags;
+            cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+            setVirtualSequenceFlags(cf, vsr, is_first, is_compressed);
+            var inf = &entry.instruction_flags;
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            if (rd != 0 and rd != 255) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+            entry.lookup_table_index = 24; // VirtualRev8W table
+            entry.is_interleaved = false; // AddOperands set
+            entry.virtual_sequence_remaining = vsr;
+            entry.is_first_in_sequence = is_first;
+        },
+        // SDK NoOp-like (no lookup): VirtualHostIO, AdviceLB/H/W/D, VirtualAdviceLoad, VirtualAdviceLen
+        .VirtualHostIO, .AdviceLB, .AdviceLH, .AdviceLW, .AdviceLD, .VirtualAdviceLoad, .VirtualAdviceLen => {
+            // Jolt SDK instructions: NOP-like with real address, no flags, no lookup.
+            // Matches Jolt's VirtualHostIO circuit_flags=[false; 14], instruction_flags=[false; 7].
+            // NOTE: AdviceLB/H/W/D should be expanded to VirtualAdviceLoad+SLLI+SRAI in
+            // preprocessing for full correctness; this is a fallback path.
+            entry.address = instr.address;
+            entry.imm = 0;
+            entry.rd = rd;
+            entry.rs1 = rs1;
+            entry.rs2 = 255;
+            entry.opcode = 0x5B;
+            entry.funct3 = switch (instr.variant) {
+                .VirtualHostIO => 2,
+                .AdviceLB => 3,
+                .AdviceLH => 4,
+                .AdviceLW => 5,
+                .AdviceLD => 6,
+                .VirtualAdviceLen => 7,
+                .VirtualAdviceLoad => 3,
+                else => 2,
+            };
+            entry.circuit_flags = [_]bool{false} ** 14;
+            entry.instruction_flags = [_]bool{false} ** 7;
+            entry.lookup_table_index = 255;
+            entry.is_interleaved = true;
+            entry.virtual_sequence_remaining = null;
+            entry.is_first_in_sequence = false;
+        },
+        .CSRRW, .CSRRS, .MRET => {
             entry.address = instr.address;
             entry.imm = 0;
             entry.rd = 255;
@@ -1674,7 +1841,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
 
         // UNIMPL — all flags false, no lookup
         .UNIMPL => {
-            entry.address = instr.address;
+            entry.address = 0; // UNIMPL normalizes to Default in Jolt, which has address=0
             entry.imm = 0;
             entry.rd = 255;
             entry.rs1 = 255;
@@ -1724,7 +1891,11 @@ fn applyVirtualAndCompressedFlags(
 ) void {
     // Fix register indices: populateEntryFromInstruction only sees the low 5 bits
     // from the instruction word. Virtual registers (32+) need the full value.
-    if (rd_full != 255) entry.rd = rd_full;
+    if (rd_full != 255) {
+        entry.rd = rd_full;
+        // Also fix IsRdNotZero: the instruction word had rd&0x1F which truncates VRs to 0
+        entry.instruction_flags[@intFromEnum(InstructionFlags.IsRdNotZero)] = (rd_full != 0);
+    }
     if (rs1_full != 255) entry.rs1 = rs1_full;
     if (rs2_full != 255) entry.rs2 = rs2_full;
 
@@ -1838,6 +2009,7 @@ fn getRTypeEncoding(variant: preprocessing.JoltInstruction.InstructionVariant) R
         .SRA => .{ .funct3 = 5, .funct7 = 0x20 },
         .OR => .{ .funct3 = 6, .funct7 = 0x00 },
         .AND => .{ .funct3 = 7, .funct7 = 0x00 },
+        .ANDN => .{ .funct3 = 7, .funct7 = 0x20 },
         .MUL => .{ .funct3 = 0, .funct7 = 0x01 },
         .MULH => .{ .funct3 = 1, .funct7 = 0x01 },
         .MULHSU => .{ .funct3 = 2, .funct7 = 0x01 },
@@ -1991,14 +2163,16 @@ pub fn buildBytecodeEntries(
     }
 
     // ================================================================
-    // Phase 1: Populate from preprocessing bytecode (preferred) or raw ELF bytes
+    // Phase 1: Use preprocessing bytecode when available
     // ================================================================
-    // Using preprocessing bytecode ensures the prover's bytecode entries match
-    // exactly what the verifier will compute from the serialized preprocessing.
-    // This is critical for programs with .rodata sections (like SHA256) where
-    // data bytes in the code section would be decoded differently by two
-    // independent decoders.
-    if (program_code_bytes) |code_bytes| {
+    if (bytecode_preprocessing) |prep| {
+        for (0..@min(bytecode_K, prep.bytecode.items.len)) |k| {
+            const prep_instr = prep.bytecode.items[k];
+            if (prep_instr.variant == .NoOp) continue;
+            populateEntryFromJoltInstruction(&entries[k], prep_instr);
+        }
+    } else if (program_code_bytes) |code_bytes| {
+        // Using raw ELF path
         const decode_limit = @min(text_size, code_bytes.len);
         var offset: usize = 0;
         while (offset < decode_limit) {
@@ -2953,6 +3127,22 @@ pub fn buildBytecodeEntries(
                         entries[k - 1].virtual_sequence_remaining = 1;
                         entries[k - 1].is_first_in_sequence = true;
                     }
+                } else if (raw_opcode == 0x0B) {
+                    // Jolt inline instruction (0x0B) — already expanded by Phase 1 preprocessing.
+                    // Skip to avoid overwriting the correct entries with a single wrong one.
+                } else if (raw_opcode == 0x73 and (raw_funct3 == 1 or raw_funct3 == 2 or
+                    (raw_funct3 == 0 and ((instr_word >> 20) & 0xFFF) == 0x302)))
+                {
+                    // CSR instructions (CSRRW funct3=1, CSRRS funct3=2) and MRET (funct3=0, funct12=0x302)
+                    // — already expanded by preprocessing into ADDI/OR/JALR virtual sequences.
+                    // Skip to avoid overwriting with a single ECALL-like entry.
+                } else if (raw_opcode == 0x5B and raw_funct3 != 0 and raw_funct3 != 5) {
+                    // Jolt SDK VirtualHostIO instructions (opcode 0x5B, funct3 != 0 and != 5).
+                    // funct3=0 is VirtualSRLI and funct3=5 is VirtualSRAI (Zolt's own virtual instructions).
+                    // Other funct3 values (1=AssertEQ, 2=HostIO, 3-7=advice loads) come from the
+                    // Jolt SDK in the ELF. These are NOP-like (no lookup, no register writes).
+                    // Phase 1 preprocessing handles them as UNIMPL with correct flags.
+                    // Skip to avoid misprocessing them as VirtualSRLI/VirtualSRAI.
                 } else {
                     populateEntryFromInstruction(&entries[k], instr_word, addr);
 
@@ -3057,6 +3247,8 @@ pub fn buildBytecodeEntries(
         }
     }
 
+    // Debug output removed
+
     // ================================================================
     // Phase 3: Sync with preprocessing to ensure bytecode entries match
     // ================================================================
@@ -3118,49 +3310,86 @@ pub fn buildBytecodeEntries(
                 entries[k].opcode = 0;
                 entries[k].funct3 = 0;
             } else {
-                // Real instruction in preprocessing but prover has different/UNIMPL.
-                // Re-decode from raw bytes at the preprocessing's address.
-                if (program_code_bytes) |code_bytes| {
-                    const byte_offset = prep_addr - code_base_address;
-                    if (byte_offset + 2 <= code_bytes.len) {
-                        const hw: u16 = std.mem.readInt(u16, code_bytes[byte_offset..][0..2], .little);
-                        const is_comp = (hw & 0x3) != 0x3;
-                        var instr_word: u32 = undefined;
-                        if (is_comp) {
-                            instr_word = instruction_mod.uncompressInstruction(@as(u32, hw), .Bit64);
-                        } else if (byte_offset + 4 <= code_bytes.len) {
-                            instr_word = std.mem.readInt(u32, code_bytes[byte_offset..][0..4], .little);
-                        } else {
-                            instr_word = 0;
-                        }
-                        populateEntryFromInstruction(&entries[k], instr_word, prep_addr);
-                        if (is_comp) entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
-                    }
+                // Real instruction in preprocessing but prover has different/NoOp.
+                // Build a synthetic instruction word from the preprocessing variant
+                // and use populateEntryFromInstruction to ensure consistent flag computation.
+                const synth = buildSyntheticWordFromPrep(prep_instr);
+                if (synth.word != 0) {
+                    populateEntryFromInstruction(&entries[k], synth.word, prep_addr);
+                    // Apply virtual sequence metadata
+                    applyVirtualAndCompressedFlags(&entries[k], synth.rd_full, synth.rs1_full, synth.rs2_full, prep_instr.virtual_sequence_remaining, prep_instr.is_first_in_sequence, prep_instr.is_compressed);
+                } else {
+                    // Unknown variant — use populateEntryFromJoltInstruction as fallback
+                    populateEntryFromJoltInstruction(&entries[k], prep_instr);
                 }
             }
         }
     }
 
-    // Debug: dump first entries
-    dbg("\n[ZOLT BYTECODE ENTRIES] bytecode_K={}\n", .{bytecode_K});
-    for (0..@min(bytecode_K, 32)) |k| {
-        const e = entries[k];
-        // Compute a compact representation: cf_bits, if_bits
-        var cf_bits: u16 = 0;
-        for (0..14) |i| {
-            if (e.circuit_flags[i]) cf_bits |= @as(u16, 1) << @intCast(i);
-        }
-        var if_bits: u8 = 0;
-        for (0..7) |i| {
-            if (e.instruction_flags[i]) if_bits |= @as(u8, 1) << @intCast(i);
-        }
-        dbg("  entry[{d:2}]: addr=0x{x:0>8} rd={d:2} rs1={d:2} rs2={d:2} imm={d:6} cf=0x{x:04} if=0x{x:02} lt={d:3} interl={}\n", .{
-            k, e.address, e.rd, e.rs1, e.rs2, e.imm, cf_bits, if_bits, e.lookup_table_index, @intFromBool(e.is_interleaved),
-        });
-    }
-    dbg("\n", .{});
+    // Debug comparison removed
 
     return entries;
+}
+
+/// Build a synthetic 32-bit instruction word from a preprocessing JoltInstruction.
+/// Returns .word=0 if the variant is not supported.
+fn buildSyntheticWordFromPrep(instr: preprocessing.JoltInstruction) struct { word: u32, rd_full: u8, rs1_full: u8, rs2_full: u8 } {
+    var rd: u8 = 0;
+    var rs1: u8 = 0;
+    var rs2: u8 = 0;
+    var imm: i64 = 0;
+    switch (instr.operands) {
+        .FormatR => |r| { rd = r.rd; rs1 = r.rs1; rs2 = r.rs2; },
+        .FormatI => |i_op| { rd = i_op.rd; rs1 = i_op.rs1; imm = @bitCast(i_op.imm); },
+        .FormatLoad => |l| { rd = l.rd; rs1 = l.rs1; imm = l.imm; },
+        .FormatS => |s| { rs1 = s.rs1; rs2 = s.rs2; imm = s.imm; },
+        .FormatJ => |j| { rd = j.rd; imm = @bitCast(j.imm); },
+        .FormatU => |u_op| { rd = u_op.rd; imm = @bitCast(u_op.imm); },
+        else => {},
+    }
+    const rd_full = rd;
+    const rs1_full = rs1;
+    const rs2_full = rs2;
+
+    const word: u32 = switch (instr.variant) {
+        // I-type: ADDI, XORI, ORI, ANDI, SLTI, SLTIU
+        .ADDI => buildIType(@bitCast(imm), rs1, 0, rd, 0x13),
+        .XORI => buildIType(@bitCast(imm), rs1, 4, rd, 0x13),
+        .ORI => buildIType(@bitCast(imm), rs1, 6, rd, 0x13),
+        .ANDI => buildIType(@bitCast(imm), rs1, 7, rd, 0x13),
+        // R-type: ADD, SUB, XOR, OR, AND, etc.
+        .ADD => buildRType(0, rs2, rs1, 0, rd, 0x33),
+        .SUB => buildRType(0x20, rs2, rs1, 0, rd, 0x33),
+        .XOR => buildRType(0, rs2, rs1, 4, rd, 0x33),
+        .OR => buildRType(0, rs2, rs1, 6, rd, 0x33),
+        .AND => buildRType(0, rs2, rs1, 7, rd, 0x33),
+        .MUL => buildRType(1, rs2, rs1, 0, rd, 0x33),
+        // Jump: JALR, JAL
+        .JALR => blk_jalr: {
+            const raw_rd = if (rd == 40) @as(u8, 0) else rd;
+            break :blk_jalr buildIType(@bitCast(imm), rs1, 0, raw_rd, 0x67);
+        },
+        .JAL => blk_jal: {
+            const raw_rd = if (rd == 40) @as(u8, 0) else rd;
+            break :blk_jal buildJType(@bitCast(imm), raw_rd, 0x6F);
+        },
+        // Load/Store
+        .LD => buildIType(@as(u64, @bitCast(imm)), rs1, 3, rd, 0x03),
+        .SD => buildSType(imm, rs2, rs1, 3, 0x23),
+        // Virtual
+        .VirtualSignExtendWord => buildIType(0, rs1, 0, rd, 0x0B),
+        .VirtualZeroExtendWord => buildIType(0, rs1, 0, rd, 0x42),
+        .VirtualMULI => buildIType(@bitCast(imm), rs1, 0, rd, 0x2B),
+        .VirtualSRLI => blk_srli: {
+            const bitmask: u64 = @bitCast(imm);
+            const total_shift: u7 = if (bitmask == 0) 0 else @intCast(@ctz(bitmask));
+            break :blk_srli buildIType(@as(u64, total_shift), rs1, 0, rd, 0x5B);
+        },
+        // SDK instructions
+        .VirtualHostIO => (@as(u32, 2) << 12) | (@as(u32, rs1 & 0x1F) << 15) | (@as(u32, rd & 0x1F) << 7) | 0x5B,
+        else => 0, // Unsupported
+    };
+    return .{ .word = word, .rd_full = rd_full, .rs1_full = rs1_full, .rs2_full = rs2_full };
 }
 
 /// Check if a raw instruction is a W-extension that decomposes into 2 entries:
@@ -3183,7 +3412,7 @@ fn isKnownInstruction(opcode: u8, funct3: u3, funct7: u7) bool {
             0 => (funct7 == 0 or funct7 == 0x20 or funct7 == 0x01), // ADD, SUB, MUL
             1, 2, 3, 4, 6 => (funct7 == 0 or funct7 == 0x01), // SLL, SLT, SLTU, XOR, OR + M-ext
             5 => (funct7 == 0 or funct7 == 0x20 or funct7 == 0x01), // SRL, SRA, DIVU
-            7 => (funct7 == 0 or funct7 == 0x01), // AND, REMU
+            7 => (funct7 == 0 or funct7 == 0x20 or funct7 == 0x01), // AND, ANDN, REMU
         },
         0x3b => return switch (funct3) { // OP-32
             0 => (funct7 == 0 or funct7 == 0x20 or funct7 == 0x01), // ADDW, SUBW, MULW
@@ -3210,9 +3439,16 @@ fn isKnownInstruction(opcode: u8, funct3: u3, funct7: u7) bool {
         0x73,
         0x0F, // ECALL, FENCE (treated as NoOp in Jolt)
         => return true,
-        // Virtual opcodes (0x0B, 0x2B, 0x5B, 0x02, 0x22) are NOT recognized here
-        // since they only appear in virtual sequence entries created by populate functions,
-        // never in raw ELF bytes.
+        // Jolt SDK / virtual instructions at opcode 0x5B
+        //   funct3=0 → VirtualRev8W (real instruction in jolt-inlines/sha2 ELFs)
+        //   funct3=2 → VirtualHostIO
+        //   funct3=3,4,5,6 → AdviceLB/LH/LW/LD
+        //   funct3=7 → VirtualAdviceLen
+        // funct3=1 is unused in pinned Jolt 997c1543 (newer revs use it for VirtualAssertEQ).
+        0x5B => return funct3 != 1,
+        // 0x7B is our internal synthetic opcode for VirtualRev8W trace cycles
+        0x7B => return true,
+        // Other virtual opcodes only appear in virtual sequence entries, not ELF bytes.
         else => return false,
     }
 }
@@ -3237,6 +3473,7 @@ pub fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
             else if (funct7 == 0x01) 0 // MUL → RangeCheck
             else 255,
             7 => if (funct7 == 0) @as(u8, 2) // AND → And
+            else if (funct7 == 0x20) 3 // ANDN → Andn
             else if (funct7 == 0x01) 13 // REMU → (was UpperWord, should be ValidUnsignedRemainder but decomposed)
             else 255,
             6 => if (funct7 == 0) @as(u8, 4) // OR → Or
@@ -3286,7 +3523,17 @@ pub fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
             2 => 23, // VirtualShiftRightBitmask → ShiftRightBitmask
             else => 0, // VirtualMULI (funct3=0) → RangeCheck
         },
-        0x5B => if (funct3 == 5) @as(u8, 26) else 25, // VirtualSRAI/VirtualSRA → VirtualSRA, VirtualSRLI/VirtualSRL → VirtualSRL
+        0x5B => switch (funct3) {
+            // NOTE: opcode 0x5B funct3=0/5 is shared between two distinct cases:
+            //   - Internal: VirtualSRLI/VirtualSRL (table 25), VirtualSRAI/VirtualSRA (table 26)
+            //   - External (Jolt 997c1543): VirtualRev8W (funct3=0, table 24), AdviceLW (funct3=5, no table)
+            // The raw-decode path here matches our internal usage (VirtualSRL family). External
+            // VirtualRev8W from a real ELF is handled by the prep-first path via the
+            // .VirtualRev8W variant in populateEntryFromJoltInstruction (which sets table 24).
+            0 => @as(u8, 25), // VirtualSRLI/VirtualSRL → VirtualSRL
+            5 => @as(u8, 26), // VirtualSRAI/VirtualSRA → VirtualSRA
+            else => 255, // VirtualHostIO/Advice* — no lookup table at raw decode
+        },
         0x02 => 0, // VirtualAdvice → RangeCheck
         0x22 => switch (funct3) { // Virtual assert
             1 => 16, // VirtualAssertValidDiv0 → ValidDiv0
@@ -3296,6 +3543,10 @@ pub fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
         },
         0x42 => 19, // VirtualZeroExtendWord → LowerHalfWord
         0x62 => 15, // VirtualAssertValidUnsignedRemainder → ValidUnsignedRemainder
+        0x6B => if (funct3 == 0) @as(u8, 27) // VirtualROTRI → VirtualROTR
+        else if (funct3 == 1) 28 // VirtualROTRIW → VirtualROTRW
+        else 255,
+        0x7B => 24, // VirtualRev8W (internal synthetic) → VirtualRev8W table
         else => 255, // Load, Store, ECALL, FENCE - no lookup table
     };
 }

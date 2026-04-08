@@ -1456,20 +1456,6 @@ pub fn computeBytecodeValPolys(
         }
         val_polys[0][k] = val1;
 
-        // Debug: print details for mismatching entries
-        if (k == 3 or k == 4 or k == 10 or k == 16 or k == 18 or k == 27 or k == 29 or k == 35) {
-            const addr_be = F.fromU64(entry.address).toBytesBE();
-            const imm_be = imm_field.toBytesBE();
-            dbg("[ZOLT_BC_ENTRY] k={}: addr=0x{x:0>8} imm_LE=[", .{ k, entry.address });
-            for (0..8) |bi| dbg("{x:0>2}", .{imm_be[31 - bi]});
-            dbg("] opcode=0x{x:0>2} raw_imm={} cf=[", .{ entry.opcode, entry.imm });
-            for (0..14) |ci| {
-                if (entry.circuit_flags[ci]) dbg("1", .{}) else dbg("0", .{});
-            }
-            dbg("]\n", .{});
-            _ = addr_be;
-        }
-
         // Stage 2: γ₂⁰·jump + γ₂¹·branch + γ₂²·write_lookup_to_rd + γ₂³·virtual_instruction
         var val2 = F.zero();
         if (entry.circuit_flags[@intFromEnum(CircuitFlags.Jump)]) {

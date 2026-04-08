@@ -1,0 +1,14 @@
+[package]
+name = "sha256-inline-guest-1024"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+guest = []
+
+[dependencies]
+jolt = { package = "jolt-sdk", git = "https://github.com/a16z/jolt.git", rev = "997c1543" }
+jolt-inlines-sha2 = { git = "https://github.com/a16z/jolt.git", rev = "997c1543" }
+
+[package.metadata.cargo-machete]
+ignored = ["jolt-inlines-sha2"]

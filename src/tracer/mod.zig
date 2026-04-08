@@ -80,6 +80,15 @@ pub const TraceStep = struct {
     /// Whether this is the last instruction in a virtual sequence (vsr == Some(0)).
     /// In upstream Jolt, this is CircuitFlags::IsLastInSequence.
     is_last_in_sequence: bool = false,
+    /// Full u64 immediate for instructions whose actual immediate doesn't fit in
+    /// the standard RISC-V 12-bit (or smaller) encoding. Set by inline-expansion
+    /// code paths (e.g. SHA-256 inline) when the materialized immediate exceeds
+    /// 12 bits — `step.instruction` only stores the truncated encoding, but the
+    /// real lookup index, R1CS witness immediate, and bytecode entry must use
+    /// this wider value.
+    /// `has_full_imm = false` (default) means: decode imm from `instruction` as usual.
+    inline_full_imm: u64 = 0,
+    has_full_imm: bool = false,
 };
 
 /// Full execution trace
@@ -181,6 +190,9 @@ pub const Emulator = struct {
     is_compressed: bool,
     /// Previous PC for infinite loop detection (matching Jolt's termination heuristic)
     prev_pc: u64,
+    /// Advice tape read position (consumed by AdviceLB/H/W/D).
+    /// Returns 0 when tape is exhausted (valid externally-supplied witness).
+    advice_pos: usize,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, config: *const common.MemoryConfig) Emulator {
@@ -193,6 +205,7 @@ pub const Emulator = struct {
             .lookup_trace = zkvm.instruction.LookupTraceCollector(64).init(allocator),
             .is_compressed = false,
             .prev_pc = 0, // Will be set to initial PC on first step
+            .advice_pos = 0,
             .allocator = allocator,
         };
     }
@@ -203,6 +216,187 @@ pub const Emulator = struct {
         self.device.deinit();
         self.trace.deinit();
         self.lookup_trace.deinit();
+    }
+
+    /// Read `num_bytes` (1, 2, 4, or 8) from the untrusted advice tape.
+    /// Advances `advice_pos`. Returns 0 when the tape is exhausted (valid
+    /// witness — advice is externally supplied and only range-checked).
+    fn adviceTapeRead(self: *Emulator, num_bytes: usize) u64 {
+        std.debug.assert(num_bytes == 1 or num_bytes == 2 or num_bytes == 4 or num_bytes == 8);
+        var value: u64 = 0;
+        const tape = self.device.untrusted_advice.items;
+        for (0..num_bytes) |i| {
+            const byte: u8 = if (self.advice_pos + i < tape.len) tape[self.advice_pos + i] else 0;
+            value |= @as(u64, byte) << @intCast(i * 8);
+        }
+        self.advice_pos += num_bytes;
+        return value;
+    }
+
+    /// Execute AdviceLB/LH/LW/LD as the inline sequence expansion
+    /// (VirtualAdviceLoad [+ VirtualMULI (SLLI) + VirtualSRAI (SRAI)]).
+    /// For num_bytes=8 (AdviceLD) it's just one VirtualAdviceLoad cycle.
+    /// For num_bytes=1/2/4 it's 3 cycles: VirtualAdviceLoad, VirtualMULI (SLLI × shift),
+    /// VirtualSRAI (SRAI × shift) where shift = 64 - num_bytes*8 to sign-extend.
+    fn stepAdviceLoadSignExt(
+        self: *Emulator,
+        decoded: zkvm.instruction.DecodedInstruction,
+        num_bytes: usize,
+    ) !bool {
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+        const base_pc = self.state.pc;
+        const rd: u8 = decoded.rd;
+        const shift_amount: u6 = @intCast(64 - num_bytes * 8);
+
+        // ── Step 1 (always): VirtualAdvice(rd) reads `num_bytes` from advice tape ──
+        const advice_value: u64 = self.adviceTapeRead(num_bytes);
+        const rd_pre = try self.registers.read(rd);
+        if (rd != 0) try self.registers.write(rd, advice_value);
+
+        const advice_load_instr: u32 = buildVirtualAdviceInstr(rd);
+        const is_single_cycle = (num_bytes == 8);
+
+        try self.lookup_trace.recordVirtualAdvice(
+            @intCast(self.state.cycle),
+            base_pc,
+            advice_load_instr,
+            advice_value,
+            true, // is_virtual
+            !is_single_cycle, // do_not_update_pc (unless it's the only cycle)
+            true, // is_first_in_sequence
+            if (is_single_cycle) self.is_compressed else false,
+        );
+
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = base_pc,
+            .unexpanded_pc = base_pc,
+            .instruction = advice_load_instr,
+            .rs1_value = 0,
+            .rs2_value = 0,
+            .rd_pre_value = rd_pre,
+            .rd_value = advice_value,
+            .rd_index = rd,
+            .rs1_index = 0,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = false,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = if (is_single_cycle) base_pc + pc_increment else base_pc,
+            .is_compressed = if (is_single_cycle) self.is_compressed else false,
+            .virtual_sequence_remaining = if (is_single_cycle) 0 else 2,
+            .is_first_in_sequence = true,
+            .is_last_in_sequence = is_single_cycle,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        if (is_single_cycle) {
+            self.prev_pc = base_pc;
+            self.state.pc = base_pc + pc_increment;
+            return true;
+        }
+
+        // ── Step 2: VirtualMULI(rd, rd, 1 << shift_amount) — matches SLLI decomposition ──
+        const multiplier: u64 = @as(u64, 1) << shift_amount;
+        const shifted_left: u64 = advice_value *% multiplier;
+        const rd_pre_step2 = try self.registers.read(rd);
+        if (rd != 0) try self.registers.write(rd, shifted_left);
+
+        const vmuli_instr: u32 = buildVirtualMULIInstr(rd, rd, @intCast(shift_amount));
+        try self.lookup_trace.recordVirtualMULI(
+            @intCast(self.state.cycle),
+            base_pc,
+            vmuli_instr,
+            advice_value,
+            multiplier,
+            true, // is_virtual
+            true, // do_not_update_pc: middle of sequence (vsr=1)
+            false, // is_first_in_sequence
+            false, // is_compressed (not last)
+        );
+
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = base_pc,
+            .unexpanded_pc = base_pc,
+            .instruction = vmuli_instr,
+            .rs1_value = advice_value,
+            .rs2_value = 0,
+            .rd_pre_value = rd_pre_step2,
+            .rd_value = shifted_left,
+            .rd_index = rd,
+            .rs1_index = rd,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = base_pc,
+            .is_compressed = false,
+            .virtual_sequence_remaining = 1,
+            .is_first_in_sequence = false,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ── Step 3: VirtualSRAI(rd, rd, bitmask) — matches SRAI decomposition ──
+        const signed_left: i64 = @bitCast(shifted_left);
+        const result_signed: i64 = signed_left >> @intCast(shift_amount);
+        const result: u64 = @bitCast(result_signed);
+        const rd_pre_step3 = try self.registers.read(rd);
+        if (rd != 0) try self.registers.write(rd, result);
+
+        const vsrai_instr: u32 = buildVirtualSRAIInstr(rd, rd, @intCast(shift_amount));
+        try self.lookup_trace.recordVirtualSRAI(
+            @intCast(self.state.cycle),
+            base_pc,
+            vsrai_instr,
+            shifted_left,
+            true, // is_virtual
+            false, // do_not_update_pc: last in sequence (vsr=0)
+            false, // is_first_in_sequence
+            self.is_compressed, // is_compressed propagated to last step
+        );
+
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = base_pc,
+            .unexpanded_pc = base_pc,
+            .instruction = vsrai_instr,
+            .rs1_value = shifted_left,
+            .rs2_value = 0,
+            .rd_pre_value = rd_pre_step3,
+            .rd_value = result,
+            .rd_index = rd,
+            .rs1_index = rd,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = base_pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 0,
+            .is_first_in_sequence = false,
+            .is_last_in_sequence = true,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        self.prev_pc = base_pc;
+        self.state.pc = base_pc + pc_increment;
+        return true;
     }
 
     /// Load a program into memory at a specific base address
@@ -272,11 +466,19 @@ pub const Emulator = struct {
     fn writeWordWithIO(self: *Emulator, address: u64, value: u64) !void {
         const aligned_addr = address & ~@as(u64, 7);
         if (self.isIOAddress(aligned_addr)) {
-            // Write 8 bytes to I/O
+            // Write 8 bytes to device.outputs / panic / termination so the
+            // Fiat-Shamir preamble (which appends device.outputs) sees them.
+            // We ALSO mirror the doubleword to RAM below so that:
+            //   1. subsequent ram.read calls (e.g. inside the SB/SH/SW
+            //      read-modify-write decomposition) observe the previously
+            //      stored byte values, AND
+            //   2. val_final (built from emulator.ram.memory) matches val_io
+            //      at the IO region — both polynomials carry the same per-
+            //      address byte value, so OutputSumcheck and the val-derived
+            //      Stage 4 polynomials are internally consistent.
             for (0..8) |i| {
                 try self.device.store(aligned_addr + i, @truncate(value >> (@as(u6, @intCast(i)) * 8)));
             }
-            return;
         }
         return self.ram.write(aligned_addr, value, self.state.cycle);
     }
@@ -323,6 +525,48 @@ pub const Emulator = struct {
     pub const VIRTUAL_CHANGE_DIVISOR_W_OPCODE: u7 = 0x3b;
     pub const VIRTUAL_CHANGE_DIVISOR_W_FUNCT3: u3 = 6;
     pub const VIRTUAL_CHANGE_DIVISOR_W_FUNCT7: u7 = 0x01;
+
+    /// VirtualROTRI/VirtualROTRIW: I-type format (rd, rs1, bitmask_imm) - uses custom opcode 0x6B
+    /// The imm field stores the ROTATION AMOUNT (0-63). The 64-bit bitmask is
+    /// reconstructed as: ones = (1 << (width - rotation)) - 1; bitmask = ones << rotation
+    pub const VIRTUAL_ROTRI_OPCODE: u7 = 0x6B;
+    pub const VIRTUAL_ROTRI_FUNCT3: u3 = 0;
+    pub const VIRTUAL_ROTRIW_FUNCT3: u3 = 1;
+
+    /// ANDN: R-type format (rd, rs1, rs2) - standard OP opcode 0x33 with funct7=0x20, funct3=7
+    /// Computes rd = rs1 & ~rs2 (Zbb bit manipulation extension)
+    pub const ANDN_FUNCT7: u7 = 0x20;
+    pub const ANDN_FUNCT3: u3 = 7;
+
+    /// Build a synthetic ANDN instruction word (R-type: opcode=0x33, funct3=7, funct7=0x20)
+    fn buildANDNInstr(rd: u8, rs1: u8, rs2: u8) u32 {
+        return (@as(u32, ANDN_FUNCT7) << 25) |
+            (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (@as(u32, ANDN_FUNCT3) << 12) |
+            (@as(u32, rd & 0x1F) << 7) |
+            0x33; // OP opcode
+    }
+
+    /// Build a synthetic VirtualROTRI instruction word (I-type: opcode=0x6B, funct3=0)
+    /// rotation: the rotation amount (0-63), stored in I-type imm field.
+    fn buildVirtualROTRIInstr(rd: u8, rs1: u8, rotation: u6) u32 {
+        return (@as(u32, rotation) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (@as(u32, VIRTUAL_ROTRI_FUNCT3) << 12) |
+            (@as(u32, rd & 0x1F) << 7) |
+            @as(u32, VIRTUAL_ROTRI_OPCODE);
+    }
+
+    /// Build a synthetic VirtualROTRIW instruction word (I-type: opcode=0x6B, funct3=1)
+    /// rotation: the rotation amount (0-31), stored in I-type imm field.
+    fn buildVirtualROTRIWInstr(rd: u8, rs1: u8, rotation: u5) u32 {
+        return (@as(u32, rotation) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (@as(u32, VIRTUAL_ROTRIW_FUNCT3) << 12) |
+            (@as(u32, rd & 0x1F) << 7) |
+            @as(u32, VIRTUAL_ROTRI_OPCODE);
+    }
 
     /// Build a synthetic VirtualMULI instruction word.
     /// shamt: shift amount (0-63) stored in the I-type immediate field.
@@ -573,6 +817,28 @@ pub const Emulator = struct {
         return decoded.opcode == .STORE and decoded.funct3 != 0b011; // Not SD
     }
 
+    /// Check if instruction is a jolt-inline instruction (opcode 0x0B = custom-0)
+    fn isInlineInstruction(instruction: u32) bool {
+        return (instruction & 0x7f) == 0x0B;
+    }
+
+    /// Check if instruction is CSRRW (opcode=0x73, funct3=1)
+    fn isCSRRW(decoded: zkvm.instruction.DecodedInstruction) bool {
+        return decoded.opcode == .SYSTEM and decoded.funct3 == 1;
+    }
+
+    /// Check if instruction is CSRRS (opcode=0x73, funct3=2)
+    fn isCSRRS(decoded: zkvm.instruction.DecodedInstruction) bool {
+        return decoded.opcode == .SYSTEM and decoded.funct3 == 2;
+    }
+
+    /// Check if instruction is MRET (opcode=0x73, funct3=0, funct12=0x302)
+    fn isMRET(instruction: u32) bool {
+        return (instruction & 0x7f) == 0x73 and
+            ((instruction >> 12) & 0x7) == 0 and
+            ((instruction >> 20) & 0xFFF) == 0x302;
+    }
+
     pub fn step(self: *Emulator) !bool {
         // Infinite loop detection (matching Jolt's termination heuristic)
         // If PC hasn't changed since last step, the program has terminated
@@ -653,8 +919,104 @@ pub const Emulator = struct {
             return try self.stepREMWDIVW(instruction, decoded);
         }
 
+        // Check if this is a jolt-inline instruction (opcode 0x0B)
+        if (isInlineInstruction(instruction)) {
+            return try self.stepInline(instruction);
+        }
+
+        if (isCSRRW(decoded)) return try self.stepCSRRW(instruction, decoded);
+        if (isCSRRS(decoded)) return try self.stepCSRRS(instruction, decoded);
+        if (isMRET(instruction)) return try self.stepMRET(instruction, decoded);
+
+        // VirtualRev8W (opcode 0x5B funct3=0): byte-swap each 32-bit half
+        const op_raw: u8 = @truncate(instruction & 0x7F);
+        const f3_raw: u3 = @truncate((instruction >> 12) & 0x7);
+        if (op_raw == 0x5B) {
+            switch (f3_raw) {
+                0 => return try self.stepVirtualRev8W(instruction, decoded),
+                3 => return try self.stepAdviceLoadSignExt(decoded, 1), // AdviceLB
+                4 => return try self.stepAdviceLoadSignExt(decoded, 2), // AdviceLH
+                5 => return try self.stepAdviceLoadSignExt(decoded, 4), // AdviceLW
+                6 => return try self.stepAdviceLoadSignExt(decoded, 8), // AdviceLD (single cycle)
+                // funct3 = 1, 2, 7: fall through to stepNormal (VirtualAssertEQ,
+                // VirtualHostIO, VirtualAdviceLen — NoOp passthroughs).
+                else => {},
+            }
+        }
+
         // Standard (non-W-extension) instruction execution
         return try self.stepNormal(instruction, decoded);
+    }
+
+    /// Execute VirtualRev8W: rd = rev8w(rs1) where rev8w byte-swaps each 32-bit half.
+    /// Single-cycle trace step. Format: I-type (rd, rs1).
+    fn stepVirtualRev8W(
+        self: *Emulator,
+        instruction: u32,
+        decoded: zkvm.instruction.DecodedInstruction,
+    ) !bool {
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+        const rs1_value = try self.registers.read(decoded.rs1);
+        const rd_pre = try self.registers.read(decoded.rd);
+
+        // rev8w: swap bytes in each 32-bit half independently
+        const lo: u32 = @byteSwap(@as(u32, @truncate(rs1_value)));
+        const hi: u32 = @byteSwap(@as(u32, @truncate(rs1_value >> 32)));
+        const result: u64 = @as(u64, lo) | (@as(u64, hi) << 32);
+
+        if (decoded.rd != 0) {
+            try self.registers.write(decoded.rd, result);
+        }
+
+        // Build a synthetic instruction word with opcode 0x7B funct3=0 to distinguish
+        // VirtualRev8W from our internal VirtualSRLI (which uses 0x5B funct3=0).
+        // This mapping is only used by the R1CS witness and Stage 5 lookup-index
+        // computation inside Zolt; the serialized bytecode entry still uses variant
+        // .VirtualRev8W so Jolt's verifier interprets it correctly.
+        const synth_instr: u32 = (@as(u32, decoded.rs1 & 0x1F) << 15) |
+            (@as(u32, decoded.rd & 0x1F) << 7) |
+            @as(u32, 0x7B);
+
+        try self.lookup_trace.recordVirtualRev8W(
+            @intCast(self.state.cycle),
+            self.state.pc,
+            synth_instr,
+            rs1_value,
+            false, // is_virtual: standalone instruction (not in inline sequence)
+            false, // do_not_update_pc
+            false, // is_first_in_sequence
+            self.is_compressed,
+        );
+
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = synth_instr,
+            .rs1_value = rs1_value,
+            .rs2_value = 0,
+            .rd_pre_value = if (decoded.rd == 0) 0 else rd_pre,
+            .rd_value = if (decoded.rd == 0) 0 else result,
+            .rd_index = decoded.rd,
+            .rs1_index = decoded.rs1,
+            .rs2_index = 0,
+            .rd_written = decoded.rd != 0,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+        });
+        _ = instruction; // original ELF word, not used in the synthetic trace step
+
+        self.prev_pc = self.state.pc;
+        self.state.pc += pc_increment;
+        self.state.cycle += 1;
+        self.registers.tick();
+        return true;
     }
 
     /// Execute a standard (non-W-extension) instruction as a single trace step
@@ -704,7 +1066,18 @@ pub const Emulator = struct {
 
         // Determine which registers are read/written based on opcode
         const opcode = decoded.opcode;
-        const reads_rs1 = switch (opcode) {
+        const opcode_raw: u8 = @truncate(@as(u32, instruction) & 0x7F);
+        const funct3_raw: u3 = @truncate((instruction >> 12) & 0x7);
+        // Jolt SDK custom opcodes (0x5B with funct3 != 0/5) — VirtualHostIO and
+        // VirtualAdviceLoad/Len — use FormatI with rs1 in the bytecode entry.
+        // The trace must record the rs1 read so the Stage 4 Rs1Ra polynomial
+        // matches the bytecode val_poly. Without this, BCRAF Stage 4 sumcheck
+        // mismatches the opening claim and Stage 6 verification fails.
+        // funct3 == 0/5 are VirtualSRL/SRA which are handled by their own
+        // step handlers (stepSRL/stepSRA/stepSRLI) that set rs1_read/rs2_read
+        // explicitly, so we don't override here.
+        const is_sdk_custom_2 = opcode_raw == 0x5B and funct3_raw != 0 and funct3_raw != 5;
+        const reads_rs1 = is_sdk_custom_2 or switch (opcode) {
             .OP_IMM, .LOAD, .JALR, .OP_IMM_32, .OP, .OP_32, .STORE, .BRANCH => true,
             else => false,
         };
@@ -1108,6 +1481,368 @@ pub const Emulator = struct {
         self.state.pc = self.state.pc + pc_increment;
         self.state.cycle += 1;
         self.registers.tick();
+        return true;
+    }
+
+    /// Execute a jolt-inline instruction (opcode 0x0B) by expanding it into a
+    /// virtual instruction sequence. Currently supports SHA256 (funct7=0, funct3=0/1).
+    fn stepInline(self: *Emulator, instruction: u32) !bool {
+        const sha256_inline = @import("sha256_inline.zig");
+
+        const funct3: u3 = @truncate((instruction >> 12) & 0x7);
+        const funct7: u7 = @truncate((instruction >> 25) & 0x7f);
+        const rs1_reg: u8 = @truncate((instruction >> 15) & 0x1f);
+        const rs2_reg: u8 = @truncate((instruction >> 20) & 0x1f);
+        const rs3_reg: u8 = @truncate((instruction >> 7) & 0x1f); // rd field = rs3 in FormatInline
+
+        // Determine inline type
+        const initial = (funct7 == 0x00 and funct3 == 0x01); // SHA256INIT
+        const is_sha256 = (funct7 == 0x00 and (funct3 == 0x00 or funct3 == 0x01));
+        if (!is_sha256) {
+            // Unsupported inline - treat as NOP (fallback)
+            self.prev_pc = self.state.pc;
+            self.state.pc += 4;
+            self.state.cycle += 1;
+            self.registers.tick();
+            return true;
+        }
+
+        // If rs3 (rd) is x0, remap to virtual register 40 (matching Jolt)
+        const effective_rs3: u8 = if (rs3_reg == 0) 40 else rs3_reg;
+        _ = effective_rs3; // rs3 not directly used in SHA256 inline (state is at memory[rs1])
+
+        // Read memory pointers from registers
+        const state_ptr = try self.registers.read(rs1_reg);
+        const input_ptr = try self.registers.read(rs2_reg);
+        _ = state_ptr;
+        _ = input_ptr;
+
+        // Build the SHA256 virtual instruction sequence
+        var sequence = try sha256_inline.buildSha256Sequence(
+            self.allocator,
+            rs1_reg,
+            rs2_reg,
+            initial,
+        );
+        defer sequence.deinit(self.allocator);
+
+        const seq_len = sequence.items.len;
+        const base_pc = self.state.pc;
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+
+        // Execute each virtual instruction and emit a trace step
+        for (sequence.items, 0..) |instr, idx| {
+            const vsr: u16 = @intCast(seq_len - 1 - idx);
+            const is_first = (idx == 0);
+            const is_last = (idx == seq_len - 1);
+
+            // Read operand values
+            const rs1_val = try self.registers.read(instr.rs1);
+            const rs2_val = if (instr.rs2 != 0 or instr.kind == .ANDN or instr.kind == .AND or
+                instr.kind == .XOR or instr.kind == .OR or instr.kind == .SD)
+                try self.registers.read(instr.rs2)
+            else
+                0;
+
+            // Captured before writeWordWithIO inside the SD branch, so the
+            // TraceStep can record the actual pre-store doubleword value.
+            var inline_sd_pre_value: u64 = 0;
+
+            // Compute result based on instruction kind
+            const rd_val: u64 = switch (instr.kind) {
+                .ADD => rs1_val +% rs2_val,
+                .ADDI => rs1_val +% instr.imm,
+                .XOR => rs1_val ^ rs2_val,
+                .XORI => rs1_val ^ instr.imm,
+                .AND => rs1_val & rs2_val,
+                .ANDI => rs1_val & instr.imm,
+                .OR => rs1_val | rs2_val,
+                .ANDN => rs1_val & ~rs2_val,
+                .VirtualMULI => blk: {
+                    // VirtualMULI: rd = rs1 * (1 << imm) — imm is the shift amount
+                    const shamt: u6 = @intCast(instr.imm & 0x3F);
+                    break :blk rs1_val *% (@as(u64, 1) << shamt);
+                },
+                .VirtualSRLI => blk: {
+                    // VirtualSRLI: rd = rs1 & bitmask — imm IS the bitmask
+                    // The result is rs1 logical-right-shifted by trailing_zeros(bitmask)
+                    const bitmask = instr.imm;
+                    const shift: u6 = if (bitmask == 0) 0 else @intCast(@ctz(bitmask));
+                    break :blk rs1_val >> shift;
+                },
+                .VirtualSignExtendWord => blk: {
+                    // Sign-extend lower 32 bits to 64 bits
+                    const lower32: u32 = @truncate(rs1_val);
+                    break :blk @bitCast(@as(i64, @as(i32, @bitCast(lower32))));
+                },
+                .VirtualZeroExtendWord => rs1_val & 0xFFFFFFFF,
+                .VirtualROTRIW => blk: {
+                    const val32: u32 = @truncate(rs1_val);
+                    // instr.imm is the BITMASK, extract rotation via trailing zeros
+                    const bm32: u32 = @truncate(instr.imm);
+                    const rotation: u5 = if (bm32 == 0) 0 else @intCast(@ctz(bm32));
+                    break :blk @as(u64, std.math.rotr(u32, val32, rotation));
+                },
+                .LD => blk: {
+                    const addr: u64 = @bitCast(@as(i64, @bitCast(rs1_val)) +% @as(i64, @bitCast(instr.imm)));
+                    // Use IO-aware read so that loads from the input/advice region pull
+                    // through device.load instead of returning RAM zeroes.
+                    break :blk try self.readWordWithIO(addr);
+                },
+                .SD => blk: {
+                    // For stores, rs2_val is what gets written. Capture the
+                    // pre-value BEFORE calling writeWordWithIO so we can record
+                    // it on the TraceStep — once writeWordWithIO runs, ram.memory
+                    // already holds the post-value and reading it back would
+                    // give us the wrong RamInc in Stage 6.
+                    const addr: u64 = @bitCast(@as(i64, @bitCast(rs1_val)) +% @as(i64, @bitCast(instr.imm)));
+                    inline_sd_pre_value = if (self.ram.memory.get(addr & ~@as(u64, 7))) |v| v else 0;
+                    // CRITICAL: writes to the program output region must populate
+                    // device.outputs (not RAM), otherwise val_final and val_io
+                    // disagree at OutputSumcheck and Stage 2 verification fails.
+                    try self.writeWordWithIO(addr, rs2_val);
+                    break :blk 0;
+                },
+            };
+
+            // Write result to destination register (except for stores and x0)
+            const rd_pre_value = try self.registers.read(instr.rd);
+            const is_store = (instr.kind == .SD);
+            if (!is_store and instr.rd != 0) {
+                try self.registers.write(instr.rd, rd_val);
+            }
+
+            // Build synthetic instruction word for the trace
+            const synth_word: u32 = switch (instr.kind) {
+                .ADD => blk: {
+                    break :blk (@as(u32, 0) << 25) | (@as(u32, instr.rs2 & 0x1F) << 20) | (@as(u32, instr.rs1 & 0x1F) << 15) | (0 << 12) | (@as(u32, instr.rd & 0x1F) << 7) | 0x33;
+                },
+                .ADDI => blk: {
+                    const imm12: u32 = @truncate(instr.imm & 0xFFF);
+                    break :blk (imm12 << 20) | (@as(u32, instr.rs1 & 0x1F) << 15) | (0 << 12) | (@as(u32, instr.rd & 0x1F) << 7) | 0x13;
+                },
+                .XOR => blk: {
+                    break :blk (@as(u32, 0) << 25) | (@as(u32, instr.rs2 & 0x1F) << 20) | (@as(u32, instr.rs1 & 0x1F) << 15) | (4 << 12) | (@as(u32, instr.rd & 0x1F) << 7) | 0x33;
+                },
+                .XORI => blk: {
+                    const imm12: u32 = @truncate(instr.imm & 0xFFF);
+                    break :blk (imm12 << 20) | (@as(u32, instr.rs1 & 0x1F) << 15) | (4 << 12) | (@as(u32, instr.rd & 0x1F) << 7) | 0x13;
+                },
+                .AND => blk: {
+                    break :blk (@as(u32, 0) << 25) | (@as(u32, instr.rs2 & 0x1F) << 20) | (@as(u32, instr.rs1 & 0x1F) << 15) | (7 << 12) | (@as(u32, instr.rd & 0x1F) << 7) | 0x33;
+                },
+                .ANDI => blk: {
+                    const imm12: u32 = @truncate(instr.imm & 0xFFF);
+                    break :blk (imm12 << 20) | (@as(u32, instr.rs1 & 0x1F) << 15) | (7 << 12) | (@as(u32, instr.rd & 0x1F) << 7) | 0x13;
+                },
+                .OR => blk: {
+                    break :blk (@as(u32, 0) << 25) | (@as(u32, instr.rs2 & 0x1F) << 20) | (@as(u32, instr.rs1 & 0x1F) << 15) | (6 << 12) | (@as(u32, instr.rd & 0x1F) << 7) | 0x33;
+                },
+                .ANDN => buildANDNInstr(instr.rd, instr.rs1, instr.rs2),
+                .VirtualMULI => buildVirtualMULIInstr(instr.rd, instr.rs1, @intCast(instr.imm & 0x3F)),
+                .VirtualSRLI => blk: {
+                    // VirtualSRLI uses opcode 0x5B, stores total_shift in imm field
+                    const bitmask = instr.imm;
+                    const total_shift: u7 = if (bitmask == 0) 0 else @intCast(@ctz(bitmask));
+                    break :blk buildVirtualSRLIInstr(instr.rd, instr.rs1, total_shift);
+                },
+                .VirtualSignExtendWord => buildVirtualSignExtendWordInstr(instr.rd, instr.rs1),
+                .VirtualZeroExtendWord => buildVirtualZeroExtendWordInstr(instr.rd, instr.rs1),
+                .VirtualROTRIW => blk_rotriw: {
+                    // instr.imm is the BITMASK, extract rotation amount via trailing zeros
+                    const bm32: u32 = @truncate(instr.imm);
+                    const rot: u5 = if (bm32 == 0) 0 else @intCast(@ctz(bm32));
+                    break :blk_rotriw buildVirtualROTRIWInstr(instr.rd, instr.rs1, rot);
+                },
+                .LD => blk: {
+                    const imm12: u32 = @truncate(@as(u64, @bitCast(@as(i64, @bitCast(instr.imm)))) & 0xFFF);
+                    break :blk (imm12 << 20) | (@as(u32, instr.rs1 & 0x1F) << 15) | (3 << 12) | (@as(u32, instr.rd & 0x1F) << 7) | 0x03;
+                },
+                .SD => blk: {
+                    const imm_val: i64 = @bitCast(instr.imm);
+                    const imm_u: u32 = @truncate(@as(u64, @bitCast(imm_val)) & 0xFFF);
+                    break :blk ((imm_u >> 5) << 25) | (@as(u32, instr.rs2 & 0x1F) << 20) | (@as(u32, instr.rs1 & 0x1F) << 15) | (3 << 12) | ((imm_u & 0x1F) << 7) | 0x23;
+                },
+            };
+
+            // Record lookup trace entry (for instructions that have lookup tables)
+            const do_not_update_pc = (vsr != 0);
+            switch (instr.kind) {
+                .ADD, .ADDI => {
+                    // RangeCheck table (identity)
+                    try self.lookup_trace.recordInstruction(
+                        @intCast(self.state.cycle),
+                        base_pc,
+                        synth_word,
+                        zkvm.instruction.DecodedInstruction.decode(synth_word),
+                        rs1_val,
+                        rs2_val,
+                    );
+                },
+                .XOR, .XORI, .AND, .ANDI, .OR => {
+                    try self.lookup_trace.recordInstruction(
+                        @intCast(self.state.cycle),
+                        base_pc,
+                        synth_word,
+                        zkvm.instruction.DecodedInstruction.decode(synth_word),
+                        rs1_val,
+                        rs2_val,
+                    );
+                },
+                .ANDN => {
+                    try self.lookup_trace.recordANDN(
+                        @intCast(self.state.cycle),
+                        base_pc,
+                        synth_word,
+                        rs1_val,
+                        rs2_val,
+                        true, // is_virtual
+                        do_not_update_pc,
+                        is_first,
+                        is_last and self.is_compressed,
+                    );
+                },
+                .VirtualROTRIW => {
+                    // Reconstruct the bitmask from rotation amount
+                    const rotation = instr.imm & 0x1F;
+                    const bitmask: u64 = if (rotation == 0) 0xFFFFFFFF else (((@as(u64, 1) << @intCast(32 - rotation)) - 1) << @intCast(rotation));
+                    try self.lookup_trace.recordVirtualROTRIW(
+                        @intCast(self.state.cycle),
+                        base_pc,
+                        synth_word,
+                        rs1_val,
+                        bitmask,
+                        true, // is_virtual
+                        do_not_update_pc,
+                        is_first,
+                        is_last and self.is_compressed,
+                    );
+                },
+                .VirtualZeroExtendWord => {
+                    try self.lookup_trace.recordVirtualZeroExtendWord(
+                        @intCast(self.state.cycle),
+                        base_pc,
+                        synth_word,
+                        rs1_val,
+                        true, // is_virtual
+                        do_not_update_pc,
+                        is_first,
+                        is_last and self.is_compressed,
+                    );
+                },
+                .VirtualMULI => {
+                    // imm_val for VirtualMULI is the multiplier (1 << shamt)
+                    const muli_shamt: u6 = @intCast(instr.imm & 0x3F);
+                    const muli_multiplier: u64 = @as(u64, 1) << muli_shamt;
+                    try self.lookup_trace.recordVirtualMULI(
+                        @intCast(self.state.cycle),
+                        base_pc,
+                        synth_word,
+                        rs1_val,
+                        muli_multiplier,
+                        true, // is_virtual
+                        do_not_update_pc,
+                        is_first,
+                        is_last and self.is_compressed,
+                    );
+                },
+                .VirtualSRLI => {
+                    const srli_bitmask = instr.imm;
+                    try self.lookup_trace.recordVirtualSRLI(
+                        @intCast(self.state.cycle),
+                        base_pc,
+                        synth_word,
+                        rs1_val,
+                        srli_bitmask,
+                        rd_val, // result
+                        true, // is_virtual
+                        do_not_update_pc,
+                        is_first,
+                        is_last and self.is_compressed,
+                    );
+                },
+                .VirtualSignExtendWord => {
+                    try self.lookup_trace.recordVirtualSignExtendWord(
+                        @intCast(self.state.cycle),
+                        base_pc,
+                        synth_word,
+                        rs1_val,
+                        rd_val, // sign_extended_result
+                    );
+                },
+                .LD, .SD => {
+                    // Load/store instructions don't use lookup tables
+                },
+            }
+
+            // Determine memory access for trace step
+            var memory_addr: ?u64 = null;
+            var memory_value: ?u64 = null;
+            var memory_pre_value: ?u64 = null;
+            var is_memory_write: bool = false;
+            if (instr.kind == .LD) {
+                memory_addr = @bitCast(@as(i64, @bitCast(rs1_val)) +% @as(i64, @bitCast(instr.imm)));
+                memory_value = rd_val;
+            } else if (instr.kind == .SD) {
+                memory_addr = @bitCast(@as(i64, @bitCast(rs1_val)) +% @as(i64, @bitCast(instr.imm)));
+                memory_value = rs2_val;
+                // Use the pre-store value captured BEFORE writeWordWithIO;
+                // reading ram.memory here would return the post-value.
+                memory_pre_value = inline_sd_pre_value;
+                is_memory_write = true;
+            }
+
+            // For inline-emitted I-type instructions, the immediate may not fit in
+            // the standard 12-bit (or 5-bit shamt) RISC-V encoding. The synth_word
+            // truncates to whatever the encoding supports, but `instr.imm` holds the
+            // full u64. Mark the trace step so downstream consumers (Stage 5
+            // lookup-index reconstruction, R1CS witness immediate, bytecode entry)
+            // use the full immediate instead of decoding the truncated word.
+            const has_full_imm_field: bool = switch (instr.kind) {
+                .ADDI, .XORI, .ANDI => true,
+                else => false,
+            };
+
+            // Emit trace step
+            try self.trace.steps.append(self.allocator, .{
+                .cycle = self.state.cycle,
+                .pc = base_pc, // raw PC (same as other step functions)
+                .unexpanded_pc = base_pc,
+                .instruction = synth_word,
+                .rs1_value = rs1_val,
+                .rs2_value = if (instr.kind == .SD) rs2_val else if (instr.kind == .ANDN or instr.kind == .AND or instr.kind == .XOR or instr.kind == .OR or instr.kind == .ADD) rs2_val else 0,
+                .rd_pre_value = rd_pre_value,
+                .rd_value = if (is_store) 0 else rd_val,
+                .rd_index = instr.rd,
+                .rs1_index = instr.rs1,
+                .rs2_index = instr.rs2,
+                // Jolt includes rd=0 writes in the RdWa polynomial (cpu.x[0] is captured
+                // pre and post with both = 0). So rd_written must be TRUE for any instruction
+                // with an rd field, even when rd=0. Only stores (rd=None) are excluded.
+                .rd_written = !is_store,
+                .rs1_read = true,
+                .rs2_read = (instr.kind == .ANDN or instr.kind == .AND or instr.kind == .XOR or instr.kind == .OR or instr.kind == .ADD or instr.kind == .SD),
+                .memory_addr = memory_addr,
+                .memory_pre_value = memory_pre_value,
+                .memory_value = memory_value,
+                .is_memory_write = is_memory_write,
+                .next_pc = if (is_last) base_pc + pc_increment else base_pc,
+                .is_compressed = if (is_last) self.is_compressed else false,
+                .virtual_sequence_remaining = vsr,
+                .is_first_in_sequence = is_first,
+                .is_last_in_sequence = is_last,
+                .inline_full_imm = if (has_full_imm_field) instr.imm else 0,
+                .has_full_imm = has_full_imm_field,
+            });
+
+            self.state.cycle += 1;
+            self.registers.tick();
+        }
+
+        // Advance PC
+        self.prev_pc = self.state.pc;
+        self.state.pc = base_pc + pc_increment;
+
         return true;
     }
 
@@ -4853,7 +5588,7 @@ pub const Emulator = struct {
                 const v1_val = try self.registers.read(v1);
                 const v2_val = try self.registers.read(v2);
                 const sd_instr = buildSDInstr(v1, v2);
-                try self.ram.write(aligned_addr, v2_val, self.state.cycle);
+                try self.writeWordWithIO(aligned_addr, v2_val);
                 const sd_decoded = zkvm.instruction.DecodedInstruction.decode(sd_instr);
                 try self.lookup_trace.recordInstruction(
                     @intCast(self.state.cycle),
@@ -5308,7 +6043,7 @@ pub const Emulator = struct {
                 const v1_val = try self.registers.read(v1);
                 const v2_val = try self.registers.read(v2);
                 const sd_instr = buildSDInstr(v1, v2);
-                try self.ram.write(aligned_addr, v2_val, self.state.cycle);
+                try self.writeWordWithIO(aligned_addr, v2_val);
                 const sd_decoded = zkvm.instruction.DecodedInstruction.decode(sd_instr);
                 try self.lookup_trace.recordInstruction(
                     @intCast(self.state.cycle),
@@ -5353,6 +6088,566 @@ pub const Emulator = struct {
         self.state.pc = self.state.pc + pc_increment;
         self.state.cycle += 1;
         self.registers.tick();
+        return true;
+    }
+
+    /// Build a synthetic OR instruction word: OR rd, rs1, rs2
+    /// opcode=0x33, funct7=0, funct3=6
+    fn buildORInstr(rd: u8, rs1: u8, rs2: u8) u32 {
+        return (0x00 << 25) | // funct7 = 0
+            (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (0x06 << 12) | // funct3 = 6 (OR)
+            (@as(u32, rd & 0x1F) << 7) |
+            0x33; // opcode = OP
+    }
+
+    /// Build a synthetic JALR instruction word: JALR rd, rs1, 0
+    /// opcode=0x67, funct3=0, imm=0
+    fn buildJALRInstr(rd: u8, rs1: u8) u32 {
+        return (0 << 20) | // imm = 0
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (0 << 12) | // funct3 = 0
+            (@as(u32, rd & 0x1F) << 7) |
+            0x67; // opcode = JALR
+    }
+
+    /// CSR address to virtual register mapping (imported from preprocessing)
+    fn csrToVirtualReg(csr_addr: u12) u8 {
+        const bytecode_preproc = @import("../zkvm/bytecode_preprocessing.zig");
+        return bytecode_preproc.csrToVirtualReg(csr_addr);
+    }
+
+    /// Execute CSRRW as a virtual sequence of ADDI instructions.
+    /// CSRRW rd, csr, rs1:
+    ///   If rd==0: ADDI virtual_reg, rs1, 0 (1 step)
+    ///   If rd==rs1: ADDI temp, rs1, 0; ADDI rd, virtual_reg, 0; ADDI virtual_reg, temp, 0 (3 steps)
+    ///   Else: ADDI rd, virtual_reg, 0; ADDI virtual_reg, rs1, 0 (2 steps)
+    fn stepCSRRW(
+        self: *Emulator,
+        instruction: u32,
+        decoded: zkvm.instruction.DecodedInstruction,
+    ) !bool {
+        _ = instruction;
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+        const csr_addr: u12 = @truncate((@as(u32, @bitCast(decoded.imm)) >> 0) & 0xFFF);
+        const virtual_reg = csrToVirtualReg(csr_addr);
+        const temp_reg: u8 = 40;
+        const rd = decoded.rd;
+        const rs1 = decoded.rs1;
+
+        // Read source values
+        const rs1_value = try self.registers.read(rs1);
+        const vr_value = try self.registers.read(virtual_reg);
+
+        if (rd == 0) {
+            // csrw pseudo: 1 step - ADDI virtual_reg, rs1, 0
+            const rd_pre = try self.registers.read(virtual_reg);
+            try self.registers.write(virtual_reg, rs1_value);
+            const synth_instr = buildADDIInstr(virtual_reg, rs1, 0);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = synth_instr,
+                .rs1_value = rs1_value,
+                .rs2_value = 0,
+                .rd_pre_value = rd_pre,
+                .rd_value = rs1_value,
+                .rd_index = virtual_reg,
+                .rs1_index = rs1,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = self.is_compressed,
+                .virtual_sequence_remaining = 0,
+                .is_first_in_sequence = true,
+                .is_last_in_sequence = true,
+            });
+            self.prev_pc = self.state.pc;
+            self.state.pc += pc_increment;
+            self.state.cycle += 1;
+            self.registers.tick();
+        } else if (rd == rs1) {
+            // rd == rs1: 3 steps with temp
+            // Step 1: ADDI temp, rs1, 0
+            const temp_pre = try self.registers.read(temp_reg);
+            try self.registers.write(temp_reg, rs1_value);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildADDIInstr(temp_reg, rs1, 0),
+                .rs1_value = rs1_value,
+                .rs2_value = 0,
+                .rd_pre_value = temp_pre,
+                .rd_value = rs1_value,
+                .rd_index = temp_reg,
+                .rs1_index = rs1,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = false,
+                .virtual_sequence_remaining = 2,
+                .is_first_in_sequence = true,
+            });
+            self.state.cycle += 1;
+            self.registers.tick();
+
+            // Step 2: ADDI rd, virtual_reg, 0
+            const rd_pre = try self.registers.read(rd);
+            try self.registers.write(rd, vr_value);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildADDIInstr(rd, virtual_reg, 0),
+                .rs1_value = vr_value,
+                .rs2_value = 0,
+                .rd_pre_value = rd_pre,
+                .rd_value = vr_value,
+                .rd_index = rd,
+                .rs1_index = virtual_reg,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = false,
+                .virtual_sequence_remaining = 1,
+                .is_first_in_sequence = false,
+            });
+            self.state.cycle += 1;
+            self.registers.tick();
+
+            // Step 3: ADDI virtual_reg, temp, 0
+            const temp_val = try self.registers.read(temp_reg);
+            const vr_pre = try self.registers.read(virtual_reg);
+            try self.registers.write(virtual_reg, temp_val);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildADDIInstr(virtual_reg, temp_reg, 0),
+                .rs1_value = temp_val,
+                .rs2_value = 0,
+                .rd_pre_value = vr_pre,
+                .rd_value = temp_val,
+                .rd_index = virtual_reg,
+                .rs1_index = temp_reg,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = self.is_compressed,
+                .virtual_sequence_remaining = 0,
+                .is_first_in_sequence = false,
+                .is_last_in_sequence = true,
+            });
+            self.prev_pc = self.state.pc;
+            self.state.pc += pc_increment;
+            self.state.cycle += 1;
+            self.registers.tick();
+        } else {
+            // rd != rs1, rd != 0: 2 steps
+            // Step 1: ADDI rd, virtual_reg, 0
+            const rd_pre = try self.registers.read(rd);
+            try self.registers.write(rd, vr_value);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildADDIInstr(rd, virtual_reg, 0),
+                .rs1_value = vr_value,
+                .rs2_value = 0,
+                .rd_pre_value = rd_pre,
+                .rd_value = vr_value,
+                .rd_index = rd,
+                .rs1_index = virtual_reg,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = false,
+                .virtual_sequence_remaining = 1,
+                .is_first_in_sequence = true,
+            });
+            self.state.cycle += 1;
+            self.registers.tick();
+
+            // Step 2: ADDI virtual_reg, rs1, 0
+            const vr_pre = try self.registers.read(virtual_reg);
+            try self.registers.write(virtual_reg, rs1_value);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildADDIInstr(virtual_reg, rs1, 0),
+                .rs1_value = rs1_value,
+                .rs2_value = 0,
+                .rd_pre_value = vr_pre,
+                .rd_value = rs1_value,
+                .rd_index = virtual_reg,
+                .rs1_index = rs1,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = self.is_compressed,
+                .virtual_sequence_remaining = 0,
+                .is_first_in_sequence = false,
+                .is_last_in_sequence = true,
+            });
+            self.prev_pc = self.state.pc;
+            self.state.pc += pc_increment;
+            self.state.cycle += 1;
+            self.registers.tick();
+        }
+
+        return true;
+    }
+
+    /// Execute CSRRS as a virtual sequence of ADDI/OR instructions.
+    /// CSRRS rd, csr, rs1:
+    ///   If rs1==0: ADDI rd, virtual_reg, 0 (1 step)
+    ///   If rd==0: OR virtual_reg, virtual_reg, rs1 (1 step)
+    ///   If rd==rs1: ADDI temp, rs1, 0; ADDI rd, virtual_reg, 0; OR virtual_reg, virtual_reg, temp (3 steps)
+    ///   Else: ADDI rd, virtual_reg, 0; OR virtual_reg, virtual_reg, rs1 (2 steps)
+    fn stepCSRRS(
+        self: *Emulator,
+        instruction: u32,
+        decoded: zkvm.instruction.DecodedInstruction,
+    ) !bool {
+        _ = instruction;
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+        const csr_addr: u12 = @truncate((@as(u32, @bitCast(decoded.imm)) >> 0) & 0xFFF);
+        const virtual_reg = csrToVirtualReg(csr_addr);
+        const temp_reg: u8 = 40;
+        const rd = decoded.rd;
+        const rs1 = decoded.rs1;
+
+        const rs1_value = try self.registers.read(rs1);
+        const vr_value = try self.registers.read(virtual_reg);
+
+        if (rs1 == 0) {
+            // csrr pseudo: 1 step - ADDI rd, virtual_reg, 0
+            const rd_pre = try self.registers.read(rd);
+            const result_val = vr_value;
+            if (rd != 0) try self.registers.write(rd, result_val);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildADDIInstr(rd, virtual_reg, 0),
+                .rs1_value = vr_value,
+                .rs2_value = 0,
+                .rd_pre_value = rd_pre,
+                .rd_value = if (rd == 0) 0 else result_val,
+                .rd_index = rd,
+                .rs1_index = virtual_reg,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = self.is_compressed,
+                .virtual_sequence_remaining = 0,
+                .is_first_in_sequence = true,
+                .is_last_in_sequence = true,
+            });
+            self.prev_pc = self.state.pc;
+            self.state.pc += pc_increment;
+            self.state.cycle += 1;
+            self.registers.tick();
+        } else if (rd == 0) {
+            // csrs pseudo: 1 step - OR virtual_reg, virtual_reg, rs1
+            const vr_pre = vr_value;
+            const result_val = vr_value | rs1_value;
+            try self.registers.write(virtual_reg, result_val);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildORInstr(virtual_reg, virtual_reg, rs1),
+                .rs1_value = vr_value,
+                .rs2_value = rs1_value,
+                .rd_pre_value = vr_pre,
+                .rd_value = result_val,
+                .rd_index = virtual_reg,
+                .rs1_index = virtual_reg,
+                .rs2_index = rs1,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = true,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = self.is_compressed,
+                .virtual_sequence_remaining = 0,
+                .is_first_in_sequence = true,
+                .is_last_in_sequence = true,
+            });
+            self.prev_pc = self.state.pc;
+            self.state.pc += pc_increment;
+            self.state.cycle += 1;
+            self.registers.tick();
+        } else if (rd == rs1) {
+            // rd == rs1: 3 steps with temp
+            // Step 1: ADDI temp, rs1, 0
+            const temp_pre = try self.registers.read(temp_reg);
+            try self.registers.write(temp_reg, rs1_value);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildADDIInstr(temp_reg, rs1, 0),
+                .rs1_value = rs1_value,
+                .rs2_value = 0,
+                .rd_pre_value = temp_pre,
+                .rd_value = rs1_value,
+                .rd_index = temp_reg,
+                .rs1_index = rs1,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = false,
+                .virtual_sequence_remaining = 2,
+                .is_first_in_sequence = true,
+            });
+            self.state.cycle += 1;
+            self.registers.tick();
+
+            // Step 2: ADDI rd, virtual_reg, 0
+            const rd_pre = try self.registers.read(rd);
+            try self.registers.write(rd, vr_value);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildADDIInstr(rd, virtual_reg, 0),
+                .rs1_value = vr_value,
+                .rs2_value = 0,
+                .rd_pre_value = rd_pre,
+                .rd_value = vr_value,
+                .rd_index = rd,
+                .rs1_index = virtual_reg,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = false,
+                .virtual_sequence_remaining = 1,
+                .is_first_in_sequence = false,
+            });
+            self.state.cycle += 1;
+            self.registers.tick();
+
+            // Step 3: OR virtual_reg, virtual_reg, temp
+            const temp_val = try self.registers.read(temp_reg);
+            const vr_pre = try self.registers.read(virtual_reg);
+            const or_result = vr_pre | temp_val;
+            try self.registers.write(virtual_reg, or_result);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildORInstr(virtual_reg, virtual_reg, temp_reg),
+                .rs1_value = vr_pre,
+                .rs2_value = temp_val,
+                .rd_pre_value = vr_pre,
+                .rd_value = or_result,
+                .rd_index = virtual_reg,
+                .rs1_index = virtual_reg,
+                .rs2_index = temp_reg,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = true,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = self.is_compressed,
+                .virtual_sequence_remaining = 0,
+                .is_first_in_sequence = false,
+                .is_last_in_sequence = true,
+            });
+            self.prev_pc = self.state.pc;
+            self.state.pc += pc_increment;
+            self.state.cycle += 1;
+            self.registers.tick();
+        } else {
+            // rd != rs1, both nonzero: 2 steps
+            // Step 1: ADDI rd, virtual_reg, 0
+            const rd_pre = try self.registers.read(rd);
+            try self.registers.write(rd, vr_value);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildADDIInstr(rd, virtual_reg, 0),
+                .rs1_value = vr_value,
+                .rs2_value = 0,
+                .rd_pre_value = rd_pre,
+                .rd_value = vr_value,
+                .rd_index = rd,
+                .rs1_index = virtual_reg,
+                .rs2_index = 0,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = false,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = false,
+                .virtual_sequence_remaining = 1,
+                .is_first_in_sequence = true,
+            });
+            self.state.cycle += 1;
+            self.registers.tick();
+
+            // Step 2: OR virtual_reg, virtual_reg, rs1
+            const vr_pre = try self.registers.read(virtual_reg);
+            const or_result = vr_pre | rs1_value;
+            try self.registers.write(virtual_reg, or_result);
+            try self.trace.addStep(.{
+                .cycle = self.state.cycle,
+                .pc = self.state.pc,
+                .unexpanded_pc = self.state.pc,
+                .instruction = buildORInstr(virtual_reg, virtual_reg, rs1),
+                .rs1_value = vr_pre,
+                .rs2_value = rs1_value,
+                .rd_pre_value = vr_pre,
+                .rd_value = or_result,
+                .rd_index = virtual_reg,
+                .rs1_index = virtual_reg,
+                .rs2_index = rs1,
+                .rd_written = true,
+                .rs1_read = true,
+                .rs2_read = true,
+                .memory_addr = null,
+                .memory_pre_value = null,
+                .memory_value = null,
+                .is_memory_write = false,
+                .next_pc = self.state.pc + pc_increment,
+                .is_compressed = self.is_compressed,
+                .virtual_sequence_remaining = 0,
+                .is_first_in_sequence = false,
+                .is_last_in_sequence = true,
+            });
+            self.prev_pc = self.state.pc;
+            self.state.pc += pc_increment;
+            self.state.cycle += 1;
+            self.registers.tick();
+        }
+
+        return true;
+    }
+
+    /// Execute MRET as JALR v40, mepc(vr36), 0
+    /// Jumps to the address stored in mepc virtual register.
+    fn stepMRET(
+        self: *Emulator,
+        instruction: u32,
+        decoded: zkvm.instruction.DecodedInstruction,
+    ) !bool {
+        _ = instruction;
+        _ = decoded;
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+        const mepc_reg: u8 = 36;
+        const temp_reg: u8 = 40; // v40 for return address (like JAL/JALR with rd=0)
+
+        const mepc_value = try self.registers.read(mepc_reg);
+        const temp_pre = try self.registers.read(temp_reg);
+
+        // JALR semantics: rd = PC + 4, PC = (rs1 + imm) & ~1
+        const link_addr = self.state.pc + pc_increment;
+        const target = mepc_value & ~@as(u64, 1);
+
+        try self.registers.write(temp_reg, link_addr);
+
+        const synth_instr = buildJALRInstr(temp_reg, mepc_reg);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = synth_instr,
+            .rs1_value = mepc_value,
+            .rs2_value = 0,
+            .rd_pre_value = temp_pre,
+            .rd_value = link_addr,
+            .rd_index = temp_reg,
+            .rs1_index = mepc_reg,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = target,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 0,
+            .is_first_in_sequence = true,
+            .is_last_in_sequence = true,
+        });
+
+        self.prev_pc = self.state.pc;
+        self.state.pc = target;
+        self.state.cycle += 1;
+        self.registers.tick();
+
         return true;
     }
 

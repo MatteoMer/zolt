@@ -496,6 +496,34 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
         // Jolt's to_lookup_index() returns rs1 directly (like SignExtendWord)
         return @as(u128, step.rs1_value);
     }
+    if (opcode == 0x7B) {
+        // VirtualRev8W (internal synthetic opcode): AddOperands → rs1 directly.
+        // Jolt's `RISCVCycle<VirtualRev8W>::to_lookup_index()` returns
+        // `self.register_state.rs1.into()` (jolt-core/src/zkvm/instruction/virtual_rev8w.rs:46).
+        // Without this case, the default path below falls through to interleaved(0, 0) = 0
+        // because 0x7B is not in left_is_rs1's opcode list, which makes the committed
+        // InstructionRa polynomials inconsistent with Stage 5's opening claims.
+        return @as(u128, step.rs1_value);
+    }
+    if (opcode == 0x6B) {
+        // VirtualROTRI/VirtualROTRIW: interleaved(rs1_value, bitmask)
+        const funct3_6b: u3 = @truncate((instr >> 12) & 0x7);
+        const rot_raw: u32 = instr >> 20;
+        if (funct3_6b == 0) {
+            // VirtualROTRI: 64-bit rotation
+            const rotation: u7 = @truncate(rot_raw & 0x3F);
+            const bitmask: u64 = if (rotation == 0) 0xFFFFFFFF_FFFFFFFF else blk: {
+                const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, rotation))) - 1;
+                break :blk @truncate(ones << @intCast(rotation));
+            };
+            return interleaveBits(step.rs1_value, bitmask);
+        } else {
+            // VirtualROTRIW: 32-bit rotation
+            const rotation_w: u6 = @truncate(rot_raw & 0x1F);
+            const bitmask_w: u64 = if (rotation_w == 0) 0xFFFFFFFF else ((@as(u64, 1) << @intCast(32 - @as(u8, rotation_w))) - 1) << @intCast(rotation_w);
+            return interleaveBits(step.rs1_value, bitmask_w);
+        }
+    }
     if (opcode == 0x62) {
         // VirtualAssertValidUnsignedRemainder: interleaved(rs1_value, rs2_value)
         // LeftOperandIsRs1Value, RightOperandIsRs2Value → interleave
@@ -526,7 +554,16 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
 
     var right_input: u64 = 0;
     if (right_is_rs2) right_input = step.rs2_value;
-    if (right_is_imm) right_input = decodeImmediateU64(instr);
+    if (right_is_imm) {
+        // Inline-emitted I-type instructions (e.g. SHA-256 ADDI with K[i] folded
+        // constants) carry the wide immediate on the trace step. The encoded
+        // 12-bit field has been truncated, so we must use the override.
+        if (step.has_full_imm) {
+            right_input = step.inline_full_imm;
+        } else {
+            right_input = decodeImmediateU64(instr);
+        }
+    }
 
     // Now compute the lookup index based on the instruction's operand mode
     switch (opcode) {

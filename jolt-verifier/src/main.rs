@@ -46,8 +46,6 @@ fn main() {
 
     let pp_consumed = pp_cursor.position() as usize;
     eprintln!("Preprocessing loaded ({} bytes consumed out of {})", pp_consumed, preprocessing_bytes.len());
-    eprintln!("  entry_address: 0x{:x}", preprocessing.shared.bytecode.entry_address);
-    eprintln!("  entry_bytecode_index: {}", preprocessing.shared.bytecode.entry_bytecode_index());
     eprintln!("  code_size: {}", preprocessing.shared.bytecode.code_size);
 
     // Load proof
@@ -68,10 +66,22 @@ fn main() {
         proof.commitments.len()
     );
 
-    // Create minimal program I/O
-    let program_io = common::jolt_device::JoltDevice {
-        memory_layout: preprocessing.shared.memory_layout.clone(),
-        ..Default::default()
+    // Try to load a program I/O sidecar `<proof>.io` written by zolt's prover.
+    // Falls back to an empty JoltDevice (with the layout from preprocessing) if
+    // the sidecar is missing — preserves backward compatibility for proofs that
+    // don't write any non-trivial outputs.
+    let io_path = format!("{}.io", cli.proof);
+    let program_io = if let Ok(io_bytes) = fs::read(&io_path) {
+        eprintln!("Loading program I/O sidecar from {} ({} bytes)", io_path, io_bytes.len());
+        let mut io_cursor = Cursor::new(&io_bytes);
+        common::jolt_device::JoltDevice::deserialize_compressed(&mut io_cursor)
+            .unwrap_or_else(|e| fatal(&format!("deserialize program_io: {e}")))
+    } else {
+        eprintln!("No I/O sidecar at {}; assuming empty inputs/outputs", io_path);
+        common::jolt_device::JoltDevice {
+            memory_layout: preprocessing.shared.memory_layout.clone(),
+            ..Default::default()
+        }
     };
 
     // Verify

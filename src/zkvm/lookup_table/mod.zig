@@ -283,6 +283,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             /// This can be expressed as:
             /// sum_{j=0}^{XLEN-1} (1-r_x[j]) * r_y[j] * prod_{k=0}^{j-1} eq(r_x[k], r_y[k])
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
 
                 var result = F.zero();
@@ -340,6 +341,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             /// - If x positive, y negative: x_sign=0, y_sign=1, so contribution = -1
             /// - If same sign: x_sign - y_sign = 0, use unsigned comparison
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
 
                 const one = F.one();
@@ -449,6 +451,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             /// Simpler: x <= y = NOT(x > y) = NOT(y < x)
             /// We need to swap operands to compute y < x
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
 
                 // Compute y < x by swapping operands
@@ -1197,6 +1200,49 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// Input: shift amount (0..XLEN-1). Uses AddOperands (rs1+0=rs1).
         /// output = ((1 << (XLEN - shift)) - 1) << shift
         /// For shift=0: all 1s. For shift=63: only MSB.
+        /// VirtualRev8W: byte-swap each 32-bit half of a 64-bit register.
+        /// Computes: rev8w(rs1) where bytes [b7 b6 b5 b4 | b3 b2 b1 b0] become
+        /// [b4 b5 b6 b7 | b0 b1 b2 b3]. Single-operand identity-style table.
+        /// Reference: jolt-core/src/zkvm/lookup_table/virtual_rev8w.rs
+        pub const VirtualRev8W = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                const v: u64 = @truncate(index);
+                const lo: u32 = @byteSwap(@as(u32, @truncate(v)));
+                const hi: u32 = @byteSwap(@as(u32, @truncate(v >> 32)));
+                return @as(u64, lo) | (@as(u64, hi) << 32);
+            }
+
+            /// Evaluate the MLE at point r (length 2*XLEN).
+            /// Mirrors Jolt's evaluation: iterate r in reverse, group into 8-bit
+            /// chunks (with bit at position i contributing 2^i), then reassemble
+            /// as [d, c, b, a, h, g, f, e] (byte-swap per 32-bit half).
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                // Group r (read in reverse, i.e. from index r.len()-1 down to 0)
+                // into 8 bytes a..h (LSB to MSB of input).
+                var bytes: [8]F = undefined;
+                inline for (0..8) |byte_idx| {
+                    var byte_val = F.zero();
+                    inline for (0..8) |i| {
+                        const r_idx = r.len - 1 - byte_idx * 8 - i;
+                        const coeff = F.fromU64(@as(u64, 1) << @intCast(i));
+                        byte_val = byte_val.add(r[r_idx].mul(coeff));
+                    }
+                    bytes[byte_idx] = byte_val;
+                }
+                // Reassemble: input [a, b, c, d, e, f, g, h] → output [d, c, b, a, h, g, f, e]
+                const reassembled = [_]F{
+                    bytes[3], bytes[2], bytes[1], bytes[0], bytes[7], bytes[6], bytes[5], bytes[4],
+                };
+                var result = F.zero();
+                inline for (reassembled, 0..) |b, i| {
+                    const coeff = F.fromU64(@as(u64, 1) << @intCast(i * 8));
+                    result = result.add(b.mul(coeff));
+                }
+                return result;
+            }
+        };
+
         pub const ShiftRightBitmask = struct {
             pub fn materializeEntry(index: u128) u64 {
                 const shift: u7 = @truncate(index & (XLEN - 1));
@@ -1206,37 +1252,62 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
 
             pub fn evaluateMLE(r: []const F) F {
-                // Single-operand table: iterate over all XLEN possible shift amounts
-                // For XLEN=64 this is only 64 entries (the shift amount is only log2(XLEN) bits)
-                std.debug.assert(r.len >= XLEN);
-                // The input is the shift amount, which only uses log2(XLEN) bits.
-                // But the table is indexed by the full XLEN-bit operand.
-                // We need to sum over all 2^XLEN entries, but only the lower log2(XLEN) bits matter.
-                // For bits >= log2(XLEN), they don't affect the result. The result is the same
-                // regardless of those higher bits since we mask with (XLEN-1).
-                // So MLE = (product of (1-r[i]) for i >= log2(XLEN)) * sum_over_shift_amounts
-                const log_xlen = if (XLEN == 64) 6 else 5;
-                // Factor out high bits: they must all be 0 for a valid shift amount
-                var high_factor = F.one();
-                for (log_xlen..XLEN) |i| {
-                    high_factor = high_factor.mul(F.one().sub(r[i]));
+                @setEvalBranchQuota(200_000);
+                // ShiftRightBitmask is a single-operand identity-path table. Jolt's
+                // evaluate_mle expects r.len == 2 * XLEN and uses only the LAST log2(XLEN)
+                // elements (the low bits of the address encoding), interpreting them as
+                // the shift amount modulo XLEN.
+                if (r.len != 2 * XLEN) {
+                    // Legacy single-operand path (r.len == XLEN): brute-force lookup for
+                    // small XLEN used by some tests.
+                    std.debug.assert(r.len >= XLEN);
+                    const log_xlen_legacy = if (XLEN == 64) 6 else 5;
+                    var high_factor = F.one();
+                    for (log_xlen_legacy..XLEN) |i| {
+                        high_factor = high_factor.mul(F.one().sub(r[i]));
+                    }
+                    var sum = F.zero();
+                    for (0..XLEN) |shift| {
+                        const val = materializeEntry(@intCast(shift));
+                        var basis = F.one();
+                        for (0..log_xlen_legacy) |b| {
+                            const bit: u1 = @truncate(shift >> @truncate(b));
+                            if (bit == 1) {
+                                basis = basis.mul(r[b]);
+                            } else {
+                                basis = basis.mul(F.one().sub(r[b]));
+                            }
+                        }
+                        sum = sum.add(F.fromU64(val).mul(basis));
+                    }
+                    return high_factor.mul(sum);
                 }
-                // Sum over valid shift amounts (0..XLEN-1)
-                var sum = F.zero();
-                for (0..XLEN) |shift| {
-                    const val = materializeEntry(@intCast(shift));
-                    var basis = F.one();
-                    for (0..log_xlen) |b| {
-                        const bit: u1 = @truncate(shift >> @truncate(b));
-                        if (bit == 1) {
-                            basis = basis.mul(r[b]);
-                        } else {
-                            basis = basis.mul(F.one().sub(r[b]));
+
+                // 2*XLEN path — matches Jolt exactly. For XLEN=64, log_w = 6 and
+                // only r[r.len()-6..] is used. r[r.len()-1] is the LSB of shift, and
+                // r[r.len()-log_w] is the MSB of shift (BIG_ENDIAN across shift bits).
+                const log_w: usize = if (XLEN == 64) 6 else std.math.log2_int(usize, XLEN);
+                const r_tail = r[r.len - log_w ..];
+                var sum_bitmask = F.zero();
+                inline for (0..XLEN) |s| {
+                    // bitmask = ((1 << (XLEN - s)) - 1) << s
+                    const ones: u128 = (@as(u128, 1) << @intCast(XLEN - s)) - 1;
+                    const bitmask_u64: u64 = @truncate(ones << @intCast(s));
+                    var eq_val = F.one();
+                    inline for (0..6) |i| {
+                        if (i < log_w) {
+                            const bit = (s >> i) & 1;
+                            const idx = log_w - i - 1;
+                            if (bit == 0) {
+                                eq_val = eq_val.mul(F.one().sub(r_tail[idx]));
+                            } else {
+                                eq_val = eq_val.mul(r_tail[idx]);
+                            }
                         }
                     }
-                    sum = sum.add(F.fromU64(val).mul(basis));
+                    sum_bitmask = sum_bitmask.add(F.fromU64(bitmask_u64).mul(eq_val));
                 }
-                return high_factor.mul(sum);
+                return sum_bitmask;
             }
         };
 
@@ -1262,24 +1333,24 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 return entry;
             }
 
-            /// MLE follows the same interleave convention as VirtualSRL.
-            /// r[2*i] corresponds to even bit positions (first arg in interleaveBits),
-            /// r[2*i+1] corresponds to odd bit positions (second arg in interleaveBits).
-            /// The sign bit is the MSB of the value operand.
+            /// MLE follows Jolt's convention: r[0] is the sign bit (MSB of value), and
+            /// r[2*i]/r[2*i+1] for i in 0..XLEN index value/bitmask bit pairs.
+            /// Reference: jolt-core/src/zkvm/lookup_table/virtual_sra.rs evaluate_mle.
             pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
                 std.debug.assert(r.len == 2 * XLEN);
-                // Follow VirtualSRL's convention: r[2*i] and r[2*i+1] map to the
-                // interleaved bit positions. The formula is the same recurrence but
-                // with sign_bit * (1 - y_i) added.
-                // Sign bit (MSB of value) is at the same relative position as VirtualSRL's MSB
-                const sign_bit = r[2 * (XLEN - 1)];
                 var result = F.zero();
+                var sign_extension = F.zero();
                 inline for (0..XLEN) |i| {
-                    const x_i = r[2 * i]; // same convention as VirtualSRL
-                    const y_i = r[2 * i + 1]; // same convention as VirtualSRL
-                    result = result.mul(F.one().add(y_i)).add(x_i.mul(y_i)).add(sign_bit.mul(F.one().sub(y_i)));
+                    const x_i = r[2 * i];
+                    const y_i = r[2 * i + 1];
+                    result = result.mul(F.one().add(y_i)).add(x_i.mul(y_i));
+                    if (i != 0) {
+                        const coeff = F.fromU64(@as(u64, 1) << @intCast(i));
+                        sign_extension = sign_extension.add(coeff.mul(F.one().sub(y_i)));
+                    }
                 }
-                return result;
+                return result.add(r[0].mul(sign_extension));
             }
         };
 
@@ -1326,6 +1397,99 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
         };
 
+        /// VirtualROTR: rotate-right using bitmask encoding
+        /// The index interleaves value bits (x) and bitmask bits (y).
+        /// result = first_sum + second_sum where:
+        ///   first_sum: accumulates x*y terms (right-shifted portion)
+        ///   second_sum: accumulates x*(1-y) terms with positional weights (left-shifted portion)
+        /// Reference: jolt-core/src/zkvm/lookup_table/virtual_rotr.rs
+        pub const VirtualROTR = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                var x: u64 = 0;
+                var y: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    x |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
+                    y |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
+                }
+                var prod_one_plus_y: u128 = 1;
+                var first_sum: u64 = 0;
+                var second_sum: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    const bit_pos = XLEN - 1 - i;
+                    const x_i: u64 = (x >> bit_pos) & 1;
+                    const y_i: u64 = (y >> bit_pos) & 1;
+                    first_sum = first_sum *% (1 + y_i) +% (x_i *% y_i);
+                    second_sum +%= @as(u64, @truncate(x_i *% ((1 -% y_i) *% @as(u64, @truncate(prod_one_plus_y))) *% (@as(u64, 1) << @intCast(bit_pos))));
+                    prod_one_plus_y *%= 1 + @as(u128, y_i);
+                }
+                return first_sum +% second_sum;
+            }
+
+            pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
+                std.debug.assert(r.len == 2 * XLEN);
+                var prod_one_plus_y = F.one();
+                var first_sum = F.zero();
+                var second_sum = F.zero();
+                inline for (0..XLEN) |i| {
+                    const r_x = r[2 * i];
+                    const r_y = r[2 * i + 1];
+                    // first_sum = first_sum * (1 + r_y) + r_x * r_y
+                    first_sum = first_sum.mul(F.one().add(r_y)).add(r_x.mul(r_y));
+                    // second_sum += r_x * (1 - r_y) * prod_one_plus_y * 2^(XLEN-1-i)
+                    second_sum = second_sum.add(r_x.mul(F.one().sub(r_y)).mul(prod_one_plus_y).mul(F.fromU64(@as(u64, 1) << @intCast(XLEN - 1 - i))));
+                    // prod_one_plus_y *= (1 + r_y)
+                    prod_one_plus_y = prod_one_plus_y.mul(F.one().add(r_y));
+                }
+                return first_sum.add(second_sum);
+            }
+        };
+
+        /// VirtualROTRW: rotate-right-word (32-bit) using bitmask encoding
+        /// Same algorithm as VirtualROTR but only processes the lower XLEN/2 bits.
+        /// Reference: jolt-core/src/zkvm/lookup_table/virtual_rotrw.rs
+        pub const VirtualROTRW = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                var x: u64 = 0;
+                var y: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    x |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
+                    y |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
+                }
+                var prod_one_plus_y: u64 = 1;
+                var first_sum: u64 = 0;
+                var second_sum: u64 = 0;
+                // Only process bits XLEN-1 down to XLEN/2 (i.e., the lower 32 bits of the value)
+                inline for (0..XLEN / 2) |i| {
+                    const bit_pos = XLEN - 1 - (XLEN / 2) - i;
+                    const x_i: u64 = (x >> bit_pos) & 1;
+                    const y_i: u64 = (y >> bit_pos) & 1;
+                    first_sum = first_sum *% (1 + y_i) +% (x_i *% y_i);
+                    second_sum +%= x_i *% (1 -% y_i) *% prod_one_plus_y *% (@as(u64, 1) << @intCast(bit_pos));
+                    prod_one_plus_y *%= 1 + y_i;
+                }
+                return first_sum +% second_sum;
+            }
+
+            pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
+                std.debug.assert(r.len == 2 * XLEN);
+                var prod_one_plus_y = F.one();
+                var first_sum = F.zero();
+                var second_sum = F.zero();
+                // Skip the first XLEN/2 pairs (upper bits), process only lower 32-bit pairs
+                const half = XLEN / 2;
+                inline for (half..XLEN) |i| {
+                    const r_x = r[2 * i];
+                    const r_y = r[2 * i + 1];
+                    first_sum = first_sum.mul(F.one().add(r_y)).add(r_x.mul(r_y));
+                    second_sum = second_sum.add(r_x.mul(F.one().sub(r_y)).mul(prod_one_plus_y).mul(F.fromU64(@as(u64, 1) << @intCast(XLEN - 1 - i))));
+                    prod_one_plus_y = prod_one_plus_y.mul(F.one().add(r_y));
+                }
+                return first_sum.add(second_sum);
+            }
+        };
+
         /// Number of lookup tables in Jolt
         pub const NUM_TABLES: usize = 42;
 
@@ -1335,6 +1499,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// 6: Equal, 7: SignedGreaterThanEqual, 8: UnsignedGreaterThanEqual, 9: NotEqual,
         /// 10: SignedLessThan, 11: UnsignedLessThan, 12: Movsign, ...
         pub fn evaluateTableMLE(table_index: usize, r: []const F) F {
+            @setEvalBranchQuota(2_000_000);
             return switch (table_index) {
                 0 => RangeCheck.evaluateMLE(r),
                 1 => blk_rca: {
@@ -1361,7 +1526,17 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 10 => SignedLessThan.evaluateMLE(r),
                 11 => UnsignedLessThan.evaluateMLE(r),
                 12 => Movsign.evaluateMLE(r),
-                13 => @panic("UpperWord MLE not implemented"),
+                13 => blk_upper: {
+                    // UpperWord MLE: upper XLEN bits of the 2*XLEN-bit interleaved index
+                    // evaluate_mle = Σ_{i=0..XLEN-1} r[i] * 2^(XLEN-1-i)
+                    @setEvalBranchQuota(200_000);
+                    var uw_result = F.zero();
+                    inline for (0..XLEN) |i| {
+                        const coeff = F.fromU64(@as(u64, 1) << @intCast(XLEN - 1 - i));
+                        uw_result = uw_result.add(coeff.mul(r[i]));
+                    }
+                    break :blk_upper uw_result;
+                },
                 14 => UnsignedLessThanEqual.evaluateMLE(r),
                 // 15 was ValidSignedRemainder (removed in PR #1355)
                 15 => ValidUnsignedRemainder.evaluateMLE(r),
@@ -1370,14 +1545,30 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 18 => WordAlignment.evaluateMLE(r),
                 19 => LowerHalfWord.evaluateMLE(r),
                 20 => SignExtendHalfWord.evaluateMLE(r),
-                21 => Pow2.evaluateMLE(r),
+                21 => blk_pow2_dispatch: {
+                    // Pow2 MLE matching Jolt's evaluate_mle for r.len() == 2*XLEN.
+                    // result = ∏_{i=0..log2(XLEN)} (1 + (2^(2^i) - 1) * r[r.len()-1-i])
+                    @setEvalBranchQuota(200_000);
+                    if (r.len == XLEN) break :blk_pow2_dispatch Pow2.evaluateMLE(r);
+                    std.debug.assert(r.len == 2 * XLEN);
+                    var pow2_res = F.one();
+                    const log2_xlen: usize = std.math.log2_int(usize, XLEN);
+                    inline for (0..6) |i| { // log2(64) = 6
+                        if (i < log2_xlen) {
+                            const coeff = F.fromU64((@as(u64, 1) << @intCast(@as(u64, 1) << @intCast(i))) - 1);
+                            const idx = r.len - 1 - i;
+                            pow2_res = pow2_res.mul(F.one().add(coeff.mul(r[idx])));
+                        }
+                    }
+                    break :blk_pow2_dispatch pow2_res;
+                },
                 22 => @panic("Pow2W MLE not implemented"),
                 23 => ShiftRightBitmask.evaluateMLE(r),
-                24 => @panic("VirtualRev8W MLE not implemented"),
+                24 => VirtualRev8W.evaluateMLE(r),
                 25 => VirtualSRL.evaluateMLE(r),
                 26 => VirtualSRA.evaluateMLE(r),
-                27 => @panic("VirtualROTR MLE not implemented"),
-                28 => @panic("VirtualROTRW MLE not implemented"),
+                27 => VirtualROTR.evaluateMLE(r),
+                28 => VirtualROTRW.evaluateMLE(r),
                 29 => @panic("VirtualChangeDivisor MLE not implemented"),
                 30 => @panic("VirtualChangeDivisorW MLE not implemented"),
                 31 => @panic("MulUNoOverflow MLE not implemented"),
@@ -1397,100 +1588,81 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// Returns the u64 table output for the given lookup index.
         /// Used for diagnostics: verifying that combined_vals lookup_output matches the table.
         pub fn materializeTableEntry(table_index: usize, index: u128) u64 {
-            // Uninterleave for interleaved-path tables
-            const even_bits = blk: {
+            // Uninterleave for interleaved-path tables.
+            // Convention (matches Jolt's uninterleave_bits):
+            //   x (LEFT operand) = bits at ODD positions 1,3,5,...
+            //   y (RIGHT operand) = bits at EVEN positions 0,2,4,...
+            const x_left_bits = blk: {
                 var x: u64 = 0;
                 inline for (0..XLEN) |i| {
-                    x |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
+                    x |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
                 }
                 break :blk x;
             };
-            const odd_bits = blk: {
+            const y_right_bits = blk: {
                 var y: u64 = 0;
                 inline for (0..XLEN) |i| {
-                    y |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
+                    y |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
                 }
                 break :blk y;
             };
+            // Table indices below MUST match `getLookupTableIndex` (in bytecode_entries.zig)
+            // and `evaluateTableMLE` above. A mismatch with cycle_table_indices causes
+            // silent wrong-table evaluation in any diagnostic that uses this function.
             return switch (table_index) {
-                // Convention: interleaveBits128(x, y) puts x at odd positions, y at even
-                // So: odd_bits = x = first arg (typically rs1/left)
-                //     even_bits = y = second arg (typically rs2/right)
-                // uninterleave: x=odd_bits, y=even_bits
                 0 => @truncate(index), // RangeCheck: identity, lower 64 bits
                 1 => @truncate(index & ~@as(u128, 1)), // RangeCheckAligned: lower 64 bits with LSB cleared
-                2 => odd_bits & even_bits, // And: x & y
-                3 => (~odd_bits) & even_bits, // Andn: ~x & y
-                4 => odd_bits | even_bits, // Or: x | y
-                5 => odd_bits ^ even_bits, // Xor: x ^ y
-                6 => @intFromBool(odd_bits == even_bits), // Equal: x == y
-                7 => @intFromBool(@as(i64, @bitCast(odd_bits)) >= @as(i64, @bitCast(even_bits))), // SignedGreaterThanEqual: (signed)x >= (signed)y
-                8 => @intFromBool(odd_bits >= even_bits), // UnsignedGreaterThanEqual: x >= y
-                9 => @intFromBool(odd_bits != even_bits), // NotEqual: x != y
-                10 => @intFromBool(@as(i64, @bitCast(odd_bits)) < @as(i64, @bitCast(even_bits))), // SignedLessThan: (signed)x < (signed)y
-                11 => @intFromBool(odd_bits < even_bits), // UnsignedLessThan: x < y
-                12 => blk12: { // Movsign: sign(y) ? ~x : x
-                    const y_signed: i64 = @bitCast(even_bits);
-                    break :blk12 if (y_signed < 0) ~odd_bits else odd_bits;
+                2 => x_left_bits & y_right_bits, // And
+                3 => x_left_bits & ~y_right_bits, // Andn: x & ~y
+                4 => x_left_bits | y_right_bits, // Or
+                5 => x_left_bits ^ y_right_bits, // Xor
+                6 => @intFromBool(x_left_bits == y_right_bits), // Equal
+                7 => @intFromBool(@as(i64, @bitCast(x_left_bits)) >= @as(i64, @bitCast(y_right_bits))), // SignedGreaterThanEqual
+                8 => @intFromBool(x_left_bits >= y_right_bits), // UnsignedGreaterThanEqual
+                9 => @intFromBool(x_left_bits != y_right_bits), // NotEqual
+                10 => @intFromBool(@as(i64, @bitCast(x_left_bits)) < @as(i64, @bitCast(y_right_bits))), // SignedLessThan
+                11 => @intFromBool(x_left_bits < y_right_bits), // UnsignedLessThan
+                12 => blk12: { // Movsign: if sign(x) then 2^XLEN - 1 else 0 — per Jolt
+                    const x_signed: i64 = @bitCast(x_left_bits);
+                    break :blk12 if (x_signed < 0) 0xFFFF_FFFF_FFFF_FFFF else 0;
                 },
-                13 => blk13: { // UpperWord: upper 32 bits of 128-bit value
-                    // For identity-path (MUL/MULHU), index is the raw u128 product
-                    // Upper word = bits [127:64] of the full value
-                    break :blk13 @truncate(index >> 64);
+                13 => @truncate(index >> 64), // UpperWord: upper 64 bits of the 128-bit identity index
+                14 => @intFromBool(x_left_bits <= y_right_bits), // UnsignedLessThanEqual
+                15 => ValidUnsignedRemainder.materializeEntry(index), // interleaved(remainder, divisor)
+                16 => blk_div0: { // ValidDiv0
+                    const dividend_u32: u32 = @truncate(x_left_bits);
+                    const divisor_u32: u32 = @truncate(y_right_bits);
+                    const dividend_i32: i32 = @bitCast(dividend_u32);
+                    const divisor_i32: i32 = @bitCast(divisor_u32);
+                    break :blk_div0 if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1) 0 else 1;
                 },
-                16 => ValidUnsignedRemainder.materializeEntry(index), // interleaved(remainder, divisor)
-                20 => LowerHalfWord.materializeEntry(index), // identity: lower 32 bits
-                21 => blk21: {
-                    // SignExtendHalfWord: identity path, sign-extend lower 32 bits to 64 bits
+                17 => HalfwordAlignment.materializeEntry(index), // identity
+                18 => WordAlignment.materializeEntry(index), // identity
+                19 => LowerHalfWord.materializeEntry(index), // identity: lower 32 bits
+                20 => blk_seh: { // SignExtendHalfWord: identity, sign-extend lower 32 bits
                     const val: u64 = @truncate(index);
                     const lower32: u32 = @truncate(val);
                     const sign_extended: i64 = @as(i64, @as(i32, @bitCast(lower32)));
-                    break :blk21 @bitCast(sign_extended);
+                    break :blk_seh @bitCast(sign_extended);
                 },
-                17 => blk17: {
-                    // ValidDiv0: interleaved(dividend, divisor)
-                    // For XLEN=64: truncate to 32-bit signed values
-                    // Returns 1 if dividend != INT32_MIN or divisor != -1 (i.e., no overflow)
-                    // Also returns 1 if divisor == 0 (div-by-zero handled separately)
-                    const dividend_u32: u32 = @truncate(odd_bits); // x = dividend
-                    const divisor_u32: u32 = @truncate(even_bits); // y = divisor
-                    const dividend_i32: i32 = @bitCast(dividend_u32);
-                    const divisor_i32: i32 = @bitCast(divisor_u32);
-                    break :blk17 if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1) 0 else 1;
-                },
-                18 => HalfwordAlignment.materializeEntry(index), // identity path
-                19 => WordAlignment.materializeEntry(index), // identity path
-                22 => Pow2.materializeEntry(index), // identity path
-                24 => ShiftRightBitmask.materializeEntry(index), // identity path
-                26 => VirtualSRL.materializeEntry(index), // interleaved
-                27 => blk27: {
-                    // VirtualSRA: interleaved(value, bitmask)
-                    // Jolt convention: x=odd_bits=value, y=even_bits=bitmask
-                    // SRA output: value AND bitmask, OR sign_extension
-                    // The bitmask selects the shifted bits, sign_extension fills upper bits
-                    // But for materializeEntry, we compute directly:
-                    // value & bitmask | (~bitmask & sign_extend)
-                    // where sign_extend = (value >> 63) ? 0xFFFFFFFFFFFFFFFF : 0
-                    // Actually, VirtualSRA MLE returns: x & y (like AND), but with sign extension
-                    // From Jolt's VirtualSRATable materialize_entry:
-                    // let (value, bitmask) = uninterleave_bits(index);
-                    // let sign_bit = (value >> (XLEN-1)) & 1;
-                    // if sign_bit == 1 { (value & bitmask) | !bitmask } else { value & bitmask }
-                    const value = odd_bits; // x
-                    const bitmask = even_bits; // y
+                21 => Pow2.materializeEntry(index), // identity
+                23 => ShiftRightBitmask.materializeEntry(index), // identity
+                24 => VirtualRev8W.materializeEntry(index), // identity (byte-swap 32-bit halves)
+                25 => VirtualSRL.materializeEntry(index), // interleaved
+                26 => blk_sra: { // VirtualSRA: x & y | (sign(x) ? ~y : 0)
+                    const value = x_left_bits;
+                    const bitmask = y_right_bits;
                     const sign_bit = (value >> (XLEN - 1)) & 1;
-                    break :blk27 if (sign_bit == 1) (value & bitmask) | ~bitmask else value & bitmask;
+                    break :blk_sra if (sign_bit == 1) (value & bitmask) | ~bitmask else value & bitmask;
                 },
-                31 => blk31: {
-                    // VirtualChangeDivisorW: interleaved(dividend, divisor)
-                    // For XLEN=64: truncate to 32-bit signed values
-                    // If dividend == INT32_MIN and divisor == -1: return 1
-                    // Otherwise: return divisor sign-extended to 64 bits
-                    const dividend_u32: u32 = @truncate(odd_bits); // x = dividend
-                    const divisor_u32: u32 = @truncate(even_bits); // y = divisor
+                27 => VirtualROTR.materializeEntry(index), // interleaved
+                28 => VirtualROTRW.materializeEntry(index), // interleaved
+                30 => blk_cdw: { // VirtualChangeDivisorW
+                    const dividend_u32: u32 = @truncate(x_left_bits);
+                    const divisor_u32: u32 = @truncate(y_right_bits);
                     const dividend_i32: i32 = @bitCast(dividend_u32);
                     const divisor_i32: i32 = @bitCast(divisor_u32);
-                    break :blk31 if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1)
+                    break :blk_cdw if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1)
                         1
                     else
                         @bitCast(@as(i64, divisor_i32));

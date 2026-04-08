@@ -201,6 +201,22 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 dbg("  ram_ra_input = {any}\n", .{ram_ra_input.toBytesBE()[0..8]});
                 dbg("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
             }
+            // Gated diagnostic: dump the three lookup component claims so
+            // stage5_lookups.zig's brute-force check can isolate which one is wrong.
+            if (std.posix.getenv("ZOLT_S5_BRUTE") != null) {
+                const print = std.debug.print;
+                print("[S5_BRUTE COMPONENTS] rv_claim       = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{rv_claim.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE COMPONENTS] left_op_claim  = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{left_op_claim.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE COMPONENTS] right_op_claim = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{right_op_claim.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE COMPONENTS] gamma_raf      = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{gamma_raf.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE COMPONENTS] lookups_input  = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{lookups_input.toBytesBE()[31 - bi]});
+                print("\n", .{});
+            }
             if (comptime debug_verbose) {
                 const print = std.debug.print;
                 print("[S5 CLAIM DETAIL] rv_claim = {any}\n", .{rv_claim.toBytesBE()});
@@ -497,6 +513,21 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(gamma_raf.mul(left_op_claim))
                 .add(gamma_raf2.mul(right_op_claim));
 
+            if (std.posix.getenv("ZOLT_S5_BRUTE") != null) {
+                const print = std.debug.print;
+                print("[S5_BRUTE COMPONENTS] rv_claim       = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{rv_claim.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE COMPONENTS] left_op_claim  = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{left_op_claim.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE COMPONENTS] right_op_claim = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{right_op_claim.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE COMPONENTS] gamma_raf      = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{gamma_raf.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE COMPONENTS] lookups_input  = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{lookups_input.toBytesBE()[31 - bi]});
+                print("\n", .{});
+            }
+
             if (comptime debug_verbose) {
                 dbg("[STAGE5] Input claims (with trace):\n", .{});
                 dbg("  regs_val_input = {any}\n", .{regs_val_input.toBytesBE()});
@@ -586,14 +617,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Σ_j eq(j, r_reduction) * combined(lookup_index(j), j)
             var lookups_eq_evals = try self.allocator.alloc(F, T);
             var lookups_combined_vals = try self.allocator.alloc(F, T);
-            const lookups_ra_weights = try self.allocator.alloc(F, T); // Per-cycle total ra weight (product of chunks)
             const lookups_indices_lo = try self.allocator.alloc(u64, T); // Lower 64 bits of lookup index
             const lookups_indices_hi = try self.allocator.alloc(u64, T); // Upper 64 bits of lookup index
             // NOTE: No defers for these arrays -- ownership transfers to LookupsReadRafProver below.
-            // lookups_ra_weights is debug-only and also transferred.
             @memset(lookups_eq_evals, F.zero());
             @memset(lookups_combined_vals, F.zero());
-            @memset(lookups_ra_weights, F.one()); // Start with weight 1
             @memset(lookups_indices_lo, 0);
             @memset(lookups_indices_hi, 0);
 
@@ -609,6 +637,95 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // r_reduction is in BIG_ENDIAN order (MSB first)
             // Use O(2^n) doubling technique instead of O(n * 2^n) per-element computation
             Inst.buildFullEqTable(r_reduction, lookups_eq_evals[0..T], self.thread_pool);
+
+            // DIAGNOSTIC (ZOLT_S5_BRUTE): compute `Σ_j eq(j, r_reduction) * step.rd_value`
+            // as a reference rv_claim computed directly from the trace. If this disagrees
+            // with the `rv_claim` that Stage 4 / InstructionLookupsProver handed us
+            // (`opening_claims[LookupOutput @ InstructionClaimReduction]`), then Stage 4's
+            // reduction is wrong. If they agree, the bug is elsewhere (e.g., the brute-
+            // force in stage5_lookups.zig using materializeTableEntry diverges from
+            // step.rd_value for some cycle, pointing at a table MLE bug).
+            //
+            // We have to compute `lookup_output` the same way stage5_instances.zig does
+            // because rd_value is NOT used directly for all opcodes (branches, asserts,
+            // JAL/JALR have their own formulas).
+            if (std.posix.getenv("ZOLT_S5_BRUTE") != null) {
+                const print = std.debug.print;
+                // Print r_reduction for cross-check
+                print("[S5_BRUTE] r_reduction (n={}): ", .{r_reduction.len});
+                for (r_reduction, 0..) |rr, ri| {
+                    if (ri > 0) print(",", .{});
+                    for (0..32) |bi_rr| print("{x:0>2}", .{rr.toBytesBE()[31 - bi_rr]});
+                }
+                print("\n", .{});
+
+                // Also build a REVERSED eq table to test whether r_reduction endianness is swapped.
+                const rev_r = self.allocator.alloc(F, r_reduction.len) catch unreachable;
+                defer self.allocator.free(rev_r);
+                for (0..r_reduction.len) |i_rev| rev_r[i_rev] = r_reduction[r_reduction.len - 1 - i_rev];
+                const rev_eq = self.allocator.alloc(F, T) catch unreachable;
+                defer self.allocator.free(rev_eq);
+                Inst.buildFullEqTable(rev_r, rev_eq[0..T], self.thread_pool);
+
+                const trace_len_bf = trace.steps.items.len;
+                var bf_rv_from_trace = F.zero();
+                var bf_rv_rev_eq = F.zero();
+                for (0..trace_len_bf) |j_bf| {
+                    const step_bf = trace.steps.items[j_bf];
+                    const instr_bf = step_bf.instruction;
+                    const opcode_bf = instr_bf & 0x7f;
+                    const funct3_bf: u3 = @truncate((instr_bf >> 12) & 0x7);
+                    _ = funct3_bf;
+                    var lo_bf: F = F.zero();
+                    if (step_bf.is_noop and !step_bf.is_termination_store) {
+                        lo_bf = F.zero();
+                    } else switch (opcode_bf) {
+                        0x6f => { // JAL
+                            const imm_j: i64 = blk: {
+                                const imm20: u32 = ((@as(u32, instr_bf >> 31) & 1) << 19) |
+                                    ((@as(u32, instr_bf >> 12) & 0xFF) << 11) |
+                                    ((@as(u32, instr_bf >> 20) & 1) << 10) |
+                                    ((@as(u32, instr_bf >> 21) & 0x3FF));
+                                break :blk @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                            };
+                            lo_bf = F.fromU64(@bitCast(@as(i64, @intCast(step_bf.unexpanded_pc)) +% imm_j));
+                        },
+                        0x67 => { // JALR
+                            const imm12: u32 = @truncate(instr_bf >> 20);
+                            const imm_j: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
+                            const tgt = @as(u64, @bitCast(@as(i64, @intCast(step_bf.rs1_value)) +% imm_j)) & ~@as(u64, 1);
+                            lo_bf = F.fromU64(tgt);
+                        },
+                        0x63 => { // Branch
+                            const rs1b = step_bf.rs1_value;
+                            const rs2b = step_bf.rs2_value;
+                            const f3b: u3 = @truncate((instr_bf >> 12) & 0x7);
+                            const taken: bool = switch (f3b) {
+                                0x0 => rs1b == rs2b,
+                                0x1 => rs1b != rs2b,
+                                0x4 => @as(i64, @bitCast(rs1b)) < @as(i64, @bitCast(rs2b)),
+                                0x5 => @as(i64, @bitCast(rs1b)) >= @as(i64, @bitCast(rs2b)),
+                                0x6 => rs1b < rs2b,
+                                0x7 => rs1b >= rs2b,
+                                else => false,
+                            };
+                            lo_bf = F.fromU64(@intFromBool(taken));
+                        },
+                        0x22, 0x62 => lo_bf = F.one(),
+                        else => lo_bf = F.fromU64(step_bf.rd_value),
+                    }
+                    bf_rv_from_trace = bf_rv_from_trace.add(lookups_eq_evals[j_bf].mul(lo_bf));
+                    bf_rv_rev_eq = bf_rv_rev_eq.add(rev_eq[j_bf].mul(lo_bf));
+                }
+                print("[S5_BRUTE COMPONENTS] bf_rv_from_trace = ", .{});
+                for (0..32) |bi_p| print("{x:0>2}", .{bf_rv_from_trace.toBytesBE()[31 - bi_p]});
+                print("\n[S5_BRUTE COMPONENTS] bf_rv_rev_eq     = ", .{});
+                for (0..32) |bi_p| print("{x:0>2}", .{bf_rv_rev_eq.toBytesBE()[31 - bi_p]});
+                print("\n[S5_BRUTE COMPONENTS] prover_rv_claim  = ", .{});
+                for (0..32) |bi_p| print("{x:0>2}", .{rv_claim.toBytesBE()[31 - bi_p]});
+                print("\n[S5_BRUTE COMPONENTS] rv_match         = {}\n", .{bf_rv_from_trace.eql(rv_claim)});
+                print("[S5_BRUTE COMPONENTS] rv_rev_match     = {}\n", .{bf_rv_rev_eq.eql(rv_claim)});
+            }
 
             if (comptime bench_timing) {
                 std.debug.print("    [STAGE5-INIT] EqTable + allocs:  {d:8.1} ms\n", .{@as(f64, @floatFromInt(init_sub_timer.read())) / 1_000_000.0});
@@ -1071,7 +1188,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // First compute left_input and right_input (same as R1CS)
                         const left_is_rs1: bool = switch (opcode) {
-                            0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                            0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x6B => true,
+                            0x5B => (funct3 == 0 or funct3 == 5), // VirtualSRLI/VirtualSRAI only; VirtualHostIO: false
                             0x22 => true, // VirtualAssertEQ: left = rs1
                             0x42 => true, // VirtualZeroExtendWord: left = rs1
                             0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1
@@ -1085,13 +1203,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             0x33, 0x63, 0x3b => true,
                             0x22 => (funct3 == 0 or funct3 == 1), // VirtualAssertEQ/ValidDiv0: rs2; alignment: imm
                             0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
-                            0x5B => step.rs2_read, // R-type VirtualSRL/SRA: rs2
+                            0x5B => (funct3 == 0 or funct3 == 5) and step.rs2_read, // VirtualSRL/SRA R-type only; VirtualHostIO: false
                             else => false,
                         };
                         const right_is_imm: bool = switch (opcode) {
-                            0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                            0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x6B => true,
                             0x22 => (funct3 == 2 or funct3 == 3), // alignment assertions: imm
-                            0x5B => !step.rs2_read, // I-type: imm; R-type: not imm
+                            0x5B => (funct3 == 0 or funct3 == 5) and !step.rs2_read, // I-type VirtualSRLI/VirtualSRAI only; VirtualHostIO: false
                             else => false,
                         };
 
@@ -1113,7 +1231,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             } else {
                                 break :blk F.zero(); // VirtualPow2/VirtualShiftRightBitmask: IMM = 0
                             }
-                        } else if (opcode == 0x5B) blk: {
+                        } else if (opcode == 0x5B and (funct3 == 0 or funct3 == 5)) blk: {
+                            // VirtualSRLI/VirtualSRAI/VirtualSRL/VirtualSRA only (not VirtualHostIO)
                             if (step.rs2_read) {
                                 break :blk F.zero(); // R-type: no immediate
                             } else {
@@ -1122,6 +1241,21 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const ones4: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift4))) - 1;
                                 const bitmask4: u64 = @truncate(ones4 << total_shift4);
                                 break :blk F.fromU64(bitmask4);
+                            }
+                        } else if (opcode == 0x6B) blk_6b: {
+                            // VirtualROTRI/VirtualROTRIW: IMM = bitmask from rotation
+                            const rot_raw_6b: u32 = instr >> 20;
+                            if (funct3 == 0) {
+                                const rot_6b: u7 = @truncate(rot_raw_6b & 0x3F);
+                                const bitmask_6b: u64 = if (rot_6b == 0) 0xFFFFFFFF_FFFFFFFF else blk2_6b: {
+                                    const ones_6b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, rot_6b))) - 1;
+                                    break :blk2_6b @truncate(ones_6b << @intCast(rot_6b));
+                                };
+                                break :blk_6b F.fromU64(bitmask_6b);
+                            } else {
+                                const rot_6b_w: u6 = @truncate(rot_raw_6b & 0x1F);
+                                const bitmask_6b_w: u64 = if (rot_6b_w == 0) 0xFFFFFFFF else ((@as(u64, 1) << @intCast(32 - @as(u8, rot_6b_w))) - 1) << @intCast(rot_6b_w);
+                                break :blk_6b F.fromU64(bitmask_6b_w);
                             }
                         } else if (opcode == 0x22 and (funct3 == 2 or funct3 == 3)) blk_assert: {
                             // Signed encoding for alignment assertions
@@ -1414,7 +1548,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const funct7_v: u7 = @truncate(instr_v >> 25);
                     // Recompute left_op, right_op, output using same logic as above
                     const left_is_rs1_v: bool = switch (opcode_v) {
-                        0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                        0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x6B => true,
+                        0x5B => (funct3_v == 0 or funct3_v == 5), // VirtualSRLI/VirtualSRAI only; VirtualHostIO: false
                         0x22 => true, // VirtualAssertEQ: left = rs1
                         0x42 => true, // VirtualZeroExtendWord: left = rs1
                         0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1
@@ -1428,13 +1563,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         0x33, 0x63, 0x3b => true,
                         0x22 => (funct3_v == 0 or funct3_v == 1), // VirtualAssertEQ/ValidDiv0: rs2; alignment: imm
                         0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
-                        0x5B => step_v.rs2_read, // VirtualSRL/SRA R-type: rs2
+                        0x5B => (funct3_v == 0 or funct3_v == 5) and step_v.rs2_read, // VirtualSRL/SRA R-type only; VirtualHostIO: false
                         else => false,
                     };
                     const right_is_imm_v: bool = switch (opcode_v) {
-                        0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                        0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x6B => true,
                         0x22 => (funct3_v == 2 or funct3_v == 3), // alignment assertions: imm
-                        0x5B => !step_v.rs2_read, // I-type: imm; R-type: not imm
+                        0x5B => (funct3_v == 0 or funct3_v == 5) and !step_v.rs2_read, // I-type VirtualSRLI/VirtualSRAI only; VirtualHostIO: false
                         else => false,
                     };
                     const imm_v = if (opcode_v == 0x2B) blk: {
@@ -1445,7 +1580,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         } else {
                             break :blk F.zero(); // VirtualPow2/VirtualShiftRightBitmask: IMM = 0
                         }
-                    } else if (opcode_v == 0x5B) blk5bv: {
+                    } else if (opcode_v == 0x5B and (funct3_v == 0 or funct3_v == 5)) blk5bv: {
+                        // VirtualSRLI/VirtualSRAI/VirtualSRL/VirtualSRA only (not VirtualHostIO)
                         if (step_v.rs2_read) {
                             break :blk5bv F.zero(); // R-type: no immediate
                         } else {
@@ -1453,6 +1589,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const ts_v: u7 = @truncate(ts_rv & 0x3F);
                             const ones_v: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts_v))) - 1;
                             break :blk5bv F.fromU64(@truncate(ones_v << ts_v));
+                        }
+                    } else if (opcode_v == 0x6B) blk_6bv: {
+                        const rot_raw_6bv: u32 = instr_v >> 20;
+                        if (funct3_v == 0) {
+                            const rot_6bv: u7 = @truncate(rot_raw_6bv & 0x3F);
+                            const bitmask_6bv: u64 = if (rot_6bv == 0) 0xFFFFFFFF_FFFFFFFF else blk2_6bv: {
+                                const ones_6bv: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, rot_6bv))) - 1;
+                                break :blk2_6bv @truncate(ones_6bv << @intCast(rot_6bv));
+                            };
+                            break :blk_6bv F.fromU64(bitmask_6bv);
+                        } else {
+                            const rot_6bv_w: u6 = @truncate(rot_raw_6bv & 0x1F);
+                            const bitmask_6bv_w: u64 = if (rot_6bv_w == 0) 0xFFFFFFFF else ((@as(u64, 1) << @intCast(32 - @as(u8, rot_6bv_w))) - 1) << @intCast(rot_6bv_w);
+                            break :blk_6bv F.fromU64(bitmask_6bv_w);
                         }
                     } else if (opcode_v == 0x22 and (funct3_v == 2 or funct3_v == 3)) blk_assert2: {
                         const aim2_raw: u32 = @truncate(instr_v >> 20);
@@ -1613,6 +1763,128 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             if (comptime bench_timing) {
                 std.debug.print("    [STAGE5-INIT] combined+indices:  {d:8.1} ms\n", .{@as(f64, @floatFromInt(init_sub_timer.read())) / 1_000_000.0});
                 init_sub_timer.reset();
+            }
+
+            // Per-cycle diagnostic: compare materializeTableEntry(t_idx, lookup_idx) against
+            // computeLookupOutputInt(step) and rd_value. If they ever disagree we have found
+            // a bug in either materializeTableEntry, the table assignment, or the lookup
+            // index reconstruction.
+            if (std.posix.getenv("ZOLT_S5_BRUTE") != null) {
+                const print = std.debug.print;
+                const TableMod_local = @import("../lookup_table/mod.zig").LookupTable(F, 64);
+                var mismatches: usize = 0;
+                var first_mismatch_j: usize = std.math.maxInt(usize);
+                var first_mismatch_t: i8 = -1;
+                var first_mismatch_op: u32 = 0;
+                var first_mismatch_idx: u128 = 0;
+                var first_mismatch_mat: u64 = 0;
+                var first_mismatch_act: u64 = 0;
+                var first_mismatch_rs1: u64 = 0;
+                var first_mismatch_rs2: u64 = 0;
+                var first_mismatch_rd: u64 = 0;
+                var first_mismatch_vsr: u16 = 0;
+                var first_mismatch_pc: u64 = 0;
+                for (0..trace_len) |j_dbg| {
+                    const step_dbg = trace.steps.items[j_dbg];
+                    if (step_dbg.is_noop and !step_dbg.is_termination_store) continue;
+                    const t_dbg = cycle_table_indices[j_dbg];
+                    if (t_dbg < 0) continue;
+                    const idx_dbg = lookup_indices_u128[j_dbg];
+                    const mat_val: u64 = TableMod_local.materializeTableEntry(@intCast(t_dbg), idx_dbg);
+                    // Reproduce computeLookupOutputInt logic for this opcode
+                    const opc: u8 = @truncate(step_dbg.instruction & 0x7f);
+                    const f3: u3 = @truncate((step_dbg.instruction >> 12) & 0x7);
+                    const actual: u64 = switch (opc) {
+                        0x6f => blk_jal: { // JAL: pc + imm
+                            const imm20: u32 = ((@as(u32, step_dbg.instruction >> 31) & 1) << 19) |
+                                ((@as(u32, step_dbg.instruction >> 12) & 0xFF) << 11) |
+                                ((@as(u32, step_dbg.instruction >> 20) & 1) << 10) |
+                                ((@as(u32, step_dbg.instruction >> 21) & 0x3FF));
+                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                            break :blk_jal @bitCast(@as(i64, @intCast(step_dbg.unexpanded_pc)) +% imm_signed);
+                        },
+                        0x67 => blk_jalr: {
+                            const imm12: u32 = step_dbg.instruction >> 20;
+                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
+                            break :blk_jalr @as(u64, @bitCast(@as(i64, @intCast(step_dbg.rs1_value)) +% imm_signed)) & ~@as(u64, 1);
+                        },
+                        0x63 => blk_branch: {
+                            const taken: bool = switch (f3) {
+                                0x0 => step_dbg.rs1_value == step_dbg.rs2_value,
+                                0x1 => step_dbg.rs1_value != step_dbg.rs2_value,
+                                0x4 => @as(i64, @bitCast(step_dbg.rs1_value)) < @as(i64, @bitCast(step_dbg.rs2_value)),
+                                0x5 => @as(i64, @bitCast(step_dbg.rs1_value)) >= @as(i64, @bitCast(step_dbg.rs2_value)),
+                                0x6 => step_dbg.rs1_value < step_dbg.rs2_value,
+                                0x7 => step_dbg.rs1_value >= step_dbg.rs2_value,
+                                else => false,
+                            };
+                            break :blk_branch if (taken) 1 else 0;
+                        },
+                        0x22, 0x62 => 1,
+                        else => step_dbg.rd_value,
+                    };
+                    if (mat_val != actual) {
+                        mismatches += 1;
+                        if (first_mismatch_j == std.math.maxInt(usize)) {
+                            first_mismatch_j = j_dbg;
+                            first_mismatch_t = t_dbg;
+                            first_mismatch_op = step_dbg.instruction;
+                            first_mismatch_idx = idx_dbg;
+                            first_mismatch_mat = mat_val;
+                            first_mismatch_act = actual;
+                            first_mismatch_rs1 = step_dbg.rs1_value;
+                            first_mismatch_rs2 = step_dbg.rs2_value;
+                            first_mismatch_rd = step_dbg.rd_value;
+                            first_mismatch_vsr = step_dbg.virtual_sequence_remaining;
+                            first_mismatch_pc = step_dbg.unexpanded_pc;
+                        }
+                    }
+                }
+                print("[S5_BRUTE PERCYCLE] mismatches = {d} / {d}\n", .{ mismatches, trace_len });
+                if (mismatches > 0) {
+                    print("[S5_BRUTE PERCYCLE] first mismatch: j={d} t_idx={d} instr=0x{x:0>8} opcode=0x{x:0>2} pc=0x{x} vsr={d}\n", .{
+                        first_mismatch_j, first_mismatch_t, first_mismatch_op, first_mismatch_op & 0x7f, first_mismatch_pc, first_mismatch_vsr,
+                    });
+                    print("[S5_BRUTE PERCYCLE]   rs1=0x{x} rs2=0x{x} rd_value=0x{x}\n", .{
+                        first_mismatch_rs1, first_mismatch_rs2, first_mismatch_rd,
+                    });
+                    print("[S5_BRUTE PERCYCLE]   lookup_idx_lo = 0x{x:0>16} lookup_idx_hi = 0x{x:0>16}\n", .{
+                        @as(u64, @truncate(first_mismatch_idx)),
+                        @as(u64, @truncate(first_mismatch_idx >> 64)),
+                    });
+                    print("[S5_BRUTE PERCYCLE]   materializeTableEntry = 0x{x:0>16}\n", .{first_mismatch_mat});
+                    print("[S5_BRUTE PERCYCLE]   actual rd/computed    = 0x{x:0>16}\n", .{first_mismatch_act});
+
+                    // Dump up to 5 more mismatches with rd_value comparison
+                    var more_count: usize = 0;
+                    for (0..trace_len) |j_dbg2| {
+                        if (more_count >= 5) break;
+                        const step_dbg2 = trace.steps.items[j_dbg2];
+                        if (step_dbg2.is_noop and !step_dbg2.is_termination_store) continue;
+                        const t_dbg2 = cycle_table_indices[j_dbg2];
+                        if (t_dbg2 < 0) continue;
+                        if (j_dbg2 <= first_mismatch_j) continue;
+                        const idx_dbg2 = lookup_indices_u128[j_dbg2];
+                        const mat_val2: u64 = TableMod_local.materializeTableEntry(@intCast(t_dbg2), idx_dbg2);
+                        const opc2: u8 = @truncate(step_dbg2.instruction & 0x7f);
+                        const f3_2: u3 = @truncate((step_dbg2.instruction >> 12) & 0x7);
+                        const actual2: u64 = switch (opc2) {
+                            0x6f => 0, // skip details, jal
+                            0x67 => 0, // jalr
+                            0x63 => 0, // branch
+                            0x22, 0x62 => 1,
+                            else => step_dbg2.rd_value,
+                        };
+                        _ = f3_2;
+                        if (mat_val2 != actual2) {
+                            more_count += 1;
+                            print("[S5_BRUTE PERCYCLE+] j={d} t={d} op=0x{x:0>2} instr=0x{x:0>8} rs1=0x{x} rd=0x{x} idx_lo=0x{x:0>16} mat=0x{x:0>16}\n", .{
+                                j_dbg2, t_dbg2, opc2, step_dbg2.instruction, step_dbg2.rs1_value, step_dbg2.rd_value,
+                                @as(u64, @truncate(idx_dbg2)), mat_val2,
+                            });
+                        }
+                    }
+                }
             }
 
             var lookups_prover = try LookupsReadRafProver(F).init(

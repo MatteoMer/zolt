@@ -93,6 +93,19 @@ pub const JoltInstruction = struct {
         // System
         ECALL,
         FENCE,
+        // CSR instructions (decomposed into virtual sequences of ADDI/OR/JALR)
+        CSRRW,
+        CSRRS,
+        MRET,
+        // Jolt SDK instructions (opcode 0x5B) — names must match Jolt's Instruction enum
+        VirtualRev8W, // 0x5B funct3=0 (byte-swap each 32-bit half of a 64-bit register)
+        VirtualHostIO, // 0x5B funct3=2 (host I/O, cycle tracking, print)
+        AdviceLB, // 0x5B funct3=3 (advice tape byte load, sign-extended)
+        AdviceLH, // 0x5B funct3=4 (advice tape halfword load, sign-extended)
+        AdviceLW, // 0x5B funct3=5 (advice tape word load, sign-extended)
+        AdviceLD, // 0x5B funct3=6 (advice tape doubleword load)
+        VirtualAdviceLoad, // emitted by AdviceLB/H/W/D inline_sequence
+        VirtualAdviceLen, // 0x5B funct3=7 (get advice tape remaining length)
         // Atomics (placeholder)
         // Virtual instructions (names must match Jolt's Rust enum exactly for JSON serialization)
         VirtualAdvice,
@@ -112,6 +125,10 @@ pub const JoltInstruction = struct {
         VirtualAssertWordAlignment,
         VirtualSRL,
         VirtualSRA,
+        // Jolt-inline instructions
+        ANDN,
+        VirtualROTRI,
+        VirtualROTRIW,
     };
 
     /// Instruction operands - different formats store different fields
@@ -142,6 +159,10 @@ pub const JoltInstruction = struct {
         /// NormalizedOperands.imm = u64 as i128 (zero-extension) produces the same
         /// field element as the R1CS witness's F.fromU64(@bitCast(imm_signed)).
         FormatAssert: struct { rs1: u8, imm: i64 },
+        /// Inline format: rs1, rs2, rs3 (memory pointers for jolt-inline 0x0B/0x2B instructions)
+        FormatInline: struct { rs1: u8, rs2: u8, rs3: u8, funct3: u3, funct7: u7 },
+        /// Virtual right-shift-I format: rd, rs1, imm (u64 bitmask for VirtualROTRI/W)
+        FormatVirtualRightShiftI: struct { rd: u8, rs1: u8, imm: u64 },
         /// No operands (NoOp, FENCE, ECALL)
         None: void,
     };
@@ -197,6 +218,12 @@ pub const JoltInstruction = struct {
             },
             .FormatAssert => |a| {
                 try std.fmt.format(writer, "{{\"rs1\":{},\"imm\":{}}}", .{ a.rs1, a.imm });
+            },
+            .FormatInline => |il| {
+                try std.fmt.format(writer, "{{\"rs1\":{},\"rs2\":{},\"rs3\":{}}}", .{ il.rs1, il.rs2, il.rs3 });
+            },
+            .FormatVirtualRightShiftI => |vrs| {
+                try std.fmt.format(writer, "{{\"rd\":{},\"rs1\":{},\"imm\":{}}}", .{ vrs.rd, vrs.rs1, vrs.imm });
             },
             .None => {
                 try writer.writeAll("{}");

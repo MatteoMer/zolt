@@ -116,12 +116,19 @@ fn buildBytecodeWords(
 /// This value is used as bytecode_K in the proof and must match Jolt's preprocessing.
 /// Must account for W-extension decomposition: each W-ext instruction becomes 2 bytecode entries.
 pub fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
+    return computeBytecodeCodeSizeWithTextSize(program_bytecode, program_bytecode.len);
+}
+
+/// Compute bytecode code_size, only decoding up to text_size bytes as instructions.
+/// Bytes beyond text_size are treated as data (.rodata) and NOT decoded.
+pub fn computeBytecodeCodeSizeWithTextSize(program_bytecode: []const u8, text_size: usize) usize {
     const zkvm_instruction = @import("instruction/mod.zig");
+    const decode_limit = @min(text_size, program_bytecode.len);
 
     // Count bytecode entries, accounting for W-extension decomposition
     var num_entries: usize = 0;
     var offset: usize = 0;
-    while (offset < program_bytecode.len) {
+    while (offset < decode_limit) {
         // Check if compressed (RVC): lowest 2 bits != 0b11
         if (offset + 2 <= program_bytecode.len) {
             const first_halfword = std.mem.readInt(u16, program_bytecode[offset..][0..2], .little);
@@ -177,6 +184,54 @@ pub fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
                     1 => @as(usize, 14), // SH
                     2 => @as(usize, 15), // SW
                     else => @as(usize, 1), // shouldn't happen
+                };
+            } else if (opcode == 0x0B) {
+                // Jolt inline instruction (SHA256, etc.)
+                // Count expanded entries by building the sequence
+                const sha256_inline = @import("../tracer/sha256_inline.zig");
+                const rs1: u8 = @truncate((instr_word >> 15) & 0x1f);
+                const rs2: u8 = @truncate((instr_word >> 20) & 0x1f);
+                const inline_funct3: u3 = @truncate((instr_word >> 12) & 0x7);
+                const inline_funct7: u7 = @truncate((instr_word >> 25) & 0x7f);
+                const is_sha256 = (inline_funct7 == 0x00 and (inline_funct3 == 0x00 or inline_funct3 == 0x01));
+                if (is_sha256) {
+                    const initial = (inline_funct3 == 0x01);
+                    var seq = sha256_inline.buildSha256Sequence(
+                        std.heap.page_allocator,
+                        rs1,
+                        rs2,
+                        initial,
+                    ) catch @panic("failed to build sha256 sequence for code_size");
+                    defer seq.deinit(std.heap.page_allocator);
+                    num_entries += seq.items.len;
+                } else {
+                    num_entries += 1; // Unknown inline type
+                }
+            } else if (opcode == 0x73) {
+                // SYSTEM instructions: ECALL, EBREAK, CSRRW, CSRRS, MRET
+                const sys_rd: u8 = @truncate((instr_word >> 7) & 0x1f);
+                const sys_rs1: u8 = @truncate((instr_word >> 15) & 0x1f);
+                const bytecode_preproc = @import("bytecode_preprocessing.zig");
+                if (funct3 == 1) {
+                    // CSRRW: 1, 2, or 3 entries depending on rd/rs1
+                    num_entries += bytecode_preproc.csrrwEntryCount(sys_rd, sys_rs1);
+                } else if (funct3 == 2) {
+                    // CSRRS: 1, 2, or 3 entries depending on rd/rs1
+                    num_entries += bytecode_preproc.csrrsEntryCount(sys_rd, sys_rs1);
+                } else if (funct3 == 0 and ((instr_word >> 20) & 0xFFF) == 0x302) {
+                    // MRET: 1 entry (JALR)
+                    num_entries += 1;
+                } else {
+                    // ECALL/EBREAK: 1 entry
+                    num_entries += 1;
+                }
+            } else if (opcode == 0x5B) {
+                // Jolt SDK custom-2: VirtualRev8W, VirtualHostIO, AdviceLB/H/W/D, VirtualAdviceLen
+                // AdviceLB/LH/LW expand to 3 entries (VirtualAdvice + VirtualMULI + VirtualSRAI).
+                // AdviceLD expands to 1 entry. Others are 1 entry.
+                num_entries += switch (funct3) {
+                    0b011, 0b100, 0b101 => @as(usize, 3), // AdviceLB/LH/LW
+                    else => @as(usize, 1), // VirtualRev8W(0), VirtualHostIO(2), AdviceLD(6), VirtualAdviceLen(7)
                 };
             } else {
                 const is_w_ext_2 = switch (opcode) {
@@ -273,8 +328,17 @@ pub fn JoltProver(comptime F: type) type {
             const JoltProofWithDory = jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof);
             const DoryScheme = Dory.DoryCommitmentScheme(F);
 
-            // Initialize memory config
-            // Use memory_size = 32768 to match Jolt fibonacci example
+            // Memory config uses the Jolt SDK macro's DEFAULT sizes for
+            // `max_input_size`, `max_output_size`, `max_trusted_advice_size`,
+            // `max_untrusted_advice_size`, and `stack_size` (see
+            // jolt-core `common/src/constants.rs`), with `heap_size` trimmed
+            // to 32 KiB. This layout matches any guest ELF built from a
+            // `#[jolt::provable]` function that doesn't override the io/
+            // advice sizes — i.e. the macro's compile-time `input_start` /
+            // `output_start` constants line up with Zolt's runtime
+            // `MemoryLayout`. `jolt-bench/src/main.rs` must construct a
+            // matching `MemoryConfig` for the same ELF to verify under
+            // Jolt's own prover.
             var overall_timer = std.time.Timer.start() catch unreachable;
             const bench = (std.posix.getenv("ZOLT_BENCH") != null);
             var config = common.MemoryConfig{
@@ -327,6 +391,9 @@ pub fn JoltProver(comptime F: type) type {
                 jolt_prover.JoltProver(F).initWithThreadPool(self.allocator, tp)
             else
                 jolt_prover.JoltProver(F).init(self.allocator);
+            // Free GPU accelerator/poly/msm ops that converter may lazily allocate
+            // inside `enableGpu` during the prove path.
+            defer converter.deinit();
 
             // Compute log_t and log_k directly from trace (already padded to power of 2)
             const trace_length = emulator.trace.steps.items.len;
@@ -365,6 +432,18 @@ pub fn JoltProver(comptime F: type) type {
             const actual_outputs = emulator.getOutputs();
             const actual_panic = emulator.device.panic;
 
+            // Trim trailing zero bytes off the outputs slice. Jolt's verifier
+            // does the same truncation in `RV64IMACVerifier::new` before the
+            // Fiat-Shamir preamble runs (see jolt-core/src/zkvm/verifier.rs:
+            // `program_io.outputs.truncate(...)`); the prover MUST trim too,
+            // otherwise the prover/verifier transcripts diverge for any
+            // program whose output ends with zeros.
+            const trimmed_outputs: []const u8 = blk_trim: {
+                var end: usize = actual_outputs.len;
+                while (end > 0 and actual_outputs[end - 1] == 0) : (end -= 1) {}
+                break :blk_trim actual_outputs[0..end];
+            };
+
             // DEBUG: Print Fiat-Shamir preamble values
             dbg("\n=== Zolt Fiat-Shamir Preamble Debug (WithDory) ===\n", .{});
             dbg("inputs.len = {d}\n", .{inputs.len});
@@ -373,11 +452,11 @@ pub fn JoltProver(comptime F: type) type {
             } else if (inputs.len > 32) {
                 dbg("inputs[0..32] = {any}...\n", .{inputs[0..32]});
             }
-            dbg("outputs.len = {d}\n", .{actual_outputs.len});
-            if (actual_outputs.len > 0 and actual_outputs.len <= 32) {
-                dbg("outputs = {any}\n", .{actual_outputs});
-            } else if (actual_outputs.len > 32) {
-                dbg("outputs[0..32] = {any}...\n", .{actual_outputs[0..32]});
+            dbg("outputs.len = {d}\n", .{trimmed_outputs.len});
+            if (trimmed_outputs.len > 0 and trimmed_outputs.len <= 32) {
+                dbg("outputs = {any}\n", .{trimmed_outputs});
+            } else if (trimmed_outputs.len > 32) {
+                dbg("outputs[0..32] = {any}...\n", .{trimmed_outputs[0..32]});
             }
             dbg("panic = {}\n", .{actual_panic});
             dbg("=================================================\n\n", .{});
@@ -385,7 +464,7 @@ pub fn JoltProver(comptime F: type) type {
             var device = try jolt_device.JoltDevice.fromEmulator(
                 self.allocator,
                 inputs,
-                actual_outputs,
+                trimmed_outputs,
                 actual_panic,
                 @intCast(program_bytecode.len),
                 config.heap_size, // Pass memory_size from config
@@ -457,6 +536,18 @@ pub fn JoltProver(comptime F: type) type {
             var result = JoltProofWithDory.init(self.allocator);
             result.dory_srs_log_size = log_size;
 
+            // Capture program I/O so the prove command can write a sidecar file
+            // that the verifier reads to reconstruct the public-input transcript.
+            // Use the trimmed outputs (matches what the preamble appended and
+            // what Jolt's verifier truncates internally).
+            if (inputs.len > 0) {
+                result.program_inputs = try self.allocator.dupe(u8, inputs);
+            }
+            if (trimmed_outputs.len > 0) {
+                result.program_outputs = try self.allocator.dupe(u8, trimmed_outputs);
+            }
+            result.program_panic = actual_panic;
+
             // Store bytecode/memory/register eval polynomials (for opening proof later)
             result.bytecode_evals = try self.allocator.alloc(F, bytecode_poly_size);
             for (result.bytecode_evals, 0..) |*p, i| {
@@ -499,7 +590,8 @@ pub fn JoltProver(comptime F: type) type {
             const log_k_chunk: usize = 4; // Must match convert_config below
             const LOG_K_INSTRUCTION: usize = 128; // XLEN * 2 = 64 * 2
             // Compute bytecode_K early so we can use it for bytecode_d
-            const bytecode_K_for_onehot = computeBytecodeCodeSize(program_bytecode);
+            const text_sz_for_onehot = text_size_opt orelse program_bytecode.len;
+            const bytecode_K_for_onehot = computeBytecodeCodeSizeWithTextSize(program_bytecode, text_sz_for_onehot);
             const log_bytecode_k: usize = if (bytecode_K_for_onehot <= 1) 0 else std.math.log2_int(usize, bytecode_K_for_onehot);
             const log_ram_k: usize = @intCast(log_k); // ram_K = 2^log_k
 
@@ -951,13 +1043,18 @@ pub fn JoltProver(comptime F: type) type {
             const memory_trace_ptr: *const ram.MemoryTrace = &emulator.ram.trace;
 
             // Compute bytecode_K to match Jolt's BytecodePreprocessing.code_size
-            const bytecode_code_size_dory = computeBytecodeCodeSize(program_bytecode);
+            const text_sz_for_K = text_size_opt orelse program_bytecode.len;
+            const bytecode_code_size_dory = computeBytecodeCodeSizeWithTextSize(program_bytecode, text_sz_for_K);
             dbg("[ZOLT] bytecode_code_size (Dory path): {}\n", .{bytecode_code_size_dory});
 
             // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
+            // CRITICAL: Pass device.memory_layout.termination so the synthetic
+            // LUI/ADDI/SD termination entries have the same imm values as the
+            // exported preprocessing seen by the verifier. Otherwise val_poly
+            // would diverge between prover and verifier.
             const preproc = @import("preprocessing.zig");
             const text_sz = text_size_opt orelse program_bytecode.len;
-            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, null, text_sz);
+            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, device.memory_layout.termination, text_sz);
             defer bytecode_prep_dory.deinit();
 
             // Convert to Jolt-compatible format with transcript integration

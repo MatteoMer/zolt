@@ -287,56 +287,9 @@ pub fn Stage3Prover(comptime F: type) type {
                 });
             }
 
-            if (comptime debug_verbose) {
-                // DEBUG: Check initial witness values and compute initial sum
-                dbg("\n[ZOLT] INSTR_INIT: trace_len = {}, prover.current_size = {}\n", .{ trace_len, instr_prover.current_size });
-                var full_sum = F.zero();
-                var left_sum = F.zero();
-                var right_sum = F.zero();
-                for (0..trace_len) |i| {
-                    const left_i = instr_prover.left_is_rs1[i].mul(instr_prover.rs1_value[i])
-                        .add(instr_prover.left_is_pc[i].mul(instr_prover.unexpanded_pc[i]));
-                    const right_i = instr_prover.right_is_rs2[i].mul(instr_prover.rs2_value[i])
-                        .add(instr_prover.right_is_imm[i].mul(instr_prover.imm[i]));
-                    const eq_weight_i = instr_prover.eq_stage2[i];
-                    full_sum = full_sum.add(eq_weight_i.mul(right_i.add(instr_gamma.mul(left_i))));
-                    left_sum = left_sum.add(instr_prover.eq_stage2[i].mul(left_i));
-                    right_sum = right_sum.add(instr_prover.eq_stage2[i].mul(right_i));
-                }
-                dbg("[ZOLT] INSTR_INIT: full_sum = {{ {any} }}\n", .{full_sum.toBytes()[0..8]});
-                dbg("[ZOLT] INSTR_INIT: instr_input_claim = {{ {any} }}\n", .{instr_input_claim.toBytes()[0..8]});
-                dbg("[ZOLT] INSTR_INIT: sum_equals_claim = {}\n", .{full_sum.eql(instr_input_claim)});
-
-                const left_1_from_openings = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-                const right_1_from_openings = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-                dbg("[ZOLT] INSTR_INIT: eq_weighted_left_sum = {{ {any} }}\n", .{left_sum.toBytes()[0..8]});
-                dbg("[ZOLT] INSTR_INIT: left_1_from_openings = {{ {any} }}\n", .{left_1_from_openings.toBytes()[0..8]});
-                dbg("[ZOLT] INSTR_INIT: left_match = {}\n", .{left_sum.eql(left_1_from_openings)});
-                dbg("[ZOLT] INSTR_INIT: eq_weighted_right_sum = {{ {any} }}\n", .{right_sum.toBytes()[0..8]});
-                dbg("[ZOLT] INSTR_INIT: right_1_from_openings = {{ {any} }}\n", .{right_1_from_openings.toBytes()[0..8]});
-                dbg("[ZOLT] INSTR_INIT: right_match = {}\n", .{right_sum.eql(right_1_from_openings)});
-
-                {
-                    var mismatch_count: usize = 0;
-                    for (0..trace_len) |idx| {
-                        const right_computed = instr_prover.right_is_rs2[idx].mul(instr_prover.rs2_value[idx])
-                            .add(instr_prover.right_is_imm[idx].mul(instr_prover.imm[idx]));
-                        const right_from_witness = if (idx < raw_inputs.len)
-                            raw_inputs[idx].toFieldValue(F, .RightInstructionInput)
-                        else
-                            F.zero();
-                        if (!right_computed.eql(right_from_witness)) {
-                            mismatch_count += 1;
-                            if (mismatch_count <= 5) {
-                                dbg("[ZOLT] INSTR_INIT: MISMATCH at cycle {}: computed = {{ {any} }}, witness = {{ {any} }}\n", .{ idx, right_computed.toBytes()[0..8], right_from_witness.toBytes()[0..8] });
-                                dbg("[ZOLT]   right_is_rs2 = {{ {any} }}, rs2 = {{ {any} }}\n", .{ instr_prover.right_is_rs2[idx].toBytes()[0..8], instr_prover.rs2_value[idx].toBytes()[0..8] });
-                                dbg("[ZOLT]   right_is_imm = {{ {any} }}, imm = {{ {any} }}\n", .{ instr_prover.right_is_imm[idx].toBytes()[0..8], instr_prover.imm[idx].toBytes()[0..8] });
-                            }
-                        }
-                    }
-                    dbg("[ZOLT] INSTR_INIT: right mismatch_count = {} / {}\n", .{ mismatch_count, trace_len });
-                }
-            }
+            // (Removed: dead diagnostic block referencing instr_prover.eq_stage2 which
+            //  no longer exists on the InstructionInputProver schema. Rebuild the
+            //  comparison if needed using the live field set.)
 
             // (debug removed)
 
@@ -379,36 +332,8 @@ pub fn Stage3Prover(comptime F: type) type {
                 const instr_evals = instr_prover.computeRoundEvals(current_instr_claim);
                 if (bench_s3) s3_instr_compute_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_instr_c));
 
-                if (comptime debug_verbose) {
-                    // DEBUG: Verify instr_evals at round 0
-                    if (round == 0) {
-                        var manual_p0 = F.zero();
-                        var manual_p1 = F.zero();
-                        const half = instr_prover.current_size / 2;
-                        for (0..half) |j| {
-                            const left_0 = instr_prover.left_is_rs1[2 * j].mul(instr_prover.rs1_value[2 * j])
-                                .add(instr_prover.left_is_pc[2 * j].mul(instr_prover.unexpanded_pc[2 * j]));
-                            const right_0 = instr_prover.right_is_rs2[2 * j].mul(instr_prover.rs2_value[2 * j])
-                                .add(instr_prover.right_is_imm[2 * j].mul(instr_prover.imm[2 * j]));
-                            const eq_w_0 = instr_prover.eq_stage2[2 * j];
-                            manual_p0 = manual_p0.add(eq_w_0.mul(right_0.add(instr_gamma.mul(left_0))));
-
-                            const left_1 = instr_prover.left_is_rs1[2 * j + 1].mul(instr_prover.rs1_value[2 * j + 1])
-                                .add(instr_prover.left_is_pc[2 * j + 1].mul(instr_prover.unexpanded_pc[2 * j + 1]));
-                            const right_1 = instr_prover.right_is_rs2[2 * j + 1].mul(instr_prover.rs2_value[2 * j + 1])
-                                .add(instr_prover.right_is_imm[2 * j + 1].mul(instr_prover.imm[2 * j + 1]));
-                            const eq_w_1 = instr_prover.eq_stage2[2 * j + 1];
-                            manual_p1 = manual_p1.add(eq_w_1.mul(right_1.add(instr_gamma.mul(left_1))));
-                        }
-                        dbg("[ZOLT] ROUND0_VERIFY: manual_p0 = {{ {any} }}\n", .{manual_p0.toBytes()[0..8]});
-                        dbg("[ZOLT] ROUND0_VERIFY: instr_evals[0] = {{ {any} }}\n", .{instr_evals[0].toBytes()[0..8]});
-                        dbg("[ZOLT] ROUND0_VERIFY: p0_match = {}\n", .{manual_p0.eql(instr_evals[0])});
-                        dbg("[ZOLT] ROUND0_VERIFY: manual_p1 = {{ {any} }}\n", .{manual_p1.toBytes()[0..8]});
-                        dbg("[ZOLT] ROUND0_VERIFY: derived p1 = {{ {any} }}\n", .{instr_evals[1].toBytes()[0..8]});
-                        dbg("[ZOLT] ROUND0_VERIFY: p0+p1 = {{ {any} }}\n", .{manual_p0.add(manual_p1).toBytes()[0..8]});
-                        dbg("[ZOLT] ROUND0_VERIFY: input_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()[0..8]});
-                    }
-                }
+                // (Removed: dead diagnostic referencing instr_prover.eq_stage2 which
+                //  no longer exists on the InstructionInputProver schema.)
 
                 // RegistersClaimReduction: degree 2
                 const t_reg_c = if (bench_s3) std.time.nanoTimestamp() else 0;

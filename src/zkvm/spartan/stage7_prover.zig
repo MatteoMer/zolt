@@ -255,7 +255,13 @@ pub fn Stage7Prover(comptime F: type) type {
                 const steps_slice = trace.steps.items[0..T_val];
                 const eq_cycle_slice = eq_cycle[0..T_val];
 
-                const LocalG = [][]F;
+                // LocalG carries the allocator inside the value so the reduce
+                // function (which has no context parameter) can free merged
+                // partials. `data.len == 0` means "identity / empty chunk".
+                const LocalG = struct {
+                    data: [][]F,
+                    allocator: Allocator,
+                };
                 const MapCtx = struct {
                     allocator_inner: Allocator,
                     steps_inner: @TypeOf(steps_slice),
@@ -334,31 +340,34 @@ pub fn Stage7Prover(comptime F: type) type {
                                 }
                             }
                         }
-                        return local_G;
+                        return .{ .data = local_G, .allocator = c.allocator_inner };
                     }
                 }.f;
                 const reduceFn = struct {
                     fn f(a: LocalG, b: LocalG) LocalG {
-                        if (a.len == 0) return b;
-                        if (b.len == 0) return a;
+                        if (a.data.len == 0) return b;
+                        if (b.data.len == 0) return a;
                         // Merge b into a
-                        for (0..a.len) |i| {
-                            for (0..a[i].len) |k| {
-                                a[i][k] = a[i][k].add(b[i][k]);
+                        for (0..a.data.len) |i| {
+                            for (0..a.data[i].len) |k| {
+                                a.data[i][k] = a.data[i][k].add(b.data[i][k]);
                             }
                         }
+                        // Free b's partial — its contribution is now accumulated in a.
+                        for (b.data) |row| b.allocator.free(row);
+                        b.allocator.free(b.data);
                         return a;
                     }
                 }.f;
-                const empty_g: LocalG = &[_][]F{};
+                const empty_g: LocalG = .{ .data = &[_][]F{}, .allocator = self.allocator };
                 const result_g = pool_helpers.parallelReduceOptional(LocalG, self.thread_pool, T_val, empty_g, map_ctx, mapFn, reduceFn);
                 // Copy result into G and free the reduce result
-                if (result_g.len > 0) {
+                if (result_g.data.len > 0) {
                     for (0..N) |i| {
-                        @memcpy(G[i], result_g[i]);
-                        self.allocator.free(result_g[i]);
+                        @memcpy(G[i], result_g.data[i]);
+                        result_g.allocator.free(result_g.data[i]);
                     }
-                    self.allocator.free(result_g);
+                    result_g.allocator.free(result_g.data);
                 }
             }
 

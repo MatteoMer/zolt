@@ -1622,6 +1622,10 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             const imm_u64: u64 = @bitCast(imm);
             const word = buildIType(imm_u64, rs1, info.funct3, rd, 0x13);
             populateEntryFromInstruction(entry, word, instr.address);
+            // populateEntryFromInstruction decodes entry.imm from the encoded 12-bit
+            // field, which truncates wide inline immediates (e.g. SHA-256 K[i]).
+            // Restore the full u64 to keep bytecode consistent with the trace witness.
+            entry.imm = imm;
             applyVirtualAndCompressedFlags(entry, rd, rs1, 255, vsr, is_first, is_compressed);
         },
 
@@ -1631,6 +1635,7 @@ fn populateEntryFromJoltInstruction(entry: *BytecodeEntry, instr: preprocessing.
             const imm_u64: u64 = @bitCast(imm);
             const word = buildIType(imm_u64, rs1, info.funct3, rd, 0x1b);
             populateEntryFromInstruction(entry, word, instr.address);
+            entry.imm = imm;
             applyVirtualAndCompressedFlags(entry, rd, rs1, 255, vsr, is_first, is_compressed);
         },
 

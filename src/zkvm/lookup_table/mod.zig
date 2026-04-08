@@ -1588,102 +1588,81 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// Returns the u64 table output for the given lookup index.
         /// Used for diagnostics: verifying that combined_vals lookup_output matches the table.
         pub fn materializeTableEntry(table_index: usize, index: u128) u64 {
-            // Uninterleave for interleaved-path tables
-            const even_bits = blk: {
+            // Uninterleave for interleaved-path tables.
+            // Convention (matches Jolt's uninterleave_bits):
+            //   x (LEFT operand) = bits at ODD positions 1,3,5,...
+            //   y (RIGHT operand) = bits at EVEN positions 0,2,4,...
+            const x_left_bits = blk: {
                 var x: u64 = 0;
                 inline for (0..XLEN) |i| {
-                    x |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
+                    x |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
                 }
                 break :blk x;
             };
-            const odd_bits = blk: {
+            const y_right_bits = blk: {
                 var y: u64 = 0;
                 inline for (0..XLEN) |i| {
-                    y |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
+                    y |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
                 }
                 break :blk y;
             };
+            // Table indices below MUST match `getLookupTableIndex` (in bytecode_entries.zig)
+            // and `evaluateTableMLE` above. A mismatch with cycle_table_indices causes
+            // silent wrong-table evaluation in any diagnostic that uses this function.
             return switch (table_index) {
-                // Convention: interleaveBits128(x, y) puts x at odd positions, y at even
-                // So: odd_bits = x = first arg (typically rs1/left)
-                //     even_bits = y = second arg (typically rs2/right)
-                // uninterleave: x=odd_bits, y=even_bits
                 0 => @truncate(index), // RangeCheck: identity, lower 64 bits
                 1 => @truncate(index & ~@as(u128, 1)), // RangeCheckAligned: lower 64 bits with LSB cleared
-                2 => odd_bits & even_bits, // And: x & y
-                3 => (~odd_bits) & even_bits, // Andn: ~x & y
-                4 => odd_bits | even_bits, // Or: x | y
-                5 => odd_bits ^ even_bits, // Xor: x ^ y
-                6 => @intFromBool(odd_bits == even_bits), // Equal: x == y
-                7 => @intFromBool(@as(i64, @bitCast(odd_bits)) >= @as(i64, @bitCast(even_bits))), // SignedGreaterThanEqual: (signed)x >= (signed)y
-                8 => @intFromBool(odd_bits >= even_bits), // UnsignedGreaterThanEqual: x >= y
-                9 => @intFromBool(odd_bits != even_bits), // NotEqual: x != y
-                10 => @intFromBool(@as(i64, @bitCast(odd_bits)) < @as(i64, @bitCast(even_bits))), // SignedLessThan: (signed)x < (signed)y
-                11 => @intFromBool(odd_bits < even_bits), // UnsignedLessThan: x < y
-                12 => blk12: { // Movsign: sign(y) ? ~x : x
-                    const y_signed: i64 = @bitCast(even_bits);
-                    break :blk12 if (y_signed < 0) ~odd_bits else odd_bits;
+                2 => x_left_bits & y_right_bits, // And
+                3 => x_left_bits & ~y_right_bits, // Andn: x & ~y
+                4 => x_left_bits | y_right_bits, // Or
+                5 => x_left_bits ^ y_right_bits, // Xor
+                6 => @intFromBool(x_left_bits == y_right_bits), // Equal
+                7 => @intFromBool(@as(i64, @bitCast(x_left_bits)) >= @as(i64, @bitCast(y_right_bits))), // SignedGreaterThanEqual
+                8 => @intFromBool(x_left_bits >= y_right_bits), // UnsignedGreaterThanEqual
+                9 => @intFromBool(x_left_bits != y_right_bits), // NotEqual
+                10 => @intFromBool(@as(i64, @bitCast(x_left_bits)) < @as(i64, @bitCast(y_right_bits))), // SignedLessThan
+                11 => @intFromBool(x_left_bits < y_right_bits), // UnsignedLessThan
+                12 => blk12: { // Movsign: if sign(x) then 2^XLEN - 1 else 0 — per Jolt
+                    const x_signed: i64 = @bitCast(x_left_bits);
+                    break :blk12 if (x_signed < 0) 0xFFFF_FFFF_FFFF_FFFF else 0;
                 },
-                13 => blk13: { // UpperWord: upper 32 bits of 128-bit value
-                    // For identity-path (MUL/MULHU), index is the raw u128 product
-                    // Upper word = bits [127:64] of the full value
-                    break :blk13 @truncate(index >> 64);
+                13 => @truncate(index >> 64), // UpperWord: upper 64 bits of the 128-bit identity index
+                14 => @intFromBool(x_left_bits <= y_right_bits), // UnsignedLessThanEqual
+                15 => ValidUnsignedRemainder.materializeEntry(index), // interleaved(remainder, divisor)
+                16 => blk_div0: { // ValidDiv0
+                    const dividend_u32: u32 = @truncate(x_left_bits);
+                    const divisor_u32: u32 = @truncate(y_right_bits);
+                    const dividend_i32: i32 = @bitCast(dividend_u32);
+                    const divisor_i32: i32 = @bitCast(divisor_u32);
+                    break :blk_div0 if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1) 0 else 1;
                 },
-                16 => ValidUnsignedRemainder.materializeEntry(index), // interleaved(remainder, divisor)
-                20 => LowerHalfWord.materializeEntry(index), // identity: lower 32 bits
-                21 => blk21: {
-                    // SignExtendHalfWord: identity path, sign-extend lower 32 bits to 64 bits
+                17 => HalfwordAlignment.materializeEntry(index), // identity
+                18 => WordAlignment.materializeEntry(index), // identity
+                19 => LowerHalfWord.materializeEntry(index), // identity: lower 32 bits
+                20 => blk_seh: { // SignExtendHalfWord: identity, sign-extend lower 32 bits
                     const val: u64 = @truncate(index);
                     const lower32: u32 = @truncate(val);
                     const sign_extended: i64 = @as(i64, @as(i32, @bitCast(lower32)));
-                    break :blk21 @bitCast(sign_extended);
+                    break :blk_seh @bitCast(sign_extended);
                 },
-                17 => blk17: {
-                    // ValidDiv0: interleaved(dividend, divisor)
-                    // For XLEN=64: truncate to 32-bit signed values
-                    // Returns 1 if dividend != INT32_MIN or divisor != -1 (i.e., no overflow)
-                    // Also returns 1 if divisor == 0 (div-by-zero handled separately)
-                    const dividend_u32: u32 = @truncate(odd_bits); // x = dividend
-                    const divisor_u32: u32 = @truncate(even_bits); // y = divisor
-                    const dividend_i32: i32 = @bitCast(dividend_u32);
-                    const divisor_i32: i32 = @bitCast(divisor_u32);
-                    break :blk17 if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1) 0 else 1;
-                },
-                18 => HalfwordAlignment.materializeEntry(index), // identity path
-                19 => WordAlignment.materializeEntry(index), // identity path
-                22 => Pow2.materializeEntry(index), // identity path
-                24 => ShiftRightBitmask.materializeEntry(index), // identity path
-                26 => VirtualSRL.materializeEntry(index), // interleaved
-                27 => blk27: {
-                    // VirtualSRA: interleaved(value, bitmask)
-                    // Jolt convention: x=odd_bits=value, y=even_bits=bitmask
-                    // SRA output: value AND bitmask, OR sign_extension
-                    // The bitmask selects the shifted bits, sign_extension fills upper bits
-                    // But for materializeEntry, we compute directly:
-                    // value & bitmask | (~bitmask & sign_extend)
-                    // where sign_extend = (value >> 63) ? 0xFFFFFFFFFFFFFFFF : 0
-                    // Actually, VirtualSRA MLE returns: x & y (like AND), but with sign extension
-                    // From Jolt's VirtualSRATable materialize_entry:
-                    // let (value, bitmask) = uninterleave_bits(index);
-                    // let sign_bit = (value >> (XLEN-1)) & 1;
-                    // if sign_bit == 1 { (value & bitmask) | !bitmask } else { value & bitmask }
-                    const value = odd_bits; // x
-                    const bitmask = even_bits; // y
+                21 => Pow2.materializeEntry(index), // identity
+                23 => ShiftRightBitmask.materializeEntry(index), // identity
+                24 => VirtualRev8W.materializeEntry(index), // identity (byte-swap 32-bit halves)
+                25 => VirtualSRL.materializeEntry(index), // interleaved
+                26 => blk_sra: { // VirtualSRA: x & y | (sign(x) ? ~y : 0)
+                    const value = x_left_bits;
+                    const bitmask = y_right_bits;
                     const sign_bit = (value >> (XLEN - 1)) & 1;
-                    break :blk27 if (sign_bit == 1) (value & bitmask) | ~bitmask else value & bitmask;
+                    break :blk_sra if (sign_bit == 1) (value & bitmask) | ~bitmask else value & bitmask;
                 },
-                28 => VirtualROTR.materializeEntry(index), // VirtualROTR: interleaved(value, bitmask)
-                29 => VirtualROTRW.materializeEntry(index), // VirtualROTRW: interleaved(value, bitmask)
-                31 => blk31: {
-                    // VirtualChangeDivisorW: interleaved(dividend, divisor)
-                    // For XLEN=64: truncate to 32-bit signed values
-                    // If dividend == INT32_MIN and divisor == -1: return 1
-                    // Otherwise: return divisor sign-extended to 64 bits
-                    const dividend_u32: u32 = @truncate(odd_bits); // x = dividend
-                    const divisor_u32: u32 = @truncate(even_bits); // y = divisor
+                27 => VirtualROTR.materializeEntry(index), // interleaved
+                28 => VirtualROTRW.materializeEntry(index), // interleaved
+                30 => blk_cdw: { // VirtualChangeDivisorW
+                    const dividend_u32: u32 = @truncate(x_left_bits);
+                    const divisor_u32: u32 = @truncate(y_right_bits);
                     const dividend_i32: i32 = @bitCast(dividend_u32);
                     const divisor_i32: i32 = @bitCast(divisor_u32);
-                    break :blk31 if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1)
+                    break :blk_cdw if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1)
                         1
                     else
                         @bitCast(@as(i64, divisor_i32));

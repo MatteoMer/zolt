@@ -80,6 +80,15 @@ pub const TraceStep = struct {
     /// Whether this is the last instruction in a virtual sequence (vsr == Some(0)).
     /// In upstream Jolt, this is CircuitFlags::IsLastInSequence.
     is_last_in_sequence: bool = false,
+    /// Full u64 immediate for instructions whose actual immediate doesn't fit in
+    /// the standard RISC-V 12-bit (or smaller) encoding. Set by inline-expansion
+    /// code paths (e.g. SHA-256 inline) when the materialized immediate exceeds
+    /// 12 bits — `step.instruction` only stores the truncated encoding, but the
+    /// real lookup index, R1CS witness immediate, and bytecode entry must use
+    /// this wider value.
+    /// `has_full_imm = false` (default) means: decode imm from `instruction` as usual.
+    inline_full_imm: u64 = 0,
+    has_full_imm: bool = false,
 };
 
 /// Full execution trace
@@ -1783,6 +1792,17 @@ pub const Emulator = struct {
                 is_memory_write = true;
             }
 
+            // For inline-emitted I-type instructions, the immediate may not fit in
+            // the standard 12-bit (or 5-bit shamt) RISC-V encoding. The synth_word
+            // truncates to whatever the encoding supports, but `instr.imm` holds the
+            // full u64. Mark the trace step so downstream consumers (Stage 5
+            // lookup-index reconstruction, R1CS witness immediate, bytecode entry)
+            // use the full immediate instead of decoding the truncated word.
+            const has_full_imm_field: bool = switch (instr.kind) {
+                .ADDI, .XORI, .ANDI => true,
+                else => false,
+            };
+
             // Emit trace step
             try self.trace.steps.append(self.allocator, .{
                 .cycle = self.state.cycle,
@@ -1811,6 +1831,8 @@ pub const Emulator = struct {
                 .virtual_sequence_remaining = vsr,
                 .is_first_in_sequence = is_first,
                 .is_last_in_sequence = is_last,
+                .inline_full_imm = if (has_full_imm_field) instr.imm else 0,
+                .has_full_imm = has_full_imm_field,
             });
 
             self.state.cycle += 1;

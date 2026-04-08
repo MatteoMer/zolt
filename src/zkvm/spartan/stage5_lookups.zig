@@ -412,6 +412,124 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                 print("[ZOLT INST2 R{}] eval_at_2 = {any}\n", .{ round, eval_2.toBytes()[0..16].* });
             };
 
+            // DIAGNOSTIC: at round 0, brute-force compute eval_0 and eval_2 from
+            // the underlying cycle data and compare with the decomposition-based
+            // values. Round 0 is before any binding, so the polynomial is just
+            // `Σ_j u[j] * (combined_vals[j] + γ*left_op + γ²*(identity+right))` for
+            // cycles whose lookup index has MSB=0 (eval_0) or MSB=1 (eval_1).
+            // eval_2 is extrapolated as 2*eval_1 - eval_0 for the linear-in-X
+            // part plus degree-2 correction (because f(X,rest) = ra(X,rest) *
+            // poly(X,rest) is degree 2 in X — eq(X, msb) contributes one X).
+            if (round == 0 and std.posix.getenv("ZOLT_S5_BRUTE") != null) {
+                var bf_eval_0 = F.zero();
+                var bf_eval_1 = F.zero();
+                // Break down by component to isolate the drift source.
+                var bf_rv_total = F.zero();
+                var bf_left_total = F.zero();
+                var bf_right_total = F.zero();
+                // Per-table rv_total to identify which table is buggy
+                var bf_rv_per_table: [40]F = .{F.zero()} ** 40;
+                const T_local = self.T;
+                for (0..T_local) |j| {
+                    const lookup_idx = self.lookup_indices_u128[j];
+                    const msb: u1 = @intCast((lookup_idx >> 127) & 1);
+                    const t_idx = self.cycle_table_indices[j];
+                    var table_val = F.zero();
+                    if (t_idx >= 0) {
+                        const ti: usize = @intCast(t_idx);
+                        const TableMod_local = @import("../lookup_table/mod.zig").LookupTable(F, 64);
+                        const entry = TableMod_local.materializeTableEntry(ti, lookup_idx);
+                        table_val = F.fromU64(entry);
+                    }
+                    var left_val = F.zero();
+                    var right_val = F.zero();
+                    if (self.is_interleaved_operands[j]) {
+                        const left_bits: u64 = blk_left: {
+                            var x_bits: u128 = (lookup_idx >> 1) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+                            x_bits = (x_bits | (x_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+                            x_bits = (x_bits | (x_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+                            x_bits = (x_bits | (x_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+                            x_bits = (x_bits | (x_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+                            x_bits = (x_bits | (x_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+                            x_bits = (x_bits | (x_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+                            break :blk_left @truncate(x_bits);
+                        };
+                        const right_bits: u64 = blk_right: {
+                            var y_bits: u128 = lookup_idx & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+                            y_bits = (y_bits | (y_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+                            y_bits = (y_bits | (y_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+                            y_bits = (y_bits | (y_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+                            y_bits = (y_bits | (y_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+                            y_bits = (y_bits | (y_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+                            y_bits = (y_bits | (y_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+                            break :blk_right @truncate(y_bits);
+                        };
+                        left_val = F.fromU64(left_bits);
+                        right_val = F.fromU64(right_bits);
+                    } else {
+                        // Identity path: left_op = 0, right_op = full lookup_idx (u128).
+                        left_val = F.zero();
+                        right_val = F.fromU128(lookup_idx);
+                    }
+                    const raf_val = self.gamma_raf.mul(left_val).add(self.gamma_raf2.mul(right_val));
+                    const u_val = self.lookups_eq_evals[j];
+                    const contribution = u_val.mul(table_val.add(raf_val));
+                    if (msb == 0) {
+                        bf_eval_0 = bf_eval_0.add(contribution);
+                    } else {
+                        bf_eval_1 = bf_eval_1.add(contribution);
+                    }
+                    // Component breakdown (summed over ALL cycles, no msb split):
+                    bf_rv_total = bf_rv_total.add(u_val.mul(table_val));
+                    bf_left_total = bf_left_total.add(u_val.mul(left_val));
+                    bf_right_total = bf_right_total.add(u_val.mul(right_val));
+                    if (t_idx >= 0 and @as(usize, @intCast(t_idx)) < 40) {
+                        const ti_local: usize = @intCast(t_idx);
+                        bf_rv_per_table[ti_local] = bf_rv_per_table[ti_local].add(u_val.mul(table_val));
+                    }
+                    // Diff materializeTableEntry vs the "true" lookup_output (rd_value from the step).
+                    // We only have direct access to lookup_indices_u128 here, so we use
+                    // materializeTableEntry as the reference and the `lookups_combined_vals`
+                    // initial values as the prover's witness value.
+                }
+                const bf_total = bf_eval_0.add(bf_eval_1);
+                const bf_from_components = bf_rv_total
+                    .add(self.gamma_raf.mul(bf_left_total))
+                    .add(self.gamma_raf2.mul(bf_right_total));
+                const print = std.debug.print;
+                print("[S5_BRUTE R0] prover_eval_0  = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{eval_0.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] brute_eval_0   = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{bf_eval_0.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] prover_eval_1  = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{eval_1.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] brute_eval_1   = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{bf_eval_1.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] current_claim  = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{self.current_claim.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] brute_total    = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{bf_total.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] bf_from_comps  = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{bf_from_components.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] bf_rv_total    = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{bf_rv_total.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] bf_rv_per_table (non-zero):\n", .{});
+                for (0..40) |ti_print| {
+                    if (!bf_rv_per_table[ti_print].eql(F.zero())) {
+                        print("  table[{d:2}] = ", .{ti_print});
+                        for (0..32) |bi_pt| print("{x:0>2}", .{bf_rv_per_table[ti_print].toBytesBE()[31 - bi_pt]});
+                        print("\n", .{});
+                    }
+                }
+                print("\n[S5_BRUTE R0] bf_left_total  = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{bf_left_total.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] bf_right_total = ", .{});
+                for (0..32) |bi| print("{x:0>2}", .{bf_right_total.toBytesBE()[31 - bi]});
+                print("\n[S5_BRUTE R0] eval_0_match   = {}\n", .{eval_0.eql(bf_eval_0)});
+                print("[S5_BRUTE R0] eval_1_match   = {}\n", .{eval_1.eql(bf_eval_1)});
+                print("[S5_BRUTE R0] claim_match    = {}\n", .{self.current_claim.eql(bf_total)});
+            }
+
             return .{ eval_0, eval_1, eval_2 };
         }
 

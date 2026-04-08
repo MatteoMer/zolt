@@ -621,7 +621,15 @@ fn decodeImmediateInt(instr: u32, step: TraceStep) i128 {
         else => false,
     };
     if (is_identity_add) {
+        if (step.has_full_imm) {
+            return @as(i128, step.inline_full_imm);
+        }
         return @as(i128, computeUnsignedImmediate(instr));
+    }
+    // Inline-emitted XORI/ANDI (interleaved I-type at opcode 0x13 with funct3 != 0)
+    // also need the wide immediate when set.
+    if ((opcode == 0x13 or opcode == 0x1b) and step.has_full_imm) {
+        return @as(i128, step.inline_full_imm);
     }
     // Signed path for Load/Store/Branch/U-type
     return deriveImmediateInt(instr);
@@ -732,6 +740,9 @@ fn computeU128LookupOperandInt(instr: u32, step: TraceStep) u128 {
         },
         0x13 => {
             if (funct3 == 0) {
+                if (step.has_full_imm) {
+                    return @as(u128, step.rs1_value) + @as(u128, step.inline_full_imm);
+                }
                 const imm_u64 = computeUnsignedImmediate(instr);
                 return @as(u128, step.rs1_value) + @as(u128, imm_u64);
             }
@@ -739,6 +750,9 @@ fn computeU128LookupOperandInt(instr: u32, step: TraceStep) u128 {
         },
         0x1b => {
             if (funct3 == 0) {
+                if (step.has_full_imm) {
+                    return @as(u128, step.rs1_value) + @as(u128, step.inline_full_imm);
+                }
                 const imm_u64 = computeUnsignedImmediate(instr);
                 return @as(u128, step.rs1_value) + @as(u128, imm_u64);
             }

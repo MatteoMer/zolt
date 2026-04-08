@@ -545,7 +545,16 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
 
     var right_input: u64 = 0;
     if (right_is_rs2) right_input = step.rs2_value;
-    if (right_is_imm) right_input = decodeImmediateU64(instr);
+    if (right_is_imm) {
+        // Inline-emitted I-type instructions (e.g. SHA-256 ADDI with K[i] folded
+        // constants) carry the wide immediate on the trace step. The encoded
+        // 12-bit field has been truncated, so we must use the override.
+        if (step.has_full_imm) {
+            right_input = step.inline_full_imm;
+        } else {
+            right_input = decodeImmediateU64(instr);
+        }
+    }
 
     // Now compute the lookup index based on the instruction's operand mode
     switch (opcode) {

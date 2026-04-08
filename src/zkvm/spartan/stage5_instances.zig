@@ -159,7 +159,13 @@ pub fn Helpers(comptime F: type) type {
             } else if (is_identity_add_imm) blk: {
                 // Use unsigned u64 representation (two's complement) for the immediate.
                 // E.g., imm=-1 → F(0xFFFFFFFFFFFFFFFF) instead of F(p-1).
+                if (step.has_full_imm) {
+                    break :blk F.fromU64(step.inline_full_imm);
+                }
                 break :blk F.fromU64(computeUnsignedImmediate(instr));
+            } else if (step.has_full_imm and (opcode == 0x13 or opcode == 0x1b)) blk: {
+                // Inline-emitted I-type with wide immediate (e.g. SHA-256 K[i] folded into ADDI).
+                break :blk F.fromU64(step.inline_full_imm);
             } else computeImmediate(instr);
 
             var left_input: F = F.zero();
@@ -489,8 +495,14 @@ pub fn Helpers(comptime F: type) type {
                         }
                         break :blk128 0;
                     },
-                    // ADDI: index = rs1 + sign_ext(imm) (u128)
+                    // ADDI: index = rs1 + sign_ext(imm) (u128).
+                    // For inline-emitted ADDI with a wide immediate (e.g. SHA-256 K[i]),
+                    // the actual immediate is on `step.inline_full_imm`, not in the
+                    // 12-bit encoded field of `instr`.
                     0x13 => blk128: {
+                        if (step.has_full_imm) {
+                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.inline_full_imm);
+                        }
                         const imm12_raw: u32 = @truncate(instr >> 20);
                         const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
                         const imm_u64: u64 = @bitCast(imm_signed);
@@ -498,6 +510,9 @@ pub fn Helpers(comptime F: type) type {
                     },
                     // ADDIW: index = rs1 + sign_ext(imm) (u128)
                     0x1b => blk128: {
+                        if (step.has_full_imm) {
+                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.inline_full_imm);
+                        }
                         const imm12_raw_w: u32 = @truncate(instr >> 20);
                         const imm_signed_w: i64 = @as(i64, @as(i32, @bitCast(imm12_raw_w << 20)) >> 20);
                         const imm_u64_w: u64 = @bitCast(imm_signed_w);
@@ -583,7 +598,12 @@ pub fn Helpers(comptime F: type) type {
                 right_op_raw = switch (opcode) {
                     0x33, 0x3b, 0x63 => step.rs2_value,
                     0x13 => blk: {
-                        // I-type: right operand is sign-extended immediate (as u64)
+                        // I-type: right operand is sign-extended immediate (as u64).
+                        // Inline-emitted XORI/ANDI may have a wider immediate that
+                        // doesn't fit in 12 bits — use the override when present.
+                        if (step.has_full_imm) {
+                            break :blk step.inline_full_imm;
+                        }
                         const imm12_raw: u32 = @truncate(instr >> 20);
                         const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
                         break :blk @as(u64, @bitCast(imm_signed));

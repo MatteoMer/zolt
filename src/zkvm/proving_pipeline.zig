@@ -328,8 +328,17 @@ pub fn JoltProver(comptime F: type) type {
             const JoltProofWithDory = jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof);
             const DoryScheme = Dory.DoryCommitmentScheme(F);
 
-            // Initialize memory config
-            // Use memory_size = 32768 to match Jolt fibonacci example
+            // Memory config uses the Jolt SDK macro's DEFAULT sizes for
+            // `max_input_size`, `max_output_size`, `max_trusted_advice_size`,
+            // `max_untrusted_advice_size`, and `stack_size` (see
+            // jolt-core `common/src/constants.rs`), with `heap_size` trimmed
+            // to 32 KiB. This layout matches any guest ELF built from a
+            // `#[jolt::provable]` function that doesn't override the io/
+            // advice sizes — i.e. the macro's compile-time `input_start` /
+            // `output_start` constants line up with Zolt's runtime
+            // `MemoryLayout`. `jolt-bench/src/main.rs` must construct a
+            // matching `MemoryConfig` for the same ELF to verify under
+            // Jolt's own prover.
             var overall_timer = std.time.Timer.start() catch unreachable;
             const bench = (std.posix.getenv("ZOLT_BENCH") != null);
             var config = common.MemoryConfig{
@@ -382,6 +391,9 @@ pub fn JoltProver(comptime F: type) type {
                 jolt_prover.JoltProver(F).initWithThreadPool(self.allocator, tp)
             else
                 jolt_prover.JoltProver(F).init(self.allocator);
+            // Free GPU accelerator/poly/msm ops that converter may lazily allocate
+            // inside `enableGpu` during the prove path.
+            defer converter.deinit();
 
             // Compute log_t and log_k directly from trace (already padded to power of 2)
             const trace_length = emulator.trace.steps.items.len;

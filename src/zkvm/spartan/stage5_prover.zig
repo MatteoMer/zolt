@@ -617,14 +617,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Σ_j eq(j, r_reduction) * combined(lookup_index(j), j)
             var lookups_eq_evals = try self.allocator.alloc(F, T);
             var lookups_combined_vals = try self.allocator.alloc(F, T);
-            const lookups_ra_weights = try self.allocator.alloc(F, T); // Per-cycle total ra weight (product of chunks)
             const lookups_indices_lo = try self.allocator.alloc(u64, T); // Lower 64 bits of lookup index
             const lookups_indices_hi = try self.allocator.alloc(u64, T); // Upper 64 bits of lookup index
             // NOTE: No defers for these arrays -- ownership transfers to LookupsReadRafProver below.
-            // lookups_ra_weights is debug-only and also transferred.
             @memset(lookups_eq_evals, F.zero());
             @memset(lookups_combined_vals, F.zero());
-            @memset(lookups_ra_weights, F.one()); // Start with weight 1
             @memset(lookups_indices_lo, 0);
             @memset(lookups_indices_hi, 0);
 

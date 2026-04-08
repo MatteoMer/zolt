@@ -496,6 +496,15 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
         // Jolt's to_lookup_index() returns rs1 directly (like SignExtendWord)
         return @as(u128, step.rs1_value);
     }
+    if (opcode == 0x7B) {
+        // VirtualRev8W (internal synthetic opcode): AddOperands → rs1 directly.
+        // Jolt's `RISCVCycle<VirtualRev8W>::to_lookup_index()` returns
+        // `self.register_state.rs1.into()` (jolt-core/src/zkvm/instruction/virtual_rev8w.rs:46).
+        // Without this case, the default path below falls through to interleaved(0, 0) = 0
+        // because 0x7B is not in left_is_rs1's opcode list, which makes the committed
+        // InstructionRa polynomials inconsistent with Stage 5's opening claims.
+        return @as(u128, step.rs1_value);
+    }
     if (opcode == 0x6B) {
         // VirtualROTRI/VirtualROTRIW: interleaved(rs1_value, bitmask)
         const funct3_6b: u3 = @truncate((instr >> 12) & 0x7);

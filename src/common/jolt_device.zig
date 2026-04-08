@@ -63,9 +63,12 @@ pub const MemoryLayout = struct {
         const stack_size = alignUp(config.stack_size, 8);
         const heap_size = alignUp(config.heap_size, 8);
 
-        // Critical for ValEvaluation and ValFinal sumchecks in RAM
-        std.debug.assert(std.math.isPowerOfTwo(max_trusted_advice_size) or max_trusted_advice_size == 0);
-        std.debug.assert(std.math.isPowerOfTwo(max_untrusted_advice_size) or max_untrusted_advice_size == 0);
+        // Critical for ValEvaluation and ValFinal sumchecks in RAM.
+        // The `== 0` check must come first — Zig's `or` short-circuits, and
+        // `std.math.isPowerOfTwo(0)` asserts `int > 0`, so swapping the
+        // operands would panic when advice is disabled.
+        std.debug.assert(max_trusted_advice_size == 0 or std.math.isPowerOfTwo(max_trusted_advice_size));
+        std.debug.assert(max_untrusted_advice_size == 0 or std.math.isPowerOfTwo(max_untrusted_advice_size));
 
         // Adds 16 to account for panic bit and termination bit
         const io_region_bytes = max_input_size + max_trusted_advice_size + max_untrusted_advice_size + max_output_size + 16;
@@ -139,8 +142,8 @@ pub const MemoryLayout = struct {
     }
 
     /// Remap an address to an index in the memory polynomial
-    /// Returns null if address is 0 (no read/write)
-    /// The index is (address - lowest_address) / 8
+    /// Returns null if address is 0 (no read/write) or outside the mapped
+    /// I/O + RAM region. The index is (address - lowest_address) / 8.
     pub fn remapAddress(self: *const MemoryLayout, address: u64) ?u64 {
         if (address == 0) {
             return null;
@@ -148,9 +151,11 @@ pub const MemoryLayout = struct {
         const lowest_address = self.getLowestAddress();
         if (address >= lowest_address) {
             return (address - lowest_address) / 8;
-        } else {
-            @panic("Unexpected address");
         }
+        if (std.posix.getenv("ZOLT_REMAP_DEBUG") != null) {
+            std.debug.print("[REMAP] unmapped address 0x{x} < lowest 0x{x}\n", .{ address, lowest_address });
+        }
+        return null;
     }
 
     /// Returns the total emulator memory size

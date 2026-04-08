@@ -1,0 +1,19 @@
+# Matches `jolt build --mode no-std` rustflags from jolt-core 997c1543
+# src/main.rs `build_command`.
+
+[build]
+target = "riscv64imac-unknown-none-elf"
+
+[target.riscv64imac-unknown-none-elf]
+rustflags = [
+    "-Cpasses=lower-atomic",
+    "-Cpanic=abort",
+    "-Copt-level=3",
+    "-Cllvm-args=-enable-machine-outliner=never",
+    "--cfg=getrandom_backend=\"custom\"",
+    "-Cstrip=symbols",
+    # Use our linker script and match jolt's `-mcmodel=medany` code model
+    # via rustc's equivalent.
+    "-Clink-arg=-Tlinker.ld",
+    "-Ccode-model=medium",
+]

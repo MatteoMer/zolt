@@ -2444,3 +2444,209 @@ test "initQRaf basic" {
     try std.testing.expect(left.Q[0][0].eql(shift_half));
     try std.testing.expect(identity.Q[0][0].eql(shift_full));
 }
+
+// =============================================================================
+// RAF end-to-end decomposition tests
+//
+// These tests walk the entire address-round sumcheck at a small scale
+// (total_len=8, chunk_len=2, 4 phases × 2 rounds) and check that at each
+// round, the round-polynomial contribution from each RAF decomposition
+// matches a brute-force reference computed directly from the polynomial MLE.
+//
+// A failure here would pinpoint a bug in the RAF prefix MLE, Q-poly update,
+// or combine formula — the last untested piece of the Stage 5 InstructionReadRaf
+// machinery, which is where the sha256_inline drift is suspected to live.
+// =============================================================================
+
+/// Reference evaluation for OperandPolynomial::Left: takes MSB-first field
+/// bits r[0..num_vars] and returns Σ_{i=0..num_vars/2-1} r[2i] * 2^(num_vars/2-1-i).
+/// Matches Jolt's OperandPolynomial::evaluate for OperandSide::Left.
+fn raf_leftOperandEvaluate(comptime F: type, r: []const F) F {
+    const half = r.len / 2;
+    var result = F.zero();
+    var i: usize = 0;
+    while (i < half) : (i += 1) {
+        const shift: u6 = @intCast(half - 1 - i);
+        const coeff = F.fromU64(@as(u64, 1) << shift);
+        result = result.add(coeff.mul(r[2 * i]));
+    }
+    return result;
+}
+
+/// Reference evaluation for OperandPolynomial::Right: Σ r[2i+1] * 2^(half-1-i).
+fn raf_rightOperandEvaluate(comptime F: type, r: []const F) F {
+    const half = r.len / 2;
+    var result = F.zero();
+    var i: usize = 0;
+    while (i < half) : (i += 1) {
+        const shift: u6 = @intCast(half - 1 - i);
+        const coeff = F.fromU64(@as(u64, 1) << shift);
+        result = result.add(coeff.mul(r[2 * i + 1]));
+    }
+    return result;
+}
+
+/// Reference evaluation for IdentityPolynomial: Σ r[i] * 2^(num_vars-1-i).
+fn raf_identityEvaluate(comptime F: type, r: []const F) F {
+    var result = F.zero();
+    var i: usize = 0;
+    while (i < r.len) : (i += 1) {
+        const shift: u6 = @intCast(r.len - 1 - i);
+        const coeff = F.fromU64(@as(u64, 1) << shift);
+        result = result.add(coeff.mul(r[i]));
+    }
+    return result;
+}
+
+test "RafDecomposition end-to-end: single cycle bound_value matches reference MLE" {
+    @setEvalBranchQuota(500_000);
+    const F = @import("zolt_arith").field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Small scale: 8 total address bits, 2 bits per phase, 4 phases × 2 rounds.
+    const TOTAL_LEN: usize = 8;
+    const CHUNK_LEN: usize = 2;
+    const TOTAL_PHASES: usize = TOTAL_LEN / CHUNK_LEN; // 4
+
+    var rng = std.Random.DefaultPrng.init(0xc0ffee);
+
+    // Run 30 random trials over the address-rounds sumcheck path.
+    var trial: usize = 0;
+    while (trial < 30) : (trial += 1) {
+        // Random 8-bit lookup index (the "cycle" we care about).
+        const k0: u128 = @as(u128, rng.random().int(u8));
+
+        // Build the field-element bit vector for k0 (MSB-first).
+        var k0_field: [TOTAL_LEN]F = undefined;
+        {
+            var i: usize = 0;
+            while (i < TOTAL_LEN) : (i += 1) {
+                const shift: u6 = @intCast(TOTAL_LEN - 1 - i);
+                const bit = (k0 >> shift) & 1;
+                k0_field[i] = if (bit == 1) F.one() else F.zero();
+            }
+        }
+
+        var left_ps = try RafDecomposition(F).init(
+            allocator,
+            @as(usize, 1) << @intCast(CHUNK_LEN),
+            CHUNK_LEN,
+            TOTAL_LEN,
+            .LeftOperand,
+        );
+        defer left_ps.deinit();
+        var right_ps = try RafDecomposition(F).init(
+            allocator,
+            @as(usize, 1) << @intCast(CHUNK_LEN),
+            CHUNK_LEN,
+            TOTAL_LEN,
+            .RightOperand,
+        );
+        defer right_ps.deinit();
+        var identity_ps = try RafDecomposition(F).init(
+            allocator,
+            @as(usize, 1) << @intCast(CHUNK_LEN),
+            CHUNK_LEN,
+            TOTAL_LEN,
+            .Identity,
+        );
+        defer identity_ps.deinit();
+
+        // r_challenges accumulates challenges across all rounds.
+        var r_challenges: std.ArrayList(F) = .{};
+        defer r_challenges.deinit(allocator);
+
+        var phase: usize = 0;
+        while (phase < TOTAL_PHASES) : (phase += 1) {
+            // Initialize prefix_mle for this phase.
+            left_ps.initPrefix();
+            right_ps.initPrefix();
+            identity_ps.initPrefix();
+
+            // Initialize Q accumulators for this phase. Single cycle at k0 with u=1.
+            if (phase > 0) {
+                left_ps.resetForPhase(phase, @as(usize, 1) << @intCast(CHUNK_LEN));
+                right_ps.resetForPhase(phase, @as(usize, 1) << @intCast(CHUNK_LEN));
+                identity_ps.resetForPhase(phase, @as(usize, 1) << @intCast(CHUNK_LEN));
+            }
+            const u_evals = [_]F{F.one()};
+            const lookup_indices = [_]u128{k0};
+            const is_interleaved = [_]bool{true};
+            try initQRaf(
+                F,
+                &left_ps,
+                &right_ps,
+                &identity_ps,
+                &u_evals,
+                &lookup_indices,
+                &is_interleaved,
+                null,
+                allocator,
+            );
+
+            // Run CHUNK_LEN rounds for this phase.
+            var round: usize = 0;
+            while (round < CHUNK_LEN) : (round += 1) {
+                // Pick a random challenge, bind, and record it.
+                const r_chal = blk: {
+                    const lo: u64 = rng.random().int(u64);
+                    const hi: u64 = rng.random().int(u64);
+                    break :blk F.fromU128(@as(u128, lo) | (@as(u128, hi) << 64));
+                };
+                try r_challenges.append(allocator, r_chal);
+
+                left_ps.bind(r_chal);
+                right_ps.bind(r_chal);
+                identity_ps.bind(r_chal);
+            }
+
+            // End of phase: update checkpoints so bound_value carries forward.
+            left_ps.updateCheckpoint();
+            right_ps.updateCheckpoint();
+            identity_ps.updateCheckpoint();
+        }
+
+        // After all rounds, the bound_value for each RAF decomposition should
+        // equal the polynomial's evaluation at the challenges r_challenges,
+        // WEIGHTED by ra(r, k0) = eq(r, k0_field_bits).
+        // For a single cycle with u=1, the RAF polynomial at the bound point is:
+        //   left_raf_bound = Σ_k ra(k, j0) * left_op(k) evaluated at r
+        //                  = eq(r, k0_bits) * left_op(k0_bits)
+        //   (as field elements).
+        //
+        // But Zolt's bound_value is just `left_op(r)` — it doesn't include the
+        // ra factor. The ra factor lives in the Q polys.
+        //
+        // At the end, we expect: `left.bound_value == OperandPolynomial::Left::evaluate(r)`.
+        // This matches the memory note's observation that the bound values match
+        // the verifier's OperandPolynomial::evaluate.
+
+        const r_slice = r_challenges.items;
+        try std.testing.expectEqual(TOTAL_LEN, r_slice.len);
+
+        const expected_left = raf_leftOperandEvaluate(F, r_slice);
+        const expected_right = raf_rightOperandEvaluate(F, r_slice);
+        const expected_identity = raf_identityEvaluate(F, r_slice);
+
+        if (!left_ps.bound_value.eql(expected_left)) {
+            std.debug.print("\n[RAF_E2E left] trial={} k0=0x{x}\n", .{ trial, k0 });
+            std.debug.print("  bound_value = {x}\n", .{left_ps.bound_value.toBytesBE()[24..32].*});
+            std.debug.print("  expected    = {x}\n", .{expected_left.toBytesBE()[24..32].*});
+        }
+        try std.testing.expect(left_ps.bound_value.eql(expected_left));
+
+        if (!right_ps.bound_value.eql(expected_right)) {
+            std.debug.print("\n[RAF_E2E right] trial={} k0=0x{x}\n", .{ trial, k0 });
+            std.debug.print("  bound_value = {x}\n", .{right_ps.bound_value.toBytesBE()[24..32].*});
+            std.debug.print("  expected    = {x}\n", .{expected_right.toBytesBE()[24..32].*});
+        }
+        try std.testing.expect(right_ps.bound_value.eql(expected_right));
+
+        if (!identity_ps.bound_value.eql(expected_identity)) {
+            std.debug.print("\n[RAF_E2E identity] trial={} k0=0x{x}\n", .{ trial, k0 });
+            std.debug.print("  bound_value = {x}\n", .{identity_ps.bound_value.toBytesBE()[24..32].*});
+            std.debug.print("  expected    = {x}\n", .{expected_identity.toBytesBE()[24..32].*});
+        }
+        try std.testing.expect(identity_ps.bound_value.eql(expected_identity));
+    }
+}

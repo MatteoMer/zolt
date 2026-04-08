@@ -994,6 +994,54 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                 ra_chunks[i] = self.ra_chunk_weights[i][0];
             }
 
+            // DEBUG: dump final-state bound values and compute self-consistency check.
+            // current_claim should equal:
+            //   lookups_current_scalar * E_in[0] * E_out[0] * combined_vals[0] * Π ra_chunks[i][0]
+            if (std.posix.getenv("ZOLT_S5_DEBUG") != null) {
+                const cur_be = self.current_claim.toBytesBE();
+                std.debug.print("[LOOKUPS_END] current_claim_LE=", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{cur_be[31 - bi]});
+                std.debug.print("\n", .{});
+
+                const cv0_be = self.lookups_combined_vals[0].toBytesBE();
+                std.debug.print("[LOOKUPS_END] combined_vals[0]_LE=", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{cv0_be[31 - bi]});
+                std.debug.print("\n", .{});
+
+                const lcs_be = self.lookups_current_scalar.toBytesBE();
+                std.debug.print("[LOOKUPS_END] lookups_current_scalar_LE=", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{lcs_be[31 - bi]});
+                std.debug.print("\n", .{});
+
+                const ei0 = if (self.split_eq_E_in_len > 0) self.split_eq_E_in[0] else F.one();
+                const eo0 = if (self.split_eq_E_out_len > 0) self.split_eq_E_out[0] else F.one();
+                const ei_be = ei0.toBytesBE();
+                const eo_be = eo0.toBytesBE();
+                std.debug.print("[LOOKUPS_END] E_in[0]_LE=", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{ei_be[31 - bi]});
+                std.debug.print("\n[LOOKUPS_END] E_out[0]_LE=", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{eo_be[31 - bi]});
+                std.debug.print("\n", .{});
+
+                var ra_prod = F.one();
+                for (0..lookups_ra_d) |i| ra_prod = ra_prod.mul(ra_chunks[i]);
+                const rp_be = ra_prod.toBytesBE();
+                std.debug.print("[LOOKUPS_END] ra_product_LE=", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{rp_be[31 - bi]});
+                std.debug.print("\n", .{});
+
+                // Expected self-consistent value
+                const self_check = self.lookups_current_scalar
+                    .mul(ei0)
+                    .mul(eo0)
+                    .mul(self.lookups_combined_vals[0])
+                    .mul(ra_prod);
+                const sc_be = self_check.toBytesBE();
+                std.debug.print("[LOOKUPS_END] self_check_LE=", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{sc_be[31 - bi]});
+                std.debug.print("\n[LOOKUPS_END] self_check_eq_current={}\n", .{self_check.eql(self.current_claim)});
+            }
+
             // Compute table flags using split-eq parallel histogram
             const table_flags = try self.allocator.alloc(F, num_lookup_tables);
             @memset(table_flags, F.zero());

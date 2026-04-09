@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_csp_benchmarks:
+        description: "Run CSP benchmarks (SHA-256)"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel in-progress runs for the same PR/branch
 concurrency:
@@ -281,6 +286,7 @@ jobs:
   # ─── CSP Benchmarks: SHA-256 (non-blocking) ─────────────────────
   csp-benchmarks:
     name: CSP Benchmarks (SHA-256)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_csp_benchmarks
     runs-on: macos-15
     timeout-minutes: 30
     steps:

@@ -44,6 +44,22 @@ pub fn build(b: *std.Build) void {
     if (is_apple_silicon) linkMetalFrameworks(lib.root_module);
     b.installArtifact(lib);
 
+    // C-API static library (for FFI from Rust/C)
+    const capi_lib = b.addLibrary(.{
+        .name = "zolt_capi",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_api.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt_pool", .module = zolt_pool_mod },
+                .{ .name = "zolt_arith", .module = zolt_arith_mod },
+            },
+        }),
+    });
+    if (is_apple_silicon) linkMetalFrameworks(capi_lib.root_module);
+    b.installArtifact(capi_lib);
+
     // Export zolt module for dependency consumption
     _ = b.addModule("zolt", .{
         .root_source_file = b.path("src/root.zig"),

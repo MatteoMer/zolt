@@ -285,6 +285,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: zolt
       - name: Verify ARM64
         run: test "$(uname -m)" = "arm64"
       - uses: actions/checkout@v4
@@ -301,16 +303,15 @@ jobs:
           workspaces: csp-benchmarks
       - name: Run SHA-256 benchmarks (test mode)
         env:
-          ZOLT_DIR: ${{ github.workspace }}
+          ZOLT_DIR: ${{ github.workspace }}/zolt
           BENCH_INPUT_PROFILE: reduced
         working-directory: csp-benchmarks/zolt-bench
         run: cargo bench --bench sha256 -- --test
       - name: Post benchmark summary
         if: always()
-        working-directory: csp-benchmarks/zolt-bench
         run: |
           echo "## CSP Benchmark Metrics (SHA-256)" >> $GITHUB_STEP_SUMMARY
-          for f in sha256_*_zolt_metrics.json; do
+          for f in csp-benchmarks/zolt-bench/sha256_*_zolt_metrics.json; do
             if [ -f "$f" ]; then
               echo "### $(basename "$f" .json)" >> $GITHUB_STEP_SUMMARY
               echo '```json' >> $GITHUB_STEP_SUMMARY

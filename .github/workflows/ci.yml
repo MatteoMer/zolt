@@ -291,9 +291,9 @@ jobs:
         run: test "$(uname -m)" = "arm64"
       - uses: actions/checkout@v4
         with:
-          repository: privacy-ethereum/csp-benchmarks
+          repository: MatteoMer/csp-benchmarks
+          ref: feat/add-zolt-bench
           path: csp-benchmarks
-          token: ${{ secrets.CSP_BENCHMARKS_TOKEN }}
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}

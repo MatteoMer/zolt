@@ -7,9 +7,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testdata = @import("../testdata.zig");
 
-/// LLVM carry/borrow intrinsics — map to single adc/sbb instructions on x86-64.
-/// Wrapped in a comptime-conditional struct so they are not emitted on non-x86 targets.
-const x86 = if (builtin.cpu.arch == .x86_64) struct {
+/// LLVM carry/borrow intrinsics — single adc/sbb on x86-64.
+/// Only in non-Debug builds (LLVM inlines them in Release; linker fails in Debug).
+const x86 = if (builtin.cpu.arch == .x86_64 and builtin.mode != .Debug) struct {
     extern fn @"llvm.x86.addcarry.u64"(c_in: u8, a: u64, b: u64, result: *u64) u8;
     extern fn @"llvm.x86.subborrow.u64"(b_in: u8, a: u64, b: u64, result: *u64) u8;
 
@@ -20,6 +20,7 @@ const x86 = if (builtin.cpu.arch == .x86_64) struct {
         return @"llvm.x86.subborrow.u64"(b_in, a, b, result);
     }
 } else struct {};
+const has_x86_intrinsics = builtin.cpu.arch == .x86_64 and builtin.mode != .Debug;
 
 /// Comptime flag: true when x86-64 BMI2+ADX instructions are available
 const use_asm_mul = blk: {
@@ -38,7 +39,7 @@ const use_arm64_asm = (builtin.cpu.arch == .aarch64);
 
 /// Field subtraction: (a - b) mod p, branch-based.
 /// subs/sbcs chain, then b.cs skips correction if no borrow.
-inline fn arm64SubMod256(a: [4]u64, b: [4]u64, mod: [4]u64) [4]u64 {
+pub inline fn arm64SubMod256(a: [4]u64, b: [4]u64, mod: [4]u64) [4]u64 {
     if (comptime builtin.cpu.arch != .aarch64) unreachable;
     var r0: u64 = undefined;
     var r1: u64 = undefined;
@@ -76,7 +77,7 @@ inline fn arm64SubMod256(a: [4]u64, b: [4]u64, mod: [4]u64) [4]u64 {
 }
 
 /// Unconditional 4-limb subtraction (no modular reduction).
-inline fn arm64Sub256(a: [4]u64, b: [4]u64) [4]u64 {
+pub inline fn arm64Sub256(a: [4]u64, b: [4]u64) [4]u64 {
     if (comptime builtin.cpu.arch != .aarch64) unreachable;
     var r0: u64 = undefined;
     var r1: u64 = undefined;
@@ -104,7 +105,7 @@ inline fn arm64Sub256(a: [4]u64, b: [4]u64) [4]u64 {
 }
 
 /// Unconditional 4-limb addition (no modular reduction).
-inline fn arm64Add256(a: [4]u64, b: [4]u64) [4]u64 {
+pub inline fn arm64Add256(a: [4]u64, b: [4]u64) [4]u64 {
     if (comptime builtin.cpu.arch != .aarch64) unreachable;
     var r0: u64 = undefined;
     var r1: u64 = undefined;
@@ -183,7 +184,7 @@ pub inline fn arm64Sub192(a: [3]u64, b: [3]u64) [3]u64 {
 ///            instead of the 16 muls required for generic a*b.
 ///   Phase 2: 4 iterations of Montgomery reduction (same as CIOS mul).
 /// Total: ~52 multiply instructions vs ~68 for generic mul(a, a).
-fn arm64MontgomerySquare256(a: *const [4]u64, mod: *const [4]u64, inv: u64) [4]u64 {
+pub fn arm64MontgomerySquare256(a: *const [4]u64, mod: *const [4]u64, inv: u64) [4]u64 {
     if (comptime builtin.cpu.arch != .aarch64) unreachable;
     var r0: u64 = undefined;
     var r1: u64 = undefined;
@@ -381,7 +382,7 @@ fn arm64MontgomerySquare256(a: *const [4]u64, mod: *const [4]u64, inv: u64) [4]u
 /// Computes a * b * R^{-1} mod p using fully-unrolled CIOS with two-pass
 /// carry accumulation (ARM64 substitute for x86 ADX dual carry chains).
 /// All constants (b, mod, inv) are preloaded into registers.
-fn arm64MontgomeryMul256(a: *const [4]u64, b: *const [4]u64, mod: *const [4]u64, inv: u64) [4]u64 {
+pub fn arm64MontgomeryMul256(a: *const [4]u64, b: *const [4]u64, mod: *const [4]u64, inv: u64) [4]u64 {
     if (comptime builtin.cpu.arch != .aarch64) unreachable;
     // After 4 iterations of register rotation, the result limbs end up in:
     //   iter 0: t=[x0,x1,x2,x3,x14] → shift → [x1,x2,x3,x14], t4=x0
@@ -678,9 +679,9 @@ pub const BN254_FP_R2: [4]u64 = .{
 /// Montgomery constant: -q^{-1} mod 2^64
 pub const BN254_FP_INV: u64 = 0x87d20782e4866389;
 
-/// BN254 base field element for pairing operations
-/// This is a wrapper around BN254Scalar that uses the base field modulus
-/// Used for Fp, Fp2, Fp6, Fp12 tower and G1/G2 coordinates
+/// BN254 base field element for pairing operations.
+/// Uses the in-file MontgomeryField factory for optimal codegen (same
+/// compilation unit as extensions.zig / pairing.zig callers).
 pub const BN254BaseField = MontgomeryField(
     BN254_FP_MODULUS,
     BN254_FP_R,
@@ -845,9 +846,9 @@ pub fn MontgomeryField(
             return @as(u128, a) * @as(u128, b);
         }
 
-        /// Add with carry
+        /// Add with carry — uses LLVM adc intrinsic in Release, u128 in Debug.
         inline fn addCarry(a: u64, b: u64, carry_in: u64) struct { result: u64, carry: u64 } {
-            if (comptime builtin.cpu.arch == .x86_64) {
+            if (comptime has_x86_intrinsics) {
                 var result: u64 = undefined;
                 const c = x86.addcarry(@truncate(carry_in), a, b, &result);
                 return .{ .result = result, .carry = c };
@@ -857,7 +858,7 @@ pub fn MontgomeryField(
         }
 
         inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
-            if (comptime builtin.cpu.arch == .x86_64) {
+            if (comptime has_x86_intrinsics) {
                 var result: u64 = undefined;
                 const b_out = x86.subborrow(@truncate(borrow_in), a, b, &result);
                 return .{ .result = result, .borrow = b_out };
@@ -1664,9 +1665,14 @@ pub fn JoltField(comptime Self: type) type {
     };
 }
 
-/// BN254 scalar field element
-/// Stored in Montgomery form: a is represented as a*R mod p
-pub const BN254Scalar = struct {
+/// BN254 scalar field element.
+/// Now routed through the curve-generic MontgomeryField factory.
+pub const BN254Scalar = @import("../curves/bn254/mod.zig").Fr;
+
+/// Legacy bespoke BN254Scalar body retained for reference. The type above
+/// is the canonical definition; everything below up to the closing `};`
+/// is dead code that compiles but is never linked.
+const _BN254Scalar_legacy = struct {
     limbs: [4]u64,
 
     const Self = @This();
@@ -1811,9 +1817,9 @@ pub const BN254Scalar = struct {
         return @as(u128, a) * @as(u128, b);
     }
 
-    /// Add with carry
+    /// Add with carry — uses LLVM adc intrinsic in Release, u128 in Debug.
     inline fn addCarry(a: u64, b: u64, carry_in: u64) struct { result: u64, carry: u64 } {
-        if (comptime builtin.cpu.arch == .x86_64) {
+        if (comptime has_x86_intrinsics) {
             var result: u64 = undefined;
             const c = x86.addcarry(@truncate(carry_in), a, b, &result);
             return .{ .result = result, .carry = c };
@@ -1823,7 +1829,7 @@ pub const BN254Scalar = struct {
     }
 
     pub inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
-        if (!@inComptime() and comptime builtin.cpu.arch == .x86_64) {
+        if (!@inComptime() and comptime has_x86_intrinsics) {
             var result: u64 = undefined;
             const b_out = x86.subborrow(@truncate(borrow_in), a, b, &result);
             return .{ .result = result, .borrow = b_out };

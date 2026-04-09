@@ -278,6 +278,53 @@ jobs:
           grep '\[BENCH\]' field_bench.txt pairing_bench.txt >> $GITHUB_STEP_SUMMARY || true
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+  # ─── CSP Benchmarks: SHA-256 (non-blocking) ─────────────────────
+  csp-benchmarks:
+    name: CSP Benchmarks (SHA-256)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify ARM64
+        run: test "$(uname -m)" = "arm64"
+      - uses: actions/checkout@v4
+        with:
+          repository: privacy-ethereum/csp-benchmarks
+          path: csp-benchmarks
+          token: ${{ secrets.CSP_BENCHMARKS_TOKEN }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: csp-benchmarks
+      - name: Run SHA-256 benchmarks (test mode)
+        env:
+          ZOLT_DIR: ${{ github.workspace }}
+          BENCH_INPUT_PROFILE: reduced
+        working-directory: csp-benchmarks/zolt-bench
+        run: cargo bench --bench sha256 -- --test
+      - name: Post benchmark summary
+        if: always()
+        working-directory: csp-benchmarks/zolt-bench
+        run: |
+          echo "## CSP Benchmark Metrics (SHA-256)" >> $GITHUB_STEP_SUMMARY
+          for f in sha256_*_zolt_metrics.json; do
+            if [ -f "$f" ]; then
+              echo "### $(basename "$f" .json)" >> $GITHUB_STEP_SUMMARY
+              echo '```json' >> $GITHUB_STEP_SUMMARY
+              cat "$f" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: csp-benchmark-metrics
+          path: csp-benchmarks/zolt-bench/sha256_*_zolt_*.json
+          if-no-files-found: ignore
+
   # ─── Gate: all required checks must pass ─────────────────────────
   ci-pass:
     name: CI Pass

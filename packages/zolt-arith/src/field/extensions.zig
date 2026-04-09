@@ -156,248 +156,38 @@ pub fn fp2ScalarMul(a: Fp2, s: Fp) Fp2 {
 // Extension Field Fp2 = Fp[u] / (u^2 + 1)
 // ============================================================================
 
-/// Fp2 element: a + b*u where u^2 = -1
-pub const Fp2 = struct {
-    c0: Fp, // Real part
-    c1: Fp, // Imaginary part
-
-    pub fn init(c0: Fp, c1: Fp) Fp2 {
-        return .{ .c0 = c0, .c1 = c1 };
-    }
-
-    pub fn zero() Fp2 {
-        return .{ .c0 = Fp.zero(), .c1 = Fp.zero() };
-    }
-
-    pub fn one() Fp2 {
-        return .{ .c0 = Fp.one(), .c1 = Fp.zero() };
-    }
-
-    pub fn add(self: Fp2, other: Fp2) Fp2 {
-        return .{
-            .c0 = self.c0.add(other.c0),
-            .c1 = self.c1.add(other.c1),
-        };
-    }
-
-    pub fn sub(self: Fp2, other: Fp2) Fp2 {
-        return .{
-            .c0 = self.c0.sub(other.c0),
-            .c1 = self.c1.sub(other.c1),
-        };
-    }
-
-    pub fn mul(self: Fp2, other: Fp2) Fp2 {
-        // sumOfProducts fusion: 2 fused reductions instead of 3 separate muls
-        // c0 = a0*b0 - a1*b1 (NONRESIDUE = -1)
-        // c1 = a0*b1 + a1*b0
-        const neg_a1 = self.c1.neg();
-        return .{
-            .c0 = Fp.sumOfProducts(.{ self.c0, neg_a1 }, .{ other.c0, other.c1 }),
-            .c1 = Fp.sumOfProducts(.{ self.c0, self.c1 }, .{ other.c1, other.c0 }),
-        };
-    }
-
-    pub fn square(self: Fp2) Fp2 {
-        // (a + bu)^2 = (a^2 - b^2) + 2abu
-        // Karatsuba optimization: (a+b)(a-b) = a^2 - b^2
-        const a_plus_b = self.c0.addNoReduce(self.c1); // [0, 2p), saves 1 reduction
-        const a_minus_b = self.c0.sub(self.c1); // [0, p)
-        const a_squared_minus_b_squared = a_plus_b.mul(a_minus_b);
-        const two_ab = self.c0.mul(self.c1).double();
-
-        return .{
-            .c0 = a_squared_minus_b_squared,
-            .c1 = two_ab,
-        };
-    }
-
-    pub fn neg(self: Fp2) Fp2 {
-        return .{
-            .c0 = self.c0.neg(),
-            .c1 = self.c1.neg(),
-        };
-    }
-
-    /// Conjugate: a + bu -> a - bu
-    pub fn conjugate(self: Fp2) Fp2 {
-        return .{
-            .c0 = self.c0,
-            .c1 = self.c1.neg(),
-        };
-    }
-
-    /// Inverse using the formula: 1/(a + bu) = (a - bu)/(a^2 + b^2)
-    pub fn inverse(self: Fp2) ?Fp2 {
-        const norm = self.c0.square().add(self.c1.square());
-        const norm_inv = norm.inverse() orelse return null;
-
-        return .{
-            .c0 = self.c0.mul(norm_inv),
-            .c1 = self.c1.neg().mul(norm_inv),
-        };
-    }
-
-    pub fn eql(self: Fp2, other: Fp2) bool {
-        return self.c0.eql(other.c0) and self.c1.eql(other.c1);
-    }
-
-    pub fn isZero(self: Fp2) bool {
-        return self.c0.isZero() and self.c1.isZero();
-    }
-};
+/// Fp2 element: a + b*u where u^2 = -1.
+/// Now routed through the curve-generic Fp2 factory.
+pub const Fp2 = @import("../curves/extensions.zig").Fp2(Fp);
 
 // ============================================================================
 // Extension Field Fp6 = Fp2[v] / (v^3 - xi) where xi = 9 + u
+// Now routed through the curve-generic Fp6 factory.
 // ============================================================================
 
-/// Fp6 element: c0 + c1*v + c2*v^2 where v^3 = xi
-pub const Fp6 = struct {
-    c0: Fp2,
-    c1: Fp2,
-    c2: Fp2,
+const generic_ext = @import("../curves/extensions.zig");
 
-    pub fn zero() Fp6 {
-        return .{ .c0 = Fp2.zero(), .c1 = Fp2.zero(), .c2 = Fp2.zero() };
-    }
+/// BN254 cubic non-residue: multiply Fp2 by ξ = 9 + u (shift-add).
+fn bn254MulByXi(x: Fp2) Fp2 {
+    const a = x.c0;
+    const a2 = a.add(a);
+    const a4 = a2.add(a2);
+    const a8 = a4.add(a4);
+    const a9 = a8.add(a);
+    const b = x.c1;
+    const b2 = b.add(b);
+    const b4 = b2.add(b2);
+    const b8 = b4.add(b4);
+    const b9 = b8.add(b);
+    return Fp2.init(a9.sub(b), a.add(b9));
+}
 
-    pub fn one() Fp6 {
-        return .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() };
-    }
+pub const Fp6 = generic_ext.Fp6(Fp2, bn254MulByXi);
 
-    pub fn add(self: Fp6, other: Fp6) Fp6 {
-        return .{
-            .c0 = self.c0.add(other.c0),
-            .c1 = self.c1.add(other.c1),
-            .c2 = self.c2.add(other.c2),
-        };
-    }
-
-    pub fn sub(self: Fp6, other: Fp6) Fp6 {
-        return .{
-            .c0 = self.c0.sub(other.c0),
-            .c1 = self.c1.sub(other.c1),
-            .c2 = self.c2.sub(other.c2),
-        };
-    }
-
-    pub fn neg(self: Fp6) Fp6 {
-        return .{
-            .c0 = self.c0.neg(),
-            .c1 = self.c1.neg(),
-            .c2 = self.c2.neg(),
-        };
-    }
-
-    /// Multiplication by xi = 9 + u (the non-residue for BN254)
-    /// Uses shift-add (9x = 8x + x): 4 additions instead of 1 Montgomery mul
-    pub fn mulByXi(x: Fp2) Fp2 {
-        const a = x.c0;
-        const a2 = a.add(a);
-        const a4 = a2.add(a2);
-        const a8 = a4.add(a4);
-        const a9 = a8.add(a);
-
-        const b = x.c1;
-        const b2 = b.add(b);
-        const b4 = b2.add(b2);
-        const b8 = b4.add(b4);
-        const b9 = b8.add(b);
-
-        return Fp2.init(
-            a9.sub(b),
-            a.add(b9),
-        );
-    }
-
-    pub fn mul(self: Fp6, other: Fp6) Fp6 {
-        // Karatsuba-like multiplication for cubic extension
-        const v0 = self.c0.mul(other.c0);
-        const v1 = self.c1.mul(other.c1);
-        const v2 = self.c2.mul(other.c2);
-
-        // c0 = v0 + xi((c1 + c2)(d1 + d2) - v1 - v2)
-        const c1_plus_c2 = self.c1.add(self.c2);
-        const d1_plus_d2 = other.c1.add(other.c2);
-        const t0 = mulByXi(c1_plus_c2.mul(d1_plus_d2).sub(v1).sub(v2));
-        const new_c0 = v0.add(t0);
-
-        // c1 = (c0 + c1)(d0 + d1) - v0 - v1 + xi*v2
-        const c0_plus_c1 = self.c0.add(self.c1);
-        const d0_plus_d1 = other.c0.add(other.c1);
-        const t1 = c0_plus_c1.mul(d0_plus_d1).sub(v0).sub(v1);
-        const new_c1 = t1.add(mulByXi(v2));
-
-        // c2 = (c0 + c2)(d0 + d2) - v0 - v2 + v1
-        const c0_plus_c2 = self.c0.add(self.c2);
-        const d0_plus_d2 = other.c0.add(other.c2);
-        const t2 = c0_plus_c2.mul(d0_plus_d2).sub(v0).sub(v2);
-        const new_c2 = t2.add(v1);
-
-        return .{ .c0 = new_c0, .c1 = new_c1, .c2 = new_c2 };
-    }
-
-    /// Chung-Hasan SQ2 squaring: 2 Fp2.mul + 3 Fp2.square instead of 6 Fp2.mul
-    pub fn square(self: Fp6) Fp6 {
-        const s0 = self.c0.square();
-        const ab = self.c0.mul(self.c1);
-        const s1 = ab.add(ab); // 2*c0*c1
-        const s2 = self.c0.sub(self.c1).add(self.c2).square();
-        const bc = self.c1.mul(self.c2);
-        const s3 = bc.add(bc); // 2*c1*c2
-        const s4 = self.c2.square();
-
-        return .{
-            .c0 = s0.add(mulByXi(s3)),
-            .c1 = s1.add(mulByXi(s4)),
-            .c2 = s1.add(s2).add(s3).sub(s0).sub(s4),
-        };
-    }
-
-    pub fn inverse(self: Fp6) ?Fp6 {
-        // Extended Euclidean algorithm for Fp6
-        const c0_sq = self.c0.square();
-        const c1_sq = self.c1.square();
-        const c2_sq = self.c2.square();
-        const c0c1 = self.c0.mul(self.c1);
-        const c0c2 = self.c0.mul(self.c2);
-        const c1c2 = self.c1.mul(self.c2);
-
-        // Using the formula for inverse in cubic extension
-        const a0 = c0_sq.sub(mulByXi(c1c2));
-        const a1 = mulByXi(c2_sq).sub(c0c1);
-        const a2 = c1_sq.sub(c0c2);
-
-        const tmp = mulByXi(self.c1.mul(a2).add(self.c2.mul(a1)));
-        const norm = self.c0.mul(a0).add(tmp);
-
-        const norm_inv = norm.inverse() orelse return null;
-
-        return .{
-            .c0 = a0.mul(norm_inv),
-            .c1 = a1.mul(norm_inv),
-            .c2 = a2.mul(norm_inv),
-        };
-    }
-
-    pub fn eql(self: Fp6, other: Fp6) bool {
-        return self.c0.eql(other.c0) and self.c1.eql(other.c1) and self.c2.eql(other.c2);
-    }
-
-    // Note: Fp6 frobenius is not needed as a standalone method.
-    // We implement it directly in Fp12 frobenius to properly handle
-    // the coefficient structure across all 6 Fp2 components.
-};
-
-/// Fp6 multiplication by v (shift operation)
-/// For Fp6 = Fp2[v]/(v^3 - xi), multiplying by v shifts coefficients:
-/// (c0 + c1*v + c2*v^2) * v = c2*xi + c0*v + c1*v^2
+/// Fp6 multiplication by v (shift operation).
+/// Delegates to the generic factory's `mulByV`.
 pub fn fp6MulByV(f: Fp6) Fp6 {
-    return Fp6{
-        .c0 = Fp6.mulByXi(f.c2),
-        .c1 = f.c0,
-        .c2 = f.c1,
-    };
+    return Fp6.mulByV(f);
 }
 
 // ============================================================================

@@ -18,26 +18,11 @@ const BN254_INV = mod.BN254_INV;
 const BN254BaseField = mod.BN254BaseField;
 
 /// Unreduced product accumulator for deferred Montgomery reduction.
-///
-/// Stores partial products in positional `u128` slots to avoid Montgomery reduction
-/// in hot accumulation loops. Each slot holds a sum of u64×u64 partial products;
-/// carries between slots are deferred until `reduce()`. This mirrors Jolt's
-/// `Folded256ProductAccum` type.
-///
-/// ## Usage
-/// ```
-/// var accum = UnreducedProductAccum.zero();
-/// for (a_vals, b_vals) |a, b| {
-///     accum.addAssign(a.mulToProductAccum(b));
-/// }
-/// const result = accum.reduce();  // single Montgomery reduction
-/// ```
-///
-/// ## Overflow Safety
-/// Each `fromMul` contributes at most `4 × (2^64-1)` to any slot. After N `addAssign`
-/// calls, max slot value = `N × 4 × (2^64-1)`. With u128 max = 2^128-1, safe for
-/// N up to ~2^62. At T=2^30 with E_in=2^15, N=32768 → max slot ≈ 2^79, well within bounds.
-pub const UnreducedProductAccum = struct {
+/// Now an alias for the generic factory's ProductAccum type.
+pub const UnreducedProductAccum = BN254Scalar.ProductAccum;
+
+/// Legacy UnreducedProductAccum implementation kept for reference.
+const _UnreducedProductAccum_legacy = struct {
     slots: [8]u128,
 
     const Self = @This();
@@ -692,19 +677,31 @@ pub const WideAccumS = struct {
     }
 };
 
-/// LLVM carry/borrow intrinsics — map to single adc/sbb instructions on x86-64.
-/// Wrapped in a comptime-conditional struct so they are not emitted on non-x86 targets.
-const x86 = if (builtin.cpu.arch == .x86_64) struct {
+// Carry/borrow: use LLVM intrinsics in Release, portable u128 in Debug.
+const has_x86_intrinsics = builtin.cpu.arch == .x86_64 and builtin.mode != .Debug;
+const x86 = if (has_x86_intrinsics) struct {
     extern fn @"llvm.x86.addcarry.u64"(c_in: u8, a: u64, b: u64, result: *u64) u8;
     extern fn @"llvm.x86.subborrow.u64"(b_in: u8, a: u64, b: u64, result: *u64) u8;
-
     pub inline fn addcarry(c_in: u8, a: u64, b: u64, result: *u64) u8 {
         return @"llvm.x86.addcarry.u64"(c_in, a, b, result);
     }
     pub inline fn subborrow(b_in: u8, a: u64, b: u64, result: *u64) u8 {
         return @"llvm.x86.subborrow.u64"(b_in, a, b, result);
     }
-} else struct {};
+} else struct {
+    pub inline fn addcarry(c_in: u8, a: u64, b: u64, result: *u64) u8 {
+        const sum = @as(u128, a) + @as(u128, b) + @as(u128, c_in);
+        result.* = @truncate(sum);
+        return @truncate(sum >> 64);
+    }
+    pub inline fn subborrow(b_in: u8, a: u64, b: u64, result: *u64) u8 {
+        const wide_a = @as(u128, a);
+        const wide_b = @as(u128, b) + @as(u128, b_in);
+        const diff = wide_a -% wide_b;
+        result.* = @truncate(diff);
+        return @truncate(diff >> 127);
+    }
+};
 
 /// Comptime flag: true when targeting AArch64 (all AArch64 has adds/adcs/subs/sbcs).
 const use_arm64_asm = (builtin.cpu.arch == .aarch64);

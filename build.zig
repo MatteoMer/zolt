@@ -278,6 +278,27 @@ pub fn build(b: *std.Build) void {
     const field_bench_step = b.step("bench-field", "Run field arithmetic benchmark");
     field_bench_step.dependOn(&run_field_bench.step);
 
+    // Release-optimized dep chain for benchmarks (so zolt-arith gets
+    // compiled at ReleaseFast instead of Debug, enabling LLVM intrinsics).
+    const zolt_pool_dep_release = b.dependency("zolt_pool", .{
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const zolt_arith_dep_release = b.dependency("zolt_arith", .{
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const zolt_mod_release = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "zolt_pool", .module = zolt_pool_dep_release.module("zolt_pool") },
+            .{ .name = "zolt_arith", .module = zolt_arith_dep_release.module("zolt_arith") },
+        },
+    });
+    if (is_apple_silicon) linkMetalFrameworks(zolt_mod_release);
+
     // Benchmark: zolt-arith field microbench (repo-level, optional)
     const zolt_arith_field_micro = b.addExecutable(.{
         .name = "zolt-arith-field-micro",
@@ -286,7 +307,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
-                .{ .name = "zolt", .module = lib.root_module },
+                .{ .name = "zolt", .module = zolt_mod_release },
             },
         }),
     });
@@ -302,7 +323,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
-                .{ .name = "zolt", .module = lib.root_module },
+                .{ .name = "zolt", .module = zolt_mod_release },
             },
         }),
     });

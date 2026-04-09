@@ -235,12 +235,12 @@ pub fn MontgomeryField(
 
         /// Modular addition `(a + b) mod p`.
         pub inline fn add(a: Self, b: Self) Self {
+            @setEvalBranchQuota(10000);
             if (N == 4 and !@inComptime() and comptime use_arm64_asm) {
                 var res = Self{ .limbs = asm_mod.arm64Add256(a.limbs, b.limbs) };
                 if (!res.lessThanModulus()) res = res.subtractModulus();
                 return res;
             }
-            @setEvalBranchQuota(10000);
             var result: [N]u64 = undefined;
             var carry: u64 = 0;
             inline for (0..N) |i| {
@@ -255,9 +255,9 @@ pub fn MontgomeryField(
 
         /// Modular subtraction `(a - b) mod p`.
         pub inline fn sub(a: Self, b: Self) Self {
+            @setEvalBranchQuota(10000);
             if (N == 4 and !@inComptime() and comptime use_arm64_asm)
                 return .{ .limbs = asm_mod.arm64SubMod256(a.limbs, b.limbs, modulus) };
-            @setEvalBranchQuota(10000);
             var result: [N]u64 = undefined;
             var borrow: u64 = 0;
             inline for (0..N) |i| {
@@ -324,20 +324,27 @@ pub fn MontgomeryField(
             if (a.isZero()) return null;
 
             // Square-and-multiply: a^{p-2} mod p
-            // Walk all N*64 bits of (p-2) from MSB to LSB.
-            comptime var p_minus_two: [N]u64 = modulus;
-            p_minus_two[0] -= 2;
+            // Runtime loop to keep code compact (inline for unrolls N*64
+            // iterations, blowing the icache for N >= 4).
+            const p_minus_two: [N]u64 = comptime blk: {
+                var exp: [N]u64 = modulus;
+                exp[0] -= 2;
+                break :blk exp;
+            };
 
             var result = Self.one();
             var base = a;
 
-            inline for (0..N * 64) |i| {
-                const word_idx = i / 64;
-                const bit_idx: u6 = @truncate(i % 64);
-                if ((p_minus_two[word_idx] >> bit_idx) & 1 == 1) {
-                    result = result.mul(base);
+            inline for (0..N) |i| {
+                var bits = p_minus_two[i];
+                var j: usize = 0;
+                while (j < 64) : (j += 1) {
+                    if ((bits & 1) != 0) {
+                        result = result.mul(base);
+                    }
+                    base = base.square();
+                    bits >>= 1;
                 }
-                base = base.square();
             }
             return result;
         }
@@ -601,9 +608,9 @@ pub fn MontgomeryField(
 
         /// Unconditional subtraction of the modulus.
         pub inline fn subtractModulus(self: Self) Self {
+            @setEvalBranchQuota(10000);
             if (N == 4 and !@inComptime() and comptime use_arm64_asm)
                 return .{ .limbs = asm_mod.arm64Sub256(self.limbs, modulus) };
-            @setEvalBranchQuota(10000);
             var result: [N]u64 = undefined;
             var borrow: u64 = 0;
             inline for (0..N) |i| {

@@ -54,9 +54,22 @@ pub fn Fp2(comptime BaseFp: type) type {
             return .{ .c0 = BaseFp.neg(a.c0), .c1 = BaseFp.neg(a.c1) };
         }
 
+        /// Whether the base field exposes sumOfProducts (fused mul-accumulate).
+        const has_sum_of_products = @hasDecl(BaseFp, "sumOfProducts");
+        /// Whether the base field exposes addNoReduce (lazy reduction).
+        const has_add_no_reduce = @hasDecl(BaseFp, "addNoReduce");
+
         /// Multiplication: (a₀ + a₁u)(b₀ + b₁u) = (a₀b₀ - a₁b₁) + (a₀b₁ + a₁b₀)u
-        /// Uses the Karatsuba identity: a₀b₁ + a₁b₀ = (a₀+a₁)(b₀+b₁) - a₀b₀ - a₁b₁
+        /// When BaseFp has sumOfProducts, uses fused path (2 reductions
+        /// instead of 3). Otherwise falls back to Karatsuba.
         pub fn mul(a: Self, b: Self) Self {
+            if (comptime has_sum_of_products) {
+                const neg_a1 = BaseFp.neg(a.c1);
+                return .{
+                    .c0 = BaseFp.sumOfProducts(.{ a.c0, neg_a1 }, .{ b.c0, b.c1 }),
+                    .c1 = BaseFp.sumOfProducts(.{ a.c0, a.c1 }, .{ b.c1, b.c0 }),
+                };
+            }
             const a0b0 = BaseFp.mul(a.c0, b.c0);
             const a1b1 = BaseFp.mul(a.c1, b.c1);
             const a0_plus_a1 = BaseFp.add(a.c0, a.c1);
@@ -69,8 +82,12 @@ pub fn Fp2(comptime BaseFp: type) type {
         }
 
         /// Squaring: (a + bu)² = (a²-b²) + 2ab·u
+        /// Uses addNoReduce for (a+b) when available (saves 1 reduction).
         pub fn square(a: Self) Self {
-            const a_plus_b = BaseFp.add(a.c0, a.c1);
+            const a_plus_b = if (comptime has_add_no_reduce)
+                BaseFp.addNoReduce(a.c0, a.c1)
+            else
+                BaseFp.add(a.c0, a.c1);
             const a_minus_b = BaseFp.sub(a.c0, a.c1);
             const c0 = BaseFp.mul(a_plus_b, a_minus_b);
             const ab = BaseFp.mul(a.c0, a.c1);

@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-jolt-core = { git = "https://github.com/a16z/jolt.git", rev = "997c1543", features = ["host"], default-features = false }
-common = { git = "https://github.com/a16z/jolt.git", rev = "997c1543", features = ["std"], default-features = false }
+jolt-core = { git = "https://github.com/a16z/jolt.git", rev = "b10e80ac", features = ["host"], default-features = false }
+common = { git = "https://github.com/a16z/jolt.git", rev = "b10e80ac", features = ["std"], default-features = false }
 # Registers the SHA-256 inline sequence builder via a #[ctor::ctor] on load.
 # Required for proving any ELF that uses `jolt_inlines_sha2` — without this,
 # the tracer panics with "No inline sequence builder registered for
 # opcode=0x0b".
-jolt-inlines-sha2 = { git = "https://github.com/a16z/jolt.git", rev = "997c1543", features = ["host"] }
+jolt-inlines-sha2 = { git = "https://github.com/a16z/jolt.git", rev = "b10e80ac", features = ["host"] }
 ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false }
 ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false, features = ["derive"] }
 ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false }

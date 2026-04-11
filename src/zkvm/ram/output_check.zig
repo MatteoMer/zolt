@@ -103,8 +103,13 @@ pub fn OutputSumcheckProver(comptime F: type) type {
         num_vars: usize,
         /// Current size (halves each round)
         current_size: usize,
+        /// Current round (0-indexed, incremented after each bind)
+        current_round: usize,
         /// Current claim
         current_claim: F,
+        /// Number of initial address rounds where io_mask pairs are identical,
+        /// allowing a trivial constant polynomial (PR #1346 optimization).
+        num_zero_address_vars: usize,
         /// Allocator
         allocator: Allocator,
         thread_pool: ?*ThreadPool = null,
@@ -360,6 +365,17 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             // Compute EQ polynomial evaluations
             computeEqEvals(F, eq_r_address, r_address);
 
+            // Compute how many initial address rounds have identical io_mask pairs.
+            // When io_start and io_end are aligned to powers of 2, the early
+            // rounds of the sumcheck produce trivial polynomials (PR #1346).
+            const num_zero_address_vars = @min(
+                @min(
+                    if (io_start == 0) log_K else @as(usize, @ctz(io_start)),
+                    if (io_end == 0) log_K else @as(usize, @ctz(io_end)),
+                ),
+                log_K,
+            );
+
             return Self{
                 .val_init = val_init,
                 .val_final = val_final,
@@ -368,7 +384,9 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                 .eq_r_address = eq_r_address,
                 .num_vars = log_K,
                 .current_size = K,
+                .current_round = 0,
                 .current_claim = F.zero(), // Input claim is 0
+                .num_zero_address_vars = num_zero_address_vars,
                 .allocator = allocator,
             };
         }
@@ -388,6 +406,17 @@ pub fn OutputSumcheckProver(comptime F: type) type {
         ///
         /// This is degree 3 in X.
         pub fn computeRoundPolynomial(self: *Self) [3]F {
+            // PR #1346: For early rounds where io_mask pairs are always identical,
+            // the fold produces q_constant=0, q_quadratic=0, so the polynomial is
+            // just the constant previous_claim/2.
+            if (self.current_round < self.num_zero_address_vars) {
+                const two_inv = F.fromU64(2).inverse().?;
+                const c0 = self.current_claim.mul(two_inv);
+                // Compressed format [c0, c2, c3]: degree-1 poly p(x) = c0 means
+                // p(0)=c0, p(1)=c0, so c2=c3=0.
+                return .{ c0, F.zero(), F.zero() };
+            }
+
             const half = self.current_size / 2;
 
             const OCtx = struct {
@@ -484,6 +513,7 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             parallelForOptional(self.thread_pool, 5, bctx, bindOneFn);
 
             self.current_size = half;
+            self.current_round += 1;
         }
 
         /// Update claim from evaluations at challenge

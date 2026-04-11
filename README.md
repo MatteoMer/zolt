@@ -89,7 +89,7 @@ Compared against [Jolt](https://github.com/a16z/jolt) (Rust) on a Hetzner CPX41 
 
 ## Upstream Compatibility
 
-The `jolt-verifier/` and `jolt-bench/` crates are pinned to upstream commit [`997c1543`](https://github.com/a16z/jolt/commit/997c1543). This is the version all 8 programs are verified against. Updating to a newer upstream commit may require adjustments if the verification protocol changes.
+The `jolt-verifier/` and `jolt-bench/` crates are pinned to upstream commit [`b10e80ac`](https://github.com/a16z/jolt/commit/b10e80ac). All programs are verified against this version. This includes the Fiat-Shamir soundness fixes from PRs #1358 (config parameters bound to transcript) and #1408 (preprocessing digest bound to transcript).
 
 ## Project Structure
 

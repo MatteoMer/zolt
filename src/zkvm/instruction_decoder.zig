@@ -178,10 +178,9 @@ pub fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bo
                 };
             }
         },
-        0b0001111 => { // FENCE - uses FormatI in Jolt
+        0b0001111 => { // FENCE - Jolt uses None operands
             variant = .FENCE;
-            const imm = decodeIImmediate(instruction);
-            operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
+            operands = .{ .None = {} };
         },
         0b1110011 => { // SYSTEM
             const imm = decodeIImmediate(instruction);

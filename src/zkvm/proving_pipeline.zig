@@ -474,8 +474,38 @@ pub fn JoltProver(comptime F: type) type {
             // Compute RAM parameters directly
             const ram_K: usize = @as(usize, 1) << @intCast(log_k);
 
+            // Compute config structs for Fiat-Shamir preamble (must match prover)
+            const rw_config = jolt_types.ReadWriteConfig.default(log_t, log_k);
+            const one_hot_config = jolt_types.OneHotConfig{ .log_k_chunk = 4, .lookups_ra_virtual_log_k_chunk = 16 };
+            const dory_layout: u8 = 0; // Wide layout
+
+            // Build JoltSharedPreprocessing for digest computation (PR #1408)
+            const preproc_mod = @import("preprocessing.zig");
+            const text_sz_for_digest = text_size_opt orelse program_bytecode.len;
+            var bytecode_prep_digest = try preproc_mod.BytecodePreprocessing.preprocessWithTextSize(
+                self.allocator, program_bytecode, base_address,
+                device.memory_layout.termination, text_sz_for_digest,
+            );
+            defer bytecode_prep_digest.deinit();
+
+            const mem_init_entries = try self.allocator.alloc(struct { u64, u8 }, program_bytecode.len);
+            defer self.allocator.free(mem_init_entries);
+            for (program_bytecode, 0..) |byte, i| {
+                mem_init_entries[i] = .{ base_address + i, byte };
+            }
+            var ram_prep_digest = try preproc_mod.RAMPreprocessing.preprocess(self.allocator, mem_init_entries);
+            defer ram_prep_digest.deinit();
+
+            const shared_prep = preproc_mod.JoltSharedPreprocessing{
+                .bytecode = bytecode_prep_digest,
+                .ram = ram_prep_digest,
+                .memory_layout = device.memory_layout,
+                .max_padded_trace_length = trace_length,
+            };
+            const preprocessing_digest = try shared_prep.digest(self.allocator);
+
             // Run Fiat-Shamir preamble to match Jolt verifier
-            jolt_device.fiatShamirPreamble(F, &transcript, &device, ram_K, trace_length, entry_point);
+            jolt_device.fiatShamirPreamble(F, &transcript, &device, ram_K, trace_length, entry_point, rw_config, one_hot_config, dory_layout, &preprocessing_digest);
 
             // Build polynomial evaluations and compute Dory commitments
             const bytecode_poly_size = if (program_bytecode.len < 2) 2 else std.math.ceilPowerOfTwo(usize, program_bytecode.len) catch program_bytecode.len;

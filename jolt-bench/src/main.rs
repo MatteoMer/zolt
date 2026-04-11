@@ -33,6 +33,10 @@ struct Cli {
     #[arg(long, default_value = "65536")]
     max_trace: usize,
 
+    /// Heap size in bytes for Jolt's tracer (default 32 MiB, matching Jolt SDK default)
+    #[arg(long, default_value = "33554432")]
+    heap_size: usize,
+
     /// Enable span close timing (shows Dory sub-operation durations)
     #[arg(long)]
     span_timing: bool,
@@ -99,8 +103,8 @@ fn main() {
     // were hidden by the lack of MMU bounds checks. They don't work for
     // any SDK guest that doesn't override all of these attributes too.)
     let memory_config = MemoryConfig {
-        heap_size: 65536,
-        stack_size: 65536,
+        heap_size: cli.heap_size as u64,
+        stack_size: 4096,
         max_input_size: 4096,
         max_untrusted_advice_size: 4096,
         max_trusted_advice_size: 4096,

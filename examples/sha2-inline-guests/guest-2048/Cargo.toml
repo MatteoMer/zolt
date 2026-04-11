@@ -7,8 +7,8 @@ edition = "2021"
 guest = []
 
 [dependencies]
-jolt = { package = "jolt-sdk", git = "https://github.com/a16z/jolt.git", rev = "997c1543" }
-jolt-inlines-sha2 = { git = "https://github.com/a16z/jolt.git", rev = "997c1543" }
+jolt = { package = "jolt-sdk", git = "https://github.com/a16z/jolt.git", rev = "b10e80ac" }
+jolt-inlines-sha2 = { git = "https://github.com/a16z/jolt.git", rev = "b10e80ac" }
 
 [package.metadata.cargo-machete]
 ignored = ["jolt-inlines-sha2"]

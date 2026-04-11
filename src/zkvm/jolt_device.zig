@@ -13,6 +13,7 @@ const std = @import("std");
 
 const zkvm_debug = @import("debug.zig");
 const dbg = zkvm_debug.dbg;
+const jolt_types = @import("jolt_types.zig");
 
 const Allocator = std.mem.Allocator;
 const common_jolt = @import("../common/jolt_device.zig");
@@ -159,6 +160,8 @@ pub const JoltDevice = struct {
 ///
 /// This appends the same data to the transcript as Jolt does,
 /// ensuring identical challenge derivation.
+///
+/// Reference: jolt-core/src/zkvm/mod.rs (PRs #1358, #1408)
 pub fn fiatShamirPreamble(
     comptime F: type,
     transcript: anytype,
@@ -166,8 +169,15 @@ pub fn fiatShamirPreamble(
     ram_K: usize,
     trace_length: usize,
     entry_address: u64,
+    rw_config: jolt_types.ReadWriteConfig,
+    one_hot_config: jolt_types.OneHotConfig,
+    dory_layout: u8,
+    preprocessing_digest: *const [32]u8,
 ) void {
-    const Blake2bTranscript = @import("zolt_arith").transcripts.blake2b.Blake2bTranscript;
+    _ = F;
+
+    // Preprocessing digest is appended FIRST (PR #1408)
+    transcript.appendBytes("preprocessing_digest", preprocessing_digest);
 
     transcript.appendU64("max_input_size", device.memory_layout.max_input_size);
     transcript.appendU64("max_output_size", device.memory_layout.max_output_size);
@@ -179,8 +189,14 @@ pub fn fiatShamirPreamble(
     transcript.appendU64("trace_length", @intCast(trace_length));
     transcript.appendU64("entry_address", entry_address);
 
-    _ = F;
-    _ = Blake2bTranscript;
+    // Config parameters bound to transcript (PR #1358)
+    transcript.appendU64("ram_rw_phase1_num_rounds", @intCast(rw_config.ram_rw_phase1_num_rounds));
+    transcript.appendU64("ram_rw_phase2_num_rounds", @intCast(rw_config.ram_rw_phase2_num_rounds));
+    transcript.appendU64("registers_rw_phase1_num_rounds", @intCast(rw_config.registers_rw_phase1_num_rounds));
+    transcript.appendU64("registers_rw_phase2_num_rounds", @intCast(rw_config.registers_rw_phase2_num_rounds));
+    transcript.appendU64("log_k_chunk", @intCast(one_hot_config.log_k_chunk));
+    transcript.appendU64("lookups_ra_virtual_log_k_chunk", @intCast(one_hot_config.lookups_ra_virtual_log_k_chunk));
+    transcript.appendU64("dory_layout", @intCast(dory_layout));
 }
 
 // ============================================================================

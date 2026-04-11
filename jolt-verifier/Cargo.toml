@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Pinned to a16z/jolt commit 997c1543 (2026-03-24)
-jolt-core = { git = "https://github.com/a16z/jolt.git", rev = "997c1543", features = ["host"], default-features = false }
-common = { git = "https://github.com/a16z/jolt.git", rev = "997c1543", features = ["std"], default-features = false }
+# Pinned to a16z/jolt commit b10e80ac
+jolt-core = { git = "https://github.com/a16z/jolt.git", rev = "b10e80ac", features = ["host"], default-features = false }
+common = { git = "https://github.com/a16z/jolt.git", rev = "b10e80ac", features = ["std"], default-features = false }
 ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false }
 ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false, features = ["derive"] }
 ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false }

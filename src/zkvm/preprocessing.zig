@@ -132,6 +132,24 @@ pub const JoltSharedPreprocessing = struct {
         // max_padded_trace_length: usize (as u64)
         try writer.writeInt(u64, @intCast(self.max_padded_trace_length), .little);
     }
+
+    /// Compute a Blake2b-256 digest of the serialized preprocessing.
+    /// Used to bind preprocessing to the Fiat-Shamir transcript (PR #1408).
+    pub fn digest(self: *const JoltSharedPreprocessing, allocator: Allocator) ![32]u8 {
+        const Blake2b256 = std.crypto.hash.blake2.Blake2b256;
+
+        // Serialize to an in-memory buffer
+        var buf = std.ArrayListUnmanaged(u8){};
+        defer buf.deinit(allocator);
+        try self.serialize(allocator, buf.writer(allocator));
+
+        // Hash with Blake2b-256
+        var h = Blake2b256.init(.{});
+        h.update(buf.items);
+        var out: [32]u8 = undefined;
+        h.final(&out);
+        return out;
+    }
 };
 
 // serializeMemoryLayout has been moved to MemoryLayout.serialize() in common/jolt_device.zig

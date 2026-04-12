@@ -73,19 +73,24 @@ make all
 
 ## Benchmarks
 
-Compared against [Jolt](https://github.com/a16z/jolt) (Rust) on a Hetzner CPX41 — 8 vCPU AMD EPYC (Zen 2), 16 GB RAM, Ubuntu 22.04.
+Compared against [Jolt](https://github.com/a16z/jolt) (Rust) on Apple M1 Pro, 16 GB RAM, macOS.
 
 | Program | Trace | Jolt (ms) | Zolt (ms) | Ratio |
 |---------|------:|----------:|----------:|------:|
-| fibonacci | 256 | 1240.01 | 929.33 | 0.75x |
-| factorial | 256 | 1150.95 | 1027.77 | 0.89x |
-| bitwise | 512 | 1351.32 | 1475.52 | 1.09x |
-| collatz | 2048 | 1567.96 | 2541.66 | 1.62x |
-| primes | 2048 | 1464.57 | 3443.07 | 2.35x |
-| sum | 256 | 1260.56 | 953.11 | 0.76x |
-| gcd | 256 | 1271.58 | 1427.87 | 1.12x |
-| signed | 256 | 1323.29 | 976.55 | 0.74x |
-| primes_large | 65536 | 2541.32 | 30773.29 | 12.11x |
+| fibonacci | 128 | 702.21 | 195.80 | 0.28x |
+| factorial | 64 | 877.07 | 166.29 | 0.19x |
+| bitwise | 512 | 763.48 | 235.37 | 0.31x |
+| collatz | 2048 | 888.86 | 382.80 | 0.43x |
+| primes | 2048 | 860.59 | 421.58 | 0.49x |
+| sum | 16 | 669.59 | 157.24 | 0.23x |
+| gcd | 256 | 690.98 | 255.23 | 0.37x |
+| signed | 16 | 682.64 | 160.60 | 0.24x |
+| primes_large | 65536 | 1729.97 | 1757.10 | 1.02x |
+| sha256_128 | 16384 | 1476.15 | 1468.76 | 0.99x |
+| sha256 | 8192 | 1256.52 | 1215.65 | 0.97x |
+| sha256_512 | 32768 | 2056.07 | 2084.61 | 1.01x |
+| sha256_1024 | 65536 | 2947.85 | 2886.95 | 0.98x |
+| sha256_2048 | 131072 | 3917.25 | 4029.60 | 1.03x |
 
 ## Upstream Compatibility
 

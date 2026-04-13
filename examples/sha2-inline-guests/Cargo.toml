@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "guest-64",
     "guest-128",
+    "guest-256",
     "guest-512",
     "guest-1024",
     "guest-2048",

@@ -944,6 +944,148 @@ pub const DorySRS = struct {
         self.g2_prepared_affine = affine;
     }
 
+    const CACHE_MAGIC = "ZSRS";
+    const CACHE_VERSION: u32 = 1;
+
+    /// Save the full SRS (including prepared caches) to a file for fast reload.
+    pub fn saveToCache(self: *const DorySRS, path: []const u8) !void {
+        const file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+
+        // Header
+        try file.writeAll(CACHE_MAGIC);
+        try file.writeAll(std.mem.asBytes(&std.mem.nativeToLittle(u32, CACHE_VERSION)));
+        const n: u64 = @intCast(self.g1_vec.len);
+        try file.writeAll(std.mem.asBytes(&std.mem.nativeToLittle(u64, n)));
+        try file.writeAll(std.mem.asBytes(&std.mem.nativeToLittle(u32, self.sigma)));
+        try file.writeAll(std.mem.asBytes(&std.mem.nativeToLittle(u32, self.nu)));
+
+        // G1 points — raw memory
+        try file.writeAll(std.mem.sliceAsBytes(self.g1_vec));
+        // G2 points — raw memory
+        try file.writeAll(std.mem.sliceAsBytes(self.g2_vec));
+        // G2Prepared
+        if (self.g2_prepared) |prep| {
+            try file.writeAll(&[_]u8{1});
+            try file.writeAll(std.mem.sliceAsBytes(prep));
+        } else {
+            try file.writeAll(&[_]u8{0});
+        }
+        // G2PreparedAffine
+        if (self.g2_prepared_affine) |affine| {
+            try file.writeAll(&[_]u8{1});
+            try file.writeAll(std.mem.sliceAsBytes(affine));
+        } else {
+            try file.writeAll(&[_]u8{0});
+        }
+    }
+
+    /// Load the full SRS (including prepared caches) from a cache file.
+    /// Returns null if file doesn't exist or is invalid.
+    pub fn loadFromCache(allocator: Allocator, path: []const u8) ?DorySRS {
+        const file = std.fs.cwd().openFile(path, .{}) catch return null;
+        defer file.close();
+
+        // Validate header
+        var magic: [4]u8 = undefined;
+        _ = file.readAll(&magic) catch return null;
+        if (!std.mem.eql(u8, &magic, CACHE_MAGIC)) return null;
+        var ver_buf: [4]u8 = undefined;
+        _ = file.readAll(&ver_buf) catch return null;
+        if (std.mem.readInt(u32, &ver_buf, .little) != CACHE_VERSION) return null;
+        var n_buf: [8]u8 = undefined;
+        _ = file.readAll(&n_buf) catch return null;
+        const n: usize = @intCast(std.mem.readInt(u64, &n_buf, .little));
+        var sig_buf: [4]u8 = undefined;
+        _ = file.readAll(&sig_buf) catch return null;
+        const sigma: u32 = std.mem.readInt(u32, &sig_buf, .little);
+        var nu_buf: [4]u8 = undefined;
+        _ = file.readAll(&nu_buf) catch return null;
+        const nu: u32 = std.mem.readInt(u32, &nu_buf, .little);
+
+        // G1 points
+        const g1_vec = allocator.alloc(G1Point, n) catch return null;
+        _ = file.readAll(std.mem.sliceAsBytes(g1_vec)) catch {
+            allocator.free(g1_vec);
+            return null;
+        };
+        // G2 points
+        const g2_vec = allocator.alloc(G2Point, n) catch {
+            allocator.free(g1_vec);
+            return null;
+        };
+        _ = file.readAll(std.mem.sliceAsBytes(g2_vec)) catch {
+            allocator.free(g1_vec);
+            allocator.free(g2_vec);
+            return null;
+        };
+
+        // G2Prepared (optional)
+        var g2_prepared: ?[]G2Prepared = null;
+        var flag_buf: [1]u8 = undefined;
+        _ = file.readAll(&flag_buf) catch {
+            allocator.free(g1_vec);
+            allocator.free(g2_vec);
+            return null;
+        };
+        if (flag_buf[0] == 1) {
+            const prep = allocator.alloc(G2Prepared, n) catch {
+                allocator.free(g1_vec);
+                allocator.free(g2_vec);
+                return null;
+            };
+            _ = file.readAll(std.mem.sliceAsBytes(prep)) catch {
+                allocator.free(prep);
+                allocator.free(g1_vec);
+                allocator.free(g2_vec);
+                return null;
+            };
+            g2_prepared = prep;
+        }
+
+        // G2PreparedAffine (optional)
+        var g2_prepared_affine: ?[]G2PreparedAffine = null;
+        _ = file.readAll(&flag_buf) catch {
+            allocator.free(g1_vec);
+            allocator.free(g2_vec);
+            if (g2_prepared) |p| allocator.free(p);
+            return null;
+        };
+        if (flag_buf[0] == 1) {
+            const affine = allocator.alloc(G2PreparedAffine, n) catch {
+                allocator.free(g1_vec);
+                allocator.free(g2_vec);
+                if (g2_prepared) |p| allocator.free(p);
+                return null;
+            };
+            _ = file.readAll(std.mem.sliceAsBytes(affine)) catch {
+                allocator.free(affine);
+                allocator.free(g1_vec);
+                allocator.free(g2_vec);
+                if (g2_prepared) |p| allocator.free(p);
+                return null;
+            };
+            g2_prepared_affine = affine;
+        }
+
+        const num_columns: usize = @as(usize, 1) << @intCast(sigma);
+        const num_rows: usize = @as(usize, 1) << @intCast(nu);
+
+        return DorySRS{
+            .g1_vec = g1_vec,
+            .g2_vec = g2_vec,
+            .g2_prepared = g2_prepared,
+            .g2_prepared_affine = g2_prepared_affine,
+            .num_columns = num_columns,
+            .num_rows = num_rows,
+            .sigma = sigma,
+            .nu = nu,
+            .h1 = G1Point.generator(),
+            .h2 = G2Point.generator(),
+            .allocator = allocator,
+        };
+    }
+
     pub fn deinit(self: *DorySRS) void {
         if (self.g1_vec.len > 0) {
             self.allocator.free(self.g1_vec);
@@ -1226,6 +1368,38 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .h2 = G2Point.generator(),
                 .allocator = allocator,
             };
+        }
+
+        /// Setup with disk caching. Tries to load from ~/.cache/zolt/srs_v1_{log_size}.bin.
+        /// On cache miss, generates SRS + prepared caches and writes to disk.
+        pub fn setupCached(allocator: Allocator, max_num_vars: usize, tp: ?*ThreadPool) !SetupParams {
+            // Build cache path: ~/.cache/zolt/srs_v1_<log_size>.bin
+            var path_buf: [256]u8 = undefined;
+            const home = std.posix.getenv("HOME") orelse "/tmp";
+            const path_len = (std.fmt.bufPrint(&path_buf, "{s}/.cache/zolt/srs_v1_{d}.bin", .{ home, max_num_vars }) catch return setup(allocator, max_num_vars)).len;
+            const cache_path = path_buf[0..path_len];
+
+            // Try loading from cache
+            if (DorySRS.loadFromCache(allocator, cache_path)) |srs| {
+                if (srs.g1_vec.len > 0 and srs.g2_prepared != null) {
+                    return srs;
+                }
+                // Cache was incomplete, discard and regenerate
+                var mutable_srs = srs;
+                mutable_srs.deinit();
+            }
+
+            // Cache miss: generate from scratch
+            var srs = try setup(allocator, max_num_vars);
+            srs.initPreparedCache(tp);
+
+            // Ensure cache directory exists and save
+            if (std.fmt.bufPrint(&path_buf, "{s}/.cache/zolt", .{home})) |dir_path| {
+                std.fs.cwd().makePath(dir_path) catch {};
+                srs.saveToCache(cache_path) catch {};
+            } else |_| {}
+
+            return srs;
         }
 
         /// Commit to a polynomial given as evaluations

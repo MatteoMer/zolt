@@ -350,6 +350,9 @@ pub fn JoltProver(comptime F: type) type {
             var emulator = tracer.Emulator.init(self.allocator, &config);
             defer emulator.deinit();
 
+            // Preallocate trace arrays to avoid reallocations during execution
+            try emulator.preallocate(128 * 1024);
+
             // Load the program at the correct base address and set entry point
             try emulator.loadProgramAt(program_bytecode, base_address);
             emulator.state.pc = entry_point;
@@ -359,8 +362,16 @@ pub fn JoltProver(comptime F: type) type {
             }
             try emulator.run();
 
+            var trace_timer = std.time.Timer.start() catch unreachable;
+            const emulate_ns = overall_timer.read();
+
+            // Save unpadded length for log_k optimization (padding steps have null memory_addr)
+            const num_real_steps = emulator.trace.steps.items.len;
+
             // Pad trace with NoOp cycles (matching Jolt's behavior)
             try emulator.trace.padWithNoop();
+            const pad_ns = trace_timer.read();
+            trace_timer.reset();
 
             // Initialize Blake2b transcript for Jolt compatibility
             const Blake2bTranscript = transcripts.Blake2bTranscript(F);
@@ -372,6 +383,8 @@ pub fn JoltProver(comptime F: type) type {
             const text_sz_for_witness = text_size_opt orelse program_bytecode.len;
             var bytecode_prep_witness = try preproc_for_witness.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, null, text_sz_for_witness);
             defer bytecode_prep_witness.deinit();
+            const preproc1_ns = trace_timer.read();
+            trace_timer.reset();
 
             // Build compact + raw integer witnesses directly from trace (no Montgomery round-trip).
             // This replaces the old buildCompactAndRawWitnesses which decoded field witnesses.
@@ -385,6 +398,8 @@ pub fn JoltProver(comptime F: type) type {
             );
             defer self.allocator.free(prebuilt.compact);
             defer self.allocator.free(prebuilt.raw);
+            const witness_ns = trace_timer.read();
+            trace_timer.reset();
 
             // Convert to Jolt format using the proof converter with transcript
             var converter = if (self.thread_pool) |tp|
@@ -403,9 +418,9 @@ pub fn JoltProver(comptime F: type) type {
             const log_k: u8 = blk: {
                 const ml = emulator.device.memory_layout;
 
-                // 1. Find max remapped address from trace
+                // 1. Find max remapped address from trace (only real steps, padding has null memory_addr)
                 var max_remapped: u64 = 0;
-                for (emulator.trace.steps.items) |step| {
+                for (emulator.trace.steps.items[0..num_real_steps]) |step| {
                     if (step.memory_addr) |addr| {
                         if (ml.remapAddress(addr)) |raddr| {
                             if (raddr > max_remapped) max_remapped = raddr;
@@ -426,6 +441,8 @@ pub fn JoltProver(comptime F: type) type {
                 const ram_k = std.math.ceilPowerOfTwo(u64, max_remapped) catch (1 << 16);
                 break :blk @intCast(std.math.log2_int(u64, ram_k));
             };
+            const logk_ns = trace_timer.read();
+            trace_timer.reset();
 
             // Create JoltDevice for Fiat-Shamir preamble
             // CRITICAL: Use actual emulator outputs and panic state for Fiat-Shamir transcript
@@ -470,6 +487,8 @@ pub fn JoltProver(comptime F: type) type {
                 config.heap_size, // Pass memory_size from config
             );
             defer device.deinit();
+            const device_ns = trace_timer.read();
+            trace_timer.reset();
 
             // Compute RAM parameters directly
             const ram_K: usize = @as(usize, 1) << @intCast(log_k);
@@ -487,6 +506,8 @@ pub fn JoltProver(comptime F: type) type {
                 device.memory_layout.termination, text_sz_for_digest,
             );
             defer bytecode_prep_digest.deinit();
+            const preproc2a_ns = trace_timer.read();
+            trace_timer.reset();
 
             const mem_init_entries = try self.allocator.alloc(struct { u64, u8 }, program_bytecode.len);
             defer self.allocator.free(mem_init_entries);
@@ -503,9 +524,12 @@ pub fn JoltProver(comptime F: type) type {
                 .max_padded_trace_length = trace_length,
             };
             const preprocessing_digest = try shared_prep.digest(self.allocator);
+            const preproc2b_ns = trace_timer.read();
+            trace_timer.reset();
 
             // Run Fiat-Shamir preamble to match Jolt verifier
             jolt_device.fiatShamirPreamble(F, &transcript, &device, ram_K, trace_length, entry_point, rw_config, one_hot_config, dory_layout, &preprocessing_digest);
+            const preproc2c_ns = trace_timer.read();
 
             // Build polynomial evaluations and compute Dory commitments
             const bytecode_poly_size = if (program_bytecode.len < 2) 2 else std.math.ceilPowerOfTwo(usize, program_bytecode.len) catch program_bytecode.len;
@@ -526,17 +550,31 @@ pub fn JoltProver(comptime F: type) type {
 
             const trace_and_witness_ns = overall_timer.read();
             if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] Tracing + witness gen: {d:.1} ms\n", .{@as(f64, @floatFromInt(trace_and_witness_ns)) / 1_000_000.0});
+            if (bench) {
+                const ms = 1_000_000.0;
+                std.debug.print("[BENCH] trace_detail: emulate={d:.1} pad={d:.1} preproc1={d:.1} witness={d:.1} logk={d:.1} device={d:.1} preproc2={d:.1}+{d:.1}+{d:.1}\n", .{
+                    @as(f64, @floatFromInt(emulate_ns)) / ms,
+                    @as(f64, @floatFromInt(pad_ns)) / ms,
+                    @as(f64, @floatFromInt(preproc1_ns)) / ms,
+                    @as(f64, @floatFromInt(witness_ns)) / ms,
+                    @as(f64, @floatFromInt(logk_ns)) / ms,
+                    @as(f64, @floatFromInt(device_ns)) / ms,
+                    @as(f64, @floatFromInt(preproc2a_ns)) / ms,
+                    @as(f64, @floatFromInt(preproc2b_ns)) / ms,
+                    @as(f64, @floatFromInt(preproc2c_ns)) / ms,
+                });
+            }
 
             // Load SRS from file if path provided (for Jolt compatibility)
-            // Otherwise generate SRS deterministically (may not match Jolt exactly)
+            // Otherwise generate SRS with disk caching for prepared G2 data
             var phase_timer = std.time.Timer.start() catch unreachable;
-            var dory_srs = if (srs_path) |path|
-                try DoryScheme.loadFromFile(self.allocator, path)
-            else
-                try DoryScheme.setup(self.allocator, log_size);
+            var dory_srs = if (srs_path) |path| blk: {
+                var srs = try DoryScheme.loadFromFile(self.allocator, path);
+                srs.initPreparedCache(self.thread_pool);
+                break :blk srs;
+            } else
+                try DoryScheme.setupCached(self.allocator, log_size, self.thread_pool);
             defer dory_srs.deinit();
-            // Precompute G2 Miller loop coefficients for fast pairings
-            dory_srs.initPreparedCache(self.thread_pool);
             const srs_time_ns = phase_timer.read();
             if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] SRS setup: {d:.1} ms\n", .{@as(f64, @floatFromInt(srs_time_ns)) / 1_000_000.0});
 
@@ -827,9 +865,7 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // --- One-hot index arrays: single-scan build ---
-            const text_sz_for_ra = text_size_opt orelse program_bytecode.len;
-            var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, null, text_sz_for_ra);
-            defer bytecode_prep_for_ra.deinit();
+            // Reuse bytecode_prep_witness (same params: termination=null, same text_size)
 
             {
                 const stage6_mod = @import("spartan/stage6_prover.zig");
@@ -871,7 +907,7 @@ pub fn JoltProver(comptime F: type) type {
                     }
 
                     // Bytecode Ra: compute PC index ONCE (was bytecode_d× before)
-                    const bc_idx: u64 = @intCast(bytecode_prep_for_ra.pc_map.getPCForStep(step));
+                    const bc_idx: u64 = @intCast(bytecode_prep_witness.pc_map.getPCForStep(step));
                     for (0..bytecode_d) |dim| {
                         const shift = log_k_chunk * (bytecode_d - 1 - dim);
                         const chunk: u64 = (bc_idx >> @intCast(shift)) & ram_mask;
@@ -1077,15 +1113,8 @@ pub fn JoltProver(comptime F: type) type {
             const bytecode_code_size_dory = computeBytecodeCodeSizeWithTextSize(program_bytecode, text_sz_for_K);
             dbg("[ZOLT] bytecode_code_size (Dory path): {}\n", .{bytecode_code_size_dory});
 
-            // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
-            // CRITICAL: Pass device.memory_layout.termination so the synthetic
-            // LUI/ADDI/SD termination entries have the same imm values as the
-            // exported preprocessing seen by the verifier. Otherwise val_poly
-            // would diverge between prover and verifier.
-            const preproc = @import("preprocessing.zig");
+            // Reuse bytecode_prep_digest (same params: termination=device.memory_layout.termination, same text_size)
             const text_sz = text_size_opt orelse program_bytecode.len;
-            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocessWithTextSize(self.allocator, program_bytecode, base_address, device.memory_layout.termination, text_sz);
-            defer bytecode_prep_dory.deinit();
 
             // Convert to Jolt-compatible format with transcript integration
             const pre_prove_setup_ns = phase_timer.read();
@@ -1116,9 +1145,9 @@ pub fn JoltProver(comptime F: type) type {
                     .bytecode_words = if (bytecode_info_dory.words.len > 0) bytecode_info_dory.words else null,
                     .min_bytecode_address = bytecode_info_dory.min_bytecode_address,
                     // PC mapper for Stage 6 BytecodeReadRaf
-                    .bytecode_pc_map = &bytecode_prep_dory.pc_map,
+                    .bytecode_pc_map = &bytecode_prep_digest.pc_map,
                     // Preprocessing bytecode for Stage 6 val_poly computation
-                    .bytecode_preprocessing = &bytecode_prep_dory,
+                    .bytecode_preprocessing = &bytecode_prep_digest,
                     // Static ELF code bytes for Stage 6 bytecode entry population
                     .program_code_bytes = program_bytecode,
                     .code_base_address = common.constants.RAM_START_ADDRESS,

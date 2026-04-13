@@ -170,29 +170,22 @@ pub const JoltInstruction = struct {
     /// Serialize this instruction to JSON bytes (for arkworks compatibility)
     /// NoOp and UNIMPL are unit variants in Jolt, so they serialize as just "NoOp" or "UNIMPL"
     /// Other instructions serialize as {"VARIANT":{...fields...}}
-    pub fn toJson(self: JoltInstruction, allocator: Allocator) ![]u8 {
-        var list = std.ArrayListUnmanaged(u8){};
-        errdefer list.deinit(allocator);
-        const writer = list.writer(allocator);
-
-        // NoOp and UNIMPL are unit variants in Jolt's Instruction enum
-        // They serialize as just "NoOp" or "UNIMPL" (a JSON string)
+    /// Write JSON serialization directly to any writer (zero allocation).
+    pub fn writeJsonTo(self: JoltInstruction, writer: anytype) !void {
         if (self.variant == .NoOp) {
             try writer.writeAll("\"NoOp\"");
-            return list.toOwnedSlice(allocator);
+            return;
         }
         if (self.variant == .UNIMPL) {
             try writer.writeAll("\"UNIMPL\"");
-            return list.toOwnedSlice(allocator);
+            return;
         }
 
-        // Other instructions: {"VARIANT":{"address":123,"operands":{...},...}}
         try writer.writeAll("{\"");
         try writer.writeAll(@tagName(self.variant));
         try writer.writeAll("\":{\"address\":");
         try std.fmt.format(writer, "{}", .{self.address});
 
-        // Operands
         try writer.writeAll(",\"operands\":");
         switch (self.operands) {
             .FormatR => |r| {
@@ -230,7 +223,6 @@ pub const JoltInstruction = struct {
             },
         }
 
-        // virtual_sequence_remaining
         try writer.writeAll(",\"virtual_sequence_remaining\":");
         if (self.virtual_sequence_remaining) |vsr| {
             try std.fmt.format(writer, "{}", .{vsr});
@@ -238,22 +230,23 @@ pub const JoltInstruction = struct {
             try writer.writeAll("null");
         }
 
-        // is_first_in_sequence
         try writer.writeAll(",\"is_first_in_sequence\":");
         try writer.writeAll(if (self.is_first_in_sequence) "true" else "false");
 
-        // VirtualAdvice has an extra 'advice' field (u64) that other instructions don't have.
-        // In preprocessing, advice is always 0 (actual values are filled at runtime).
         if (self.variant == .VirtualAdvice) {
             try writer.writeAll(",\"advice\":0");
         }
 
-        // is_compressed
         try writer.writeAll(",\"is_compressed\":");
         try writer.writeAll(if (self.is_compressed) "true" else "false");
 
         try writer.writeAll("}}");
+    }
 
+    pub fn toJson(self: JoltInstruction, allocator: Allocator) ![]u8 {
+        var list = std.ArrayListUnmanaged(u8){};
+        errdefer list.deinit(allocator);
+        try self.writeJsonTo(list.writer(allocator));
         return list.toOwnedSlice(allocator);
     }
 };

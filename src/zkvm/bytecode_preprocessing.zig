@@ -2277,12 +2277,16 @@ pub const BytecodePreprocessing = struct {
         // Each instruction is serialized as: u64 length + JSON bytes
         try writer.writeInt(u64, @intCast(self.bytecode.items.len), .little);
 
-        for (self.bytecode.items) |instr| {
-            const json = try instr.toJson(allocator);
-            defer allocator.free(json);
+        // Reuse a single buffer for JSON serialization to avoid per-instruction allocation
+        var json_buf = std.ArrayListUnmanaged(u8){};
+        defer json_buf.deinit(allocator);
+        try json_buf.ensureTotalCapacity(allocator, 256);
 
-            try writer.writeInt(u64, @intCast(json.len), .little);
-            try writer.writeAll(json);
+        for (self.bytecode.items) |instr| {
+            json_buf.clearRetainingCapacity();
+            try instr.writeJsonTo(json_buf.writer(allocator));
+            try writer.writeInt(u64, @intCast(json_buf.items.len), .little);
+            try writer.writeAll(json_buf.items);
         }
 
         // pc_map

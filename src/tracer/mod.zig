@@ -164,11 +164,11 @@ pub const ExecutionTrace = struct {
             .is_noop = true,
         };
 
-        // Pad with NoOp cycles
+        // Pad with NoOp cycles using @memset for efficiency
         try self.steps.ensureTotalCapacity(self.allocator, padded_len);
-        while (self.steps.items.len < padded_len) {
-            self.steps.appendAssumeCapacity(noop_step);
-        }
+        const old_len = self.steps.items.len;
+        self.steps.items.len = padded_len;
+        @memset(self.steps.items[old_len..padded_len], noop_step);
     }
 };
 
@@ -193,6 +193,9 @@ pub const Emulator = struct {
     /// Advice tape read position (consumed by AdviceLB/H/W/D).
     /// Returns 0 when tape is exhausted (valid externally-supplied witness).
     advice_pos: usize,
+    /// Cached program bytes for fast instruction fetch (avoids HashMap lookups)
+    program_base: u64,
+    program_bytes: []const u8,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, config: *const common.MemoryConfig) Emulator {
@@ -206,8 +209,22 @@ pub const Emulator = struct {
             .is_compressed = false,
             .prev_pc = 0, // Will be set to initial PC on first step
             .advice_pos = 0,
+            .program_base = 0,
+            .program_bytes = &.{},
             .allocator = allocator,
         };
+    }
+
+    /// Preallocate trace arrays to avoid repeated reallocations during execution.
+    /// Pass an estimate of the cycle count (e.g., 128K for typical programs).
+    pub fn preallocate(self: *Emulator, estimated_cycles: usize) !void {
+        try self.trace.steps.ensureTotalCapacity(self.allocator, estimated_cycles);
+        // ~3 register accesses per cycle (2 reads + 1 write)
+        try self.registers.trace.accesses.ensureTotalCapacity(self.registers.trace.allocator, estimated_cycles * 3);
+        // ~1 lookup entry per cycle
+        try self.lookup_trace.entries.ensureTotalCapacity(self.allocator, estimated_cycles);
+        // RAM accesses are sparser, estimate ~1/4 of cycles
+        try self.ram.trace.accesses.ensureTotalCapacity(self.ram.trace.allocator, estimated_cycles / 4);
     }
 
     pub fn deinit(self: *Emulator) void {
@@ -409,6 +426,9 @@ pub const Emulator = struct {
             try self.ram.writeByteUntraced(addr, byte);
             addr += 1;
         }
+        // Cache program bytes for fast instruction fetch (avoids HashMap lookups)
+        self.program_base = base_address;
+        self.program_bytes = bytecode;
     }
 
     /// Load a program into memory at default RAM_START_ADDRESS
@@ -6901,25 +6921,44 @@ pub const Emulator = struct {
     /// In Jolt, instruction fetches are proven via bytecode commitment, not the RAM trace.
     /// Only explicit data memory operations (LW, SW) are recorded in the RAM trace.
     fn fetchInstruction(self: *Emulator) !u32 {
-        // First fetch the lower 16 bits - use untraced reads
+        const pc = self.state.pc;
+
+        // Fast path: read directly from cached program bytes (avoids HashMap lookups)
+        if (pc >= self.program_base) {
+            const offset = pc - self.program_base;
+            if (offset + 2 <= self.program_bytes.len) {
+                const halfword: u32 = @as(u32, self.program_bytes[offset]) |
+                    (@as(u32, self.program_bytes[offset + 1]) << 8);
+
+                if (zkvm.instruction.isCompressed(halfword)) {
+                    const expanded = zkvm.instruction.uncompressInstruction(halfword, .Bit64);
+                    self.is_compressed = true;
+                    return expanded;
+                } else if (offset + 4 <= self.program_bytes.len) {
+                    const instruction = halfword |
+                        (@as(u32, self.program_bytes[offset + 2]) << 16) |
+                        (@as(u32, self.program_bytes[offset + 3]) << 24);
+                    self.is_compressed = false;
+                    return instruction;
+                }
+            }
+        }
+
+        // Fallback: read from RAM HashMap (for code outside cached region)
         var halfword: u32 = 0;
         inline for (0..2) |i| {
-            const byte = self.ram.readByteUntraced(self.state.pc + i);
+            const byte = self.ram.readByteUntraced(pc + i);
             halfword |= @as(u32, byte) << (@as(u5, @intCast(i)) * 8);
         }
 
-        // Check if this is a compressed instruction
         if (zkvm.instruction.isCompressed(halfword)) {
-            // 16-bit compressed instruction - expand it
             const expanded = zkvm.instruction.uncompressInstruction(halfword, .Bit64);
-            // Advance PC by 2 (will be done in step())
             self.is_compressed = true;
             return expanded;
         } else {
-            // 32-bit instruction - fetch the remaining 16 bits - use untraced reads
             var instruction = halfword;
             inline for (2..4) |i| {
-                const byte = self.ram.readByteUntraced(self.state.pc + i);
+                const byte = self.ram.readByteUntraced(pc + i);
                 instruction |= @as(u32, byte) << (@as(u5, @intCast(i)) * 8);
             }
             self.is_compressed = false;

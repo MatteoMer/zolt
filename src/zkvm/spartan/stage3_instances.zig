@@ -1040,7 +1040,7 @@ pub fn ShiftPrefixSuffixProver(comptime F: type) type {
             for (0..size) |j| {
                 // Convert j to binary (BIG_ENDIAN: bit 0 is MSB)
                 for (0..n) |k| {
-                    const bit_pos: u6 = @intCast(n - 1 - k);
+                    const bit_pos: std.math.Log2Int(usize) = @intCast(n - 1 - k);
                     j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
                 }
                 out[j] = poly_mod.EqPolynomial(F).mle(r, j_bits);

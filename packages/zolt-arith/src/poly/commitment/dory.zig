@@ -36,6 +36,7 @@ const field = @import("../../field/mod.zig");
 const msm = @import("../../msm/mod.zig");
 const glv = msm.glv;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const is_wasm = @import("zolt_pool").is_wasm;
 
 const gpu_mod = @import("../../gpu/mod.zig");
 const GpuMsmOps = gpu_mod.GpuMsmOps;
@@ -1086,6 +1087,113 @@ pub const DorySRS = struct {
         };
     }
 
+    /// Load pre-serialized SRS from a byte slice (e.g. passed from JS into WASM memory).
+    /// Same format as saveToCache/loadFromCache. Returns null if data is invalid.
+    pub fn loadFromBytes(allocator: Allocator, data: []const u8) ?DorySRS {
+        if (data.len < 20) return null; // minimum: magic(4) + version(4) + n(8) + sigma(4)
+
+        var pos: usize = 0;
+
+        // Validate header
+        if (!std.mem.eql(u8, data[pos..][0..4], CACHE_MAGIC)) return null;
+        pos += 4;
+        if (std.mem.readInt(u32, data[pos..][0..4], .little) != CACHE_VERSION) return null;
+        pos += 4;
+        const n: usize = @intCast(std.mem.readInt(u64, data[pos..][0..8], .little));
+        pos += 8;
+        const sigma: u32 = std.mem.readInt(u32, data[pos..][0..4], .little);
+        pos += 4;
+        const nu: u32 = std.mem.readInt(u32, data[pos..][0..4], .little);
+        pos += 4;
+
+        // G1 points
+        const g1_byte_len = n * @sizeOf(G1Point);
+        if (pos + g1_byte_len > data.len) return null;
+        const g1_vec = allocator.alloc(G1Point, n) catch return null;
+        @memcpy(std.mem.sliceAsBytes(g1_vec), data[pos..][0..g1_byte_len]);
+        pos += g1_byte_len;
+
+        // G2 points
+        const g2_byte_len = n * @sizeOf(G2Point);
+        if (pos + g2_byte_len > data.len) {
+            allocator.free(g1_vec);
+            return null;
+        }
+        const g2_vec = allocator.alloc(G2Point, n) catch {
+            allocator.free(g1_vec);
+            return null;
+        };
+        @memcpy(std.mem.sliceAsBytes(g2_vec), data[pos..][0..g2_byte_len]);
+        pos += g2_byte_len;
+
+        // G2Prepared (optional)
+        var g2_prepared: ?[]G2Prepared = null;
+        if (pos >= data.len) {
+            allocator.free(g1_vec);
+            allocator.free(g2_vec);
+            return null;
+        }
+        if (data[pos] == 1) {
+            pos += 1;
+            const prep_byte_len = n * @sizeOf(G2Prepared);
+            if (pos + prep_byte_len > data.len) {
+                allocator.free(g1_vec);
+                allocator.free(g2_vec);
+                return null;
+            }
+            const prep = allocator.alloc(G2Prepared, n) catch {
+                allocator.free(g1_vec);
+                allocator.free(g2_vec);
+                return null;
+            };
+            @memcpy(std.mem.sliceAsBytes(prep), data[pos..][0..prep_byte_len]);
+            pos += prep_byte_len;
+            g2_prepared = prep;
+        } else {
+            pos += 1;
+        }
+
+        // G2PreparedAffine (optional)
+        var g2_prepared_affine: ?[]G2PreparedAffine = null;
+        if (pos < data.len and data[pos] == 1) {
+            pos += 1;
+            const affine_byte_len = n * @sizeOf(G2PreparedAffine);
+            if (pos + affine_byte_len > data.len) {
+                allocator.free(g1_vec);
+                allocator.free(g2_vec);
+                if (g2_prepared) |p| allocator.free(p);
+                return null;
+            }
+            const affine = allocator.alloc(G2PreparedAffine, n) catch {
+                allocator.free(g1_vec);
+                allocator.free(g2_vec);
+                if (g2_prepared) |p| allocator.free(p);
+                return null;
+            };
+            @memcpy(std.mem.sliceAsBytes(affine), data[pos..][0..affine_byte_len]);
+            g2_prepared_affine = affine;
+        } else if (pos < data.len) {
+            // flag == 0, skip
+        }
+
+        const num_columns: usize = @as(usize, 1) << @intCast(sigma);
+        const num_rows: usize = @as(usize, 1) << @intCast(nu);
+
+        return DorySRS{
+            .g1_vec = g1_vec,
+            .g2_vec = g2_vec,
+            .g2_prepared = g2_prepared,
+            .g2_prepared_affine = g2_prepared_affine,
+            .num_columns = num_columns,
+            .num_rows = num_rows,
+            .sigma = sigma,
+            .nu = nu,
+            .h1 = G1Point.generator(),
+            .h2 = G2Point.generator(),
+            .allocator = allocator,
+        };
+    }
+
     pub fn deinit(self: *DorySRS) void {
         if (self.g1_vec.len > 0) {
             self.allocator.free(self.g1_vec);
@@ -1372,7 +1480,15 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
         /// Setup with disk caching. Tries to load from ~/.cache/zolt/srs_v1_{log_size}.bin.
         /// On cache miss, generates SRS + prepared caches and writes to disk.
+        /// On WASM, skips caching and generates SRS from scratch.
         pub fn setupCached(allocator: Allocator, max_num_vars: usize, tp: ?*ThreadPool) !SetupParams {
+            if (comptime is_wasm) {
+                // No filesystem on WASM — generate from scratch
+                var srs = try setup(allocator, max_num_vars);
+                srs.initPreparedCache(tp);
+                return srs;
+            }
+
             // Build cache path: ~/.cache/zolt/srs_v1_<log_size>.bin
             var path_buf: [256]u8 = undefined;
             const home = std.posix.getenv("HOME") orelse "/tmp";

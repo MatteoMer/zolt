@@ -2686,10 +2686,10 @@ fn psd_runTest(
                     }
                     // Also dump the relevant prefix evals referenced by the combine
                     const relevant_prefixes = [_]Prefixes{
-                        .Andn,                 .LowerHalfWord,
-                        .RightShiftW,          .LeftShiftW,
-                        .LeftShiftWHelper,     .RightShift,
-                        .LeftShift,            .LeftShiftHelper,
+                        .Andn,             .LowerHalfWord,
+                        .RightShiftW,      .LeftShiftW,
+                        .LeftShiftWHelper, .RightShift,
+                        .LeftShift,        .LeftShiftHelper,
                     };
                     for (relevant_prefixes) |p| {
                         const pv = prefix_evals[@intFromEnum(p)];

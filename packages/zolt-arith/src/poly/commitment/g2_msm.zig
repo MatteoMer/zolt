@@ -50,7 +50,7 @@ fn pippengerMsmG2(comptime F: type, bases: []const G2Point, scalars: []const F) 
     const c = g2OptimalWindowSize(bases.len);
     const num_scalar_windows = (SCALAR_BITS + c - 1) / c;
     const num_windows = num_scalar_windows + 1; // +1 for wNAF carry
-    const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2; // wNAF: 2^(c-1) buckets
+    const num_buckets = (@as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(c))) / 2; // wNAF: 2^(c-1) buckets
 
     // Compute wNAF digits for all scalars
     const stack_threshold = 128;
@@ -150,7 +150,7 @@ fn pippengerMsmG2Parallel(comptime F: type, bases: []const G2Point, scalars: []c
     const c = g2OptimalWindowSize(bases.len);
     const num_scalar_windows = (SCALAR_BITS + c - 1) / c;
     const num_windows = num_scalar_windows + 1;
-    const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2;
+    const num_buckets = (@as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(c))) / 2;
 
     // Compute wNAF digits
     const heap_digits = std.heap.page_allocator.alloc([MAX_DIGITS]i32, scalars.len) catch

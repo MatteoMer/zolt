@@ -8,10 +8,12 @@
 //! - Proof serialization
 
 const std = @import("std");
-
 const zkvm_debug = @import("debug.zig");
 const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
+const is_wasm = zkvm_debug.is_wasm;
+const PlatformTimer = zkvm_debug.PlatformTimer;
+const platformGetenv = zkvm_debug.getenv;
 
 const Allocator = std.mem.Allocator;
 const common = @import("../common/mod.zig");
@@ -87,13 +89,13 @@ fn buildBytecodeWords(
     const min_bytecode_address = min_word * 8;
 
     // Allocate words
-    const words = try allocator.alloc(u64, num_words);
+    const words = try allocator.alloc(u64, @intCast(num_words));
     @memset(words, 0);
 
     // Fill in bytes (like Jolt's RAMPreprocessing::preprocess)
     for (program_bytecode, 0..) |byte, i| {
         const addr = base_address + i;
-        const word_idx = (addr / 8) - min_word;
+        const word_idx: usize = @intCast((addr / 8) - min_word);
         const byte_offset: u6 = @intCast(addr % 8);
         words[word_idx] |= @as(u64, byte) << (byte_offset * 8);
     }
@@ -339,8 +341,8 @@ pub fn JoltProver(comptime F: type) type {
             // `MemoryLayout`. `jolt-bench/src/main.rs` must construct a
             // matching `MemoryConfig` for the same ELF to verify under
             // Jolt's own prover.
-            var overall_timer = std.time.Timer.start() catch unreachable;
-            const bench = (std.posix.getenv("ZOLT_BENCH") != null);
+            var overall_timer = PlatformTimer.start() catch unreachable;
+            const bench = if (comptime is_wasm) false else (platformGetenv("ZOLT_BENCH") != null);
             var config = common.MemoryConfig{
                 .program_size = program_bytecode.len,
                 .heap_size = 32768,
@@ -362,7 +364,7 @@ pub fn JoltProver(comptime F: type) type {
             }
             try emulator.run();
 
-            var trace_timer = std.time.Timer.start() catch unreachable;
+            var trace_timer = PlatformTimer.start() catch unreachable;
             const emulate_ns = overall_timer.read();
 
             // Save unpadded length for log_k optimization (padding steps have null memory_addr)
@@ -502,8 +504,11 @@ pub fn JoltProver(comptime F: type) type {
             const preproc_mod = @import("preprocessing.zig");
             const text_sz_for_digest = text_size_opt orelse program_bytecode.len;
             var bytecode_prep_digest = try preproc_mod.BytecodePreprocessing.preprocessWithTextSize(
-                self.allocator, program_bytecode, base_address,
-                device.memory_layout.termination, text_sz_for_digest,
+                self.allocator,
+                program_bytecode,
+                base_address,
+                device.memory_layout.termination,
+                text_sz_for_digest,
             );
             defer bytecode_prep_digest.deinit();
             const preproc2a_ns = trace_timer.read();
@@ -567,13 +572,13 @@ pub fn JoltProver(comptime F: type) type {
 
             // Load SRS from file if path provided (for Jolt compatibility)
             // Otherwise generate SRS with disk caching for prepared G2 data
-            var phase_timer = std.time.Timer.start() catch unreachable;
+            var phase_timer = PlatformTimer.start() catch unreachable;
             var dory_srs = if (srs_path) |path| blk: {
+                if (comptime is_wasm) return error.FilesystemNotAvailable;
                 var srs = try DoryScheme.loadFromFile(self.allocator, path);
                 srs.initPreparedCache(self.thread_pool);
                 break :blk srs;
-            } else
-                try DoryScheme.setupCached(self.allocator, log_size, self.thread_pool);
+            } else try DoryScheme.setupCached(self.allocator, log_size, self.thread_pool);
             defer dory_srs.deinit();
             const srs_time_ns = phase_timer.read();
             if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] SRS setup: {d:.1} ms\n", .{@as(f64, @floatFromInt(srs_time_ns)) / 1_000_000.0});
@@ -1587,4 +1592,3 @@ pub fn JoltProver(comptime F: type) type {
         }
     };
 }
-

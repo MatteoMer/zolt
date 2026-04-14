@@ -250,4 +250,3 @@ pub const JoltInstruction = struct {
         return list.toOwnedSlice(allocator);
     }
 };
-

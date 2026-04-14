@@ -84,14 +84,14 @@ pub const RAMPreprocessing = struct {
         self.min_bytecode_address = min_word * 8;
 
         // Allocate and zero words
-        try self.bytecode_words.resize(allocator, num_words);
+        try self.bytecode_words.resize(allocator, @intCast(num_words));
         @memset(self.bytecode_words.items, 0);
 
         // Fill in bytes
         for (memory_init) |entry| {
             const addr = entry[0];
             const byte = entry[1];
-            const word_idx = (addr / 8) - min_word;
+            const word_idx: usize = @intCast((addr / 8) - min_word);
             const byte_offset: u6 = @intCast(addr % 8);
             self.bytecode_words.items[word_idx] |= @as(u64, byte) << (byte_offset * 8);
         }

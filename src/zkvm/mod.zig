@@ -44,7 +44,6 @@ pub const spartan = @import("spartan/mod.zig");
 pub const PolyCommitment = commitment_types.PolyCommitment;
 pub const OpeningProof = commitment_types.OpeningProof;
 
-
 // Proving pipeline (extracted from mod.zig)
 pub const proving_pipeline = @import("proving_pipeline.zig");
 pub const computeBytecodeCodeSize = proving_pipeline.computeBytecodeCodeSize;
@@ -135,7 +134,6 @@ pub const VMState = struct {
 
 /// Jolt prover (delegates to proving_pipeline)
 pub const JoltProver = proving_pipeline.JoltProver;
-
 
 test {
     // Discover tests in sub-modules

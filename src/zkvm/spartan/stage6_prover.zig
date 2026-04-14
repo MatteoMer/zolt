@@ -14,8 +14,12 @@
 const std = @import("std");
 
 const zkvm_debug = @import("../debug.zig");
+const is_wasm = zkvm_debug.is_wasm;
 const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
+const platformGetenv = zkvm_debug.getenv;
+const platformNanoTimestamp = zkvm_debug.nanoTimestamp;
+const PlatformTimer = zkvm_debug.PlatformTimer;
 // Stage 6 fine-grained bench timing — set debug.bench_timing = true to compile in
 const s6_bench_timing = zkvm_debug.bench_timing;
 
@@ -536,13 +540,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // ====================================================================
             // Initialize ALL sumcheck instances
             // ====================================================================
-            const bench_s6 = if (comptime s6_bench_timing) (std.posix.getenv("ZOLT_BENCH") != null) else false;
-            const t_s6_overall_start = if (bench_s6) std.time.nanoTimestamp() else 0;
-            var s6_init_timer: if (s6_bench_timing) std.time.Timer else void = if (comptime s6_bench_timing) std.time.Timer.start() catch unreachable else {};
+            const bench_s6 = if (comptime s6_bench_timing) (platformGetenv("ZOLT_BENCH") != null) else false;
+            const t_s6_overall_start = if (bench_s6) platformNanoTimestamp() else 0;
+            var s6_init_timer: if (s6_bench_timing) PlatformTimer else void = if (comptime s6_bench_timing) PlatformTimer.start() catch unreachable else {};
 
             // Instance 5: IncClaimReduction (degree 2)
             // IncClaimReduction uses RAM r_cycles (not BytecodeReadRaf r_cycles)
-            const t_init_inc = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_init_inc = if (bench_s6) platformNanoTimestamp() else 0;
             var inc_prover = try IncClaimReductionProver(F).init(
                 self.allocator,
                 trace,
@@ -555,7 +559,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
             inc_prover.gpu = self.gpu_ops;
             defer inc_prover.deinit();
-            const t_after_inc = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_after_inc = if (bench_s6) platformNanoTimestamp() else 0;
 
             // Diagnostic: compare IncClaimReduction inc_poly and verify component sums
             try debugIncClaimReductionInit(
@@ -578,7 +582,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
 
             // Instance 1: HammingBooleanity (degree 3)
-            const t_init_hamming = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_init_hamming = if (bench_s6) platformNanoTimestamp() else 0;
             var hamming_prover = try HammingBooleanityProver(F).init(
                 self.allocator,
                 trace,
@@ -587,10 +591,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
             hamming_prover.gpu = self.gpu_ops;
             defer hamming_prover.deinit();
-            const t_after_hamming = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_after_hamming = if (bench_s6) platformNanoTimestamp() else 0;
 
             // Instance 3: RamRaVirtual (degree ram_d+1)
-            const t_init_ram = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_init_ram = if (bench_s6) platformNanoTimestamp() else 0;
             var ram_ra_prover = try RamRaVirtualProver(F).init(
                 self.allocator,
                 trace,
@@ -603,10 +607,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
             ram_ra_prover.gpu = self.gpu_ops;
             defer ram_ra_prover.deinit();
-            const t_after_ram = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_after_ram = if (bench_s6) platformNanoTimestamp() else 0;
 
             // Instance 4: LookupsRaVirtual (degree n_committed_per_virtual+1)
-            const t_init_lookups = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_init_lookups = if (bench_s6) platformNanoTimestamp() else 0;
             var lookups_ra_prover = try LookupsRaVirtualProver(F).init(
                 self.allocator,
                 trace,
@@ -621,7 +625,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
             lookups_ra_prover.gpu = self.gpu_ops;
             defer lookups_ra_prover.deinit();
-            const t_after_lookups = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_after_lookups = if (bench_s6) platformNanoTimestamp() else 0;
 
             // Verify: eq table partition of unity (Σ eq[j] = 1)
             if (comptime debug_verbose) {
@@ -633,7 +637,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             }
 
             // Instance 2: Booleanity (degree 3, two-phase)
-            const t_init_booleanity = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_init_booleanity = if (bench_s6) platformNanoTimestamp() else 0;
             var booleanity_prover = try stage6_instances.initBooleanityProver(
                 F,
                 self.allocator,
@@ -653,7 +657,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 pc_map,
             );
             defer booleanity_prover.deinit();
-            const t_after_booleanity = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_after_booleanity = if (bench_s6) platformNanoTimestamp() else 0;
 
             // Instance 0: BytecodeReadRaf (degree bytecode_d+1)
             // Compute Val polynomials and eq tables from bytecode entries and stage gammas
@@ -712,7 +716,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 bytecode_gamma_arr[i] = bytecode_raf_gamma_powers[i];
             }
             const entry_bytecode_index = pc_map.getPC(entry_address, 0);
-            const t_init_bcraf = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_init_bcraf = if (bench_s6) platformNanoTimestamp() else 0;
             var bytecode_prover = try BytecodeReadRafProver(F).init(
                 self.allocator,
                 trace,
@@ -737,7 +741,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             );
             bytecode_prover.gpu = self.gpu_ops;
             defer bytecode_prover.deinit();
-            const t_after_bcraf = if (bench_s6) std.time.nanoTimestamp() else 0;
+            const t_after_bcraf = if (bench_s6) platformNanoTimestamp() else 0;
 
             // pc_maps now consistent — no override needed
 
@@ -797,50 +801,52 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
             dbg("[STAGE6] Transcript before input_claims: round={}\n", .{transcript.n_rounds});
 
-            if (std.posix.getenv("ZOLT_S6_DEBUG") != null) {
-                const print = std.debug.print;
-                const labels = [_][]const u8{
-                    "BytecodeReadRaf  ",
-                    "Booleanity       ",
-                    "RamHammingBool   ",
-                    "RamRaVirtual     ",
-                    "LookupsRaVirtual ",
-                    "IncClaimReduction",
-                };
-                const inputs6 = [_]F{
-                    bytecodeReadRaf_input,
-                    booleanity_input,
-                    hammingBooleanity_input,
-                    ramRaVirtual_input,
-                    lookupsRaVirtual_input,
-                    incClaimReduction_input,
-                };
-                for (0..6) |s6_i| {
-                    print("[S6_DEBUG] input[{s}] = ", .{labels[s6_i]});
-                    for (0..32) |bi| print("{x:0>2}", .{inputs6[s6_i].toBytesBE()[31 - bi]});
-                    print("\n", .{});
-                }
-
-                // Per-cycle imm sanity check: trace step inline_full_imm vs bytecode entry imm
-                var found_count: usize = 0;
-                var mismatch_count: usize = 0;
-                for (trace.steps.items, 0..) |step_dbg, j_dbg| {
-                    if (!step_dbg.has_full_imm) continue;
-                    found_count += 1;
-                    const k_idx = pc_map.getPC(step_dbg.unexpanded_pc, step_dbg.virtual_sequence_remaining);
-                    if (k_idx >= bytecode_entries.len) continue;
-                    const entry_imm = bytecode_entries[k_idx].imm;
-                    const entry_imm_u64: u64 = @bitCast(entry_imm);
-                    const matches = entry_imm_u64 == step_dbg.inline_full_imm;
-                    if (!matches) mismatch_count += 1;
-                    if (found_count <= 5 or !matches) {
-                        print("[S6_DEBUG] j={d} k={d} pc=0x{x} vsr={d} instr=0x{x:0>8} step.inline_imm=0x{x} entry.imm=0x{x} match={}\n", .{
-                            j_dbg, k_idx, step_dbg.unexpanded_pc, step_dbg.virtual_sequence_remaining,
-                            step_dbg.instruction, step_dbg.inline_full_imm, entry_imm_u64, matches,
-                        });
+            if (comptime !is_wasm) {
+                if (platformGetenv("ZOLT_S6_DEBUG") != null) {
+                    const print = std.debug.print;
+                    const labels = [_][]const u8{
+                        "BytecodeReadRaf  ",
+                        "Booleanity       ",
+                        "RamHammingBool   ",
+                        "RamRaVirtual     ",
+                        "LookupsRaVirtual ",
+                        "IncClaimReduction",
+                    };
+                    const inputs6 = [_]F{
+                        bytecodeReadRaf_input,
+                        booleanity_input,
+                        hammingBooleanity_input,
+                        ramRaVirtual_input,
+                        lookupsRaVirtual_input,
+                        incClaimReduction_input,
+                    };
+                    for (0..6) |s6_i| {
+                        print("[S6_DEBUG] input[{s}] = ", .{labels[s6_i]});
+                        for (0..32) |bi| print("{x:0>2}", .{inputs6[s6_i].toBytesBE()[31 - bi]});
+                        print("\n", .{});
                     }
+
+                    // Per-cycle imm sanity check: trace step inline_full_imm vs bytecode entry imm
+                    var found_count: usize = 0;
+                    var mismatch_count: usize = 0;
+                    for (trace.steps.items, 0..) |step_dbg, j_dbg| {
+                        if (!step_dbg.has_full_imm) continue;
+                        found_count += 1;
+                        const k_idx = pc_map.getPC(step_dbg.unexpanded_pc, step_dbg.virtual_sequence_remaining);
+                        if (k_idx >= bytecode_entries.len) continue;
+                        const entry_imm = bytecode_entries[k_idx].imm;
+                        const entry_imm_u64: u64 = @bitCast(entry_imm);
+                        const matches = entry_imm_u64 == step_dbg.inline_full_imm;
+                        if (!matches) mismatch_count += 1;
+                        if (found_count <= 5 or !matches) {
+                            print("[S6_DEBUG] j={d} k={d} pc=0x{x} vsr={d} instr=0x{x:0>8} step.inline_imm=0x{x} entry.imm=0x{x} match={}\n", .{
+                                j_dbg,                k_idx,                    step_dbg.unexpanded_pc, step_dbg.virtual_sequence_remaining,
+                                step_dbg.instruction, step_dbg.inline_full_imm, entry_imm_u64,          matches,
+                            });
+                        }
+                    }
+                    print("[S6_DEBUG] has_full_imm cycles: {d}, mismatches: {d}\n", .{ found_count, mismatch_count });
                 }
-                print("[S6_DEBUG] has_full_imm cycles: {d}, mismatches: {d}\n", .{ found_count, mismatch_count });
             }
 
             transcript.appendScalar("sumcheck_claim", bytecodeReadRaf_input);
@@ -931,7 +937,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             var s6_t_compute: if (s6_bench_timing) [6]u64 else void = if (comptime s6_bench_timing) [6]u64{ 0, 0, 0, 0, 0, 0 } else {};
             var s6_t_bind: if (s6_bench_timing) [6]u64 else void = if (comptime s6_bench_timing) [6]u64{ 0, 0, 0, 0, 0, 0 } else {};
             var s6_t_transcript: if (s6_bench_timing) u64 else void = if (comptime s6_bench_timing) @as(u64, 0) else {};
-            var s6_timer: if (s6_bench_timing) std.time.Timer else void = if (comptime s6_bench_timing) std.time.Timer.start() catch unreachable else {};
+            var s6_timer: if (s6_bench_timing) PlatformTimer else void = if (comptime s6_bench_timing) PlatformTimer.start() catch unreachable else {};
 
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
@@ -1608,25 +1614,27 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // instance_claims[i] = input_claims[i] = the correct unscaled claim.
             }
 
-            if (std.posix.getenv("ZOLT_S6_DEBUG") != null) {
-                const print = std.debug.print;
-                const labels = [_][]const u8{
-                    "BytecodeReadRaf  ",
-                    "Booleanity       ",
-                    "RamHammingBool   ",
-                    "RamRaVirtual     ",
-                    "LookupsRaVirtual ",
-                    "IncClaimReduction",
-                };
-                print("[S6_DEBUG] Final instance claims after sumcheck:\n", .{});
-                for (0..6) |s6_i| {
-                    print("[S6_DEBUG]   {s} = ", .{labels[s6_i]});
-                    for (0..32) |bi| print("{x:0>2}", .{instance_claims[s6_i].toBytesBE()[31 - bi]});
+            if (comptime !is_wasm) {
+                if (platformGetenv("ZOLT_S6_DEBUG") != null) {
+                    const print = std.debug.print;
+                    const labels = [_][]const u8{
+                        "BytecodeReadRaf  ",
+                        "Booleanity       ",
+                        "RamHammingBool   ",
+                        "RamRaVirtual     ",
+                        "LookupsRaVirtual ",
+                        "IncClaimReduction",
+                    };
+                    print("[S6_DEBUG] Final instance claims after sumcheck:\n", .{});
+                    for (0..6) |s6_i| {
+                        print("[S6_DEBUG]   {s} = ", .{labels[s6_i]});
+                        for (0..32) |bi| print("{x:0>2}", .{instance_claims[s6_i].toBytesBE()[31 - bi]});
+                        print("\n", .{});
+                    }
+                    print("[S6_DEBUG] current_batched_claim = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{current_batched_claim.toBytesBE()[31 - bi]});
                     print("\n", .{});
                 }
-                print("[S6_DEBUG] current_batched_claim = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{current_batched_claim.toBytesBE()[31 - bi]});
-                print("\n", .{});
             }
 
             if (bench_s6) {
@@ -1637,7 +1645,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     total_compute += s6_t_compute[i];
                     total_bind += s6_t_bind[i];
                 }
-                const s6_sumcheck_wall_ns: i128 = std.time.nanoTimestamp() - t_s6_overall_start;
+                const s6_sumcheck_wall_ns: i128 = platformNanoTimestamp() - t_s6_overall_start;
                 const toMsU = struct {
                     fn f(ns: u64) f64 {
                         return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
@@ -1715,7 +1723,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 r_cycle_bc4_regs_rwc,
                 r_cycle_bc5_regs_val,
             );
-
 
             // Cache openings to transcript (protocol-critical ordering)
             stage6_helpers.cacheOpeningsToTranscript(

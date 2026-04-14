@@ -10,6 +10,7 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const is_wasm = @import("zolt_pool").is_wasm;
 
 const poly_mod = @import("zolt_arith").poly;
 const UniPoly = poly_mod.UniPoly;
@@ -40,13 +41,23 @@ const BytecodePCMapper = preprocessing.BytecodePCMapper;
 /// Supports flat slices ([]T) and slices-of-slices ([][]T).
 pub fn dropInBackground(allocator: Allocator, slice: anytype) void {
     const T = @TypeOf(slice);
-    const SpawnCtx = struct { alloc: Allocator, ptr: T };
     const info = @typeInfo(T);
     const is_slice_of_slices = comptime blk: {
         if (info != .pointer) break :blk false;
         const child_info = @typeInfo(info.pointer.child);
         break :blk (child_info == .pointer and child_info.pointer.size == .slice);
     };
+
+    // On WASM there are no background threads — free synchronously
+    if (comptime is_wasm) {
+        if (is_slice_of_slices) {
+            for (slice) |inner| allocator.free(inner);
+        }
+        allocator.free(slice);
+        return;
+    }
+
+    const SpawnCtx = struct { alloc: Allocator, ptr: T };
     const ctx = SpawnCtx{ .alloc = allocator, .ptr = slice };
     const thread = std.Thread.spawn(.{}, struct {
         fn run(c: SpawnCtx) void {

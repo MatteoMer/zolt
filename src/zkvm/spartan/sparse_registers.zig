@@ -684,7 +684,7 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
             const E_in = gruen_eq.E_in_current();
             const E_out = gruen_eq.E_out_current();
             const E_in_len = E_in.len;
-            const num_x_in_bits: u6 = if (E_in_len > 1) @intCast(@ctz(E_in_len)) else 0;
+            const num_x_in_bits: std.math.Log2Int(usize) = if (E_in_len > 1) @intCast(@ctz(E_in_len)) else 0;
             const x_bitmask: usize = if (num_x_in_bits > 0) ((@as(usize, 1) << num_x_in_bits) - 1) else 0;
 
             const ra_tbl = if (use_lookups) &self.ra_lookup_table else {};
@@ -698,7 +698,7 @@ pub fn SparseRegistersCycleMajor(comptime F: type, comptime use_lookups: bool) t
                 E_in: []const F,
                 E_out: []const F,
                 E_in_len: usize,
-                num_x_in_bits: u6,
+                num_x_in_bits: std.math.Log2Int(usize),
                 x_bitmask: usize,
                 ra_tbl: if (use_lookups) *const OneHotCoeffLookupTable(F) else void,
                 wa_tbl: if (use_lookups) *const OneHotCoeffLookupTable(F) else void,

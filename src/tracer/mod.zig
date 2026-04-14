@@ -6925,7 +6925,7 @@ pub const Emulator = struct {
 
         // Fast path: read directly from cached program bytes (avoids HashMap lookups)
         if (pc >= self.program_base) {
-            const offset = pc - self.program_base;
+            const offset: usize = @intCast(pc - self.program_base);
             if (offset + 2 <= self.program_bytes.len) {
                 const halfword: u32 = @as(u32, self.program_bytes[offset]) |
                     (@as(u32, self.program_bytes[offset + 1]) << 8);

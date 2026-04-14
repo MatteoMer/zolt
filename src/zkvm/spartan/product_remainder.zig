@@ -416,8 +416,7 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                     E_in,
                     num_xin_bits,
                 ) catch identity;
-            } else
-                pool_helpers.parallelReduceOptional([2]F, self.thread_pool, num_groups, identity, ctx, mapFn, reduceFn);
+            } else pool_helpers.parallelReduceOptional([2]F, self.thread_pool, num_groups, identity, ctx, mapFn, reduceFn);
 
             const t0_sum = sums[0];
             const t_inf_sum = sums[1];
@@ -729,7 +728,9 @@ fn nextPowerOfTwo(n: usize) usize {
     v |= v >> 4;
     v |= v >> 8;
     v |= v >> 16;
-    v |= v >> 32;
+    if (@bitSizeOf(usize) > 32) {
+        v |= v >> 32;
+    }
     return v + 1;
 }
 

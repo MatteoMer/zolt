@@ -7,9 +7,13 @@
 //! Same public API as the previous atomic counter implementation — zero call-site changes.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const atomic = std.atomic;
 const Futex = std.Thread.Futex;
 const Allocator = std.mem.Allocator;
+
+/// True when targeting WebAssembly (wasm32 or wasm64).
+pub const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
 
 /// Minimum number of elements per thread to justify parallelism.
 /// Below this threshold, work runs sequentially on the caller's thread.
@@ -344,10 +348,131 @@ comptime {
 }
 
 // ============================================================================
-// ThreadPool
+// ThreadPool — conditional type: native work-stealing pool vs WASM sequential stub
 // ============================================================================
 
-pub const ThreadPool = struct {
+pub const ThreadPool = if (is_wasm) WasmThreadPoolStub else NativeThreadPool;
+
+// ============================================================================
+// WASM Sequential Stub
+// ============================================================================
+
+/// Drop-in replacement for the native ThreadPool on wasm32/wasm64 targets.
+/// All operations execute sequentially on the caller's thread.
+const WasmThreadPoolStub = struct {
+    allocator: Allocator,
+    thread_count: usize = 0,
+
+    pub fn init(alloc: Allocator) !*WasmThreadPoolStub {
+        const self = try alloc.create(WasmThreadPoolStub);
+        self.* = .{ .allocator = alloc };
+        return self;
+    }
+
+    pub fn initWithCount(alloc: Allocator, _: usize) !*WasmThreadPoolStub {
+        return init(alloc);
+    }
+
+    pub fn deinit(self: *WasmThreadPoolStub) void {
+        self.allocator.destroy(self);
+    }
+
+    pub fn getPool() ?*WasmThreadPoolStub {
+        return null;
+    }
+
+    pub fn parallelFor(
+        self: *WasmThreadPoolStub,
+        len: usize,
+        context: anytype,
+        comptime func: fn (@TypeOf(context), usize) void,
+    ) void {
+        _ = self;
+        for (0..len) |i| func(context, i);
+    }
+
+    pub fn parallelForForce(
+        self: *WasmThreadPoolStub,
+        len: usize,
+        context: anytype,
+        comptime func: fn (@TypeOf(context), usize) void,
+    ) void {
+        _ = self;
+        for (0..len) |i| func(context, i);
+    }
+
+    pub fn parallelForEach(
+        self: *WasmThreadPoolStub,
+        len: usize,
+        context: anytype,
+        comptime func: fn (@TypeOf(context), usize) void,
+    ) void {
+        _ = self;
+        for (0..len) |i| func(context, i);
+    }
+
+    pub fn parallelChunks(
+        self: *WasmThreadPoolStub,
+        comptime T: type,
+        slice: []T,
+        chunk_size_hint: usize,
+        context: anytype,
+        comptime func: fn (@TypeOf(context), []T, usize) void,
+    ) void {
+        _ = self;
+        _ = chunk_size_hint;
+        func(context, slice, 0);
+    }
+
+    pub fn parallelReduce(
+        self: *WasmThreadPoolStub,
+        comptime R: type,
+        len: usize,
+        identity: R,
+        context: anytype,
+        comptime map: fn (@TypeOf(context), usize, usize) R,
+        comptime reduce: fn (R, R) R,
+    ) R {
+        _ = self;
+        _ = reduce;
+        if (len == 0) return identity;
+        return map(context, 0, len);
+    }
+
+    pub fn parallelReduceForce(
+        self: *WasmThreadPoolStub,
+        comptime R: type,
+        len: usize,
+        identity: R,
+        context: anytype,
+        comptime map: fn (@TypeOf(context), usize, usize) R,
+        comptime reduce: fn (R, R) R,
+    ) R {
+        _ = self;
+        _ = reduce;
+        if (len == 0) return identity;
+        return map(context, 0, len);
+    }
+
+    pub fn join(
+        self: *WasmThreadPoolStub,
+        comptime RA: type,
+        comptime RB: type,
+        context_a: anytype,
+        comptime func_a: fn (@TypeOf(context_a)) RA,
+        context_b: anytype,
+        comptime func_b: fn (@TypeOf(context_b)) RB,
+    ) struct { RA, RB } {
+        _ = self;
+        return .{ func_a(context_a), func_b(context_b) };
+    }
+};
+
+// ============================================================================
+// Native Thread Pool (work-stealing, Chase-Lev deques)
+// ============================================================================
+
+const NativeThreadPool = struct {
     workers: [MAX_THREADS + 1]WorkerData,
     threads: [MAX_THREADS]std.Thread,
     thread_count: usize,

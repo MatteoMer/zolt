@@ -3339,12 +3339,34 @@ fn buildSyntheticWordFromPrep(instr: preprocessing.JoltInstruction) struct { wor
     var rs2: u8 = 0;
     var imm: i64 = 0;
     switch (instr.operands) {
-        .FormatR => |r| { rd = r.rd; rs1 = r.rs1; rs2 = r.rs2; },
-        .FormatI => |i_op| { rd = i_op.rd; rs1 = i_op.rs1; imm = @bitCast(i_op.imm); },
-        .FormatLoad => |l| { rd = l.rd; rs1 = l.rs1; imm = l.imm; },
-        .FormatS => |s| { rs1 = s.rs1; rs2 = s.rs2; imm = s.imm; },
-        .FormatJ => |j| { rd = j.rd; imm = @bitCast(j.imm); },
-        .FormatU => |u_op| { rd = u_op.rd; imm = @bitCast(u_op.imm); },
+        .FormatR => |r| {
+            rd = r.rd;
+            rs1 = r.rs1;
+            rs2 = r.rs2;
+        },
+        .FormatI => |i_op| {
+            rd = i_op.rd;
+            rs1 = i_op.rs1;
+            imm = @bitCast(i_op.imm);
+        },
+        .FormatLoad => |l| {
+            rd = l.rd;
+            rs1 = l.rs1;
+            imm = l.imm;
+        },
+        .FormatS => |s| {
+            rs1 = s.rs1;
+            rs2 = s.rs2;
+            imm = s.imm;
+        },
+        .FormatJ => |j| {
+            rd = j.rd;
+            imm = @bitCast(j.imm);
+        },
+        .FormatU => |u_op| {
+            rd = u_op.rd;
+            imm = @bitCast(u_op.imm);
+        },
         else => {},
     }
     const rd_full = rd;

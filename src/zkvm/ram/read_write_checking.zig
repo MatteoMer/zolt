@@ -235,7 +235,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     const addr = entry.key_ptr.*;
                     const val = entry.value_ptr.*;
                     if (addr >= params.start_address) {
-                        const idx = (addr - params.start_address) / 8;
+                        const idx: usize = @intCast((addr - params.start_address) / 8);
                         if (idx < K) {
                             val_init[idx] = F.fromU64(val);
                             if (populated_count < 5) {
@@ -278,7 +278,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     const addr = entry.key_ptr.*;
                     const val = entry.value_ptr.*;
                     if (addr >= params.start_address) {
-                        const idx = (addr - params.start_address) / 8;
+                        const idx: usize = @intCast((addr - params.start_address) / 8);
                         if (idx < K) {
                             try current_val_per_addr.put(allocator, idx, val);
                         }
@@ -290,9 +290,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             for (trace.accesses.items) |access| {
                 if (access.timestamp >= T) continue;
 
-                const addr_idx = blk: {
+                const addr_idx: usize = blk: {
                     if (access.address >= params.start_address) {
-                        const idx = (access.address - params.start_address) / 8;
+                        const idx: usize = @intCast((access.address - params.start_address) / 8);
                         if (idx < K) break :blk idx;
                     }
                     continue;
@@ -309,7 +309,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         F.fromU64(new_val - prev_val)
                     else
                         F.zero().sub(F.fromU64(prev_val - new_val));
-                    inc[access.timestamp] = inc_val;
+                    inc[@intCast(access.timestamp)] = inc_val;
                     dbg("[RWC INC SET] cycle={}, new_val={}, prev_val={}, inc={any}\n", .{
                         access.timestamp,
                         new_val,
@@ -329,7 +329,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     F.fromU64(access.value); // Use value for reads
 
                 try entries.append(allocator, Entry{
-                    .cycle = access.timestamp,
+                    .cycle = @intCast(access.timestamp),
                     .address = addr_idx,
                     .ra_coeff = F.one(),
                     .val_coeff = val_coeff,
@@ -344,7 +344,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     prev_val,
                     access.value,
                     access.timestamp,
-                    if (access.timestamp < T) inc[access.timestamp].toBytesBE()[0..8] else &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 },
+                    if (access.timestamp < T) inc[@as(usize, @intCast(access.timestamp))].toBytesBE()[0..8] else &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 },
                 });
             }
 
@@ -1527,9 +1527,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             for (trace.accesses.items) |access| {
                 if (access.op != .Write) continue;
                 if (access.address < self.params.start_address) continue;
-                const k = (access.address - self.params.start_address) / 8;
+                const k: usize = @intCast((access.address - self.params.start_address) / 8);
                 if (k >= K) continue;
-                const c = access.timestamp;
+                const c: usize = @intCast(access.timestamp);
                 if (c >= T) continue;
 
                 const old_v = access.pre_value;

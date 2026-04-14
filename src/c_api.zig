@@ -3,12 +3,16 @@
 //! Exposes opaque-handle functions with C calling convention so Rust
 //! (or any other language) can drive Zolt in-process without spawning
 //! a separate binary.
+//!
+//! On WASM targets, thread pool functions are stubs (single-threaded)
+//! and ELF loading uses byte slices instead of filesystem paths.
 
 const std = @import("std");
 const zolt = @import("root.zig");
 const BN254Scalar = zolt.field.BN254Scalar;
+const is_wasm = @import("zolt_pool").is_wasm;
 
-const allocator = std.heap.page_allocator;
+const allocator = if (is_wasm) std.heap.wasm_allocator else std.heap.page_allocator;
 
 // ── Opaque handle types ──────────────────────────────────────────────
 
@@ -17,7 +21,7 @@ const ThreadPoolCtx = struct {
 };
 
 const LoadedElf = struct {
-    tp: *zolt.utils.ThreadPool,
+    tp: ?*zolt.utils.ThreadPool,
     bytecode: []const u8,
     entry_point: u64,
     base_address: u64,
@@ -47,13 +51,16 @@ export fn zolt_thread_pool_destroy(handle: ?*anyopaque) callconv(.c) void {
     allocator.destroy(ctx);
 }
 
-// ── ELF loading ──────────────────────────────────────────────────────
+// ── ELF loading (filesystem — native only) ───────────────────────────
 
+/// Load an ELF from a filesystem path. Returns null on WASM (no filesystem).
 export fn zolt_load_elf(
     tp_handle: ?*anyopaque,
     path_ptr: [*]const u8,
     path_len: usize,
 ) callconv(.c) ?*anyopaque {
+    if (comptime is_wasm) return null;
+
     const tp_ctx: *ThreadPoolCtx = cast(ThreadPoolCtx, tp_handle) orelse return null;
     const path = path_ptr[0..path_len];
 
@@ -67,6 +74,37 @@ export fn zolt_load_elf(
     };
     ctx.* = .{
         .tp = tp_ctx.tp,
+        .bytecode = program.bytecode,
+        .entry_point = program.entry_point,
+        .base_address = program.base_address,
+        .text_size = program.text_size,
+        .program = program,
+    };
+    return @ptrCast(ctx);
+}
+
+// ── ELF loading (byte slice — works on WASM and native) ──────────────
+
+export fn zolt_load_elf_bytes(
+    tp_handle: ?*anyopaque,
+    elf_ptr: [*]const u8,
+    elf_len: usize,
+) callconv(.c) ?*anyopaque {
+    const tp: ?*zolt.utils.ThreadPool = if (tp_handle) |h|
+        (cast(ThreadPoolCtx, h) orelse return null).tp
+    else
+        null;
+
+    var loader = zolt.host.ELFLoader.init(allocator);
+    const program = loader.load(elf_ptr[0..elf_len]) catch return null;
+
+    const ctx = allocator.create(LoadedElf) catch {
+        var p = program;
+        p.deinit();
+        return null;
+    };
+    ctx.* = .{
+        .tp = tp,
         .bytecode = program.bytecode,
         .entry_point = program.entry_point,
         .base_address = program.base_address,
@@ -93,7 +131,10 @@ export fn zolt_loaded_elf_destroy(handle: ?*anyopaque) callconv(.c) void {
 export fn zolt_prove(elf_handle: ?*anyopaque) callconv(.c) ?*anyopaque {
     const elf: *LoadedElf = cast(LoadedElf, elf_handle) orelse return null;
 
-    var prover = zolt.zkvm.JoltProver(BN254Scalar).initWithThreadPool(allocator, elf.tp);
+    var prover = if (elf.tp) |tp|
+        zolt.zkvm.JoltProver(BN254Scalar).initWithThreadPool(allocator, tp)
+    else
+        zolt.zkvm.JoltProver(BN254Scalar).init(allocator);
 
     var bundle = prover.proveJoltCompatibleWithDoryAndSrsAtAddress(
         elf.bytecode,
@@ -120,6 +161,12 @@ export fn zolt_prove(elf_handle: ?*anyopaque) callconv(.c) ?*anyopaque {
 export fn zolt_proof_result_size(handle: ?*anyopaque) callconv(.c) usize {
     const result: *ProofResult = cast(ProofResult, handle) orelse return 0;
     return result.bytes.len;
+}
+
+/// Get a pointer to proof bytes in linear memory (useful for WASM).
+export fn zolt_proof_result_ptr(handle: ?*anyopaque) callconv(.c) ?[*]const u8 {
+    const result: *ProofResult = cast(ProofResult, handle) orelse return null;
+    return result.bytes.ptr;
 }
 
 export fn zolt_proof_result_destroy(handle: ?*anyopaque) callconv(.c) void {

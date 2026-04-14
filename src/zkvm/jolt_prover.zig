@@ -42,6 +42,8 @@ const r1cs_evaluators = @import("r1cs/evaluators.zig");
 
 const zkvm_debug = @import("debug.zig");
 const debug_verbose = zkvm_debug.verbose;
+const is_wasm = zkvm_debug.is_wasm;
+const PlatformTimer = zkvm_debug.PlatformTimer;
 const stage_timing_enabled = false;
 
 /// Direct Jolt-compatible 7-stage prover
@@ -723,8 +725,8 @@ pub fn JoltProver(comptime F: type) type {
             jolt_proof.joint_opening_proof = joint_opening_proof;
 
             // Per-stage timing
-            var stage_timer = std.time.Timer.start() catch unreachable;
-            var bench_timer = std.time.Timer.start() catch unreachable;
+            var stage_timer = PlatformTimer.start() catch unreachable;
+            var bench_timer = PlatformTimer.start() catch unreachable;
 
             // Use pre-built compact/raw witnesses from config (built during witness gen,
             // outside Stage 1 timing).
@@ -770,10 +772,10 @@ pub fn JoltProver(comptime F: type) type {
             raw_r1cs_inputs: []const r1cs_evaluators.RawR1CSInputs,
             n_cycle_vars: usize,
             trace_length: usize,
-            stage_timer: *std.time.Timer,
-            bench_timer: *std.time.Timer,
+            stage_timer: *PlatformTimer,
+            bench_timer: *PlatformTimer,
         ) !ProveStage1Output {
-            const bench = config.bench_output;
+            const bench = if (comptime is_wasm) false else config.bench_output;
 
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
                 tau,
@@ -901,10 +903,10 @@ pub fn JoltProver(comptime F: type) type {
             raw_r1cs_inputs: []const r1cs_evaluators.RawR1CSInputs,
             n_cycle_vars: usize,
             log_ram_k: usize,
-            stage_timer: *std.time.Timer,
-            bench_timer: *std.time.Timer,
+            stage_timer: *PlatformTimer,
+            bench_timer: *PlatformTimer,
         ) !ProveStage2Output {
-            const bench = config.bench_output;
+            const bench = if (comptime is_wasm) false else config.bench_output;
             const stage1_result = s1_out.stage1_result;
             const r_spartan_original = s1_out.r_spartan_original;
 
@@ -1227,10 +1229,10 @@ pub fn JoltProver(comptime F: type) type {
             raw_r1cs_inputs: []const r1cs_evaluators.RawR1CSInputs,
             n_cycle_vars: usize,
             log_ram_k: usize,
-            stage_timer: *std.time.Timer,
-            bench_timer: *std.time.Timer,
+            stage_timer: *PlatformTimer,
+            bench_timer: *PlatformTimer,
         ) !ProveStage3Output {
-            const bench = config.bench_output;
+            const bench = if (comptime is_wasm) false else config.bench_output;
             const stage2_result = &s2_out.stage2_result;
             const r_spartan_original = s1_out.r_spartan_original;
             _ = log_ram_k;
@@ -1415,10 +1417,10 @@ pub fn JoltProver(comptime F: type) type {
             log_ram_k: usize,
             ram_K: usize,
             trace_length: usize,
-            stage_timer: *std.time.Timer,
-            bench_timer: *std.time.Timer,
+            stage_timer: *PlatformTimer,
+            bench_timer: *PlatformTimer,
         ) !ProveStage4Output {
-            const bench = config.bench_output;
+            const bench = if (comptime is_wasm) false else config.bench_output;
             const stage2_result = &s2_out.stage2_result;
             const stage3_result = &s3_out.stage3_result;
             _ = trace_length;
@@ -1586,10 +1588,10 @@ pub fn JoltProver(comptime F: type) type {
             n_cycle_vars: usize,
             log_ram_k: usize,
             ram_K: usize,
-            stage_timer: *std.time.Timer,
-            bench_timer: *std.time.Timer,
+            stage_timer: *PlatformTimer,
+            bench_timer: *PlatformTimer,
         ) !ProveStage5Output {
-            const bench = config.bench_output;
+            const bench = if (comptime is_wasm) false else config.bench_output;
             const stage2_result = &s2_out.stage2_result;
             const r_spartan_original = s1_out.r_spartan_original;
             const stage4_regs_r_address = s4_out.stage4_regs_r_address;
@@ -1780,10 +1782,10 @@ pub fn JoltProver(comptime F: type) type {
             n_cycle_vars: usize,
             log_ram_k: usize,
             ram_K: usize,
-            stage_timer: *std.time.Timer,
-            bench_timer: *std.time.Timer,
+            stage_timer: *PlatformTimer,
+            bench_timer: *PlatformTimer,
         ) !ProveStage6Output {
-            const bench = config.bench_output;
+            const bench = if (comptime is_wasm) false else config.bench_output;
             const stage2_result = &s2_out.stage2_result;
             const stage3_result = &s3_out.stage3_result;
             const stage4_regs_r_address = s4_out.stage4_regs_r_address;
@@ -1990,10 +1992,10 @@ pub fn JoltProver(comptime F: type) type {
             s5_out: *const ProveStage5Output,
             s6_out: *const ProveStage6Output,
             n_cycle_vars: usize,
-            stage_timer: *std.time.Timer,
-            bench_timer: *std.time.Timer,
+            stage_timer: *PlatformTimer,
+            bench_timer: *PlatformTimer,
         ) !void {
-            const bench = config.bench_output;
+            const bench = if (comptime is_wasm) false else config.bench_output;
             const stage2_result = &s2_out.stage2_result;
             const stage5_result = &s5_out.stage5_result;
             const stage6_result = &s6_out.stage6_result;

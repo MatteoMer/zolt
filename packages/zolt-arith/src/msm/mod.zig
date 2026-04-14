@@ -6,8 +6,10 @@
 //! We use the short Weierstrass curve y^2 = x^3 + b (a = 0 for BN254)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const is_wasm = @import("zolt_pool").is_wasm;
 
 pub const glv = @import("glv.zig");
 
@@ -672,7 +674,7 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             max_scalar_bits_hint: usize,
         ) Affine {
             const c = optimalWindowSize(bases.len);
-            const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2; // 2^(c-1) buckets for wNAF
+            const num_buckets = (@as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(c))) / 2; // 2^(c-1) buckets for wNAF
 
             // Pre-convert all scalars and compute wNAF digits.
             // Also detect effective max bit-width to skip unnecessary windows.
@@ -1250,7 +1252,7 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             const effective_bits: usize = if (max_abs == 0) 1 else @as(usize, std.math.log2_int(u128, max_abs)) + 1;
             const num_scalar_windows = @min((effective_bits + c - 1) / c, (SCALAR_BITS_I128 + c - 1) / c);
             const num_windows = num_scalar_windows + 1;
-            const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2;
+            const num_buckets = (@as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(c))) / 2;
 
             // Pre-compute wNAF digits and sign flags
             const stack_threshold = 256;
@@ -1531,11 +1533,13 @@ pub fn ParallelMSM(comptime F: type, comptime G: type) type {
 
             // For small inputs, single-threaded is faster due to thread overhead
             const min_points_per_thread: usize = 1024;
-            const actual_threads = @min(num_threads, @max(1, bases.len / min_points_per_thread));
+            const actual_threads = if (comptime is_wasm) 1 else @min(num_threads, @max(1, bases.len / min_points_per_thread));
 
             if (actual_threads <= 1) {
                 return SingleMSM.compute(bases, scalars);
             }
+
+            if (comptime is_wasm) unreachable; // WASM always takes the sequential path above
 
             // Divide work among threads
             const chunk_size = (bases.len + actual_threads - 1) / actual_threads;
@@ -1603,6 +1607,7 @@ pub fn ParallelMSM(comptime F: type, comptime G: type) type {
 
         /// Detect optimal number of threads
         pub fn detectOptimalThreads() usize {
+            if (comptime is_wasm) return 1;
             // Try to get CPU count, default to 4
             const cpu_count = std.Thread.getCpuCount() catch return 4;
             // Use at most 8 threads to avoid diminishing returns
@@ -1639,13 +1644,15 @@ pub fn ParallelBatchMSM(comptime F: type, comptime G: type) type {
             const results = try allocator.alloc(Affine, scalar_batches.len);
             errdefer allocator.free(results);
 
-            // For small batch counts, run sequentially
-            if (scalar_batches.len <= 2) {
+            // For small batch counts or WASM, run sequentially
+            if (scalar_batches.len <= 2 or comptime is_wasm) {
                 for (scalar_batches, 0..) |scalars, i| {
                     results[i] = SingleMSM.compute(bases, scalars);
                 }
                 return results;
             }
+
+            if (comptime is_wasm) unreachable;
 
             // Allocate thread infrastructure
             const contexts = try allocator.alloc(BatchThreadContext, scalar_batches.len);

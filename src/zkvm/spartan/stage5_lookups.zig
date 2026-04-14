@@ -15,8 +15,10 @@
 const std = @import("std");
 
 const zkvm_debug = @import("../debug.zig");
+const is_wasm = zkvm_debug.is_wasm;
 const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
+const platformGetenv = zkvm_debug.getenv;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
@@ -420,114 +422,116 @@ pub fn LookupsReadRafProver(comptime F: type) type {
             // eval_2 is extrapolated as 2*eval_1 - eval_0 for the linear-in-X
             // part plus degree-2 correction (because f(X,rest) = ra(X,rest) *
             // poly(X,rest) is degree 2 in X — eq(X, msb) contributes one X).
-            if (round == 0 and std.posix.getenv("ZOLT_S5_BRUTE") != null) {
-                var bf_eval_0 = F.zero();
-                var bf_eval_1 = F.zero();
-                // Break down by component to isolate the drift source.
-                var bf_rv_total = F.zero();
-                var bf_left_total = F.zero();
-                var bf_right_total = F.zero();
-                // Per-table rv_total to identify which table is buggy
-                var bf_rv_per_table: [40]F = .{F.zero()} ** 40;
-                const T_local = self.T;
-                for (0..T_local) |j| {
-                    const lookup_idx = self.lookup_indices_u128[j];
-                    const msb: u1 = @intCast((lookup_idx >> 127) & 1);
-                    const t_idx = self.cycle_table_indices[j];
-                    var table_val = F.zero();
-                    if (t_idx >= 0) {
-                        const ti: usize = @intCast(t_idx);
-                        const TableMod_local = @import("../lookup_table/mod.zig").LookupTable(F, 64);
-                        const entry = TableMod_local.materializeTableEntry(ti, lookup_idx);
-                        table_val = F.fromU64(entry);
+            if (comptime !is_wasm) {
+                if (round == 0 and platformGetenv("ZOLT_S5_BRUTE") != null) {
+                    var bf_eval_0 = F.zero();
+                    var bf_eval_1 = F.zero();
+                    // Break down by component to isolate the drift source.
+                    var bf_rv_total = F.zero();
+                    var bf_left_total = F.zero();
+                    var bf_right_total = F.zero();
+                    // Per-table rv_total to identify which table is buggy
+                    var bf_rv_per_table: [40]F = .{F.zero()} ** 40;
+                    const T_local = self.T;
+                    for (0..T_local) |j| {
+                        const lookup_idx = self.lookup_indices_u128[j];
+                        const msb: u1 = @intCast((lookup_idx >> 127) & 1);
+                        const t_idx = self.cycle_table_indices[j];
+                        var table_val = F.zero();
+                        if (t_idx >= 0) {
+                            const ti: usize = @intCast(t_idx);
+                            const TableMod_local = @import("../lookup_table/mod.zig").LookupTable(F, 64);
+                            const entry = TableMod_local.materializeTableEntry(ti, lookup_idx);
+                            table_val = F.fromU64(entry);
+                        }
+                        var left_val = F.zero();
+                        var right_val = F.zero();
+                        if (self.is_interleaved_operands[j]) {
+                            const left_bits: u64 = blk_left: {
+                                var x_bits: u128 = (lookup_idx >> 1) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+                                x_bits = (x_bits | (x_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+                                x_bits = (x_bits | (x_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+                                x_bits = (x_bits | (x_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+                                x_bits = (x_bits | (x_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+                                x_bits = (x_bits | (x_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+                                x_bits = (x_bits | (x_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+                                break :blk_left @truncate(x_bits);
+                            };
+                            const right_bits: u64 = blk_right: {
+                                var y_bits: u128 = lookup_idx & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+                                y_bits = (y_bits | (y_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+                                y_bits = (y_bits | (y_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+                                y_bits = (y_bits | (y_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+                                y_bits = (y_bits | (y_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+                                y_bits = (y_bits | (y_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+                                y_bits = (y_bits | (y_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+                                break :blk_right @truncate(y_bits);
+                            };
+                            left_val = F.fromU64(left_bits);
+                            right_val = F.fromU64(right_bits);
+                        } else {
+                            // Identity path: left_op = 0, right_op = full lookup_idx (u128).
+                            left_val = F.zero();
+                            right_val = F.fromU128(lookup_idx);
+                        }
+                        const raf_val = self.gamma_raf.mul(left_val).add(self.gamma_raf2.mul(right_val));
+                        const u_val = self.lookups_eq_evals[j];
+                        const contribution = u_val.mul(table_val.add(raf_val));
+                        if (msb == 0) {
+                            bf_eval_0 = bf_eval_0.add(contribution);
+                        } else {
+                            bf_eval_1 = bf_eval_1.add(contribution);
+                        }
+                        // Component breakdown (summed over ALL cycles, no msb split):
+                        bf_rv_total = bf_rv_total.add(u_val.mul(table_val));
+                        bf_left_total = bf_left_total.add(u_val.mul(left_val));
+                        bf_right_total = bf_right_total.add(u_val.mul(right_val));
+                        if (t_idx >= 0 and @as(usize, @intCast(t_idx)) < 40) {
+                            const ti_local: usize = @intCast(t_idx);
+                            bf_rv_per_table[ti_local] = bf_rv_per_table[ti_local].add(u_val.mul(table_val));
+                        }
+                        // Diff materializeTableEntry vs the "true" lookup_output (rd_value from the step).
+                        // We only have direct access to lookup_indices_u128 here, so we use
+                        // materializeTableEntry as the reference and the `lookups_combined_vals`
+                        // initial values as the prover's witness value.
                     }
-                    var left_val = F.zero();
-                    var right_val = F.zero();
-                    if (self.is_interleaved_operands[j]) {
-                        const left_bits: u64 = blk_left: {
-                            var x_bits: u128 = (lookup_idx >> 1) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
-                            x_bits = (x_bits | (x_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
-                            x_bits = (x_bits | (x_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
-                            x_bits = (x_bits | (x_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
-                            x_bits = (x_bits | (x_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
-                            x_bits = (x_bits | (x_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
-                            x_bits = (x_bits | (x_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
-                            break :blk_left @truncate(x_bits);
-                        };
-                        const right_bits: u64 = blk_right: {
-                            var y_bits: u128 = lookup_idx & 0x5555_5555_5555_5555_5555_5555_5555_5555;
-                            y_bits = (y_bits | (y_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
-                            y_bits = (y_bits | (y_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
-                            y_bits = (y_bits | (y_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
-                            y_bits = (y_bits | (y_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
-                            y_bits = (y_bits | (y_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
-                            y_bits = (y_bits | (y_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
-                            break :blk_right @truncate(y_bits);
-                        };
-                        left_val = F.fromU64(left_bits);
-                        right_val = F.fromU64(right_bits);
-                    } else {
-                        // Identity path: left_op = 0, right_op = full lookup_idx (u128).
-                        left_val = F.zero();
-                        right_val = F.fromU128(lookup_idx);
+                    const bf_total = bf_eval_0.add(bf_eval_1);
+                    const bf_from_components = bf_rv_total
+                        .add(self.gamma_raf.mul(bf_left_total))
+                        .add(self.gamma_raf2.mul(bf_right_total));
+                    const print = std.debug.print;
+                    print("[S5_BRUTE R0] prover_eval_0  = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{eval_0.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] brute_eval_0   = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{bf_eval_0.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] prover_eval_1  = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{eval_1.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] brute_eval_1   = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{bf_eval_1.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] current_claim  = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{self.current_claim.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] brute_total    = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{bf_total.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] bf_from_comps  = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{bf_from_components.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] bf_rv_total    = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{bf_rv_total.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] bf_rv_per_table (non-zero):\n", .{});
+                    for (0..40) |ti_print| {
+                        if (!bf_rv_per_table[ti_print].eql(F.zero())) {
+                            print("  table[{d:2}] = ", .{ti_print});
+                            for (0..32) |bi_pt| print("{x:0>2}", .{bf_rv_per_table[ti_print].toBytesBE()[31 - bi_pt]});
+                            print("\n", .{});
+                        }
                     }
-                    const raf_val = self.gamma_raf.mul(left_val).add(self.gamma_raf2.mul(right_val));
-                    const u_val = self.lookups_eq_evals[j];
-                    const contribution = u_val.mul(table_val.add(raf_val));
-                    if (msb == 0) {
-                        bf_eval_0 = bf_eval_0.add(contribution);
-                    } else {
-                        bf_eval_1 = bf_eval_1.add(contribution);
-                    }
-                    // Component breakdown (summed over ALL cycles, no msb split):
-                    bf_rv_total = bf_rv_total.add(u_val.mul(table_val));
-                    bf_left_total = bf_left_total.add(u_val.mul(left_val));
-                    bf_right_total = bf_right_total.add(u_val.mul(right_val));
-                    if (t_idx >= 0 and @as(usize, @intCast(t_idx)) < 40) {
-                        const ti_local: usize = @intCast(t_idx);
-                        bf_rv_per_table[ti_local] = bf_rv_per_table[ti_local].add(u_val.mul(table_val));
-                    }
-                    // Diff materializeTableEntry vs the "true" lookup_output (rd_value from the step).
-                    // We only have direct access to lookup_indices_u128 here, so we use
-                    // materializeTableEntry as the reference and the `lookups_combined_vals`
-                    // initial values as the prover's witness value.
+                    print("\n[S5_BRUTE R0] bf_left_total  = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{bf_left_total.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] bf_right_total = ", .{});
+                    for (0..32) |bi| print("{x:0>2}", .{bf_right_total.toBytesBE()[31 - bi]});
+                    print("\n[S5_BRUTE R0] eval_0_match   = {}\n", .{eval_0.eql(bf_eval_0)});
+                    print("[S5_BRUTE R0] eval_1_match   = {}\n", .{eval_1.eql(bf_eval_1)});
+                    print("[S5_BRUTE R0] claim_match    = {}\n", .{self.current_claim.eql(bf_total)});
                 }
-                const bf_total = bf_eval_0.add(bf_eval_1);
-                const bf_from_components = bf_rv_total
-                    .add(self.gamma_raf.mul(bf_left_total))
-                    .add(self.gamma_raf2.mul(bf_right_total));
-                const print = std.debug.print;
-                print("[S5_BRUTE R0] prover_eval_0  = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{eval_0.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] brute_eval_0   = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{bf_eval_0.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] prover_eval_1  = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{eval_1.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] brute_eval_1   = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{bf_eval_1.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] current_claim  = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{self.current_claim.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] brute_total    = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{bf_total.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] bf_from_comps  = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{bf_from_components.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] bf_rv_total    = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{bf_rv_total.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] bf_rv_per_table (non-zero):\n", .{});
-                for (0..40) |ti_print| {
-                    if (!bf_rv_per_table[ti_print].eql(F.zero())) {
-                        print("  table[{d:2}] = ", .{ti_print});
-                        for (0..32) |bi_pt| print("{x:0>2}", .{bf_rv_per_table[ti_print].toBytesBE()[31 - bi_pt]});
-                        print("\n", .{});
-                    }
-                }
-                print("\n[S5_BRUTE R0] bf_left_total  = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{bf_left_total.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] bf_right_total = ", .{});
-                for (0..32) |bi| print("{x:0>2}", .{bf_right_total.toBytesBE()[31 - bi]});
-                print("\n[S5_BRUTE R0] eval_0_match   = {}\n", .{eval_0.eql(bf_eval_0)});
-                print("[S5_BRUTE R0] eval_1_match   = {}\n", .{eval_1.eql(bf_eval_1)});
-                print("[S5_BRUTE R0] claim_match    = {}\n", .{self.current_claim.eql(bf_total)});
             }
 
             return .{ eval_0, eval_1, eval_2 };
@@ -922,10 +926,10 @@ pub fn LookupsReadRafProver(comptime F: type) type {
                     e_in: [*]const F,
                     e_out: [*]const F,
                     e_in_mask: usize,
-                    e_in_shift: u6,
+                    e_in_shift: std.math.Log2Int(usize),
                     n_chunks: usize,
                 };
-                const e_in_shift: u6 = @intCast(@ctz(self.split_eq_E_in_len));
+                const e_in_shift: std.math.Log2Int(usize) = @intCast(@ctz(self.split_eq_E_in_len));
                 const ectx = EvalCtx{
                     .combined = self.lookups_combined_vals,
                     .chunks = &self.ra_chunk_weights,
@@ -1115,49 +1119,51 @@ pub fn LookupsReadRafProver(comptime F: type) type {
             // DEBUG: dump final-state bound values and compute self-consistency check.
             // current_claim should equal:
             //   lookups_current_scalar * E_in[0] * E_out[0] * combined_vals[0] * Π ra_chunks[i][0]
-            if (std.posix.getenv("ZOLT_S5_DEBUG") != null) {
-                const cur_be = self.current_claim.toBytesBE();
-                std.debug.print("[LOOKUPS_END] current_claim_LE=", .{});
-                for (0..32) |bi| std.debug.print("{x:0>2}", .{cur_be[31 - bi]});
-                std.debug.print("\n", .{});
+            if (comptime !is_wasm) {
+                if (platformGetenv("ZOLT_S5_DEBUG") != null) {
+                    const cur_be = self.current_claim.toBytesBE();
+                    std.debug.print("[LOOKUPS_END] current_claim_LE=", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{cur_be[31 - bi]});
+                    std.debug.print("\n", .{});
 
-                const cv0_be = self.lookups_combined_vals[0].toBytesBE();
-                std.debug.print("[LOOKUPS_END] combined_vals[0]_LE=", .{});
-                for (0..32) |bi| std.debug.print("{x:0>2}", .{cv0_be[31 - bi]});
-                std.debug.print("\n", .{});
+                    const cv0_be = self.lookups_combined_vals[0].toBytesBE();
+                    std.debug.print("[LOOKUPS_END] combined_vals[0]_LE=", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{cv0_be[31 - bi]});
+                    std.debug.print("\n", .{});
 
-                const lcs_be = self.lookups_current_scalar.toBytesBE();
-                std.debug.print("[LOOKUPS_END] lookups_current_scalar_LE=", .{});
-                for (0..32) |bi| std.debug.print("{x:0>2}", .{lcs_be[31 - bi]});
-                std.debug.print("\n", .{});
+                    const lcs_be = self.lookups_current_scalar.toBytesBE();
+                    std.debug.print("[LOOKUPS_END] lookups_current_scalar_LE=", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{lcs_be[31 - bi]});
+                    std.debug.print("\n", .{});
 
-                const ei0 = if (self.split_eq_E_in_len > 0) self.split_eq_E_in[0] else F.one();
-                const eo0 = if (self.split_eq_E_out_len > 0) self.split_eq_E_out[0] else F.one();
-                const ei_be = ei0.toBytesBE();
-                const eo_be = eo0.toBytesBE();
-                std.debug.print("[LOOKUPS_END] E_in[0]_LE=", .{});
-                for (0..32) |bi| std.debug.print("{x:0>2}", .{ei_be[31 - bi]});
-                std.debug.print("\n[LOOKUPS_END] E_out[0]_LE=", .{});
-                for (0..32) |bi| std.debug.print("{x:0>2}", .{eo_be[31 - bi]});
-                std.debug.print("\n", .{});
+                    const ei0 = if (self.split_eq_E_in_len > 0) self.split_eq_E_in[0] else F.one();
+                    const eo0 = if (self.split_eq_E_out_len > 0) self.split_eq_E_out[0] else F.one();
+                    const ei_be = ei0.toBytesBE();
+                    const eo_be = eo0.toBytesBE();
+                    std.debug.print("[LOOKUPS_END] E_in[0]_LE=", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{ei_be[31 - bi]});
+                    std.debug.print("\n[LOOKUPS_END] E_out[0]_LE=", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{eo_be[31 - bi]});
+                    std.debug.print("\n", .{});
 
-                var ra_prod = F.one();
-                for (0..lookups_ra_d) |i| ra_prod = ra_prod.mul(ra_chunks[i]);
-                const rp_be = ra_prod.toBytesBE();
-                std.debug.print("[LOOKUPS_END] ra_product_LE=", .{});
-                for (0..32) |bi| std.debug.print("{x:0>2}", .{rp_be[31 - bi]});
-                std.debug.print("\n", .{});
+                    var ra_prod = F.one();
+                    for (0..lookups_ra_d) |i| ra_prod = ra_prod.mul(ra_chunks[i]);
+                    const rp_be = ra_prod.toBytesBE();
+                    std.debug.print("[LOOKUPS_END] ra_product_LE=", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{rp_be[31 - bi]});
+                    std.debug.print("\n", .{});
 
-                // Expected self-consistent value
-                const self_check = self.lookups_current_scalar
-                    .mul(ei0)
-                    .mul(eo0)
-                    .mul(self.lookups_combined_vals[0])
-                    .mul(ra_prod);
-                const sc_be = self_check.toBytesBE();
-                std.debug.print("[LOOKUPS_END] self_check_LE=", .{});
-                for (0..32) |bi| std.debug.print("{x:0>2}", .{sc_be[31 - bi]});
-                std.debug.print("\n[LOOKUPS_END] self_check_eq_current={}\n", .{self_check.eql(self.current_claim)});
+                    // Expected self-consistent value
+                    const self_check = self.lookups_current_scalar
+                        .mul(ei0)
+                        .mul(eo0)
+                        .mul(self.lookups_combined_vals[0])
+                        .mul(ra_prod);
+                    const sc_be = self_check.toBytesBE();
+                    std.debug.print("[LOOKUPS_END] self_check_LE=", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{sc_be[31 - bi]});
+                    std.debug.print("\n[LOOKUPS_END] self_check_eq_current={}\n", .{self_check.eql(self.current_claim)});
+                }
             }
 
             // Compute table flags using split-eq parallel histogram

@@ -51,7 +51,7 @@ pub const ELFLoader = struct {
         // Allocate bytecode buffer (relative to base address)
         const base_addr = min_addr;
         const bytecode_size = max_addr - base_addr;
-        const bytecode = try self.allocator.alloc(u8, bytecode_size);
+        const bytecode = try self.allocator.alloc(u8, @intCast(bytecode_size));
         errdefer self.allocator.free(bytecode);
 
         // Initialize to zero (for .bss sections)
@@ -73,7 +73,7 @@ pub const ELFLoader = struct {
         // Instructions should only be decoded within this range; bytes beyond
         // this point may be .rodata (constants, lookup tables).
         // ELF segment flags: PF_X = 1 (executable), PF_W = 2 (writable), PF_R = 4 (readable)
-        var text_size: usize = bytecode_size;
+        var text_size: usize = @intCast(bytecode_size);
         for (parsed.segments) |segment| {
             if ((segment.flags & 1) != 0 and segment.data.len > 0) {
                 // Executable segment — use its data length as text boundary

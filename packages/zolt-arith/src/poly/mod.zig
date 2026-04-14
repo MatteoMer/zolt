@@ -102,7 +102,7 @@ pub fn DensePolynomial(comptime F: type) type {
             for (self.evaluations, 0..) |eval, i| {
                 var term = eval;
                 for (0..self.num_vars) |j| {
-                    const shift_amount: u6 = @intCast(j);
+                    const shift_amount: std.math.Log2Int(usize) = @intCast(j);
                     const bit = (i >> shift_amount) & 1;
                     if (bit == 1) {
                         term = term.mul(point[j]);
@@ -307,7 +307,7 @@ pub fn EqPolynomial(comptime F: type) type {
         /// - For each i in active region: result[i+size] = result[i] * r[j], result[i] -= result[i+size]
         pub fn evalsSliceWithScaling(comptime FieldType: type, allocator: Allocator, r: []const FieldType, scaling_factor: ?FieldType) ![]FieldType {
             const n = r.len;
-            const final_size = @as(usize, 1) << @as(u6, @intCast(n));
+            const final_size = @as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(n));
             const result = try allocator.alloc(FieldType, final_size);
             buildEqTableInPlace(r, result, scaling_factor);
             return result;
@@ -323,7 +323,7 @@ pub fn EqPolynomial(comptime F: type) type {
                 return result;
             }
 
-            const final_size = @as(usize, 1) << @as(u6, @intCast(n));
+            const final_size = @as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(n));
             const result = try allocator.alloc(FieldType, final_size);
 
             // No memset needed: every entry is written before read by the expansion loop below.
@@ -1009,7 +1009,7 @@ test "EqPolynomial buildEqTableInPlace matches per-point mle" {
         defer allocator.free(j_bits);
         for (0..size) |j| {
             for (0..n) |k| {
-                const bit_pos: u6 = @intCast(n - 1 - k);
+                const bit_pos: std.math.Log2Int(usize) = @intCast(n - 1 - k);
                 j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
             }
             const expected = EqPolynomial(F).mle(r, j_bits);
@@ -1024,7 +1024,7 @@ test "EqPolynomial buildEqTableInPlace matches per-point mle" {
 
         for (0..size) |j| {
             for (0..n) |k| {
-                const bit_pos: u6 = @intCast(n - 1 - k);
+                const bit_pos: std.math.Log2Int(usize) = @intCast(n - 1 - k);
                 j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
             }
             const expected_scaled = scale.mul(EqPolynomial(F).mle(r, j_bits));
@@ -1063,7 +1063,7 @@ test "EqPolynomial buildEqPlusOneTableInPlace matches per-point mle" {
         defer allocator.free(j_bits);
         for (0..size) |j| {
             for (0..n) |k| {
-                const bit_pos: u6 = @intCast(n - 1 - k);
+                const bit_pos: std.math.Log2Int(usize) = @intCast(n - 1 - k);
                 j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
             }
             const expected = EqPlusOnePolynomial(F).mle(r, j_bits);
@@ -1102,7 +1102,7 @@ test "EqPolynomial buildEqAndEqPlusOneInPlace matches per-point mle" {
         defer allocator.free(j_bits);
         for (0..size) |j| {
             for (0..n) |k| {
-                const bit_pos: u6 = @intCast(n - 1 - k);
+                const bit_pos: std.math.Log2Int(usize) = @intCast(n - 1 - k);
                 j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
             }
             // eq table matches EqPolynomial.mle
@@ -1143,7 +1143,7 @@ test "EqPlusOnePrefixSuffixPoly batch construction matches per-point mle" {
         defer allocator.free(j_bits);
         for (0..size_lo) |j| {
             for (0..r_lo.len) |k| {
-                const bit_pos: u6 = @intCast(r_lo.len - 1 - k);
+                const bit_pos: std.math.Log2Int(usize) = @intCast(r_lo.len - 1 - k);
                 j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
             }
             const expected = EqPlusOnePolynomial(F).mle(r_lo, j_bits[0..r_lo.len]);
@@ -1164,7 +1164,7 @@ test "EqPlusOnePrefixSuffixPoly batch construction matches per-point mle" {
         // Verify suffix_0 = eq(r_hi, j) for all j
         for (0..size_hi) |j| {
             for (0..r_hi.len) |k| {
-                const bit_pos: u6 = @intCast(r_hi.len - 1 - k);
+                const bit_pos: std.math.Log2Int(usize) = @intCast(r_hi.len - 1 - k);
                 j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
             }
             const expected = EqPolynomial(F).mle(r_hi, j_bits[0..r_hi.len]);
@@ -1174,7 +1174,7 @@ test "EqPlusOnePrefixSuffixPoly batch construction matches per-point mle" {
         // Verify suffix_1 = eq+1(r_hi, j) for all j
         for (0..size_hi) |j| {
             for (0..r_hi.len) |k| {
-                const bit_pos: u6 = @intCast(r_hi.len - 1 - k);
+                const bit_pos: std.math.Log2Int(usize) = @intCast(r_hi.len - 1 - k);
                 j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
             }
             const expected = EqPlusOnePolynomial(F).mle(r_hi, j_bits[0..r_hi.len]);
@@ -1192,7 +1192,7 @@ test "EqPlusOnePrefixSuffixPoly batch construction matches per-point mle" {
             const actual = poly.prefix_0[j_lo].mul(poly.suffix_0[j_hi])
                 .add(poly.prefix_1[j_lo].mul(poly.suffix_1[j_hi]));
             for (0..n) |k| {
-                const bit_pos: u6 = @intCast(n - 1 - k);
+                const bit_pos: std.math.Log2Int(usize) = @intCast(n - 1 - k);
                 full_j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
             }
             const expected_full = EqPlusOnePolynomial(F).mle(r, full_j_bits);
@@ -1227,7 +1227,7 @@ test "EqPolynomial batch builders with large field elements" {
     EqPolynomial(F).buildEqTableInPlace(&large_r, eq_out, null);
     for (0..size) |j| {
         for (0..n) |k| {
-            const bit_pos: u6 = @intCast(n - 1 - k);
+            const bit_pos: std.math.Log2Int(usize) = @intCast(n - 1 - k);
             j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
         }
         try std.testing.expect(eq_out[j].eql(EqPolynomial(F).mle(&large_r, j_bits)));
@@ -1248,7 +1248,7 @@ test "EqPolynomial batch builders with large field elements" {
     EqPolynomial(F).buildEqPlusOneTableInPlace(&large_r, eqp1_out);
     for (0..size) |j| {
         for (0..n) |k| {
-            const bit_pos: u6 = @intCast(n - 1 - k);
+            const bit_pos: std.math.Log2Int(usize) = @intCast(n - 1 - k);
             j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
         }
         try std.testing.expect(eqp1_out[j].eql(EqPlusOnePolynomial(F).mle(&large_r, j_bits)));

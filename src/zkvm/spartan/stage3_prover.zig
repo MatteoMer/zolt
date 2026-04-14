@@ -24,8 +24,11 @@
 const std = @import("std");
 
 const zkvm_debug = @import("../debug.zig");
+const is_wasm = zkvm_debug.is_wasm;
 const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
+const platformGetenv = zkvm_debug.getenv;
+const platformNanoTimestamp = zkvm_debug.nanoTimestamp;
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
@@ -223,8 +226,8 @@ pub fn Stage3Prover(comptime F: type) type {
             // Initialize Prefix-Suffix Provers for Shift and Registers
             // =========================================================================
 
-            const bench_s3_init = (std.posix.getenv("ZOLT_BENCH") != null);
-            const t_init_start = if (bench_s3_init) std.time.nanoTimestamp() else 0;
+            const bench_s3_init = if (comptime is_wasm) false else (platformGetenv("ZOLT_BENCH") != null);
+            const t_init_start = if (bench_s3_init) platformNanoTimestamp() else 0;
 
             // ShiftSumcheck uses EqPlusOnePrefixSuffixPoly decomposition with 4 (P,Q) pairs
             var shift_prover = try ShiftPrefixSuffixProver(F).init(
@@ -240,7 +243,7 @@ pub fn Stage3Prover(comptime F: type) type {
             shift_prover.gpu_ops = self.gpu_ops;
             defer shift_prover.deinit();
 
-            const t_after_shift = if (bench_s3_init) std.time.nanoTimestamp() else 0;
+            const t_after_shift = if (bench_s3_init) platformNanoTimestamp() else 0;
 
             // RegistersClaimReduction uses EqPolynomial prefix-suffix with 1 (P,Q) pair
             var reg_prover = try RegistersPrefixSuffixProver(F).init(
@@ -256,7 +259,7 @@ pub fn Stage3Prover(comptime F: type) type {
             reg_prover.gpu_ops = self.gpu_ops;
             defer reg_prover.deinit();
 
-            const t_after_reg = if (bench_s3_init) std.time.nanoTimestamp() else 0;
+            const t_after_reg = if (bench_s3_init) platformNanoTimestamp() else 0;
 
             // InstructionInputSumcheck uses direct computation (no prefix-suffix in Jolt)
             var instr_prover = try InstructionInputProver(F).init(
@@ -272,7 +275,7 @@ pub fn Stage3Prover(comptime F: type) type {
             instr_prover.gpu_ops = self.gpu_ops;
             defer instr_prover.deinit();
 
-            const t_after_instr = if (bench_s3_init) std.time.nanoTimestamp() else 0;
+            const t_after_instr = if (bench_s3_init) platformNanoTimestamp() else 0;
 
             if (bench_s3_init) {
                 const to_ms_i = struct {
@@ -299,7 +302,7 @@ pub fn Stage3Prover(comptime F: type) type {
             var current_reg_claim = reg_input_claim;
 
             // Bench accumulators for stage 3 sub-timing
-            const bench_s3 = (std.posix.getenv("ZOLT_BENCH") != null);
+            const bench_s3 = if (comptime is_wasm) false else (platformGetenv("ZOLT_BENCH") != null);
             var s3_shift_compute_ns: u64 = 0;
             var s3_instr_compute_ns: u64 = 0;
             var s3_reg_compute_ns: u64 = 0;
@@ -323,22 +326,22 @@ pub fn Stage3Prover(comptime F: type) type {
 
                 // Compute round polynomial for each instance
                 // ShiftSumcheck: degree 2
-                const t_shift_c = if (bench_s3) std.time.nanoTimestamp() else 0;
+                const t_shift_c = if (bench_s3) platformNanoTimestamp() else 0;
                 const shift_evals = shift_prover.computeRoundEvals(current_shift_claim);
-                if (bench_s3) s3_shift_compute_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_shift_c));
+                if (bench_s3) s3_shift_compute_ns += @intCast(@as(i128, platformNanoTimestamp() - t_shift_c));
 
                 // InstructionInputSumcheck: degree 3
-                const t_instr_c = if (bench_s3) std.time.nanoTimestamp() else 0;
+                const t_instr_c = if (bench_s3) platformNanoTimestamp() else 0;
                 const instr_evals = instr_prover.computeRoundEvals(current_instr_claim);
-                if (bench_s3) s3_instr_compute_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_instr_c));
+                if (bench_s3) s3_instr_compute_ns += @intCast(@as(i128, platformNanoTimestamp() - t_instr_c));
 
                 // (Removed: dead diagnostic referencing instr_prover.eq_stage2 which
                 //  no longer exists on the InstructionInputProver schema.)
 
                 // RegistersClaimReduction: degree 2
-                const t_reg_c = if (bench_s3) std.time.nanoTimestamp() else 0;
+                const t_reg_c = if (bench_s3) platformNanoTimestamp() else 0;
                 const reg_evals = reg_prover.computeRoundEvals(current_reg_claim);
-                if (bench_s3) s3_reg_compute_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_reg_c));
+                if (bench_s3) s3_reg_compute_ns += @intCast(@as(i128, platformNanoTimestamp() - t_reg_c));
 
                 // DEBUG: After last round, manually check the formula
                 if (comptime debug_verbose) {
@@ -416,7 +419,13 @@ pub fn Stage3Prover(comptime F: type) type {
 
                 // Compress, append to proof+transcript, derive challenge, evaluate
                 const round_result = try sumcheck_helpers.finishSumcheckRound(
-                    F, &combined_coeffs, 3, combined_claim, transcript, proof, self.allocator,
+                    F,
+                    &combined_coeffs,
+                    3,
+                    combined_claim,
+                    transcript,
+                    proof,
+                    self.allocator,
                 );
                 const r_j = round_result.challenge;
                 challenges[round] = r_j;
@@ -450,17 +459,17 @@ pub fn Stage3Prover(comptime F: type) type {
                 }
 
                 // Bind all provers at r_j
-                const t_shift_b = if (bench_s3) std.time.nanoTimestamp() else 0;
+                const t_shift_b = if (bench_s3) platformNanoTimestamp() else 0;
                 shift_prover.bind(r_j);
-                if (bench_s3) s3_shift_bind_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_shift_b));
+                if (bench_s3) s3_shift_bind_ns += @intCast(@as(i128, platformNanoTimestamp() - t_shift_b));
 
-                const t_instr_b = if (bench_s3) std.time.nanoTimestamp() else 0;
+                const t_instr_b = if (bench_s3) platformNanoTimestamp() else 0;
                 instr_prover.bind(r_j);
-                if (bench_s3) s3_instr_bind_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_instr_b));
+                if (bench_s3) s3_instr_bind_ns += @intCast(@as(i128, platformNanoTimestamp() - t_instr_b));
 
-                const t_reg_b = if (bench_s3) std.time.nanoTimestamp() else 0;
+                const t_reg_b = if (bench_s3) platformNanoTimestamp() else 0;
                 reg_prover.bind(r_j);
-                if (bench_s3) s3_reg_bind_ns += @intCast(@as(i128, std.time.nanoTimestamp() - t_reg_b));
+                if (bench_s3) s3_reg_bind_ns += @intCast(@as(i128, platformNanoTimestamp() - t_reg_b));
 
                 if (comptime debug_verbose) {
                     // DEBUG: Verify shift prover's accumulated claim after each Phase 2 bind

@@ -2,9 +2,33 @@
 //! Set verbose = true to enable debug prints across all prover stages.
 
 const std = @import("std");
+pub const is_wasm = @import("zolt_pool").is_wasm;
 
 pub const verbose = false;
 pub const bench_timing = false;
+
+/// Platform timer — no-op stub on WASM, real timer on native.
+pub const PlatformTimer = if (is_wasm) struct {
+    pub fn start() error{}!@This() {
+        return .{};
+    }
+    pub fn read(_: @This()) u64 {
+        return 0;
+    }
+    pub fn reset(_: *@This()) void {}
+} else std.time.Timer;
+
+/// Platform nanoTimestamp — returns 0 on WASM.
+pub fn nanoTimestamp() i128 {
+    if (comptime is_wasm) return 0;
+    return std.time.nanoTimestamp();
+}
+
+/// Platform getenv — returns null on WASM (no POSIX environment).
+pub fn getenv(key: []const u8) ?[:0]const u8 {
+    if (comptime is_wasm) return null;
+    return std.posix.getenv(key);
+}
 
 pub fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (verbose) std.debug.print(fmt, args);

@@ -185,27 +185,42 @@ pub fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bo
         0b1110011 => { // SYSTEM
             const imm = decodeIImmediate(instruction);
             switch (funct3) {
-                0b001 => { variant = .CSRRW; operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } }; },
-                0b010 => { variant = .CSRRS; operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } }; },
-                0b000 => {
-                    const funct12: u12 = @truncate((instruction >> 20) & 0xFFF);
-                    if (funct12 == 0x302) { variant = .MRET; } else { variant = .ECALL; }
+                0b001 => {
+                    variant = .CSRRW;
                     operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
                 },
-                else => { variant = .ECALL; operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } }; },
+                0b010 => {
+                    variant = .CSRRS;
+                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
+                },
+                0b000 => {
+                    const funct12: u12 = @truncate((instruction >> 20) & 0xFFF);
+                    if (funct12 == 0x302) {
+                        variant = .MRET;
+                    } else {
+                        variant = .ECALL;
+                    }
+                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
+                },
+                else => {
+                    variant = .ECALL;
+                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
+                },
             }
         },
         0b0001011 => { // Custom-0 (0x0B): Jolt inline instructions
             // The emulator dispatches on funct3/funct7 to determine the actual inline type.
             // For the decoder, we just parse the FormatInline operands.
             variant = .UNIMPL;
-            operands = .{ .FormatInline = .{
-                .rs1 = rs1,
-                .rs2 = rs2,
-                .rs3 = rd, // rd field maps to rs3 in FormatInline
-                .funct3 = funct3,
-                .funct7 = funct7,
-            } };
+            operands = .{
+                .FormatInline = .{
+                    .rs1 = rs1,
+                    .rs2 = rs2,
+                    .rs3 = rd, // rd field maps to rs3 in FormatInline
+                    .funct3 = funct3,
+                    .funct7 = funct7,
+                },
+            };
         },
         0b1011011 => { // Custom-2 (0x5B): Jolt SDK / virtual instructions
             const imm = decodeIImmediate(instruction);

@@ -1860,11 +1860,13 @@ pub const BytecodePreprocessing = struct {
                                     .VirtualROTRIW => .{
                                         .variant = .VirtualROTRIW,
                                         .address = addr,
-                                        .operands = .{ .FormatVirtualRightShiftI = .{
-                                            .rd = instr_item.rd,
-                                            .rs1 = instr_item.rs1,
-                                            .imm = instr_item.imm, // rotation amount stored as imm
-                                        } },
+                                        .operands = .{
+                                            .FormatVirtualRightShiftI = .{
+                                                .rd = instr_item.rd,
+                                                .rs1 = instr_item.rs1,
+                                                .imm = instr_item.imm, // rotation amount stored as imm
+                                            },
+                                        },
                                         .virtual_sequence_remaining = vsr,
                                         .is_first_in_sequence = is_first_step,
                                         .is_compressed = if (is_last_step) is_compressed else false,
@@ -2296,4 +2298,3 @@ pub const BytecodePreprocessing = struct {
         try writer.writeInt(u64, self.entry_address, .little);
     }
 };
-

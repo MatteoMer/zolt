@@ -10,6 +10,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;
+const is_wasm = @import("zolt_pool").is_wasm;
 
 const jolt_types = @import("../jolt_types.zig");
 const field_mod = @import("zolt_arith").field;
@@ -23,6 +24,8 @@ const ram = @import("../ram/mod.zig");
 const claim_reductions = @import("../claim_reductions/mod.zig");
 const jolt_prover = @import("../jolt_prover.zig");
 const sumcheck_helpers = @import("sumcheck_helpers.zig");
+const zkvm_debug = @import("../debug.zig");
+const platformNanoTimestamp = zkvm_debug.nanoTimestamp;
 
 /// Generic Stage 2 sumcheck namespace, parameterised on the field.
 pub fn Stage2Sumcheck(comptime F: type) type {
@@ -226,7 +229,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
             // Initialize provers for each instance (upstream ordering):
             // [0] RamReadWriteChecking, [1] ProductVirtualRemainder,
             // [2] InstructionLookupsClaimReduction, [3] RamRafEvaluation, [4] OutputSumcheck
-            const s2_fn_t0 = if (config.bench_output) std.time.nanoTimestamp() else 0;
+            const s2_fn_t0 = if (config.bench_output) platformNanoTimestamp() else 0;
 
             // Instance 0: RamReadWriteChecking - starts at round 0 (max rounds)
             const RWCProver = ram.RamReadWriteCheckingProver(F);
@@ -333,12 +336,12 @@ pub fn Stage2Sumcheck(comptime F: type) type {
             defer challenges.deinit(allocator);
 
             // Per-instance timing accumulators (bench only)
-            const bench_s2 = config.bench_output;
+            const bench_s2 = if (comptime is_wasm) false else config.bench_output;
             var inst_compute_ns: [5]u64 = .{ 0, 0, 0, 0, 0 };
             var inst_bind_ns: [5]u64 = .{ 0, 0, 0, 0, 0 };
             var inst_active_rounds: [5]u64 = .{ 0, 0, 0, 0, 0 };
 
-            const s2_init_done_t = if (config.bench_output) std.time.nanoTimestamp() else 0;
+            const s2_init_done_t = if (config.bench_output) platformNanoTimestamp() else 0;
 
             // Step 4: Run batched sumcheck rounds
             for (0..max_num_rounds) |round_idx| {
@@ -351,7 +354,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
 
                 for (0..5) |i| {
                     const start_round = max_num_rounds - rounds_per_instance[i];
-                    const inst_t0 = if (bench_s2) std.time.nanoTimestamp() else 0;
+                    const inst_t0 = if (bench_s2) platformNanoTimestamp() else 0;
 
                     if (round_idx >= start_round) {
                         // Instance is active
@@ -506,7 +509,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                     }
 
                     if (bench_s2) {
-                        const inst_t1 = std.time.nanoTimestamp();
+                        const inst_t1 = platformNanoTimestamp();
                         inst_compute_ns[i] += @intCast(@as(i128, inst_t1 - inst_t0));
                         if (round_idx >= start_round) inst_active_rounds[i] += 1;
                     }
@@ -561,42 +564,42 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 // Bind challenge in all active instances and update their claims
                 // Instance 0: RWC (starts at round 0)
                 if (rwc_prover) |*rwcp| {
-                    const bt0 = if (bench_s2) std.time.nanoTimestamp() else 0;
+                    const bt0 = if (bench_s2) platformNanoTimestamp() else 0;
                     if (rwc_evals_this_round) |evals| rwcp.updateClaim(evals, challenge);
                     rwcp.bindChallenge(challenge) catch {};
-                    if (bench_s2) inst_bind_ns[0] += @intCast(@as(i128, std.time.nanoTimestamp() - bt0));
+                    if (bench_s2) inst_bind_ns[0] += @intCast(@as(i128, platformNanoTimestamp() - bt0));
                 }
 
                 // Instance 1: ProductVirtualRemainder (starts at max_rounds - n_cycle_vars)
                 if (product_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
-                    const bt1 = if (bench_s2) std.time.nanoTimestamp() else 0;
+                    const bt1 = if (bench_s2) platformNanoTimestamp() else 0;
                     if (product_evals_this_round) |evals| product_prover.?.updateClaim(evals, challenge);
                     product_prover.?.bindChallenge(challenge) catch {};
-                    if (bench_s2) inst_bind_ns[1] += @intCast(@as(i128, std.time.nanoTimestamp() - bt1));
+                    if (bench_s2) inst_bind_ns[1] += @intCast(@as(i128, platformNanoTimestamp() - bt1));
                 }
 
                 // Instance 2: InstructionLookups (starts at max_rounds - n_cycle_vars)
                 if (instr_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
-                    const bt2 = if (bench_s2) std.time.nanoTimestamp() else 0;
+                    const bt2 = if (bench_s2) platformNanoTimestamp() else 0;
                     if (instr_evals_this_round) |evals| instr_prover.?.updateClaim(evals, challenge);
                     instr_prover.?.bindChallenge(challenge) catch {};
-                    if (bench_s2) inst_bind_ns[2] += @intCast(@as(i128, std.time.nanoTimestamp() - bt2));
+                    if (bench_s2) inst_bind_ns[2] += @intCast(@as(i128, platformNanoTimestamp() - bt2));
                 }
 
                 // Instance 3: RAF (starts at max_rounds - log_ram_k)
                 if (raf_prover != null and round_idx >= (max_num_rounds - log_ram_k)) {
-                    const bt3 = if (bench_s2) std.time.nanoTimestamp() else 0;
+                    const bt3 = if (bench_s2) platformNanoTimestamp() else 0;
                     if (raf_evals_this_round) |evals| raf_prover.?.updateClaim(evals, challenge);
                     raf_prover.?.bindChallenge(challenge) catch {};
-                    if (bench_s2) inst_bind_ns[3] += @intCast(@as(i128, std.time.nanoTimestamp() - bt3));
+                    if (bench_s2) inst_bind_ns[3] += @intCast(@as(i128, platformNanoTimestamp() - bt3));
                 }
 
                 // Instance 4: OutputSumcheck (starts at max_rounds - log_ram_k)
                 if (output_prover != null and round_idx >= (max_num_rounds - log_ram_k)) {
-                    const bt4 = if (bench_s2) std.time.nanoTimestamp() else 0;
+                    const bt4 = if (bench_s2) platformNanoTimestamp() else 0;
                     if (output_evals_this_round) |evals| output_prover.?.updateClaim(evals, challenge);
                     output_prover.?.bindChallenge(challenge);
-                    if (bench_s2) inst_bind_ns[4] += @intCast(@as(i128, std.time.nanoTimestamp() - bt4));
+                    if (bench_s2) inst_bind_ns[4] += @intCast(@as(i128, platformNanoTimestamp() - bt4));
                 }
 
                 // Reset per-round evals
@@ -661,7 +664,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 }
             }
 
-            const s2_loop_done_t = if (config.bench_output) std.time.nanoTimestamp() else 0;
+            const s2_loop_done_t = if (config.bench_output) platformNanoTimestamp() else 0;
 
             // Print per-instance timing breakdown
             if (bench_s2) {
@@ -946,14 +949,16 @@ pub fn Stage2Sumcheck(comptime F: type) type {
                 }
             }
 
-            if (config.bench_output) {
-                const ms2 = 1_000_000.0;
-                const t_now = std.time.nanoTimestamp();
-                std.debug.print("[BENCH] stage=2 breakdown: prover_init={d:.1}ms round_loop={d:.1}ms post_loop={d:.1}ms\n", .{
-                    @as(f64, @floatFromInt(@as(i128, s2_init_done_t - s2_fn_t0))) / ms2,
-                    @as(f64, @floatFromInt(@as(i128, s2_loop_done_t - s2_init_done_t))) / ms2,
-                    @as(f64, @floatFromInt(@as(i128, t_now - s2_loop_done_t))) / ms2,
-                });
+            if (comptime !is_wasm) {
+                if (config.bench_output) {
+                    const ms2 = 1_000_000.0;
+                    const t_now = platformNanoTimestamp();
+                    std.debug.print("[BENCH] stage=2 breakdown: prover_init={d:.1}ms round_loop={d:.1}ms post_loop={d:.1}ms\n", .{
+                        @as(f64, @floatFromInt(@as(i128, s2_init_done_t - s2_fn_t0))) / ms2,
+                        @as(f64, @floatFromInt(@as(i128, s2_loop_done_t - s2_init_done_t))) / ms2,
+                        @as(f64, @floatFromInt(@as(i128, t_now - s2_loop_done_t))) / ms2,
+                    });
+                }
             }
 
             return Stage2Result{

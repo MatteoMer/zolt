@@ -2093,7 +2093,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             std.debug.print("\n===== R1CS DEBUG step={d} instr=0x{x:0>8} =====\n", .{ step_idx, step.instruction });
             std.debug.print("  opcode=0x{x:0>2} funct3={d} funct7=0x{x:0>2} rd={d} rs1={d} rs2={d}\n", .{ opcode, @as(u8, funct3), @as(u8, funct7), @as(u8, rd), @as(u8, rs1), @as(u8, rs2) });
             std.debug.print("  pc=0x{x} unexpanded_pc=0x{x} vsr={d} is_first={} is_last={}\n", .{
-                step.pc, step.unexpanded_pc, step.virtual_sequence_remaining,
+                step.pc,                   step.unexpanded_pc,       step.virtual_sequence_remaining,
                 step.is_first_in_sequence, step.is_last_in_sequence,
             });
             std.debug.print("  rs1_val=0x{x} rs2_val=0x{x} rd_val=0x{x} rd_idx={d} rd_written={}\n", .{

@@ -4,6 +4,7 @@
 
 pub const thread_pool = @import("thread_pool.zig");
 pub const ThreadPool = thread_pool.ThreadPool;
+pub const is_wasm = thread_pool.is_wasm;
 
 pub const parallel_sort = @import("parallel_sort.zig");
 pub const parallelSort = parallel_sort.parallelSort;

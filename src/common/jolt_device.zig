@@ -5,9 +5,11 @@
 //! The inputs and outputs are part of the public inputs to the proof.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const constants = @import("constants.zig");
+const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
 
 /// Configuration for memory layout
 pub const MemoryConfig = struct {
@@ -152,8 +154,10 @@ pub const MemoryLayout = struct {
         if (address >= lowest_address) {
             return (address - lowest_address) / 8;
         }
-        if (std.posix.getenv("ZOLT_REMAP_DEBUG") != null) {
-            std.debug.print("[REMAP] unmapped address 0x{x} < lowest 0x{x}\n", .{ address, lowest_address });
+        if (comptime !is_wasm) {
+            if (std.posix.getenv("ZOLT_REMAP_DEBUG") != null) {
+                std.debug.print("[REMAP] unmapped address 0x{x} < lowest 0x{x}\n", .{ address, lowest_address });
+            }
         }
         return null;
     }

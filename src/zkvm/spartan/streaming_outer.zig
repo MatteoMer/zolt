@@ -476,7 +476,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             var three_pow_dim: usize = 1;
             for (0..window_size) |_| three_pow_dim *= 3;
 
-            const num_xin_bits: u6 = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
+            const num_xin_bits: std.math.Log2Int(usize) = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
 
             const total_pairs = E_out.len * E_in.len;
             const az_bound_len = az_poly.boundLen();
@@ -486,7 +486,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 bz_evals: []const F,
                 E_out: []const F,
                 E_in: []const F,
-                num_xin_bits: u6,
+                num_xin_bits: std.math.Log2Int(usize),
                 grid_size: usize,
                 three_pow_dim: usize,
                 az_bound_len: usize,
@@ -679,7 +679,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             const FirstRoundCtx = struct {
                 num_x_in_vals: usize,
-                num_x_in_prime_bits: u6,
+                num_x_in_prime_bits: std.math.Log2Int(usize),
                 E_out: []const F,
                 E_in: []const F,
                 compact_witnesses: []const evaluators.CompactWitness,
@@ -853,7 +853,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             const FirstRoundCtx = struct {
                 num_x_in_vals: usize,
-                num_x_in_prime_bits: u6,
+                num_x_in_prime_bits: std.math.Log2Int(usize),
                 E_out: []const F,
                 E_in: []const F,
                 compact_witnesses: []const evaluators.CompactWitness,
@@ -1759,7 +1759,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         const eq_t4 = self.split_eq.getWindowEqTables(0, 1);
                         const E_out_4 = eq_t4.E_out;
                         const E_in_4 = eq_t4.E_in;
-                        const hib4: u6 = @intCast(eq_t4.head_in_bits);
+                        const hib4: std.math.Log2Int(usize) = @intCast(eq_t4.head_in_bits);
                         const w_last4 = self.split_eq.tau[self.split_eq.current_index - 1];
                         const one_minus_w_last4 = F.one().sub(w_last4);
 
@@ -2071,15 +2071,15 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const eq_tables = self.split_eq.getWindowEqTables(0, 1);
             const E_out = eq_tables.E_out;
             const E_in = eq_tables.E_in;
-            const head_in_bits: u6 = @intCast(eq_tables.head_in_bits);
+            const head_in_bits: std.math.Log2Int(usize) = @intCast(eq_tables.head_in_bits);
 
             // r_grid parameters
             const r_grid = &self.r_grid;
             const r_grid_len = r_grid.length();
-            const num_r_bits: u6 = if (r_grid_len > 1) @intCast(std.math.log2_int(usize, r_grid_len)) else 0;
+            const num_r_bits: std.math.Log2Int(usize) = if (r_grid_len > 1) @intCast(std.math.log2_int(usize, r_grid_len)) else 0;
 
             // window_size is always 1 for linear phase cycle rounds
-            const window_bits: u6 = 1;
+            const window_bits: std.math.Log2Int(usize) = 1;
 
             // Accumulators for multiquadratic polynomial (parallelized over x_out)
             const ReduceCtx = struct {
@@ -2087,9 +2087,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 E_in: []const F,
                 r_grid: *const ExpandingTable(F),
                 r_grid_len: usize,
-                head_in_bits: u6,
-                window_bits: u6,
-                num_r_bits: u6,
+                head_in_bits: std.math.Log2Int(usize),
+                window_bits: std.math.Log2Int(usize),
+                num_r_bits: std.math.Log2Int(usize),
                 compact_witnesses: []const evaluators.CompactWitness,
                 self_ptr: *const Self,
             };
@@ -2225,7 +2225,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const eq_tables = self.split_eq.getWindowEqTables(0, window_size);
                 const E_out = eq_tables.E_out;
                 const E_in = eq_tables.E_in;
-                const num_xin_bits: u6 = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
+                const num_xin_bits: std.math.Log2Int(usize) = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
 
                 const az_src = self.az_poly.?.evaluations;
                 const bz_src = self.bz_poly.?.evaluations;
@@ -2247,7 +2247,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     r_val: F,
                     E_out: []const F,
                     E_in: []const F,
-                    num_xin_bits: u6,
+                    num_xin_bits: std.math.Log2Int(usize),
                     total_pairs: usize,
                     new_size: usize,
                 };
@@ -2497,7 +2497,9 @@ fn nextPowerOfTwo(n: usize) usize {
     v |= v >> 4;
     v |= v >> 8;
     v |= v >> 16;
-    v |= v >> 32;
+    if (@bitSizeOf(usize) > 32) {
+        v |= v >> 32;
+    }
     return v + 1;
 }
 

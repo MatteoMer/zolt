@@ -1440,10 +1440,10 @@ pub fn RafDecomposition(comptime F: type) type {
                         var operand_val: u64 = 0;
                         for (0..@min(half_chunk, 32)) |bit_idx| {
                             if (is_left) {
-                                const bit: u64 = @truncate((i >> @intCast(2 * bit_idx + 1)) & 1);
+                                const bit: u64 = @intCast((i >> @intCast(2 * bit_idx + 1)) & 1);
                                 operand_val |= bit << @intCast(bit_idx);
                             } else {
-                                const bit: u64 = @truncate((i >> @intCast(2 * bit_idx)) & 1);
+                                const bit: u64 = @intCast((i >> @intCast(2 * bit_idx)) & 1);
                                 operand_val |= bit << @intCast(bit_idx);
                             }
                         }

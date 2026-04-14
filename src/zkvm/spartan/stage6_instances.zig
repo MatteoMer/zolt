@@ -162,7 +162,7 @@ pub fn IncClaimReductionProver(comptime F: type) type {
                 steps: []const tracer.TraceStep,
                 eq_hi: [4][]const F,
                 Q: [4][]F,
-                prefix_n_vars: u6,
+                prefix_n_vars: std.math.Log2Int(usize),
                 suffix_len: usize,
             };
             const q_ctx = QCtx{
@@ -457,7 +457,7 @@ pub fn IncClaimReductionProver(comptime F: type) type {
                 ram_inc_out: []F,
                 rd_inc_out: []F,
                 prefix_len: usize,
-                prefix_n_vars: u6,
+                prefix_n_vars: std.math.Log2Int(usize),
             };
             const inc_ctx = IncP2Ctx{
                 .steps = self.trace.steps.items,

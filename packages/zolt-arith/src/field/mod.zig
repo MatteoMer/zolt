@@ -604,6 +604,327 @@ pub fn arm64MontgomeryMul256(a: *const [4]u64, b: *const [4]u64, mod: *const [4]
     return .{ r0, r1, r2, r3 };
 }
 
+/// ARM64 4-limb interleaved CIOS sum-of-products.
+/// Computes (a0 * b0 + a1 * b1) * R^{-1} mod p with 4 shared Montgomery
+/// reductions instead of 9 for separate mul+mul+add.
+/// Final conditional reduction is fused inside the asm block.
+pub fn arm64SumOfProducts256(
+    a0: *const [4]u64,
+    a1: *const [4]u64,
+    b0: *const [4]u64,
+    b1: *const [4]u64,
+    mod_ptr: *const [4]u64,
+    inv: u64,
+) [4]u64 {
+    if (comptime builtin.cpu.arch != .aarch64) unreachable;
+    var r0: u64 = undefined;
+    var r1: u64 = undefined;
+    var r2: u64 = undefined;
+    var r3: u64 = undefined;
+    asm volatile (
+    // ── Preload constants ──
+        \\ ldp x4, x5, [x27]
+        \\ ldp x6, x7, [x27, #16]
+        \\ ldp x19, x20, [x28]
+        \\ ldp x21, x22, [x28, #16]
+        \\ ldp x8, x9, [x26]
+        \\ ldp x10, x11, [x26, #16]
+        \\ mov x28, xzr
+        //
+        // ════════════════════════════════════════════════
+        // Iteration 0
+        // Accumulator: t0=x0, t1=x1, t2=x2, t3=x3, t4=x14
+        // ════════════════════════════════════════════════
+        //
+        // ── Pair 0: a0[0] * b0 → t (t starts at 0) ──
+        \\ ldr x15, [x13]
+        \\ mul  x0,  x15, x4
+        \\ umulh x1,  x15, x4
+        \\ mul  x23, x15, x5
+        \\ adds x1,  x1,  x23
+        \\ umulh x2,  x15, x5
+        \\ mul  x23, x15, x6
+        \\ adcs x2,  x2,  x23
+        \\ umulh x3,  x15, x6
+        \\ mul  x23, x15, x7
+        \\ adcs x3,  x3,  x23
+        \\ umulh x14, x15, x7
+        \\ adc  x14, x14, xzr
+        //
+        // ── Pair 1: a1[0] * b1 → accumulate ──
+        \\ ldr x15, [x25]
+        \\ mul  x16, x15, x19
+        \\ umulh x17, x15, x19
+        \\ mul  x23, x15, x20
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x20
+        \\ mul  x23, x15, x21
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x21
+        \\ mul  x23, x15, x22
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x22
+        \\ adc  x27, x27, xzr
+        \\ adds x0,  x0,  x16
+        \\ adcs x1,  x1,  x17
+        \\ adcs x2,  x2,  x24
+        \\ adcs x3,  x3,  x26
+        \\ adcs x14, x14, x27
+        \\ adc  x28, x28, xzr
+        //
+        // ── Reduce: m = t[0]*inv, add m*mod, shift ──
+        \\ mul  x15, x0,  x12
+        \\ mul  x16, x15, x8
+        \\ umulh x17, x15, x8
+        \\ mul  x23, x15, x9
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x9
+        \\ mul  x23, x15, x10
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x10
+        \\ mul  x23, x15, x11
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x11
+        \\ adc  x27, x27, xzr
+        \\ adds x0,  x0,  x16
+        \\ adcs x1,  x1,  x17
+        \\ adcs x2,  x2,  x24
+        \\ adcs x3,  x3,  x26
+        \\ adcs x14, x14, x27
+        \\ adc  x0,  x28, xzr
+        \\ mov  x28, xzr
+        //
+        // ════════════════════════════════════════════════
+        // Iteration 1
+        // Accumulator: t0=x1, t1=x2, t2=x3, t3=x14, t4=x0
+        // ════════════════════════════════════════════════
+        //
+        // ── Pair 0: a0[1] * b0 ──
+        \\ ldr x15, [x13, #8]
+        \\ mul  x16, x15, x4
+        \\ umulh x17, x15, x4
+        \\ mul  x23, x15, x5
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x5
+        \\ mul  x23, x15, x6
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x6
+        \\ mul  x23, x15, x7
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x7
+        \\ adc  x27, x27, xzr
+        \\ adds x1,  x1,  x16
+        \\ adcs x2,  x2,  x17
+        \\ adcs x3,  x3,  x24
+        \\ adcs x14, x14, x26
+        \\ adcs x0,  x0,  x27
+        \\ adc  x28, x28, xzr
+        //
+        // ── Pair 1: a1[1] * b1 ──
+        \\ ldr x15, [x25, #8]
+        \\ mul  x16, x15, x19
+        \\ umulh x17, x15, x19
+        \\ mul  x23, x15, x20
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x20
+        \\ mul  x23, x15, x21
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x21
+        \\ mul  x23, x15, x22
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x22
+        \\ adc  x27, x27, xzr
+        \\ adds x1,  x1,  x16
+        \\ adcs x2,  x2,  x17
+        \\ adcs x3,  x3,  x24
+        \\ adcs x14, x14, x26
+        \\ adcs x0,  x0,  x27
+        \\ adc  x28, x28, xzr
+        //
+        // ── Reduce ──
+        \\ mul  x15, x1,  x12
+        \\ mul  x16, x15, x8
+        \\ umulh x17, x15, x8
+        \\ mul  x23, x15, x9
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x9
+        \\ mul  x23, x15, x10
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x10
+        \\ mul  x23, x15, x11
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x11
+        \\ adc  x27, x27, xzr
+        \\ adds x1,  x1,  x16
+        \\ adcs x2,  x2,  x17
+        \\ adcs x3,  x3,  x24
+        \\ adcs x14, x14, x26
+        \\ adcs x0,  x0,  x27
+        \\ adc  x1,  x28, xzr
+        \\ mov  x28, xzr
+        //
+        // ════════════════════════════════════════════════
+        // Iteration 2
+        // Accumulator: t0=x2, t1=x3, t2=x14, t3=x0, t4=x1
+        // ════════════════════════════════════════════════
+        //
+        // ── Pair 0: a0[2] * b0 ──
+        \\ ldr x15, [x13, #16]
+        \\ mul  x16, x15, x4
+        \\ umulh x17, x15, x4
+        \\ mul  x23, x15, x5
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x5
+        \\ mul  x23, x15, x6
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x6
+        \\ mul  x23, x15, x7
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x7
+        \\ adc  x27, x27, xzr
+        \\ adds x2,  x2,  x16
+        \\ adcs x3,  x3,  x17
+        \\ adcs x14, x14, x24
+        \\ adcs x0,  x0,  x26
+        \\ adcs x1,  x1,  x27
+        \\ adc  x28, x28, xzr
+        //
+        // ── Pair 1: a1[2] * b1 ──
+        \\ ldr x15, [x25, #16]
+        \\ mul  x16, x15, x19
+        \\ umulh x17, x15, x19
+        \\ mul  x23, x15, x20
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x20
+        \\ mul  x23, x15, x21
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x21
+        \\ mul  x23, x15, x22
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x22
+        \\ adc  x27, x27, xzr
+        \\ adds x2,  x2,  x16
+        \\ adcs x3,  x3,  x17
+        \\ adcs x14, x14, x24
+        \\ adcs x0,  x0,  x26
+        \\ adcs x1,  x1,  x27
+        \\ adc  x28, x28, xzr
+        //
+        // ── Reduce ──
+        \\ mul  x15, x2,  x12
+        \\ mul  x16, x15, x8
+        \\ umulh x17, x15, x8
+        \\ mul  x23, x15, x9
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x9
+        \\ mul  x23, x15, x10
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x10
+        \\ mul  x23, x15, x11
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x11
+        \\ adc  x27, x27, xzr
+        \\ adds x2,  x2,  x16
+        \\ adcs x3,  x3,  x17
+        \\ adcs x14, x14, x24
+        \\ adcs x0,  x0,  x26
+        \\ adcs x1,  x1,  x27
+        \\ adc  x2,  x28, xzr
+        \\ mov  x28, xzr
+        //
+        // ════════════════════════════════════════════════
+        // Iteration 3
+        // Accumulator: t0=x3, t1=x14, t2=x0, t3=x1, t4=x2
+        // ════════════════════════════════════════════════
+        //
+        // ── Pair 0: a0[3] * b0 ──
+        \\ ldr x15, [x13, #24]
+        \\ mul  x16, x15, x4
+        \\ umulh x17, x15, x4
+        \\ mul  x23, x15, x5
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x5
+        \\ mul  x23, x15, x6
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x6
+        \\ mul  x23, x15, x7
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x7
+        \\ adc  x27, x27, xzr
+        \\ adds x3,  x3,  x16
+        \\ adcs x14, x14, x17
+        \\ adcs x0,  x0,  x24
+        \\ adcs x1,  x1,  x26
+        \\ adcs x2,  x2,  x27
+        \\ adc  x28, x28, xzr
+        //
+        // ── Pair 1: a1[3] * b1 ──
+        \\ ldr x15, [x25, #24]
+        \\ mul  x16, x15, x19
+        \\ umulh x17, x15, x19
+        \\ mul  x23, x15, x20
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x20
+        \\ mul  x23, x15, x21
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x21
+        \\ mul  x23, x15, x22
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x22
+        \\ adc  x27, x27, xzr
+        \\ adds x3,  x3,  x16
+        \\ adcs x14, x14, x17
+        \\ adcs x0,  x0,  x24
+        \\ adcs x1,  x1,  x26
+        \\ adcs x2,  x2,  x27
+        \\ adc  x28, x28, xzr
+        //
+        // ── Reduce (final) ──
+        \\ mul  x15, x3,  x12
+        \\ mul  x16, x15, x8
+        \\ umulh x17, x15, x8
+        \\ mul  x23, x15, x9
+        \\ adds x17, x17, x23
+        \\ umulh x24, x15, x9
+        \\ mul  x23, x15, x10
+        \\ adcs x24, x24, x23
+        \\ umulh x26, x15, x10
+        \\ mul  x23, x15, x11
+        \\ adcs x26, x26, x23
+        \\ umulh x27, x15, x11
+        \\ adc  x27, x27, xzr
+        \\ adds x3,  x3,  x16
+        \\ adcs x14, x14, x17
+        \\ adcs x0,  x0,  x24
+        \\ adcs x1,  x1,  x26
+        \\ adcs x2,  x2,  x27
+        \\ adc  x3,  x28, xzr
+        //
+        // ── Final conditional reduction ──
+        // Result: {x14, x0, x1, x2}, t4=x3
+        \\ subs x16, x14, x8
+        \\ sbcs x17, x0,  x9
+        \\ sbcs x24, x1,  x10
+        \\ sbcs x27, x2,  x11
+        \\ sbcs xzr, x3,  xzr
+        \\ csel x14, x16, x14, cs
+        \\ csel x0,  x17, x0,  cs
+        \\ csel x1,  x24, x1,  cs
+        \\ csel x2,  x27, x2,  cs
+        : [_r0] "={x14}" (r0),
+          [_r1] "={x0}" (r1),
+          [_r2] "={x1}" (r2),
+          [_r3] "={x2}" (r3),
+        : [_a0] "{x13}" (a0),
+          [_a1] "{x25}" (a1),
+          [_b0] "{x27}" (b0),
+          [_b1] "{x28}" (b1),
+          [_mod] "{x26}" (mod_ptr),
+          [_inv] "{x12}" (inv),
+        : .{ .x0 = true, .x1 = true, .x2 = true, .x3 = true, .x4 = true, .x5 = true, .x6 = true, .x7 = true, .x8 = true, .x9 = true, .x10 = true, .x11 = true, .x14 = true, .x15 = true, .x16 = true, .x17 = true, .x19 = true, .x20 = true, .x21 = true, .x22 = true, .x23 = true, .x24 = true, .x25 = true, .x26 = true, .x27 = true, .x28 = true, .nzcv = true, .memory = true });
+    return .{ r0, r1, r2, r3 };
+}
+
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
@@ -1172,6 +1493,14 @@ pub fn MontgomeryField(
         /// Interleaved CIOS: both products share the same reduction step per limb iteration.
         /// Safe for BN254 since modulus_size (254) < 64*N - 1 (255).
         pub inline fn sumOfProducts(a: [2]Self, b: [2]Self) Self {
+            if (!@inComptime() and comptime use_arm64_asm) {
+                const mod_arr: [4]u64 = modulus;
+                return .{ .limbs = arm64SumOfProducts256(
+                    &a[0].limbs, &a[1].limbs,
+                    &b[0].limbs, &b[1].limbs,
+                    &mod_arr, montgomery_inv,
+                ) };
+            }
             var t: [5]u64 = .{ 0, 0, 0, 0, 0 };
 
             inline for (0..4) |i| {

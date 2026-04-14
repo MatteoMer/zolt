@@ -651,6 +651,14 @@ pub fn MontgomeryField(
         /// Fused multiply-accumulate: a[0]*b[0] + a[1]*b[1] with 2 reductions
         /// instead of 3 (vs separate mul + mul + add). Interleaved CIOS.
         pub inline fn sumOfProducts(a_pair: [2]Self, b_pair: [2]Self) Self {
+            if (N == 4 and !@inComptime() and comptime use_arm64_asm) {
+                const mod_arr: [4]u64 = modulus;
+                return .{ .limbs = asm_mod.arm64SumOfProducts256(
+                    &a_pair[0].limbs, &a_pair[1].limbs,
+                    &b_pair[0].limbs, &b_pair[1].limbs,
+                    &mod_arr, n_prime,
+                ) };
+            }
             var t: [N + 1]u64 = .{0} ** (N + 1);
 
             inline for (0..N) |i| {

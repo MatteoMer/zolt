@@ -9,11 +9,69 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const atomic = std.atomic;
-const Futex = std.Thread.Futex;
 const Allocator = std.mem.Allocator;
 
 /// True when targeting WebAssembly (wasm32 or wasm64).
 pub const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
+
+/// True when targeting WASM with the `atomics` CPU feature enabled.
+/// Enables WasmWorkerPool (parallel proving via Web Workers + SharedArrayBuffer).
+pub const has_wasm_atomics = is_wasm and
+    std.Target.wasm.featureSetHas(builtin.cpu.features, .atomics);
+
+/// Platform-appropriate futex. On native: std.Thread.Futex.
+/// On WASM with atomics: direct memory.atomic.wait32/notify intrinsics,
+/// bypassing std.Thread.Futex which requires single_threaded=false
+/// (incompatible with std.heap.wasm_allocator).
+const Futex = if (has_wasm_atomics) WasmFutex else std.Thread.Futex;
+
+const WasmFutex = struct {
+    /// Block until woken. Uses memory.atomic.wait32.
+    fn wait(ptr: *const atomic.Value(u32), expect: u32) void {
+        const result = asm volatile (
+            \\local.get %[ptr]
+            \\local.get %[expected]
+            \\local.get %[timeout]
+            \\memory.atomic.wait32 0
+            \\local.set %[ret]
+            : [ret] "=r" (-> u32),
+            : [ptr] "r" (&ptr.raw),
+              [expected] "r" (@as(i32, @bitCast(expect))),
+              [timeout] "r" (@as(i64, -1)),
+        );
+        _ = result;
+    }
+
+    /// Block with timeout (nanoseconds). Uses memory.atomic.wait32.
+    fn timedWait(ptr: *const atomic.Value(u32), expect: u32, timeout_ns: u64) error{Timeout}!void {
+        const result = asm volatile (
+            \\local.get %[ptr]
+            \\local.get %[expected]
+            \\local.get %[timeout]
+            \\memory.atomic.wait32 0
+            \\local.set %[ret]
+            : [ret] "=r" (-> u32),
+            : [ptr] "r" (&ptr.raw),
+              [expected] "r" (@as(i32, @bitCast(expect))),
+              [timeout] "r" (@as(i64, @intCast(timeout_ns))),
+        );
+        if (result == 2) return error.Timeout;
+    }
+
+    /// Wake up to max_waiters threads. Uses memory.atomic.notify.
+    fn wake(ptr: *const atomic.Value(u32), max_waiters: u32) void {
+        if (max_waiters == 0) return;
+        _ = asm volatile (
+            \\local.get %[ptr]
+            \\local.get %[waiters]
+            \\memory.atomic.notify 0
+            \\local.set %[ret]
+            : [ret] "=r" (-> u32),
+            : [ptr] "r" (&ptr.raw),
+              [waiters] "r" (max_waiters),
+        );
+    }
+};
 
 /// Minimum number of elements per thread to justify parallelism.
 /// Below this threshold, work runs sequentially on the caller's thread.
@@ -29,6 +87,10 @@ const YIELD_ITERS: u32 = 8;
 // Chase-Lev deque capacity (power of 2). Supports ~256 pending jobs per worker.
 // Max depth with 3-level nesting and adaptive splitting: ~54 entries.
 const DEQUE_CAP: usize = 256;
+
+/// Deque index type. wasm32 atomics are limited to 32-bit operands.
+/// i32 wraps after ~2B operations — more than sufficient for browser proving sessions.
+const DequeIdx = if (builtin.cpu.arch == .wasm32) i32 else i64;
 
 const WorkerState = enum(u32) {
     spinning = 0,
@@ -159,7 +221,7 @@ const SpinLatch = struct {
                 if (self.probe()) return;
                 atomic.spinLoopHint();
             }
-            std.Thread.yield() catch {};
+            if (is_wasm) atomic.spinLoopHint() else std.Thread.yield() catch {};
         }
     }
 };
@@ -170,8 +232,8 @@ const SpinLatch = struct {
 
 const Deque = struct {
     buffer: [DEQUE_CAP]*Job align(cache_line) = undefined,
-    bottom: atomic.Value(i64) align(cache_line) = atomic.Value(i64).init(0),
-    top: atomic.Value(i64) align(cache_line) = atomic.Value(i64).init(0),
+    bottom: atomic.Value(DequeIdx) align(cache_line) = atomic.Value(DequeIdx).init(0),
+    top: atomic.Value(DequeIdx) align(cache_line) = atomic.Value(DequeIdx).init(0),
 
     const StealResult = union(enum) {
         success: *Job,
@@ -256,8 +318,9 @@ const WorkerData = struct {
     claim_depth: atomic.Value(u32) = atomic.Value(u32).init(0),
 
     fn initRng(self: *WorkerData) void {
-        // Seed RNG with index + timestamp for randomness
-        const ts: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+        // Seed RNG with index + timestamp for randomness.
+        // On WASM there is no clock — index-based seed is fine for steal randomization.
+        const ts: u64 = if (is_wasm) 0 else @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
         self.rng_state = @truncate((self.index +% 1) *% 2654435761 +% ts);
         if (self.rng_state == 0) self.rng_state = 1;
     }
@@ -351,7 +414,12 @@ comptime {
 // ThreadPool — conditional type: native work-stealing pool vs WASM sequential stub
 // ============================================================================
 
-pub const ThreadPool = if (is_wasm) WasmThreadPoolStub else NativeThreadPool;
+pub const ThreadPool = if (has_wasm_atomics)
+    WasmWorkerPool
+else if (is_wasm)
+    WasmThreadPoolStub
+else
+    NativeThreadPool;
 
 // ============================================================================
 // WASM Sequential Stub
@@ -466,6 +534,92 @@ const WasmThreadPoolStub = struct {
         _ = self;
         return .{ func_a(context_a), func_b(context_b) };
     }
+};
+
+// ============================================================================
+// WASM Worker Pool (parallel via Web Workers + SharedArrayBuffer)
+// ============================================================================
+
+/// Work-stealing thread pool for WASM with atomics. Same API as NativeThreadPool.
+/// Workers are Web Workers that call `workerEntry` from JS — no OS thread spawning.
+/// Each Web Worker instantiates its own WASM module, so module-level globals
+/// (including `threadlocal`) provide per-worker TLS for free.
+const WasmWorkerPool = struct {
+    workers: [MAX_THREADS + 1]WorkerData,
+    thread_count: usize,
+    allocator: Allocator,
+    generation: atomic.Value(u32) align(cache_line),
+
+    /// Initialize with zero workers. JS will set the count via initWithCount.
+    pub fn init(alloc: Allocator) !*ThreadPool {
+        return initWithCount(alloc, 0);
+    }
+
+    /// Initialize with a specific worker count. Does NOT spawn threads —
+    /// JS creates Web Workers that call workerEntry.
+    pub fn initWithCount(alloc: Allocator, thread_count: usize) !*ThreadPool {
+        const actual_count = @min(thread_count, MAX_THREADS);
+        const self = try alloc.create(ThreadPool);
+        self.* = .{
+            .workers = [_]WorkerData{.{}} ** (MAX_THREADS + 1),
+            .thread_count = actual_count,
+            .allocator = alloc,
+            .generation = atomic.Value(u32).init(0),
+        };
+        for (0..actual_count + 1) |i| {
+            self.workers[i].pool_ptr = self;
+            self.workers[i].index = i;
+            self.workers[i].initRng();
+        }
+        return self;
+    }
+
+    /// Signal shutdown and wake all workers. JS terminates Web Workers.
+    pub fn deinit(self: *ThreadPool) void {
+        for (self.workers[0..self.thread_count]) |*w| {
+            w.state.store(@intFromEnum(WorkerState.shutdown), .release);
+        }
+        _ = self.generation.fetchAdd(1, .release);
+        for (self.workers[0..self.thread_count]) |*w| {
+            Futex.wake(&w.state, 1);
+        }
+        if (tls_worker) |w| {
+            if (w.pool_ptr == self) {
+                w.claim_depth.store(0, .release);
+                tls_worker = null;
+            }
+        }
+        self.allocator.destroy(self);
+    }
+
+    /// Entry point for Web Workers. Called from JS via C API.
+    /// Blocking — enters the spin/steal/park loop, returns on shutdown.
+    pub fn workerEntry(self: *ThreadPool, worker_idx: usize) void {
+        NativeThreadPool.workerMain(self, worker_idx);
+    }
+
+    // All shared methods aliased from NativeThreadPool. When compiled,
+    // `*ThreadPool` resolves to `*WasmWorkerPool` — field layout matches.
+    pub const getCurrentWorker = NativeThreadPool.getCurrentWorker;
+    pub const getPool = NativeThreadPool.getPool;
+    pub const parallelFor = NativeThreadPool.parallelFor;
+    pub const parallelForForce = NativeThreadPool.parallelForForce;
+    pub const parallelForEach = NativeThreadPool.parallelForEach;
+    pub const parallelChunks = NativeThreadPool.parallelChunks;
+    pub const parallelReduce = NativeThreadPool.parallelReduce;
+    pub const parallelReduceForce = NativeThreadPool.parallelReduceForce;
+    pub const join = NativeThreadPool.join;
+
+    const releaseWorkerClaim = NativeThreadPool.releaseWorkerClaim;
+    const parallelForImpl = NativeThreadPool.parallelForImpl;
+    const parallelForImplWithThreshold = NativeThreadPool.parallelForImplWithThreshold;
+    const reduceImpl = NativeThreadPool.reduceImpl;
+    const rangeJobExecute = NativeThreadPool.rangeJobExecute;
+    const executeRange = NativeThreadPool.executeRange;
+    const joinJobExecute = NativeThreadPool.joinJobExecute;
+    const wakeWorkers = NativeThreadPool.wakeWorkers;
+    const effectiveThreads = NativeThreadPool.effectiveThreads;
+    const workerProcessWork = NativeThreadPool.workerProcessWork;
 };
 
 // ============================================================================
@@ -964,7 +1118,7 @@ const NativeThreadPool = struct {
                         if (latch.probe()) return;
                         atomic.spinLoopHint();
                     }
-                    std.Thread.yield() catch {};
+                    if (is_wasm) atomic.spinLoopHint() else std.Thread.yield() catch {};
                 }
             }
 
@@ -1203,7 +1357,7 @@ const NativeThreadPool = struct {
             // Phase 2: Yield (with stealing attempts)
             worker.state.store(@intFromEnum(WorkerState.yielding), .release);
             for (0..YIELD_ITERS) |_| {
-                std.Thread.yield() catch {};
+                if (is_wasm) atomic.spinLoopHint() else std.Thread.yield() catch {};
                 if (worker.state.load(.acquire) == @intFromEnum(WorkerState.shutdown)) return;
                 const g = self.generation.load(.acquire);
                 if (g != last_seen_gen) {
@@ -1261,7 +1415,7 @@ const NativeThreadPool = struct {
             if (consecutive_steal_failures <= 8) {
                 atomic.spinLoopHint();
             } else {
-                std.Thread.yield() catch {};
+                if (is_wasm) atomic.spinLoopHint() else std.Thread.yield() catch {};
             }
         }
     }

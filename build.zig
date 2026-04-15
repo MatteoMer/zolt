@@ -18,6 +18,10 @@ pub fn build(b: *std.Build) void {
     const is_wasm = target.result.cpu.arch == .wasm32 or
         target.result.cpu.arch == .wasm64;
 
+    // Detect WASM atomics — enables multi-threaded mode for Web Workers
+    const has_wasm_atomics = is_wasm and
+        std.Target.wasm.featureSetHas(target.result.cpu.features, .atomics);
+
     // Package dependencies
     const zolt_pool_dep = b.dependency("zolt_pool", .{
         .target = target,
@@ -31,37 +35,6 @@ pub fn build(b: *std.Build) void {
     });
     const zolt_arith_mod = zolt_arith_dep.module("zolt_arith");
 
-    // Main library
-    const lib = b.addLibrary(.{
-        .name = "zolt",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zolt_pool", .module = zolt_pool_mod },
-                .{ .name = "zolt_arith", .module = zolt_arith_mod },
-            },
-        }),
-    });
-    if (is_apple_silicon) linkMetalFrameworks(lib.root_module);
-    b.installArtifact(lib);
-
-    // C-API static library (for FFI from Rust/C/WASM)
-    const capi_lib = b.addLibrary(.{
-        .name = "zolt_capi",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/c_api.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zolt_pool", .module = zolt_pool_mod },
-                .{ .name = "zolt_arith", .module = zolt_arith_mod },
-            },
-        }),
-    });
-    if (is_apple_silicon) linkMetalFrameworks(capi_lib.root_module);
-    b.installArtifact(capi_lib);
 
     // Export zolt module for dependency consumption
     _ = b.addModule("zolt", .{
@@ -74,9 +47,115 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // ── Native-only targets (executables, tests, benchmarks) ─────────
+    // ── WASM executable target (browser-loadable .wasm module) ─────────
+    if (is_wasm) {
+        const wasm_mod = b.addExecutable(.{
+            .name = "zolt_capi",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/c_api.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zolt_pool", .module = zolt_pool_mod },
+                    .{ .name = "zolt_arith", .module = zolt_arith_mod },
+                },
+            }),
+        });
+        wasm_mod.entry = .disabled;
+        wasm_mod.initial_memory = 256 * 1024 * 1024; // 256 MB
+        wasm_mod.max_memory = if (target.result.cpu.arch == .wasm64)
+            16 * 1024 * 1024 * 1024 // 16 GB (wasm64, wasm-ld max)
+        else
+            4 * 1024 * 1024 * 1024; // 4 GB (wasm32 max)
+        wasm_mod.root_module.export_symbol_names = if (has_wasm_atomics)
+            &.{
+                "zolt_alloc",
+                "zolt_free",
+                "zolt_thread_pool_create",
+                "zolt_thread_pool_destroy",
+                "zolt_load_elf",
+                "zolt_load_elf_bytes",
+                "zolt_loaded_elf_size",
+                "zolt_loaded_elf_destroy",
+                "zolt_prove",
+                "zolt_proof_result_size",
+                "zolt_proof_result_ptr",
+                "zolt_proof_result_destroy",
+                "zolt_thread_pool_create_wasm",
+                "zolt_thread_pool_ptr",
+                "zolt_worker_entry",
+                // Workers need their own stack and TLS regions
+                "__stack_pointer",
+                "__tls_base",
+                "__tls_size",
+                "__tls_align",
+                "__wasm_init_tls",
+            }
+        else
+            &.{
+                "zolt_alloc",
+                "zolt_free",
+                "zolt_thread_pool_create",
+                "zolt_thread_pool_destroy",
+                "zolt_load_elf",
+                "zolt_load_elf_bytes",
+                "zolt_loaded_elf_size",
+                "zolt_loaded_elf_destroy",
+                "zolt_prove",
+                "zolt_proof_result_size",
+                "zolt_proof_result_ptr",
+                "zolt_proof_result_destroy",
+                "zolt_thread_pool_create_wasm",
+                "zolt_thread_pool_ptr",
+                "zolt_worker_entry",
+            };
+
+        if (has_wasm_atomics) {
+            // Enable shared memory for Web Workers + SharedArrayBuffer
+            wasm_mod.shared_memory = true;
+            wasm_mod.import_memory = true; // JS creates SharedArrayBuffer
+            wasm_mod.export_memory = true; // re-export so JS can access via instance.exports.memory
+        } else {
+            wasm_mod.export_memory = true;
+        }
+        b.installArtifact(wasm_mod);
+    }
+
+    // ── Native-only targets (libraries, executables, tests, benchmarks) ──
     // These require OS threads, filesystem, and can't run on WASM.
     if (!is_wasm) {
+        // Main library
+        const lib = b.addLibrary(.{
+            .name = "zolt",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zolt_pool", .module = zolt_pool_mod },
+                    .{ .name = "zolt_arith", .module = zolt_arith_mod },
+                },
+            }),
+        });
+        if (is_apple_silicon) linkMetalFrameworks(lib.root_module);
+        b.installArtifact(lib);
+
+        // C-API static library (for FFI from Rust/C)
+        const capi_lib = b.addLibrary(.{
+            .name = "zolt_capi",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/c_api.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zolt_pool", .module = zolt_pool_mod },
+                    .{ .name = "zolt_arith", .module = zolt_arith_mod },
+                },
+            }),
+        });
+        if (is_apple_silicon) linkMetalFrameworks(capi_lib.root_module);
+        b.installArtifact(capi_lib);
+
         // Main executable (for testing/demo)
         const exe = b.addExecutable(.{
             .name = "zolt",

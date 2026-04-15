@@ -11,6 +11,7 @@ const std = @import("std");
 const zolt = @import("root.zig");
 const BN254Scalar = zolt.field.BN254Scalar;
 const is_wasm = @import("zolt_pool").is_wasm;
+const has_wasm_atomics = @import("zolt_pool").has_wasm_atomics;
 
 const allocator = if (is_wasm) std.heap.wasm_allocator else std.heap.page_allocator;
 
@@ -49,6 +50,41 @@ export fn zolt_thread_pool_destroy(handle: ?*anyopaque) callconv(.c) void {
     const ctx: *ThreadPoolCtx = cast(ThreadPoolCtx, handle) orelse return;
     ctx.tp.deinit();
     allocator.destroy(ctx);
+}
+
+// ── WASM worker pool (threaded WASM only) ────────────────────────────
+
+/// Create a thread pool with an explicit worker count (for WASM Web Workers).
+/// Returns null without atomics support or on allocation failure.
+export fn zolt_thread_pool_create_wasm(thread_count: u32) callconv(.c) ?*anyopaque {
+    if (comptime has_wasm_atomics) {
+        const tp = zolt.utils.ThreadPool.initWithCount(allocator, thread_count) catch return null;
+        const ctx = allocator.create(ThreadPoolCtx) catch {
+            tp.deinit();
+            return null;
+        };
+        ctx.* = .{ .tp = tp };
+        return @ptrCast(ctx);
+    }
+    return null;
+}
+
+/// Get the raw pool pointer as usize (passed to workers for zolt_worker_entry).
+export fn zolt_thread_pool_ptr(handle: ?*anyopaque) callconv(.c) usize {
+    if (comptime has_wasm_atomics) {
+        const ctx: *ThreadPoolCtx = cast(ThreadPoolCtx, handle) orelse return 0;
+        return @intFromPtr(ctx.tp);
+    }
+    return 0;
+}
+
+/// Worker entry point — blocking. Called by each Web Worker.
+/// Enters the spin/steal/park loop and returns on pool shutdown.
+export fn zolt_worker_entry(pool_ptr: usize, worker_id: u32) callconv(.c) void {
+    if (comptime has_wasm_atomics) {
+        const tp: *zolt.utils.ThreadPool = @ptrFromInt(pool_ptr);
+        tp.workerEntry(@intCast(worker_id));
+    }
 }
 
 // ── ELF loading (filesystem — native only) ───────────────────────────
@@ -173,6 +209,17 @@ export fn zolt_proof_result_destroy(handle: ?*anyopaque) callconv(.c) void {
     const result: *ProofResult = cast(ProofResult, handle) orelse return;
     allocator.free(result.bytes);
     allocator.destroy(result);
+}
+
+// ── WASM memory helpers ──────────────────────────────────────────────
+
+export fn zolt_alloc(len: usize) callconv(.c) ?[*]u8 {
+    const slice = allocator.alloc(u8, len) catch return null;
+    return slice.ptr;
+}
+
+export fn zolt_free(ptr: [*]u8, len: usize) callconv(.c) void {
+    allocator.free(ptr[0..len]);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Zolt — Browser ZK Proof Demo</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    max-width: 640px; margin: 40px auto; padding: 0 20px;
+    color: #1a1a1a; background: #fafafa;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .subtitle { color: #666; margin-top: 0; }
+  #log {
+    background: #111; color: #0f0; font-family: monospace;
+    font-size: 13px; padding: 16px; border-radius: 8px;
+    min-height: 200px; max-height: 500px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  button {
+    font-size: 1rem; padding: 10px 24px; margin: 12px 4px 12px 0;
+    border: none; border-radius: 6px; cursor: pointer;
+    background: #2563eb; color: #fff; font-weight: 600;
+  }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.secondary { background: #555; }
+  select {
+    font-size: 1rem; padding: 8px 12px; margin: 12px 4px 12px 0;
+    border: 1px solid #ccc; border-radius: 6px; background: #fff;
+  }
+  .drop-zone {
+    border: 2px dashed #aaa; border-radius: 8px; padding: 24px;
+    text-align: center; color: #888; margin: 12px 0;
+    transition: border-color .15s, background .15s;
+  }
+  .drop-zone.active { border-color: #2563eb; background: #eff6ff; }
+</style>
+</head>
+<body>
+
+<h1>Zolt WASM Prover</h1>
+<p class="subtitle">Generate a zero-knowledge proof entirely in the browser.</p>
+
+<button id="btn-load" disabled>Load WASM module</button>
+<select id="elf-select">
+  <option value="fibonacci.elf">fibonacci.elf (fast)</option>
+  <option value="sha256.elf">sha256.elf</option>
+  <option value="sha256_128.elf">sha256_128.elf</option>
+  <option value="sha256_512.elf">sha256_512.elf</option>
+  <option value="sha256_1024.elf">sha256_1024.elf</option>
+  <option value="sha256_2048.elf">sha256_2048.elf (slow)</option>
+  <option value="sha256_inline.elf">sha256_inline.elf</option>
+</select>
+<button id="btn-prove" disabled>Prove</button>
+<button id="btn-clear" class="secondary">Clear log</button>
+
+<div id="drop-zone" class="drop-zone">
+  Or drag &amp; drop any RISC-V ELF here
+</div>
+
+<div id="log"></div>
+
+<script type="module">
+const logEl = document.getElementById("log");
+const btnLoad = document.getElementById("btn-load");
+const btnProve = document.getElementById("btn-prove");
+const btnClear = document.getElementById("btn-clear");
+const dropZone = document.getElementById("drop-zone");
+const elfSelect = document.getElementById("elf-select");
+
+let elfBytes = null;
+let elfName = null;
+let proverWorker = null;
+let computeWorkers = [];
+let poolHandle = null;
+let isThreaded = false;
+let workerCount = 0;
+let wasmModule = null; // cached compiled module (reused across resets)
+
+function log(msg) {
+  logEl.textContent += msg + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---- Helpers ----
+
+function waitForMessage(worker, type) {
+  return new Promise((resolve, reject) => {
+    const handler = ({ data }) => {
+      if (data.type === type) { worker.removeEventListener("message", handler); resolve(data); }
+      if (data.type === "error") { worker.removeEventListener("message", handler); reject(new Error(data.message)); }
+    };
+    worker.addEventListener("message", handler);
+  });
+}
+
+function hasSharedArrayBuffer() {
+  try { new SharedArrayBuffer(1); return true; } catch { return false; }
+}
+
+// ---- Load WASM module ----
+
+async function loadWasm() {
+  btnLoad.disabled = true;
+  const t0 = performance.now();
+  const canThread = hasSharedArrayBuffer();
+
+  try {
+    let wasmBytes = null;
+    let label = "";
+
+    // Try threaded build first
+    if (canThread) {
+      try {
+        const resp = await fetch("/zig-out/wasm32-threaded/zolt_capi.wasm");
+        if (resp.ok) { wasmBytes = await resp.arrayBuffer(); isThreaded = true; label = "wasm32-threaded"; }
+      } catch { /* fall through */ }
+    }
+    if (!wasmBytes) {
+      isThreaded = false;
+      try {
+        const resp = await fetch("/zig-out/wasm64/zolt_capi.wasm");
+        if (resp.ok) { wasmBytes = await resp.arrayBuffer(); label = "wasm64"; }
+      } catch { /* fall through */ }
+    }
+    if (!wasmBytes) {
+      const resp = await fetch("/zig-out/wasm32/zolt_capi.wasm");
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      wasmBytes = await resp.arrayBuffer();
+      label = "wasm32";
+    }
+
+    log(`Fetched ${label} binary: ${(wasmBytes.byteLength / 1024 / 1024).toFixed(1)} MB`);
+    wasmModule = await WebAssembly.compile(wasmBytes);
+
+    if (isThreaded) {
+      await setupThreaded();
+    } else {
+      await setupNonThreaded();
+    }
+    log(`Setup done in ${(performance.now() - t0).toFixed(0)} ms`);
+
+    btnProve.disabled = false;
+    await loadElf(elfSelect.value);
+  } catch (e) {
+    log(`ERROR: ${e.message}`);
+    btnLoad.disabled = false;
+  }
+}
+
+function teardownWorkers() {
+  for (const w of computeWorkers) w.terminate();
+  computeWorkers = [];
+  if (proverWorker) proverWorker.terminate();
+  proverWorker = null;
+  poolHandle = null;
+}
+
+async function setupThreaded() {
+  teardownWorkers();
+
+  const cores = navigator.hardwareConcurrency || 4;
+  workerCount = Math.min(cores - 1, 15);
+
+  // Fresh shared memory for each setup (avoids allocator fragmentation between proves)
+  const INITIAL_PAGES = 256 * 1024 * 1024 / 65536;
+  const MAX_PAGES = 4 * 1024 * 1024 * 1024 / 65536;
+  const memory = new WebAssembly.Memory({ initial: INITIAL_PAGES, maximum: MAX_PAGES, shared: true });
+
+  // Spawn prover + compute workers, let them all instantiate.
+  proverWorker = new Worker("zolt-prover.js");
+  proverWorker.addEventListener("message", ({ data }) => {
+    if (data.type === "status") log(data.message);
+    if (data.type === "error") log(`Prover error: ${data.message}`);
+  });
+  proverWorker.postMessage({ type: "init", wasmModule, memory });
+  await waitForMessage(proverWorker, "ready");
+
+  let computeReady = 0;
+  for (let i = 0; i < workerCount; i++) {
+    const w = new Worker("zolt-worker.js");
+    w.addEventListener("message", ({ data: msg }) => {
+      if (msg.type === "ready") computeReady++;
+      if (msg.type === "error") log(`Worker ${msg.workerId} error: ${msg.message}`);
+    });
+    w.postMessage({ type: "init", wasmModule, memory, workerId: i });
+    computeWorkers.push(w);
+  }
+  while (computeReady < workerCount) await new Promise(r => setTimeout(r, 50));
+
+  // Prover creates pool + allocates stacks/TLS.
+  proverWorker.postMessage({ type: "setup", workerCount });
+  const setup = await waitForMessage(proverWorker, "setup-done");
+  poolHandle = setup.poolHandle;
+
+  for (let i = 0; i < workerCount; i++) {
+    computeWorkers[i].postMessage({
+      type: "start",
+      poolPtr: setup.poolPtr,
+      workerId: i,
+      stackBase: setup.workerInfos[i].stackBase,
+      tlsBase: setup.workerInfos[i].tlsBase,
+    });
+  }
+  await new Promise(r => setTimeout(r, 100));
+  log(`${workerCount} workers active (${cores} cores)`);
+}
+
+async function setupNonThreaded() {
+  teardownWorkers();
+  proverWorker = new Worker("zolt-prover.js");
+  proverWorker.addEventListener("message", ({ data }) => {
+    if (data.type === "status") log(data.message);
+    if (data.type === "error") log(`Prover error: ${data.message}`);
+  });
+  proverWorker.postMessage({ type: "init", wasmModule, memory: null });
+  await waitForMessage(proverWorker, "ready");
+  poolHandle = 0;
+  log("Single-threaded mode");
+}
+
+// ---- Load ELF by name ----
+
+async function loadElf(name) {
+  try {
+    const resp = await fetch(`/examples/${name}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    elfBytes = new Uint8Array(await resp.arrayBuffer());
+    elfName = name;
+    log(`\nLoaded ${name} (${elfBytes.length} bytes)`);
+  } catch (e) {
+    log(`Could not load ${name}: ${e.message}`);
+  }
+}
+
+// ---- Prove (non-blocking!) ----
+
+async function prove() {
+  if (!wasmModule || !elfBytes) return;
+  btnProve.disabled = true;
+
+  try {
+    // Fresh memory + workers for each prove (wasm_allocator isn't thread-safe,
+    // so we need a clean slate to avoid corruption from parallel allocations).
+    const t0 = performance.now();
+    if (isThreaded) await setupThreaded(); else await setupNonThreaded();
+    const setupMs = (performance.now() - t0).toFixed(0);
+    log(`\nWorkers ready (${setupMs} ms setup)`);
+  } catch (e) {
+    log(`\nSetup error: ${e.message}`);
+    btnProve.disabled = false;
+    return;
+  }
+
+  const modeLabel = isThreaded ? `${workerCount} workers` : "single-threaded";
+  log(`Proving ${elfName || "ELF"} (${modeLabel})...`);
+
+  // Send ELF to prover worker — main thread stays responsive!
+  proverWorker.postMessage({
+    type: "prove",
+    elfBytes,
+    elfName,
+    poolHandle: poolHandle || 0,
+  });
+
+  try {
+    const result = await waitForMessage(proverWorker, "proof-done");
+    log(`Proof generated in ${result.elapsed}s`);
+    log(`  size  : ${result.proofSize} bytes`);
+    log(`  memory: ${result.memMB} MB used`);
+    log(`  sha256: ${result.sha256}`);
+    log("\nDone!");
+  } catch (e) {
+    log(`ERROR: ${e.message}`);
+  } finally {
+    btnProve.disabled = false;
+  }
+}
+
+// ---- Drag & drop ----
+
+dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("active"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("active"));
+dropZone.addEventListener("drop", async e => {
+  e.preventDefault();
+  dropZone.classList.remove("active");
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  elfBytes = new Uint8Array(await file.arrayBuffer());
+  elfName = file.name;
+  log(`\nLoaded ${file.name} (${elfBytes.length} bytes) via drag & drop`);
+  if (proverWorker) btnProve.disabled = false;
+});
+
+// ---- Wire up ----
+
+btnLoad.addEventListener("click", loadWasm);
+btnProve.addEventListener("click", prove);
+btnClear.addEventListener("click", () => { logEl.textContent = ""; });
+elfSelect.addEventListener("change", () => { if (proverWorker) loadElf(elfSelect.value); });
+
+btnLoad.disabled = false;
+log("Click 'Load WASM module' to begin.");
+</script>
+</body>
+</html>

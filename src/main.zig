@@ -9,6 +9,7 @@ const zolt = @import("root.zig");
 const args_mod = @import("cli/args.zig");
 const run_cmd = @import("commands/run.zig");
 const prove_cmd = @import("commands/prove.zig");
+const verify_cmd = @import("commands/verify.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -117,6 +118,37 @@ pub fn main() !void {
                 std.debug.print("Usage: zolt prove -o <output> [options] <elf_file>\n", .{});
             }
         },
+        .verify => {
+            const first_arg = args.next() orelse {
+                std.debug.print("Error: verify command requires --proof and --preprocessing\n", .{});
+                std.debug.print("Usage: zolt verify --proof <file> --preprocessing <file>\n", .{});
+                return;
+            };
+
+            const verify_args = args_mod.parseVerifyArgs(&args, first_arg);
+
+            if (verify_args.show_help) {
+                args_mod.printVerifyHelp();
+                return;
+            }
+
+            if (verify_args.proof_path == null) {
+                std.debug.print("Error: verify command requires a proof file (--proof <file>)\n", .{});
+                std.debug.print("Usage: zolt verify --proof <file> --preprocessing <file>\n", .{});
+                return;
+            }
+
+            if (verify_args.preprocessing_path == null) {
+                std.debug.print("Error: verify command requires a preprocessing file (--preprocessing <file>)\n", .{});
+                std.debug.print("Usage: zolt verify --proof <file> --preprocessing <file>\n", .{});
+                return;
+            }
+
+            verify_cmd.runVerifier(allocator, verify_args.proof_path.?, verify_args.preprocessing_path.?) catch |err| {
+                std.debug.print("Verification failed: {s}\n", .{@errorName(err)});
+                std.process.exit(1);
+            };
+        },
         .unknown => {
             std.debug.print("Unknown command: {s}\n\n", .{cmd_arg});
             args_mod.printHelp();
@@ -137,6 +169,7 @@ test "command parsing" {
     try std.testing.expect(args_mod.parseCommand("-v") == .version);
     try std.testing.expect(args_mod.parseCommand("run") == .run);
     try std.testing.expect(args_mod.parseCommand("prove") == .prove);
+    try std.testing.expect(args_mod.parseCommand("verify") == .verify);
     try std.testing.expect(args_mod.parseCommand("unknown_cmd") == .unknown);
 }
 

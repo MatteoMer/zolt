@@ -170,6 +170,40 @@ pub fn build(b: *std.Build) void {
             }),
         });
         if (is_apple_silicon) linkMetalFrameworks(exe.root_module);
+
+        // Link jolt-verifier Rust staticlib for the `verify` command.
+        // A system command builds the Rust crate; the resulting .a is linked
+        // into the Zig executable so `extern fn jolt_verify` resolves.
+        {
+            const cargo_build = b.addSystemCommand(&.{
+                "cargo",
+                "build",
+                "--profile",
+                "release-staticlib",
+                "--manifest-path",
+            });
+            cargo_build.addFileArg(b.path("jolt-verifier/Cargo.toml"));
+
+            // Tell Zig where to find the Rust staticlib
+            exe.addLibraryPath(.{ .cwd_relative = b.pathFromRoot("jolt-verifier/target/release-staticlib") });
+            exe.root_module.linkSystemLibrary("jolt_verifier", .{ .preferred = .static });
+
+            // The Rust staticlib pulls in C/system deps
+            exe.root_module.linkSystemLibrary("c", .{});
+            exe.root_module.linkSystemLibrary("m", .{});
+            if (target.result.os.tag != .macos) {
+                exe.root_module.linkSystemLibrary("pthread", .{});
+            }
+            if (is_apple_silicon or target.result.os.tag == .macos) {
+                const fw_opts: std.Build.Module.LinkFrameworkOptions = .{};
+                exe.root_module.linkFramework("Security", fw_opts);
+                exe.root_module.linkFramework("CoreFoundation", fw_opts);
+            }
+
+            // Ensure cargo build runs before linking
+            exe.step.dependOn(&cargo_build.step);
+        }
+
         b.installArtifact(exe);
 
         // Run command
@@ -196,7 +230,7 @@ pub fn build(b: *std.Build) void {
         if (is_apple_silicon) linkMetalFrameworks(lib_unit_tests.root_module);
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
-        // Unit tests for the executable
+        // Unit tests for the executable (needs jolt-verifier staticlib for verify command)
         const exe_unit_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
@@ -209,6 +243,19 @@ pub fn build(b: *std.Build) void {
             }),
         });
         if (is_apple_silicon) linkMetalFrameworks(exe_unit_tests.root_module);
+        // Link jolt-verifier for extern fn jolt_verify
+        exe_unit_tests.addLibraryPath(.{ .cwd_relative = b.pathFromRoot("jolt-verifier/target/release-staticlib") });
+        exe_unit_tests.root_module.linkSystemLibrary("jolt_verifier", .{ .preferred = .static });
+        exe_unit_tests.root_module.linkSystemLibrary("c", .{});
+        exe_unit_tests.root_module.linkSystemLibrary("m", .{});
+        if (target.result.os.tag != .macos) {
+            exe_unit_tests.root_module.linkSystemLibrary("pthread", .{});
+        }
+        if (is_apple_silicon or target.result.os.tag == .macos) {
+            const fw_opts2: std.Build.Module.LinkFrameworkOptions = .{};
+            exe_unit_tests.root_module.linkFramework("Security", fw_opts2);
+            exe_unit_tests.root_module.linkFramework("CoreFoundation", fw_opts2);
+        }
         const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
         // Test step

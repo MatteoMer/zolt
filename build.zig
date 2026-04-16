@@ -186,7 +186,7 @@ pub fn build(b: *std.Build) void {
 
             // Tell Zig where to find the Rust staticlib
             exe.addLibraryPath(.{ .cwd_relative = b.pathFromRoot("jolt-verifier/target/release-staticlib") });
-            exe.root_module.linkSystemLibrary("jolt_verifier", .{ .preferred = .static });
+            exe.root_module.linkSystemLibrary("jolt_verifier", .{ .preferred_link_mode = .static });
 
             // The Rust staticlib pulls in C/system deps
             exe.root_module.linkSystemLibrary("c", .{});
@@ -245,7 +245,7 @@ pub fn build(b: *std.Build) void {
         if (is_apple_silicon) linkMetalFrameworks(exe_unit_tests.root_module);
         // Link jolt-verifier for extern fn jolt_verify
         exe_unit_tests.addLibraryPath(.{ .cwd_relative = b.pathFromRoot("jolt-verifier/target/release-staticlib") });
-        exe_unit_tests.root_module.linkSystemLibrary("jolt_verifier", .{ .preferred = .static });
+        exe_unit_tests.root_module.linkSystemLibrary("jolt_verifier", .{ .preferred_link_mode = .static });
         exe_unit_tests.root_module.linkSystemLibrary("c", .{});
         exe_unit_tests.root_module.linkSystemLibrary("m", .{});
         if (target.result.os.tag != .macos) {

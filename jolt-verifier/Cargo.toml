@@ -3,6 +3,9 @@ name = "jolt-verifier"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["staticlib", "lib"]
+
 [dependencies]
 # Pinned to a16z/jolt commit b10e80ac
 jolt-core = { git = "https://github.com/a16z/jolt.git", rev = "b10e80ac", features = ["host"], default-features = false }
@@ -25,3 +28,10 @@ allocative = { git = "https://github.com/facebookexperimental/allocative", rev =
 [profile.release]
 opt-level = 3
 lto = "fat"
+
+# Profile for building the staticlib linked by Zig.
+# LTO must be off so the .a contains native object code (not LLVM bitcode)
+# that a non-Rust linker can consume.
+[profile.release-staticlib]
+inherits = "release"
+lto = "off"

@@ -170,6 +170,53 @@ pub fn build(b: *std.Build) void {
             }),
         });
         if (is_apple_silicon) linkMetalFrameworks(exe.root_module);
+
+        // Build jolt-verifier Rust staticlib once; link it into every Zig
+        // compile that needs `extern fn jolt_verify` (the main exe and the
+        // exe unit tests, which share src/main.zig as their root).
+        const cargo_build = b.addSystemCommand(&.{
+            "cargo",
+            "build",
+            "--profile",
+            "release-staticlib",
+            "--manifest-path",
+        });
+        cargo_build.addFileArg(b.path("jolt-verifier/Cargo.toml"));
+
+        const linkJoltVerifier = struct {
+            fn call(
+                c: *std.Build.Step.Compile,
+                b_: *std.Build,
+                tgt: std.Build.ResolvedTarget,
+                apple_silicon: bool,
+                cargo_step: *std.Build.Step,
+            ) void {
+                c.addLibraryPath(.{ .cwd_relative = b_.pathFromRoot("jolt-verifier/target/release-staticlib") });
+                c.root_module.linkSystemLibrary("jolt_verifier", .{ .preferred_link_mode = .static });
+                c.root_module.linkSystemLibrary("c", .{});
+                c.root_module.linkSystemLibrary("m", .{});
+                if (tgt.result.os.tag == .linux) {
+                    c.root_module.linkSystemLibrary("pthread", .{});
+                    c.root_module.linkSystemLibrary("dl", .{});
+                    c.root_module.linkSystemLibrary("rt", .{});
+                    // Rust's std pulls in panic-unwind symbols (_Unwind_*) that
+                    // live in libgcc_s on GNU/Linux; without this, linking a
+                    // Rust staticlib on Linux fails with undefined references.
+                    c.root_module.linkSystemLibrary("gcc_s", .{});
+                } else if (tgt.result.os.tag != .macos) {
+                    c.root_module.linkSystemLibrary("pthread", .{});
+                }
+                if (apple_silicon or tgt.result.os.tag == .macos) {
+                    const fw_opts: std.Build.Module.LinkFrameworkOptions = .{};
+                    c.root_module.linkFramework("Security", fw_opts);
+                    c.root_module.linkFramework("CoreFoundation", fw_opts);
+                }
+                c.step.dependOn(cargo_step);
+            }
+        }.call;
+
+        linkJoltVerifier(exe, b, target, is_apple_silicon, &cargo_build.step);
+
         b.installArtifact(exe);
 
         // Run command
@@ -196,7 +243,7 @@ pub fn build(b: *std.Build) void {
         if (is_apple_silicon) linkMetalFrameworks(lib_unit_tests.root_module);
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
-        // Unit tests for the executable
+        // Unit tests for the executable (needs jolt-verifier staticlib for verify command)
         const exe_unit_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
@@ -209,6 +256,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         if (is_apple_silicon) linkMetalFrameworks(exe_unit_tests.root_module);
+        linkJoltVerifier(exe_unit_tests, b, target, is_apple_silicon, &cargo_build.step);
         const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
         // Test step

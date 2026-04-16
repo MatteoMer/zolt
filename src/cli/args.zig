@@ -11,6 +11,7 @@ pub const Command = enum {
     version,
     run,
     prove,
+    verify,
     unknown,
 };
 
@@ -35,6 +36,13 @@ pub const ProveArgs = struct {
     had_first_arg: bool = false,
 };
 
+pub const VerifyArgs = struct {
+    proof_path: ?[]const u8 = null,
+    preprocessing_path: ?[]const u8 = null,
+    show_help: bool = false,
+    had_first_arg: bool = false,
+};
+
 pub fn printHelp() void {
     std.debug.print(
         \\Zolt zkVM v{s}
@@ -47,10 +55,12 @@ pub fn printHelp() void {
         \\    help                Show this help message
         \\    version             Show version information
         \\    prove [opts] <elf>  Generate ZK proof for ELF binary
+        \\    verify [opts]       Verify a proof against preprocessing
         \\    run [opts] <elf>    Run RISC-V ELF binary in the emulator
         \\
         \\EXAMPLES:
         \\    zolt prove -o proof.bin program.elf         # Generate and save a proof
+        \\    zolt verify --proof proof.bin --preprocessing pp.bin  # Verify a proof
         \\    zolt run program.elf                        # Execute a RISC-V binary
         \\    zolt run --trace program.elf                # Show execution trace
         \\
@@ -73,6 +83,8 @@ pub fn parseCommand(arg: []const u8) Command {
         return .run;
     } else if (std.mem.eql(u8, arg, "prove")) {
         return .prove;
+    } else if (std.mem.eql(u8, arg, "verify")) {
+        return .verify;
     }
     return .unknown;
 }
@@ -216,6 +228,55 @@ pub fn printProveHelp() void {
     std.debug.print("  --input-hex HEX          Set input as hex bytes (e.g., 20 for input 32)\n", .{});
 }
 
+/// Parse verify sub-command arguments from an argument iterator.
+/// The first non-flag argument after "verify" should be passed as `first_arg`.
+pub fn parseVerifyArgs(args: anytype, first_arg: []const u8) VerifyArgs {
+    var result = VerifyArgs{};
+
+    if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
+        result.show_help = true;
+        return result;
+    }
+
+    result.had_first_arg = true;
+
+    // Process first arg
+    if (std.mem.startsWith(u8, first_arg, "-")) {
+        processVerifyFlag(&result, first_arg, args);
+    } else {
+        // Positional: treat as proof path
+        result.proof_path = first_arg;
+    }
+
+    // Process remaining args
+    while (args.next()) |next_arg| {
+        if (std.mem.startsWith(u8, next_arg, "-")) {
+            processVerifyFlag(&result, next_arg, args);
+        } else if (result.proof_path == null) {
+            result.proof_path = next_arg;
+        }
+    }
+
+    return result;
+}
+
+fn processVerifyFlag(result: *VerifyArgs, flag: []const u8, args: anytype) void {
+    if (std.mem.eql(u8, flag, "--proof") or std.mem.eql(u8, flag, "-p")) {
+        result.proof_path = args.next();
+    } else if (std.mem.eql(u8, flag, "--preprocessing") or std.mem.eql(u8, flag, "-P")) {
+        result.preprocessing_path = args.next();
+    }
+}
+
+pub fn printVerifyHelp() void {
+    std.debug.print("Usage: zolt verify [options] --proof <file> --preprocessing <file>\n\n", .{});
+    std.debug.print("Verify a ZK proof against preprocessing data.\n", .{});
+    std.debug.print("Calls the Jolt RV64IMAC verifier directly via linked Rust library.\n\n", .{});
+    std.debug.print("Options:\n", .{});
+    std.debug.print("  -p, --proof F            Path to proof file (required)\n", .{});
+    std.debug.print("  -P, --preprocessing F    Path to preprocessing file (required)\n", .{});
+}
+
 test "command parsing" {
     try std.testing.expect(parseCommand("help") == .help);
     try std.testing.expect(parseCommand("-h") == .help);
@@ -224,6 +285,7 @@ test "command parsing" {
     try std.testing.expect(parseCommand("-v") == .version);
     try std.testing.expect(parseCommand("run") == .run);
     try std.testing.expect(parseCommand("prove") == .prove);
+    try std.testing.expect(parseCommand("verify") == .verify);
     try std.testing.expect(parseCommand("unknown_cmd") == .unknown);
 }
 

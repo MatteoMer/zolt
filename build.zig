@@ -12,6 +12,20 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Opt-in build of the Rust Jolt verifier staticlib. Off by default so most
+    // CI jobs (and quick `zig build` / `zig build test` runs) skip the ~2 min
+    // cargo compile. Enable with `zig build -Dverify=true` to get the
+    // `zolt verify` command and its extern link to libjolt_verifier.a.
+    const enable_verifier = b.option(
+        bool,
+        "verify",
+        "Build and link the Rust Jolt verifier (enables `zolt verify`)",
+    ) orelse false;
+
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "enable_verifier", enable_verifier);
+    const build_options_mod = build_options.createModule();
+
     const is_apple_silicon = target.result.os.tag == .macos and
         target.result.cpu.arch == .aarch64;
 
@@ -166,6 +180,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "zolt_pool", .module = zolt_pool_mod },
                     .{ .name = "zolt_arith", .module = zolt_arith_mod },
+                    .{ .name = "build_options", .module = build_options_mod },
                 },
             }),
         });
@@ -174,14 +189,19 @@ pub fn build(b: *std.Build) void {
         // Build jolt-verifier Rust staticlib once; link it into every Zig
         // compile that needs `extern fn jolt_verify` (the main exe and the
         // exe unit tests, which share src/main.zig as their root).
-        const cargo_build = b.addSystemCommand(&.{
-            "cargo",
-            "build",
-            "--profile",
-            "release-staticlib",
-            "--manifest-path",
-        });
-        cargo_build.addFileArg(b.path("jolt-verifier/Cargo.toml"));
+        // Only created when `-Dverify=true`; otherwise the verify command
+        // compiles to a stub and nothing needs libjolt_verifier.a.
+        const cargo_build: ?*std.Build.Step.Run = if (enable_verifier) blk: {
+            const cmd = b.addSystemCommand(&.{
+                "cargo",
+                "build",
+                "--profile",
+                "release-staticlib",
+                "--manifest-path",
+            });
+            cmd.addFileArg(b.path("jolt-verifier/Cargo.toml"));
+            break :blk cmd;
+        } else null;
 
         const linkJoltVerifier = struct {
             fn call(
@@ -215,7 +235,7 @@ pub fn build(b: *std.Build) void {
             }
         }.call;
 
-        linkJoltVerifier(exe, b, target, is_apple_silicon, &cargo_build.step);
+        if (cargo_build) |cb| linkJoltVerifier(exe, b, target, is_apple_silicon, &cb.step);
 
         b.installArtifact(exe);
 
@@ -243,7 +263,7 @@ pub fn build(b: *std.Build) void {
         if (is_apple_silicon) linkMetalFrameworks(lib_unit_tests.root_module);
         const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
-        // Unit tests for the executable (needs jolt-verifier staticlib for verify command)
+        // Unit tests for the executable (links jolt-verifier only when -Dverify=true)
         const exe_unit_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
@@ -252,11 +272,12 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "zolt_pool", .module = zolt_pool_mod },
                     .{ .name = "zolt_arith", .module = zolt_arith_mod },
+                    .{ .name = "build_options", .module = build_options_mod },
                 },
             }),
         });
         if (is_apple_silicon) linkMetalFrameworks(exe_unit_tests.root_module);
-        linkJoltVerifier(exe_unit_tests, b, target, is_apple_silicon, &cargo_build.step);
+        if (cargo_build) |cb| linkJoltVerifier(exe_unit_tests, b, target, is_apple_silicon, &cb.step);
         const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
         // Test step

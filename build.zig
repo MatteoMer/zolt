@@ -195,7 +195,15 @@ pub fn build(b: *std.Build) void {
                 c.root_module.linkSystemLibrary("jolt_verifier", .{ .preferred_link_mode = .static });
                 c.root_module.linkSystemLibrary("c", .{});
                 c.root_module.linkSystemLibrary("m", .{});
-                if (tgt.result.os.tag != .macos) {
+                if (tgt.result.os.tag == .linux) {
+                    c.root_module.linkSystemLibrary("pthread", .{});
+                    c.root_module.linkSystemLibrary("dl", .{});
+                    c.root_module.linkSystemLibrary("rt", .{});
+                    // Rust's std pulls in panic-unwind symbols (_Unwind_*) that
+                    // live in libgcc_s on GNU/Linux; without this, linking a
+                    // Rust staticlib on Linux fails with undefined references.
+                    c.root_module.linkSystemLibrary("gcc_s", .{});
+                } else if (tgt.result.os.tag != .macos) {
                     c.root_module.linkSystemLibrary("pthread", .{});
                 }
                 if (apple_silicon or tgt.result.os.tag == .macos) {

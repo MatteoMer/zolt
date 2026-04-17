@@ -33,8 +33,11 @@ pub fn RaPolynomial(comptime F: type) type {
             indices: []?u8,
             /// Small eq table (k_chunk entries, typically 16). Prescaled by `scale`. Owned.
             eq_table: []F,
+            /// True if any index is null; enables branchless fast path when false.
+            has_nulls: bool,
 
             pub inline fn getBoundCoeff(self: @This(), j: usize) F {
+                if (!self.has_nulls) return self.eq_table[self.indices[j].?];
                 return if (self.indices[j]) |idx|
                     self.eq_table[idx]
                 else
@@ -53,8 +56,13 @@ pub fn RaPolynomial(comptime F: type) type {
             /// F_0[k] = (1-r0)*eq[k], F_1[k] = r0*eq[k]. Owned.
             F_0: []F,
             F_1: []F,
+            /// Propagated from Round1; enables branchless fast path.
+            has_nulls: bool,
 
             pub inline fn getBoundCoeff(self: @This(), j: usize) F {
+                if (!self.has_nulls) {
+                    return self.F_0[self.indices[2 * j].?].add(self.F_1[self.indices[2 * j + 1].?]);
+                }
                 const v0 = if (self.indices[2 * j]) |idx| self.F_0[idx] else F.zero();
                 const v1 = if (self.indices[2 * j + 1]) |idx| self.F_1[idx] else F.zero();
                 return v0.add(v1);
@@ -74,12 +82,20 @@ pub fn RaPolynomial(comptime F: type) type {
             F_01: []F,
             F_10: []F,
             F_11: []F,
+            /// Propagated from Round1; enables branchless fast path.
+            has_nulls: bool,
 
             /// LE bit ordering: position offset g has bits [b1, b0] where
             /// b0 = round0 selector (F_?0 vs F_?1), b1 = round1 selector (F_0? vs F_1?).
             /// So: base+0 → F_00, base+1 → F_10, base+2 → F_01, base+3 → F_11.
             pub inline fn getBoundCoeff(self: @This(), j: usize) F {
                 const base = 4 * j;
+                if (!self.has_nulls) {
+                    return self.F_00[self.indices[base].?]
+                        .add(self.F_10[self.indices[base + 1].?])
+                        .add(self.F_01[self.indices[base + 2].?])
+                        .add(self.F_11[self.indices[base + 3].?]);
+                }
                 const v00 = if (self.indices[base]) |idx| self.F_00[idx] else F.zero();
                 const v10 = if (self.indices[base + 1]) |idx| self.F_10[idx] else F.zero();
                 const v01 = if (self.indices[base + 2]) |idx| self.F_01[idx] else F.zero();
@@ -124,9 +140,18 @@ pub fn RaPolynomial(comptime F: type) type {
             for (eq_table) |*entry| {
                 entry.* = entry.*.mul(scale);
             }
+            // Scan for null indices to enable branchless fast paths in getBoundCoeff
+            var has_nulls = false;
+            for (indices) |idx| {
+                if (idx == null) {
+                    has_nulls = true;
+                    break;
+                }
+            }
             return .{ .round1 = .{
                 .indices = indices,
                 .eq_table = eq_table,
+                .has_nulls = has_nulls,
             } };
         }
 
@@ -176,11 +201,15 @@ pub fn RaPolynomial(comptime F: type) type {
                     // Free eq_table (replaced by F_0, F_1)
                     allocator.free(s.eq_table);
 
+                    // Capture has_nulls before overwriting the union payload
+                    const has_nulls = s.has_nulls;
+
                     // indices pointer is shared into round2 (NOT freed)
                     self.* = .{ .round2 = .{
                         .indices = s.indices,
                         .F_0 = F_0,
                         .F_1 = F_1,
+                        .has_nulls = has_nulls,
                     } };
                 },
                 .round2 => |*s| {
@@ -208,12 +237,16 @@ pub fn RaPolynomial(comptime F: type) type {
                     allocator.free(s.F_0);
                     allocator.free(s.F_1);
 
+                    // Capture has_nulls before overwriting the union payload
+                    const has_nulls = s.has_nulls;
+
                     self.* = .{ .round3 = .{
                         .indices = s.indices,
                         .F_00 = F_00,
                         .F_01 = F_01,
                         .F_10 = F_10,
                         .F_11 = F_11,
+                        .has_nulls = has_nulls,
                     } };
                 },
                 .round3 => |*s| {

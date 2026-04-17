@@ -1139,6 +1139,14 @@ pub fn RamRaVirtualProver(comptime F: type) type {
             const UPA = UnreducedProductAccum;
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [MAX_RA_EVALS]F {
+                    // Dispatch once on ra_poly state to avoid per-access tag checks.
+                    // All ra_polys are in the same state at any given round.
+                    return switch (c.ra_polys[0]) {
+                        inline else => |_, comptime_tag| fInner(c, start, end, comptime_tag),
+                    };
+                }
+
+                inline fn fInner(c: Ctx, start: usize, end: usize, comptime tag: anytype) [MAX_RA_EVALS]F {
                     const MAX_D = 8;
                     var outer_acc: [MAX_RA_EVALS]UPA = .{UPA.zero()} ** MAX_RA_EVALS;
                     var inner_acc: [MAX_RA_EVALS]UPA = .{UPA.zero()} ** MAX_RA_EVALS;
@@ -1165,8 +1173,8 @@ pub fn RamRaVirtualProver(comptime F: type) type {
                         var lo: [MAX_D]F = undefined;
                         var delta: [MAX_D]F = undefined;
                         for (0..c.d) |i| {
-                            lo[i] = c.ra_polys[i].getBoundCoeff(2 * j);
-                            delta[i] = c.ra_polys[i].getBoundCoeff(2 * j + 1).sub(lo[i]);
+                            lo[i] = @field(c.ra_polys[i], @tagName(tag)).getBoundCoeff(2 * j);
+                            delta[i] = @field(c.ra_polys[i], @tagName(tag)).getBoundCoeff(2 * j + 1).sub(lo[i]);
                         }
 
                         var cur: [MAX_D]F = undefined;
@@ -2538,6 +2546,14 @@ pub fn LookupsRaVirtualProver(comptime F: type) type {
             const UPA = UnreducedProductAccum;
             const mapFn = struct {
                 fn f(c: Ctx, start: usize, end: usize) [4]F {
+                    // Dispatch once on ra_poly state to avoid per-access tag checks.
+                    // All ra_polys are in the same state at any given round.
+                    return switch (c.ra_polys[0]) {
+                        inline else => |_, comptime_tag| fInner(c, start, end, comptime_tag),
+                    };
+                }
+
+                inline fn fInner(c: Ctx, start: usize, end: usize, comptime tag: anytype) [4]F {
                     var outer_acc: [4]UPA = .{UPA.zero()} ** 4;
                     var inner_acc: [4]UPA = .{UPA.zero()} ** 4;
                     var prev_x_out: usize = if (start > 0) start >> @intCast(c.head_in_bits) else 0;
@@ -2567,8 +2583,8 @@ pub fn LookupsRaVirtualProver(comptime F: type) type {
                             for (0..c.M) |m_idx| {
                                 const idx = v * c.M + m_idx;
                                 pairs[m_idx] = .{
-                                    c.ra_polys[idx].getBoundCoeff(2 * j),
-                                    c.ra_polys[idx].getBoundCoeff(2 * j + 1),
+                                    @field(c.ra_polys[idx], @tagName(tag)).getBoundCoeff(2 * j),
+                                    @field(c.ra_polys[idx], @tagName(tag)).getBoundCoeff(2 * j + 1),
                                 };
                             }
                             const prod_evals = evalLinearProd4(F, pairs);

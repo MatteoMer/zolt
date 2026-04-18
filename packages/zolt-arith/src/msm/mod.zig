@@ -982,9 +982,9 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             return final_result.toAffine();
         }
 
-        /// Chunk-based parallel MSM: split input into num_threads chunks,
-        /// each chunk runs sequential Pippenger independently, results summed.
-        /// Better cache locality than per-window parallelism (chunk fits L2).
+        /// Parallel MSM: uses chunk-based parallelism for large inputs (good
+        /// cache locality) and per-window parallelism for smaller inputs
+        /// (enough parallel work even with few points).
         fn pippengerMSMParallel(
             bases: []const Affine,
             scalars: []const F,
@@ -993,11 +993,23 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             const n = bases.len;
             const num_threads = tp.thread_count + 1; // workers + caller
 
-            // For small inputs, chunks would be too small for Pippenger
-            if (n < num_threads * 256) {
-                return pippengerMSM(bases, scalars);
+            // For large inputs, chunk-based is better (each chunk fits L2).
+            // For smaller inputs, per-window parallelism keeps all threads busy.
+            if (n >= num_threads * 256) {
+                return pippengerMSMChunkParallel(bases, scalars, tp);
             }
+            return pippengerMSMWindowParallel(bases, scalars, tp);
+        }
 
+        /// Chunk-based parallel MSM: split input into num_threads chunks,
+        /// each chunk runs sequential Pippenger independently, results summed.
+        fn pippengerMSMChunkParallel(
+            bases: []const Affine,
+            scalars: []const F,
+            tp: *ThreadPool,
+        ) Affine {
+            const n = bases.len;
+            const num_threads = tp.thread_count + 1;
             const num_chunks = num_threads;
             const chunk_size = (n + num_chunks - 1) / num_chunks;
 
@@ -1042,6 +1054,170 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                     final_result = final_result.addAffine(cr);
                 }
             }
+            return final_result.toAffine();
+        }
+
+        /// Per-window parallel MSM: each thread processes a subset of windows
+        /// over all points. Effective for small-to-moderate N where chunk-based
+        /// parallelism would produce chunks too small for Pippenger.
+        fn pippengerMSMWindowParallel(
+            bases: []const Affine,
+            scalars: []const F,
+            tp: *ThreadPool,
+        ) Affine {
+            const c = optimalWindowSize(bases.len);
+            const num_buckets = (@as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(c))) / 2;
+
+            // Pre-convert all scalars and compute wNAF digits
+            const heap_digits = std.heap.page_allocator.alloc([MAX_DIGITS]i32, scalars.len) catch
+                return pippengerMSM(bases, scalars);
+            defer std.heap.page_allocator.free(heap_digits);
+
+            var or_limbs: [4]u64 = .{ 0, 0, 0, 0 };
+            const full_num_scalar_windows = (SCALAR_BITS + c - 1) / c;
+            for (scalars, 0..) |s, i| {
+                const normal = s.fromMontgomery();
+                heap_digits[i] = makeDigits(normal.limbs, c, full_num_scalar_windows);
+                or_limbs[0] |= normal.limbs[0];
+                or_limbs[1] |= normal.limbs[1];
+                or_limbs[2] |= normal.limbs[2];
+                or_limbs[3] |= normal.limbs[3];
+            }
+            const effective_bits = limbsBitWidth(or_limbs);
+            const actual_max_bits = if (effective_bits == 0) 1 else effective_bits;
+            const num_scalar_windows = (actual_max_bits + c - 1) / c;
+            const num_windows = num_scalar_windows + 1;
+
+            // Allocate per-window buckets and window sums
+            const all_buckets = std.heap.page_allocator.alloc(Bucket, num_windows * num_buckets) catch
+                return pippengerMSM(bases, scalars);
+            defer std.heap.page_allocator.free(all_buckets);
+
+            const window_sums = std.heap.page_allocator.alloc(Bucket, num_windows) catch
+                return pippengerMSM(bases, scalars);
+            defer std.heap.page_allocator.free(window_sums);
+
+            // Phase 1: Process all windows in parallel
+            const WinCtx = struct {
+                all_digits: [][MAX_DIGITS]i32,
+                all_buckets: []Bucket,
+                window_sums: []Bucket,
+                bases: []const Affine,
+                num_buckets: usize,
+            };
+            const ctx = WinCtx{
+                .all_digits = heap_digits,
+                .all_buckets = all_buckets,
+                .window_sums = window_sums,
+                .bases = bases,
+                .num_buckets = num_buckets,
+            };
+
+            tp.parallelForForce(num_windows, ctx, struct {
+                fn f(cx: WinCtx, win_idx: usize) void {
+                    const bucket_offset = win_idx * cx.num_buckets;
+                    const buckets = cx.all_buckets[bucket_offset .. bucket_offset + cx.num_buckets];
+
+                    for (0..cx.num_buckets) |j| {
+                        buckets[j] = Bucket.identity();
+                    }
+
+                    for (cx.bases, 0..) |base, idx| {
+                        if (base.isIdentity()) continue;
+                        const digit = cx.all_digits[idx][win_idx];
+                        if (digit > 0) {
+                            const bidx: usize = @intCast(digit - 1);
+                            buckets[bidx] = buckets[bidx].addAffine(base);
+                        } else if (digit < 0) {
+                            const bidx: usize = @intCast(-digit - 1);
+                            buckets[bidx] = buckets[bidx].subAffine(base);
+                        }
+                    }
+
+                    var running_sum = Bucket.identity();
+                    var window_sum = Bucket.identity();
+                    var bucket_idx: usize = cx.num_buckets;
+                    while (bucket_idx > 0) {
+                        bucket_idx -= 1;
+                        running_sum = running_sum.add(buckets[bucket_idx]);
+                        window_sum = window_sum.add(running_sum);
+                    }
+
+                    cx.window_sums[win_idx] = window_sum;
+                }
+            }.f);
+
+            // Phase 2: Batch convert window sums to affine (Montgomery's trick)
+            var window_sums_affine: [MAX_DIGITS]Affine = undefined;
+            var products: [MAX_DIGITS]G = undefined;
+            var non_empty_indices: [MAX_DIGITS]usize = undefined;
+            var num_non_empty: usize = 0;
+
+            for (0..num_windows) |wi| {
+                if (window_sums[wi].empty) {
+                    window_sums_affine[wi] = Affine.identity();
+                } else {
+                    products[num_non_empty] = window_sums[wi].zz.mul(window_sums[wi].zzz);
+                    non_empty_indices[num_non_empty] = wi;
+                    num_non_empty += 1;
+                }
+            }
+
+            if (num_non_empty > 0) {
+                var prefix: [MAX_DIGITS]G = undefined;
+                prefix[0] = products[0];
+                for (1..num_non_empty) |i| {
+                    prefix[i] = prefix[i - 1].mul(products[i]);
+                }
+
+                var running_inv = prefix[num_non_empty - 1].inverse() orelse G.one();
+
+                var i = num_non_empty;
+                while (i > 1) {
+                    i -= 1;
+                    const product_inv = prefix[i - 1].mul(running_inv);
+                    running_inv = running_inv.mul(products[i]);
+                    const wi = non_empty_indices[i];
+                    const zz_inv = product_inv.mul(window_sums[wi].zzz);
+                    const zzz_inv = product_inv.mul(window_sums[wi].zz);
+                    window_sums_affine[wi] = Affine.fromCoords(
+                        window_sums[wi].x.mul(zz_inv),
+                        window_sums[wi].y.mul(zzz_inv),
+                    );
+                }
+                {
+                    const wi = non_empty_indices[0];
+                    const zz_inv = running_inv.mul(window_sums[wi].zzz);
+                    const zzz_inv = running_inv.mul(window_sums[wi].zz);
+                    window_sums_affine[wi] = Affine.fromCoords(
+                        window_sums[wi].x.mul(zz_inv),
+                        window_sums[wi].y.mul(zzz_inv),
+                    );
+                }
+            }
+
+            // Phase 3: Combine windows (MSB to LSB)
+            var final_result = Projective.identity();
+            var window_idx: usize = num_windows;
+            while (window_idx > 0) {
+                window_idx -= 1;
+
+                if (!final_result.isIdentity()) {
+                    var k: usize = 0;
+                    while (k < c) : (k += 1) {
+                        final_result = final_result.double();
+                    }
+                }
+
+                if (!window_sums_affine[window_idx].isIdentity()) {
+                    if (final_result.isIdentity()) {
+                        final_result = Projective.fromAffine(window_sums_affine[window_idx]);
+                    } else {
+                        final_result = final_result.addAffine(window_sums_affine[window_idx]);
+                    }
+                }
+            }
+
             return final_result.toAffine();
         }
 

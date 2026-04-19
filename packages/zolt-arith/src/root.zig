@@ -23,6 +23,9 @@ pub const interleaveBits = bits.interleaveBits;
 pub const expanding_table = @import("expanding_table.zig");
 pub const ExpandingTable = expanding_table.ExpandingTable;
 
+// --- Fiat-crypto verified field arithmetic (used by verifier) -------------
+pub const fiat = @import("fiat/mod.zig");
+
 // --- Curve-generic substrate + BLS12-381 surface (used by zyli) ----------
 pub const curves = @import("curves/mod.zig");
 pub const bigint = @import("bigint.zig");

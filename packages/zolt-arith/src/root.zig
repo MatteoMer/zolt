@@ -48,4 +48,5 @@ test {
     // Fiat-crypto verified field arithmetic
     _ = @import("fiat/bn254.zig");
     _ = @import("fiat/diff_tests.zig");
+    _ = @import("fiat/property_tests.zig");
 }

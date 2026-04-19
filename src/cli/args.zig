@@ -39,6 +39,7 @@ pub const ProveArgs = struct {
 pub const VerifyArgs = struct {
     proof_path: ?[]const u8 = null,
     preprocessing_path: ?[]const u8 = null,
+    native: bool = false,
     show_help: bool = false,
     had_first_arg: bool = false,
 };
@@ -265,6 +266,8 @@ fn processVerifyFlag(result: *VerifyArgs, flag: []const u8, args: anytype) void 
         result.proof_path = args.next();
     } else if (std.mem.eql(u8, flag, "--preprocessing") or std.mem.eql(u8, flag, "-P")) {
         result.preprocessing_path = args.next();
+    } else if (std.mem.eql(u8, flag, "--native")) {
+        result.native = true;
     }
 }
 

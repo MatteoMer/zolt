@@ -144,10 +144,17 @@ pub fn main() !void {
                 return;
             }
 
-            verify_cmd.runVerifier(allocator, verify_args.proof_path.?, verify_args.preprocessing_path.?) catch |err| {
-                std.debug.print("Verification failed: {s}\n", .{@errorName(err)});
-                std.process.exit(1);
-            };
+            if (verify_args.native) {
+                verify_cmd.runNativeVerifier(allocator, verify_args.proof_path.?, verify_args.preprocessing_path.?) catch |err| {
+                    std.debug.print("Verification failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else {
+                verify_cmd.runVerifier(allocator, verify_args.proof_path.?, verify_args.preprocessing_path.?) catch |err| {
+                    std.debug.print("Verification failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            }
         },
         .unknown => {
             std.debug.print("Unknown command: {s}\n\n", .{cmd_arg});

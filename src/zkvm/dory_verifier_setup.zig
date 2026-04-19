@@ -205,6 +205,52 @@ pub const DoryVerifierSetup = struct {
         };
     }
 
+    /// Deserialize from arkworks-compatible format
+    pub fn deserialize(allocator: Allocator, reader: anytype) !DoryVerifierSetup {
+        const readGTVec = struct {
+            fn f(alloc: Allocator, r: anytype) !std.ArrayListUnmanaged(GT) {
+                const len: usize = @intCast(try r.readInt(u64, .little));
+                var list = std.ArrayListUnmanaged(GT){};
+                try list.ensureTotalCapacity(alloc, len);
+                for (0..len) |_| {
+                    list.appendAssumeCapacity(try deserializeGT(r));
+                }
+                return list;
+            }
+        }.f;
+
+        const delta_1l = try readGTVec(allocator, reader);
+        errdefer {
+            var tmp = delta_1l;
+            tmp.deinit(allocator);
+        }
+        const delta_1r = try readGTVec(allocator, reader);
+        const delta_2l = try readGTVec(allocator, reader);
+        const delta_2r = try readGTVec(allocator, reader);
+        const chi = try readGTVec(allocator, reader);
+        const g1_0 = try deserializeG1(reader);
+        const g2_0 = try deserializeG2(reader);
+        const h1 = try deserializeG1(reader);
+        const h2 = try deserializeG2(reader);
+        const ht = try deserializeGT(reader);
+        const max_log_n: usize = @intCast(try reader.readInt(u64, .little));
+
+        return DoryVerifierSetup{
+            .delta_1l = delta_1l,
+            .delta_1r = delta_1r,
+            .delta_2l = delta_2l,
+            .delta_2r = delta_2r,
+            .chi = chi,
+            .g1_0 = g1_0,
+            .g2_0 = g2_0,
+            .h1 = h1,
+            .h2 = h2,
+            .ht = ht,
+            .max_log_n = max_log_n,
+            .allocator = allocator,
+        };
+    }
+
     /// Serialize to arkworks-compatible format
     /// Matches the CanonicalSerialize impl for VerifierSetup<BN254>
     pub fn serialize(self: *const DoryVerifierSetup, writer: anytype) !void {
@@ -398,6 +444,40 @@ pub fn lexicographicallyLessFp2(a: pairing.Fp2, b: pairing.Fp2) bool {
     return false; // Equal
 }
 
+/// Deserialize a GT element from arkworks format (reader-based)
+pub fn deserializeGT(reader: anytype) !GT {
+    var bytes: [384]u8 = undefined;
+    const n = try reader.readAll(&bytes);
+    if (n != 384) return error.UnexpectedEof;
+    return GT.fromBytes(&bytes);
+}
+
+/// Deserialize an Fp element from arkworks format (reader-based)
+pub fn deserializeFp(reader: anytype) !Fp {
+    var limbs: [4]u64 = undefined;
+    for (0..4) |i| {
+        limbs[i] = try reader.readInt(u64, .little);
+    }
+    // Convert from standard form to Montgomery form
+    return (Fp{ .limbs = limbs }).toMontgomery();
+}
+
+/// Deserialize a G1 point from arkworks compressed format (reader-based)
+pub fn deserializeG1(reader: anytype) !G1Point {
+    var bytes: [32]u8 = undefined;
+    const n = try reader.readAll(&bytes);
+    if (n != 32) return error.UnexpectedEof;
+    return dory.decompressG1(&bytes) orelse error.InvalidG1Point;
+}
+
+/// Deserialize a G2 point from arkworks compressed format (reader-based)
+pub fn deserializeG2(reader: anytype) !G2Point {
+    var bytes: [64]u8 = undefined;
+    const n = try reader.readAll(&bytes);
+    if (n != 64) return error.UnexpectedEof;
+    return dory.decompressG2(&bytes) orelse error.InvalidG2Point;
+}
+
 test "DoryVerifierSetup serialization" {
     const allocator = std.testing.allocator;
     const DoryCommitmentScheme = dory.DoryCommitmentScheme(@import("zolt_arith").field.BN254Scalar);
@@ -427,4 +507,16 @@ test "DoryVerifierSetup serialization" {
     // Should produce non-empty output
     try std.testing.expect(buf.items.len > 0);
     dbg("Verifier setup serialized to {} bytes\n", .{buf.items.len});
+
+    // Deserialize and verify roundtrip
+    var stream = std.io.fixedBufferStream(buf.items);
+    var deserialized = try DoryVerifierSetup.deserialize(allocator, stream.reader());
+    defer deserialized.deinit();
+
+    try std.testing.expectEqual(verifier_setup.delta_1l.items.len, deserialized.delta_1l.items.len);
+    try std.testing.expectEqual(verifier_setup.max_log_n, deserialized.max_log_n);
+    try std.testing.expect(verifier_setup.ht.eql(deserialized.ht));
+    for (verifier_setup.chi.items, deserialized.chi.items) |a, b| {
+        try std.testing.expect(a.eql(b));
+    }
 }

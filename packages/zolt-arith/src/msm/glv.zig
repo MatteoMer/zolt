@@ -445,33 +445,90 @@ pub fn glvScalarMulG2WithBases(bases_in: [4]G2Point, scalar: Fr) G2Projective {
     return shamirMul4D(bases, decomp.k, decomp.max_bits);
 }
 
-/// Shamir's trick for 4-point multi-scalar multiplication
+/// Shamir's trick for 4-point multi-scalar multiplication with precomputed table.
 fn shamirMul4D(bases: [4]G2Point, coeffs: [4][4]u64, max_bits: usize) G2Projective {
+    // Precompute table[0..16] where table[b3<<3|b2<<2|b1<<1|b0] = sum of bases[i] where bit i is set
+    var table: [16]G2Point = undefined;
+    table[0] = G2Point.identity();
+    table[1] = bases[0];
+    table[2] = bases[1];
+    table[4] = bases[2];
+    table[8] = bases[3];
+    table[3] = G2Projective.fromAffine(bases[0]).addAffine(bases[1]).toAffine();
+    table[5] = G2Projective.fromAffine(bases[0]).addAffine(bases[2]).toAffine();
+    table[6] = G2Projective.fromAffine(bases[1]).addAffine(bases[2]).toAffine();
+    table[9] = G2Projective.fromAffine(bases[0]).addAffine(bases[3]).toAffine();
+    table[10] = G2Projective.fromAffine(bases[1]).addAffine(bases[3]).toAffine();
+    table[12] = G2Projective.fromAffine(bases[2]).addAffine(bases[3]).toAffine();
+    table[7] = G2Projective.fromAffine(table[3]).addAffine(bases[2]).toAffine();
+    table[11] = G2Projective.fromAffine(table[3]).addAffine(bases[3]).toAffine();
+    table[13] = G2Projective.fromAffine(table[5]).addAffine(bases[3]).toAffine();
+    table[14] = G2Projective.fromAffine(table[6]).addAffine(bases[3]).toAffine();
+    table[15] = G2Projective.fromAffine(table[7]).addAffine(bases[3]).toAffine();
+
     var result = G2Projective.identity();
-
     var bit_idx: usize = max_bits;
-    while (bit_idx > 0) {
-        bit_idx -= 1;
 
+    // Handle odd top bit with 1-bit step
+    if (max_bits % 2 == 1) {
+        bit_idx -= 1;
+        const idx = shamirTableIndex(coeffs, bit_idx);
+        if (idx != 0) {
+            result = G2Projective.fromAffine(table[idx]);
+        }
+    }
+
+    // Process 2 bits at a time: double-add-double-add
+    while (bit_idx >= 2) {
+        bit_idx -= 2;
+
+        // Double for high bit position
         if (!result.isIdentity()) {
             result = result.double();
         }
 
-        const limb_pos = bit_idx / 64;
-        const bit_pos: u6 = @intCast(bit_idx % 64);
+        // High bit contribution
+        const idx_hi = shamirTableIndex(coeffs, bit_idx + 1);
+        if (idx_hi != 0) {
+            if (result.isIdentity()) {
+                result = G2Projective.fromAffine(table[idx_hi]);
+            } else {
+                result = result.addAffine(table[idx_hi]);
+            }
+        }
 
-        for (0..4) |i| {
-            if (limb_pos < 4 and (coeffs[i][limb_pos] >> bit_pos) & 1 == 1) {
-                if (result.isIdentity()) {
-                    result = G2Projective.fromAffine(bases[i]);
-                } else {
-                    result = result.addAffine(bases[i]);
-                }
+        // Double for low bit position
+        if (!result.isIdentity()) {
+            result = result.double();
+        }
+
+        // Low bit contribution
+        const idx_lo = shamirTableIndex(coeffs, bit_idx);
+        if (idx_lo != 0) {
+            if (result.isIdentity()) {
+                result = G2Projective.fromAffine(table[idx_lo]);
+            } else {
+                result = result.addAffine(table[idx_lo]);
             }
         }
     }
 
     return result;
+}
+
+/// Compute 4-bit Shamir table index from bit position across 4 scalars.
+inline fn shamirTableIndex(coeffs: [4][4]u64, bit_idx: usize) u4 {
+    const limb_pos = bit_idx / 64;
+    const bit_pos: u6 = @intCast(bit_idx % 64);
+    var idx: u4 = 0;
+    if (limb_pos < 4) {
+        for (0..4) |i| {
+            if ((coeffs[i][limb_pos] >> bit_pos) & 1 == 1) {
+                idx |= @as(u4, 1) << @intCast(i);
+            }
+        }
+    }
+    return idx;
 }
 
 // ============================================================================

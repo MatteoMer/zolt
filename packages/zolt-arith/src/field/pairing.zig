@@ -584,7 +584,7 @@ const MAX_UNPREPARED_BATCH: usize = 8;
 
 /// Maximum pairs per sub-batch for prepared Miller loop.
 /// Only reads EllCoeff per step (~48 bytes/pair), so larger batches fit L1.
-const MAX_PREPARED_BATCH: usize = 16;
+const MAX_PREPARED_BATCH: usize = 64;
 
 /// Batched Miller loop using precomputed G2 coefficients.
 /// Shares a single Fp12.square() per ATE iteration across all pairs,
@@ -707,31 +707,34 @@ pub fn batchedMillerLoopUnprepared(
             f = f.square();
         }
 
-        // Doubling step for all pairs
-        for (0..n) |k| {
-            if (g1_points[k].infinity or g2_points[k].infinity) continue;
-            const coeffs_dbl = rs[k].double_in_place(two_inv);
-            const c0_eval = fp2ScalarMul(coeffs_dbl.c0, g1_points[k].y);
-            const c1_eval = fp2ScalarMul(coeffs_dbl.c1, g1_points[k].x);
-            f = fp12MulBy034(f, c0_eval, c1_eval, coeffs_dbl.c2);
-        }
-
         const bit = ATE_LOOP_COUNT[idx - 1];
-        if (bit == 1) {
+
+        if (bit == 1 or bit == -1) {
+            // Non-zero bit: combine doubling + addition lines via sparse-sparse
             for (0..n) |k| {
                 if (g1_points[k].infinity or g2_points[k].infinity) continue;
-                const coeffs_add = rs[k].add_in_place(g2_points[k]);
-                const c0_add = fp2ScalarMul(coeffs_add.c0, g1_points[k].y);
-                const c1_add = fp2ScalarMul(coeffs_add.c1, g1_points[k].x);
-                f = fp12MulBy034(f, c0_add, c1_add, coeffs_add.c2);
+                // Doubling line coefficients
+                const coeffs_dbl = rs[k].double_in_place(two_inv);
+                const dbl_c0 = fp2ScalarMul(coeffs_dbl.c0, g1_points[k].y);
+                const dbl_c1 = fp2ScalarMul(coeffs_dbl.c1, g1_points[k].x);
+                // Addition line coefficients
+                const q = if (bit == 1) g2_points[k] else nqs[k];
+                const coeffs_add = rs[k].add_in_place(q);
+                const add_c0 = fp2ScalarMul(coeffs_add.c0, g1_points[k].y);
+                const add_c1 = fp2ScalarMul(coeffs_add.c1, g1_points[k].x);
+                // Sparse × sparse combination (6 Fp2.mul)
+                const combined = fp12Mul034By034(dbl_c0, dbl_c1, coeffs_dbl.c2, add_c0, add_c1, coeffs_add.c2);
+                // 01234-sparse × full (17 Fp2.mul)
+                f = fp12MulBy01234(f, combined);
             }
-        } else if (bit == -1) {
+        } else {
+            // Zero bit: only doubling line
             for (0..n) |k| {
                 if (g1_points[k].infinity or g2_points[k].infinity) continue;
-                const coeffs_add = rs[k].add_in_place(nqs[k]);
-                const c0_add = fp2ScalarMul(coeffs_add.c0, g1_points[k].y);
-                const c1_add = fp2ScalarMul(coeffs_add.c1, g1_points[k].x);
-                f = fp12MulBy034(f, c0_add, c1_add, coeffs_add.c2);
+                const coeffs_dbl = rs[k].double_in_place(two_inv);
+                const c0_eval = fp2ScalarMul(coeffs_dbl.c0, g1_points[k].y);
+                const c1_eval = fp2ScalarMul(coeffs_dbl.c1, g1_points[k].x);
+                f = fp12MulBy034(f, c0_eval, c1_eval, coeffs_dbl.c2);
             }
         }
     }

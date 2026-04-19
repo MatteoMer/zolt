@@ -44,4 +44,7 @@ test {
     _ = @import("curves/montgomery_field.zig");
     _ = @import("curves/bn254/mod.zig");
     _ = @import("curves/bls12_381/mod.zig");
+
+    // Fiat-crypto verified field arithmetic
+    _ = @import("fiat/bn254.zig");
 }

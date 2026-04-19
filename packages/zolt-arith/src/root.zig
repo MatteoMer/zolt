@@ -51,4 +51,5 @@ test {
     _ = @import("fiat/property_tests.zig");
     _ = @import("fiat/extensions.zig");
     _ = @import("fiat/ext_diff_tests.zig");
+    _ = @import("fiat/pairing.zig");
 }

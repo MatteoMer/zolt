@@ -49,4 +49,6 @@ test {
     _ = @import("fiat/bn254.zig");
     _ = @import("fiat/diff_tests.zig");
     _ = @import("fiat/property_tests.zig");
+    _ = @import("fiat/extensions.zig");
+    _ = @import("fiat/ext_diff_tests.zig");
 }

@@ -16,13 +16,34 @@ const jolt_device = @import("../jolt_device.zig");
 const preprocessing_mod = @import("../preprocessing.zig");
 
 pub const sumcheck_verifier = @import("sumcheck_verifier.zig");
+pub const opening_accumulator = @import("opening_accumulator.zig");
+pub const VerifierOpeningAccumulator = opening_accumulator.VerifierOpeningAccumulator;
+pub const batched_sumcheck = @import("batched_sumcheck.zig");
+pub const BatchedSumcheckResult = batched_sumcheck.BatchedSumcheckResult;
+pub const SumcheckInstance = batched_sumcheck.SumcheckInstance;
+pub const stage1_verifier = @import("stage1_verifier.zig");
 
 const GT = jolt_serialization.GT;
 const DoryCommitment = jolt_serialization.DoryCommitment;
 const DoryProof = jolt_serialization.DoryProof;
 
+const r1cs_mod = @import("../r1cs/mod.zig");
+const univariate_skip = @import("../r1cs/univariate_skip.zig");
+
 const F = zolt_arith.field.BN254Scalar;
 const JoltProofType = jolt_types.JoltProof(F, DoryCommitment, DoryProof);
+
+/// Per-stage degree bounds for sumcheck polynomials.
+/// Stage 1 (outer remaining): degree 3.
+/// Stage 2 (batched): max degree across 5 instances = 3.
+/// Stages 3-7: degree 3 (claim reductions use degree-3 polynomials).
+const STAGE1_REMAINING_DEGREE: usize = 3;
+const STAGE2_BATCHED_DEGREE: usize = 3;
+const STAGE3_DEGREE: usize = 3;
+const STAGE4_DEGREE: usize = 3;
+const STAGE5_DEGREE: usize = 3;
+const STAGE6_DEGREE: usize = 3;
+const STAGE7_DEGREE: usize = 3;
 
 /// Verification error types
 pub const VerifyError = error{
@@ -31,6 +52,8 @@ pub const VerifyError = error{
     OpeningClaimMismatch,
     InvalidProof,
     InsufficientRounds,
+    DegreeBoundExceeded,
+    UniSkipSumCheckFailed,
     InvalidG1Point,
     InvalidG2Point,
     InvalidData,
@@ -127,37 +150,86 @@ fn verifyInner(
         tau[i] = transcript.challengeScalar();
     }
 
+    // Initialize opening accumulator (collects claims across all stages)
+    var acc = VerifierOpeningAccumulator(F).init(allocator);
+    defer acc.deinit();
+
     // 8. Verify Stage 1: UniSkip + Outer Spartan sumcheck
     if (proof.stage1_uni_skip_first_round_proof) |uni_skip| {
-        const uni_result = sumcheck_verifier.verifyUniSkipRound(F, uni_skip.uni_poly, &transcript);
-        _ = uni_result;
+        // 8a. UniSkip: verify degree bound
+        const uni_result = try sumcheck_verifier.verifyUniSkipRound(
+            F,
+            uni_skip.uni_poly,
+            univariate_skip.OUTER_FIRST_ROUND_POLY_DEGREE_BOUND,
+            &transcript,
+        );
+
+        // 8b. UniSkip: verify sum-of-evals over base domain = 0
+        stage1_verifier.checkUniSkipSumOfEvals(
+            F,
+            uni_skip.uni_poly,
+            univariate_skip.OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
+            F.zero(), // Outer UniSkip input claim is always 0
+        ) catch {
+            return VerifyResult{ .valid = false, .failed_stage = 1 };
+        };
+
+        // 8c. Cache the UniSkip opening in the accumulator
+        try acc.appendVirtual(
+            .UnivariateSkip,
+            .SpartanOuter,
+            &[_]F{uni_result.challenge},
+            uni_result.claim,
+        );
+        acc.flushToTranscript(&transcript);
     }
+
+    // 8d. Outer remaining sumcheck
+    const s1_remaining = stage1_verifier.OuterRemainingSumcheckVerifier(F){
+        .tau = tau,
+        .r0 = if (proof.stage1_uni_skip_first_round_proof != null)
+            acc.getVirtual(.UnivariateSkip, .SpartanOuter).?.point[0]
+        else
+            F.zero(),
+        .num_cycle_vars = n_cycle_vars,
+        .proof_opening_claims = &proof.opening_claims,
+    };
 
     const s1_result = try sumcheck_verifier.verifySumcheck(
         F,
         &proof.stage1_sumcheck_proof,
-        // Initial claim comes from UniSkip evaluation + tau-based claim
-        // For now, use the first compressed poly's implied claim
-        getSumcheckInitialClaim(F, &proof.stage1_sumcheck_proof),
+        s1_remaining.inputClaim(&acc),
         proof.stage1_sumcheck_proof.compressed_polys.items.len,
+        STAGE1_REMAINING_DEGREE,
         &transcript,
         allocator,
     );
     defer allocator.free(s1_result.challenges);
 
+    // Cache Stage 1 opening claims
+    s1_remaining.cacheOpenings(&acc, s1_result.challenges);
+
     // 9. Verify Stage 2: UniSkip + 5-instance batched sumcheck
+    var s2_uni_skip_claim = F.zero();
     if (proof.stage2_uni_skip_first_round_proof) |uni_skip| {
         // Stage 2 also has a tau_high challenge before UniSkip
         _ = transcript.challengeScalar(); // tau_high_stage2
-        const uni_result = sumcheck_verifier.verifyUniSkipRound(F, uni_skip.uni_poly, &transcript);
-        _ = uni_result;
+        const uni_result = try sumcheck_verifier.verifyUniSkipRound(
+            F,
+            uni_skip.uni_poly,
+            univariate_skip.PRODUCT_VIRTUAL_FIRST_ROUND_POLY_DEGREE_BOUND,
+            &transcript,
+        );
+        s2_uni_skip_claim = uni_result.claim;
     }
 
     const s2_result = try sumcheck_verifier.verifySumcheck(
         F,
         &proof.stage2_sumcheck_proof,
-        getSumcheckInitialClaim(F, &proof.stage2_sumcheck_proof),
+        // TODO: Wire proper batched initial claim from 5 instances
+        s2_uni_skip_claim,
         proof.stage2_sumcheck_proof.compressed_polys.items.len,
+        STAGE2_BATCHED_DEGREE,
         &transcript,
         allocator,
     );
@@ -175,6 +247,14 @@ fn verifyInner(
         &proof.stage7_sumcheck_proof,
     };
 
+    const stage_degrees = [_]usize{
+        STAGE3_DEGREE,
+        STAGE4_DEGREE,
+        STAGE5_DEGREE,
+        STAGE6_DEGREE,
+        STAGE7_DEGREE,
+    };
+
     var stage_results: [5]sumcheck_verifier.SumcheckResult(F) = undefined;
     var stage_allocs: [5]bool = [_]bool{false} ** 5;
 
@@ -185,8 +265,10 @@ fn verifyInner(
         stage_results[i] = try sumcheck_verifier.verifySumcheck(
             F,
             stage_proof,
+            // TODO: Wire proper per-stage initial claims
             getSumcheckInitialClaim(F, stage_proof),
             num_rounds,
+            stage_degrees[i],
             &transcript,
             allocator,
         );
@@ -211,28 +293,13 @@ fn verifyInner(
     return VerifyResult{ .valid = true };
 }
 
-/// Extract the initial claim for a sumcheck proof from the first compressed polynomial.
-/// The claim is p(0) + p(1) which can be derived from the compressed coefficients.
+/// Placeholder initial claim for stages not yet wired with proper claim logic.
+/// Returns zero — real claims must come from the protocol context (previous stage
+/// output, opening accumulator, or tau-derived values).
+///
+/// TODO: Replace with per-stage verifier instances (as done for Stage 1).
 fn getSumcheckInitialClaim(comptime Field: type, proof: *const jolt_types.SumcheckInstanceProof(Field)) Field {
-    if (proof.compressed_polys.items.len == 0) return Field.zero();
-
-    const compressed = proof.compressed_polys.items[0].coeffs_except_linear_term;
-    if (compressed.len == 0) return Field.zero();
-
-    // For the verifier, the initial claim comes from the transcript (the prover bound it).
-    // Since we're replaying the transcript exactly as the prover did, the claim is implicitly
-    // correct if the transcript matches. We derive it from the compressed polynomial:
-    //
-    // p(0) = c0
-    // p(1) = c0 + c1 + c2 + ... + c_d  where c1 = claim - 2*c0 - c2 - ... - c_d
-    // p(0) + p(1) = c0 + (claim - c0) = claim
-    //
-    // So claim = 2*c0 + c1 + c2 + ... + c_d = 2*c0 + (claim - 2*c0 - Σci) + Σci = claim
-    // This is circular — the claim is not independently derivable from the compressed poly alone.
-    // It must come from the protocol context (previous stage output or initial tau-derived value).
-    //
-    // For now, return zero as a placeholder. The real verification will come from
-    // wiring stage outputs together.
+    _ = proof;
     return Field.zero();
 }
 
@@ -254,4 +321,7 @@ fn defaultDevice(memory_layout: jolt_device.MemoryLayout) jolt_device.JoltDevice
 
 test {
     _ = sumcheck_verifier;
+    _ = opening_accumulator;
+    _ = batched_sumcheck;
+    _ = stage1_verifier;
 }

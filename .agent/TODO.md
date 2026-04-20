@@ -9,22 +9,22 @@ fibonacci, factorial, bitwise, collatz, primes, sum, gcd, signed
 ## Phase 1: Foundation
 
 ### Formally Verified Field Arithmetic (fiat-crypto)
-- [ ] Generate fiat-crypto C code for BN254 Fr (scalar field)
-- [ ] Generate fiat-crypto C code for BN254 Fp (base field)
-- [ ] Integrate generated C via `@cImport` into Zig build
-- [ ] Validate against existing differential test fixtures (`testdata/zolt-arith-diff/`)
-- [ ] Add algebraic property tests (commutativity, associativity, distributivity, inverse)
+- [x] Generate fiat-crypto Zig code for BN254 Fr (scalar field)
+- [x] Generate fiat-crypto Zig code for BN254 Fp (base field)
+- [x] Integrate generated code via FiatField wrapper into Zig build
+- [x] Validate against existing differential test fixtures (`testdata/zolt-arith-diff/`)
+- [x] Add algebraic property tests (commutativity, associativity, distributivity, inverse)
 
 ### Extension Fields on FV Base
-- [ ] Implement Fp2 = Fp[u]/(u²+1) using simple algebraic formulas (no optimizations)
-- [ ] Implement Fp6 = Fp2[v]/(v³−ξ) via Karatsuba
-- [ ] Implement Fp12 = Fp6[w]/(w²−v) via Karatsuba
-- [ ] Validate all against existing diff fixtures (`fp2_ops.txt`, `fp6_ops.txt`, `fp12_ops.txt`)
+- [x] Implement Fp2 = Fp[u]/(u²+1) using simple algebraic formulas (no optimizations)
+- [x] Implement Fp6 = Fp2[v]/(v³−ξ) via Karatsuba
+- [x] Implement Fp12 = Fp6[w]/(w²−v) via Karatsuba
+- [x] Validate all against existing diff fixtures (`fp2_ops.txt`, `fp6_ops.txt`, `fp12_ops.txt`)
 
 ### Pairing on FV Fields
-- [ ] Implement standard optimal ate pairing (no shortcuts/optimizations)
-- [ ] Implement inversion via Fermat's little theorem (a^(p-2)) on fiat-crypto mul/square
-- [ ] Validate against existing pairing test vectors
+- [x] Implement standard optimal ate pairing (no shortcuts/optimizations)
+- [x] Implement inversion via Fermat's little theorem (a^(p-2)) on fiat-crypto mul/square
+- [x] Validate against existing pairing test vectors
 
 ---
 
@@ -32,12 +32,17 @@ fibonacci, factorial, bitwise, collatz, primes, sum, gcd, signed
 
 ### Sumcheck Verifier
 - [x] Generic round verification (compressed polynomial recovery + claim check)
-- [ ] Enforce degree bounds per stage/instance (hardcoded degree table)
-- [ ] Batched sumcheck support (multiple instances with staggered rounds)
+- [x] Enforce degree bounds per stage/instance (hardcoded degree table)
+- [x] Batched sumcheck support (multiple instances with staggered rounds)
 - [x] Unit tests with known-good fixtures
 
+### Opening Claims
+- [x] Opening claim accumulation (VerifierOpeningAccumulator)
+- [ ] Opening claim checking (expected output claim verification per stage)
+- [ ] Eliminate silent zero-fallback (`orelse F.zero()` → explicit errors)
+
 ### Per-Stage Verification (Stages 1–7)
-- [ ] Stage 1: Outer Spartan + UniSkip
+- [x] Stage 1: Outer Spartan + UniSkip (infrastructure + claim threading; expected_output_claim TODO)
 - [ ] Stage 2: Batched (5 instances — ProductVirtualRemainder, RamRafEvaluation, RamReadWriteChecking, OutputSumcheck, InstructionLookupsClaimReduction)
 - [ ] Stage 3: Batched (3 instances — ShiftSumcheck, InstructionInputSumcheck, RegistersClaimReduction)
 - [ ] Stage 4: Registers RW + RAM val evaluation + RAM val final
@@ -52,9 +57,7 @@ fibonacci, factorial, bitwise, collatz, primes, sum, gcd, signed
 - [ ] Final scalar product check
 - [ ] Pairing equation verification
 
-### Opening Claims
-- [ ] Opening claim accumulation and checking
-- [ ] Eliminate silent zero-fallback (`orelse F.zero()` → explicit errors)
+### Dory Verifier
 
 ---
 

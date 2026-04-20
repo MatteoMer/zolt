@@ -23,6 +23,11 @@ pub const BatchedSumcheckResult = batched_sumcheck.BatchedSumcheckResult;
 pub const SumcheckInstance = batched_sumcheck.SumcheckInstance;
 pub const stage1_verifier = @import("stage1_verifier.zig");
 pub const stage2_verifier = @import("stage2_verifier.zig");
+pub const stage3_verifier = @import("stage3_verifier.zig");
+pub const stage4_verifier = @import("stage4_verifier.zig");
+pub const stage5_verifier = @import("stage5_verifier.zig");
+pub const stage6_verifier = @import("stage6_verifier.zig");
+pub const stage7_verifier = @import("stage7_verifier.zig");
 
 const GT = jolt_serialization.GT;
 const DoryCommitment = jolt_serialization.DoryCommitment;
@@ -34,17 +39,8 @@ const univariate_skip = @import("../r1cs/univariate_skip.zig");
 const F = zolt_arith.field.BN254Scalar;
 const JoltProofType = jolt_types.JoltProof(F, DoryCommitment, DoryProof);
 
-/// Per-stage degree bounds for sumcheck polynomials.
-/// Stage 1 (outer remaining): degree 3.
-/// Stage 2 (batched): max degree across 5 instances = 3.
-/// Stages 3-7: degree 3 (claim reductions use degree-3 polynomials).
+/// Degree bound for Stage 1 outer remaining sumcheck.
 const STAGE1_REMAINING_DEGREE: usize = 3;
-const STAGE2_BATCHED_DEGREE: usize = 3;
-const STAGE3_DEGREE: usize = 3;
-const STAGE4_DEGREE: usize = 3;
-const STAGE5_DEGREE: usize = 3;
-const STAGE6_DEGREE: usize = 3;
-const STAGE7_DEGREE: usize = 3;
 
 /// Verification error types
 pub const VerifyError = error{
@@ -263,45 +259,70 @@ fn verifyInner(
     // Stage 2 post: append final claim to transcript
     transcript.appendScalar("opening_claim", s2_result.final_claim);
 
-    // 10-14. Verify Stages 3-7
-    const stage_proofs = [_]*const jolt_types.SumcheckInstanceProof(F){
-        &proof.stage3_sumcheck_proof,
-        &proof.stage4_sumcheck_proof,
-        &proof.stage5_sumcheck_proof,
-        &proof.stage6_sumcheck_proof,
-        &proof.stage7_sumcheck_proof,
+    // 10. Verify Stage 3: Shift + InstructionInput + RegistersClaim (3 instances)
+    const s3_chal = stage3_verifier.Stage3Verifier(F).sampleChallenges(&transcript);
+    const s3_ctx = stage3_verifier.Stage3Verifier(F){
+        .shift_gamma_powers = s3_chal.shift_gamma_powers,
+        .instr_gamma = s3_chal.instr_gamma,
+        .reg_gamma = s3_chal.reg_gamma,
+        .n_cycle_vars = n_cycle_vars,
+        .proof_opening_claims = &proof.opening_claims,
     };
+    const s3_result = try s3_ctx.verify(&proof.stage3_sumcheck_proof, &transcript, &acc, allocator);
+    defer allocator.free(s3_result.challenges);
+    s3_ctx.cacheOpenings(&acc, s3_result.challenges);
 
-    const stage_degrees = [_]usize{
-        STAGE3_DEGREE,
-        STAGE4_DEGREE,
-        STAGE5_DEGREE,
-        STAGE6_DEGREE,
-        STAGE7_DEGREE,
+    // 11. Verify Stage 4: RegistersRW + RamValCheck (2 instances)
+    const s4_chal = stage4_verifier.Stage4Verifier(F).sampleChallenges(&transcript);
+    const s4_ctx = stage4_verifier.Stage4Verifier(F){
+        .gamma_stage4 = s4_chal.gamma_stage4,
+        .ram_val_check_gamma = s4_chal.ram_val_check_gamma,
+        .n_cycle_vars = n_cycle_vars,
+        .proof_opening_claims = &proof.opening_claims,
     };
+    const s4_result = try s4_ctx.verify(&proof.stage4_sumcheck_proof, &transcript, &acc, allocator);
+    defer allocator.free(s4_result.challenges);
+    s4_ctx.cacheOpenings(&acc, s4_result.challenges);
 
-    var stage_results: [5]sumcheck_verifier.SumcheckResult(F) = undefined;
-    var stage_allocs: [5]bool = [_]bool{false} ** 5;
-
-    for (stage_proofs, 0..) |stage_proof, i| {
-        const num_rounds = stage_proof.compressed_polys.items.len;
-        if (num_rounds == 0) continue;
-
-        stage_results[i] = try sumcheck_verifier.verifySumcheck(
-            F,
-            stage_proof,
-            // TODO: Wire proper per-stage initial claims
-            getSumcheckInitialClaim(F, stage_proof),
-            num_rounds,
-            stage_degrees[i],
-            &transcript,
-            allocator,
-        );
-        stage_allocs[i] = true;
-    }
-    defer for (0..5) |i| {
-        if (stage_allocs[i]) allocator.free(stage_results[i].challenges);
+    // 12. Verify Stage 5: LookupsReadRaf + RamRaClaim + RegistersValEval (3 instances)
+    const lookups_log_k: usize = @as(usize, proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+    const s5_chal = stage5_verifier.Stage5Verifier(F).sampleChallenges(&transcript);
+    const s5_ctx = stage5_verifier.Stage5Verifier(F){
+        .gamma_ram_ra = s5_chal.gamma_ram_ra,
+        .gamma_lookups_raf = s5_chal.gamma_lookups_raf,
+        .n_cycle_vars = n_cycle_vars,
+        .lookups_log_k = lookups_log_k,
+        .proof_opening_claims = &proof.opening_claims,
     };
+    const s5_result = try s5_ctx.verify(&proof.stage5_sumcheck_proof, &transcript, &acc, allocator);
+    defer allocator.free(s5_result.challenges);
+    s5_ctx.cacheOpenings(&acc, s5_result.challenges);
+
+    // 13. Verify Stage 6: BytecodeRaf + Booleanity + Hamming + RamRaVirt + LookupsRaVirt + Inc (6 instances)
+    const s6_log_k: usize = proof.one_hot_config.log_k_chunk;
+    // TODO: Compute n_virtual_ra_polys from proof config (instruction_d + bytecode_d + ram_d)
+    const n_virtual_ra_polys: usize = 0; // placeholder
+    const s6_setup = try stage6_verifier.Stage6Verifier(F).sampleChallenges(&transcript, s6_log_k, lookups_log_k, n_virtual_ra_polys, allocator);
+    const s6_ctx = stage6_verifier.Stage6Verifier(F){
+        .inc_gamma = s6_setup.inc_gamma,
+        .n_cycle_vars = n_cycle_vars,
+        .log_k_chunk = s6_log_k,
+        .proof_opening_claims = &proof.opening_claims,
+    };
+    const s6_result = try s6_ctx.verify(&proof.stage6_sumcheck_proof, &transcript, &acc, allocator);
+    defer allocator.free(s6_result.challenges);
+    s6_ctx.cacheOpenings(&acc, s6_result.challenges);
+
+    // 14. Verify Stage 7: HammingWeightClaimReduction (1 instance)
+    const s7_chal = stage7_verifier.Stage7Verifier(F).sampleChallenges(&transcript);
+    const s7_ctx = stage7_verifier.Stage7Verifier(F){
+        .gamma = s7_chal.gamma,
+        .log_k_chunk = s6_log_k,
+        .proof_opening_claims = &proof.opening_claims,
+    };
+    const s7_result = try s7_ctx.verify(&proof.stage7_sumcheck_proof, &transcript, allocator);
+    defer allocator.free(s7_result.challenges);
+    s7_ctx.cacheOpenings(&acc, s7_result.challenges);
 
     // 15. Opening claims verification
     // The opening claims in the proof should be consistent with the sumcheck outputs.
@@ -316,16 +337,6 @@ fn verifyInner(
     // This requires pairing-based checks using the DoryVerifierSetup.
 
     return VerifyResult{ .valid = true };
-}
-
-/// Placeholder initial claim for stages not yet wired with proper claim logic.
-/// Returns zero — real claims must come from the protocol context (previous stage
-/// output, opening accumulator, or tau-derived values).
-///
-/// TODO: Replace with per-stage verifier instances (as done for Stage 1).
-fn getSumcheckInitialClaim(comptime Field: type, proof: *const jolt_types.SumcheckInstanceProof(Field)) Field {
-    _ = proof;
-    return Field.zero();
 }
 
 fn defaultDevice(memory_layout: jolt_device.MemoryLayout) jolt_device.JoltDevice {
@@ -350,4 +361,9 @@ test {
     _ = batched_sumcheck;
     _ = stage1_verifier;
     _ = stage2_verifier;
+    _ = stage3_verifier;
+    _ = stage4_verifier;
+    _ = stage5_verifier;
+    _ = stage6_verifier;
+    _ = stage7_verifier;
 }

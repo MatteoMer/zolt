@@ -39,6 +39,7 @@ pub const r1cs = @import("r1cs/mod.zig");
 pub const ram = @import("ram/mod.zig");
 pub const registers = @import("registers/mod.zig");
 pub const spartan = @import("spartan/mod.zig");
+pub const verifier = @import("verifier/mod.zig");
 
 // Re-export commitment types
 pub const PolyCommitment = commitment_types.PolyCommitment;

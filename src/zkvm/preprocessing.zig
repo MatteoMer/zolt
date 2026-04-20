@@ -110,6 +110,22 @@ pub const RAMPreprocessing = struct {
             try writer.writeInt(u64, word, .little);
         }
     }
+
+    /// Deserialize from arkworks format
+    pub fn deserialize(allocator: Allocator, reader: anytype) !RAMPreprocessing {
+        const min_bytecode_address = try reader.readInt(u64, .little);
+        const num_words: usize = @intCast(try reader.readInt(u64, .little));
+        var words = std.ArrayListUnmanaged(u64){};
+        try words.resize(allocator, num_words);
+        for (0..num_words) |i| {
+            words.items[i] = try reader.readInt(u64, .little);
+        }
+        return RAMPreprocessing{
+            .min_bytecode_address = min_bytecode_address,
+            .bytecode_words = words,
+            .allocator = allocator,
+        };
+    }
 };
 
 /// JoltSharedPreprocessing - shared between prover and verifier
@@ -132,6 +148,7 @@ pub const JoltSharedPreprocessing = struct {
         // max_padded_trace_length: usize (as u64)
         try writer.writeInt(u64, @intCast(self.max_padded_trace_length), .little);
     }
+
 
     /// Compute a Blake2b-256 digest of the serialized preprocessing.
     /// Used to bind preprocessing to the Fiat-Shamir transcript (PR #1408).
@@ -219,5 +236,83 @@ pub const JoltVerifierPreprocessing = struct {
         try self.generators.serialize(writer);
         // Then serialize shared preprocessing
         try self.shared.serialize(allocator, writer);
+    }
+};
+
+/// Lightweight preprocessing data for the native verifier.
+/// Extracted from the preprocessing file without fully deserializing
+/// BytecodePreprocessing (which requires JSON parsing).
+pub const VerifierPreprocessingData = struct {
+    generators: DoryVerifierSetup,
+    /// Blake2b-256 digest of the serialized JoltSharedPreprocessing bytes
+    preprocessing_digest: [32]u8,
+    /// Memory layout (from JoltSharedPreprocessing)
+    memory_layout: MemoryLayout,
+    /// ELF entry address (from BytecodePreprocessing)
+    entry_address: u64,
+    /// Max padded trace length
+    max_padded_trace_length: usize,
+
+    pub fn deinit(self: *VerifierPreprocessingData) void {
+        self.generators.deinit();
+    }
+
+    /// Parse a preprocessing file to extract just what the verifier needs.
+    pub fn fromBytes(allocator: Allocator, data: []const u8) !VerifierPreprocessingData {
+        var stream = std.io.fixedBufferStream(data);
+        var reader = stream.reader();
+
+        // 1. Deserialize DoryVerifierSetup
+        var generators = try DoryVerifierSetup.deserialize(allocator, reader);
+        errdefer generators.deinit();
+
+        // 2. Record where JoltSharedPreprocessing starts
+        const shared_start = stream.pos;
+
+        // 3. Skip through BytecodePreprocessing to extract entry_address
+        //    Format: code_size(u64) + bytecode Vec + pc_map + entry_address(u64)
+        _ = try reader.readInt(u64, .little); // code_size
+        const num_instructions: usize = @intCast(try reader.readInt(u64, .little));
+        for (0..num_instructions) |_| {
+            // Each instruction: u64 json_len + json_bytes
+            const json_len: usize = @intCast(try reader.readInt(u64, .little));
+            try reader.skipBytes(json_len, .{});
+        }
+        // pc_map: Vec<Option<(usize, u16)>>
+        const pc_map_len: usize = @intCast(try reader.readInt(u64, .little));
+        for (0..pc_map_len) |_| {
+            const flag = try reader.readByte();
+            if (flag == 1) {
+                try reader.skipBytes(8 + 2, .{}); // usize(u64) + u16
+            }
+        }
+        const entry_address = try reader.readInt(u64, .little);
+
+        // 4. Skip RAMPreprocessing
+        _ = try reader.readInt(u64, .little); // min_bytecode_address
+        const num_words: usize = @intCast(try reader.readInt(u64, .little));
+        try reader.skipBytes(num_words * 8, .{}); // bytecode_words
+
+        // 5. Read MemoryLayout (20 * u64)
+        const memory_layout = try MemoryLayout.deserialize(reader);
+
+        // 6. Read max_padded_trace_length
+        const max_padded_trace_length: usize = @intCast(try reader.readInt(u64, .little));
+
+        // 7. Compute digest of the JoltSharedPreprocessing bytes
+        const shared_bytes = data[shared_start..stream.pos];
+        const Blake2b256 = std.crypto.hash.blake2.Blake2b256;
+        var h = Blake2b256.init(.{});
+        h.update(shared_bytes);
+        var digest: [32]u8 = undefined;
+        h.final(&digest);
+
+        return VerifierPreprocessingData{
+            .generators = generators,
+            .preprocessing_digest = digest,
+            .memory_layout = memory_layout,
+            .entry_address = entry_address,
+            .max_padded_trace_length = max_padded_trace_length,
+        };
     }
 };

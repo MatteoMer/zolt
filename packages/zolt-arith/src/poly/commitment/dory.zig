@@ -63,10 +63,10 @@ pub const tonelliShanks = point_compression.tonelliShanks;
 pub const yIsPositive = point_compression.yIsPositive;
 pub const fp2Sqrt = point_compression.fp2Sqrt;
 
-// Transcript helpers (used internally)
-const doryAppendGT = point_compression.doryAppendGT;
-const doryAppendG1 = point_compression.doryAppendG1;
-const doryAppendG2 = point_compression.doryAppendG2;
+// Transcript helpers (used by verifier and prover)
+pub const doryAppendGT = point_compression.doryAppendGT;
+pub const doryAppendG1 = point_compression.doryAppendG1;
+pub const doryAppendG2 = point_compression.doryAppendG2;
 
 // Re-export G2 MSM public API
 pub const msmG2Bench = g2_msm_mod.msmG2Bench;

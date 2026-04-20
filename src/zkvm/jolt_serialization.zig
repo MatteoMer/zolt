@@ -556,6 +556,265 @@ pub fn ArkworksDeserializer(comptime F: type) type {
                 .allocator = allocator,
             };
         }
+
+        /// Read a u32 from little-endian
+        pub fn readU32(self: *Self) !u32 {
+            if (self.pos + 4 > self.data.len) return error.UnexpectedEof;
+            const value = std.mem.readInt(u32, self.data[self.pos..][0..4], .little);
+            self.pos += 4;
+            return value;
+        }
+
+        /// Read a G1 point from arkworks compressed format (32 bytes)
+        pub fn readG1Compressed(self: *Self) !dory_mod.G1Point {
+            if (self.pos + 32 > self.data.len) return error.UnexpectedEof;
+            const bytes = self.data[self.pos..][0..32];
+            self.pos += 32;
+            return dory_mod.decompressG1(bytes) orelse error.InvalidG1Point;
+        }
+
+        /// Read a G2 point from arkworks compressed format (64 bytes)
+        pub fn readG2Compressed(self: *Self) !dory_mod.G2Point {
+            if (self.pos + 64 > self.data.len) return error.UnexpectedEof;
+            const bytes = self.data[self.pos..][0..64];
+            self.pos += 64;
+            return dory_mod.decompressG2(bytes) orelse error.InvalidG2Point;
+        }
+
+        /// Read a CommittedPolynomial from Jolt's compact format
+        pub fn readCommittedPolynomial(self: *Self) !jolt_types.CommittedPolynomial {
+            const discriminant = try self.readU8();
+            return switch (discriminant) {
+                0 => .RdInc,
+                1 => .RamInc,
+                2 => jolt_types.CommittedPolynomial{ .InstructionRa = try self.readU8() },
+                3 => jolt_types.CommittedPolynomial{ .BytecodeRa = try self.readU8() },
+                4 => jolt_types.CommittedPolynomial{ .RamRa = try self.readU8() },
+                else => error.InvalidData,
+            };
+        }
+
+        /// Read a VirtualPolynomial from Jolt's compact format
+        pub fn readVirtualPolynomial(self: *Self) !jolt_types.VirtualPolynomial {
+            const discriminant = try self.readU8();
+            return switch (discriminant) {
+                0 => .PC,
+                1 => .UnexpandedPC,
+                2 => .NextPC,
+                3 => .NextUnexpandedPC,
+                4 => .NextIsNoop,
+                5 => .NextIsVirtual,
+                6 => .NextIsFirstInSequence,
+                7 => .LeftLookupOperand,
+                8 => .RightLookupOperand,
+                9 => .LeftInstructionInput,
+                10 => .RightInstructionInput,
+                11 => .Product,
+                12 => .ShouldJump,
+                13 => .ShouldBranch,
+                14 => .Rd,
+                15 => .Imm,
+                16 => .Rs1Value,
+                17 => .Rs2Value,
+                18 => .RdWriteValue,
+                19 => .Rs1Ra,
+                20 => .Rs2Ra,
+                21 => .RdWa,
+                22 => .LookupOutput,
+                23 => .InstructionRaf,
+                24 => .InstructionRafFlag,
+                25 => jolt_types.VirtualPolynomial{ .InstructionRa = try self.readU8() },
+                26 => .RegistersVal,
+                27 => .RamAddress,
+                28 => .RamRa,
+                29 => .RamReadValue,
+                30 => .RamWriteValue,
+                31 => .RamVal,
+                32 => .RamValInit,
+                33 => .RamValFinal,
+                34 => .RamHammingWeight,
+                35 => .UnivariateSkip,
+                36 => jolt_types.VirtualPolynomial{ .OpFlags = try self.readU8() },
+                37 => jolt_types.VirtualPolynomial{ .InstructionFlags = try self.readU8() },
+                38 => jolt_types.VirtualPolynomial{ .LookupTableFlag = try self.readU8() },
+                else => error.InvalidData,
+            };
+        }
+
+        /// Read an OpeningId from Jolt's compact format
+        pub fn readOpeningId(self: *Self) !jolt_types.OpeningId {
+            const first_byte = try self.readU8();
+
+            if (first_byte < jolt_types.OpeningId.TRUSTED_ADVICE_BASE) {
+                // UntrustedAdvice
+                const sid = first_byte - jolt_types.OpeningId.UNTRUSTED_ADVICE_BASE;
+                return .{ .UntrustedAdvice = @enumFromInt(sid) };
+            } else if (first_byte < jolt_types.OpeningId.COMMITTED_BASE) {
+                // TrustedAdvice
+                const sid = first_byte - jolt_types.OpeningId.TRUSTED_ADVICE_BASE;
+                return .{ .TrustedAdvice = @enumFromInt(sid) };
+            } else if (first_byte < jolt_types.OpeningId.VIRTUAL_BASE) {
+                // Committed
+                const sid = first_byte - jolt_types.OpeningId.COMMITTED_BASE;
+                const poly = try self.readCommittedPolynomial();
+                return .{ .Committed = .{ .poly = poly, .sumcheck_id = @enumFromInt(sid) } };
+            } else {
+                // Virtual
+                const sid = first_byte - jolt_types.OpeningId.VIRTUAL_BASE;
+                if (sid >= jolt_types.SumcheckId.COUNT) return error.InvalidData;
+                const poly = try self.readVirtualPolynomial();
+                return .{ .Virtual = .{ .poly = poly, .sumcheck_id = @enumFromInt(sid) } };
+            }
+        }
+
+        /// Read OpeningClaims (BTreeMap format: length + sorted key-value pairs)
+        pub fn readOpeningClaims(self: *Self, allocator: Allocator) !jolt_types.OpeningClaims(F) {
+            var claims = jolt_types.OpeningClaims(F).init(allocator);
+            errdefer claims.deinit();
+
+            const num_entries = try self.readUsize();
+            for (0..num_entries) |_| {
+                const id = try self.readOpeningId();
+                const claim = try self.readFieldElement();
+                try claims.insert(id, claim);
+            }
+            return claims;
+        }
+
+        /// Read a DoryProof in arkworks format
+        pub fn readDoryProof(self: *Self, allocator: Allocator) !DoryProof {
+            // 1. VMV message: c (GT), d2 (GT), e1 (G1)
+            const vmv_c = try self.readGT();
+            const vmv_d2 = try self.readGT();
+            const vmv_e1 = try self.readG1Compressed();
+
+            // 2. Number of rounds (u32)
+            const num_rounds = try self.readU32();
+
+            // 3. First messages
+            const first_messages = try allocator.alloc(dory_mod.FirstReduceMessage, num_rounds);
+            errdefer allocator.free(first_messages);
+            for (0..num_rounds) |i| {
+                first_messages[i] = .{
+                    .d1_left = try self.readGT(),
+                    .d1_right = try self.readGT(),
+                    .d2_left = try self.readGT(),
+                    .d2_right = try self.readGT(),
+                    .e1_beta = try self.readG1Compressed(),
+                    .e2_beta = try self.readG2Compressed(),
+                };
+            }
+
+            // 4. Second messages
+            const second_messages = try allocator.alloc(dory_mod.SecondReduceMessage, num_rounds);
+            errdefer allocator.free(second_messages);
+            for (0..num_rounds) |i| {
+                second_messages[i] = .{
+                    .c_plus = try self.readGT(),
+                    .c_minus = try self.readGT(),
+                    .e1_plus = try self.readG1Compressed(),
+                    .e1_minus = try self.readG1Compressed(),
+                    .e2_plus = try self.readG2Compressed(),
+                    .e2_minus = try self.readG2Compressed(),
+                };
+            }
+
+            // 5. Final message: e1 (G1), e2 (G2)
+            const final_e1 = try self.readG1Compressed();
+            const final_e2 = try self.readG2Compressed();
+
+            // 6. nu and sigma (u32 each)
+            const nu = try self.readU32();
+            const sigma = try self.readU32();
+
+            return DoryProof{
+                .vmv_message = .{ .c = vmv_c, .d2 = vmv_d2, .e1 = vmv_e1 },
+                .first_messages = first_messages,
+                .second_messages = second_messages,
+                .final_message = .{ .e1 = final_e1, .e2 = final_e2 },
+                .nu = nu,
+                .sigma = sigma,
+                .allocator = allocator,
+            };
+        }
+
+        /// Read a complete JoltProof from arkworks format.
+        /// Format mirrors writeJoltProof() exactly.
+        pub fn readJoltProof(self: *Self, allocator: Allocator) !jolt_types.JoltProof(F, DoryCommitment, DoryProof) {
+            const JProof = jolt_types.JoltProof(F, DoryCommitment, DoryProof);
+            var proof = JProof.init(allocator);
+            errdefer proof.deinit();
+
+            // 1. Commitments (Vec<DoryCommitment>)
+            const num_commitments = try self.readUsize();
+            try proof.commitments.ensureTotalCapacity(allocator, num_commitments);
+            for (0..num_commitments) |_| {
+                const comm = try self.readDoryCommitment();
+                proof.commitments.appendAssumeCapacity(comm);
+            }
+
+            // 2. Stage 1: UniSkip discriminant + proof, Sumcheck discriminant + proof
+            const s1_uni_disc = try self.readU8(); // 0 = Standard variant
+            _ = s1_uni_disc;
+            proof.stage1_uni_skip_first_round_proof = try self.readUniSkipFirstRoundProof(allocator);
+            const s1_sc_disc = try self.readU8(); // 0 = Clear variant
+            _ = s1_sc_disc;
+            proof.stage1_sumcheck_proof.deinit();
+            proof.stage1_sumcheck_proof = try self.readSumcheckInstanceProof(allocator);
+
+            // 3. Stage 2: UniSkip discriminant + proof, Sumcheck discriminant + proof
+            const s2_uni_disc = try self.readU8();
+            _ = s2_uni_disc;
+            proof.stage2_uni_skip_first_round_proof = try self.readUniSkipFirstRoundProof(allocator);
+            const s2_sc_disc = try self.readU8();
+            _ = s2_sc_disc;
+            proof.stage2_sumcheck_proof.deinit();
+            proof.stage2_sumcheck_proof = try self.readSumcheckInstanceProof(allocator);
+
+            // 4. Stages 3-7: discriminant + Sumcheck each
+            inline for (.{
+                &proof.stage3_sumcheck_proof,
+                &proof.stage4_sumcheck_proof,
+                &proof.stage5_sumcheck_proof,
+                &proof.stage6_sumcheck_proof,
+                &proof.stage7_sumcheck_proof,
+            }) |stage_proof| {
+                const disc = try self.readU8();
+                _ = disc;
+                stage_proof.deinit();
+                stage_proof.* = try self.readSumcheckInstanceProof(allocator);
+            }
+
+            // 5. Joint opening proof (DoryProof)
+            proof.joint_opening_proof = try self.readDoryProof(allocator);
+
+            // 6. Untrusted advice commitment (Option<DoryCommitment>)
+            const has_advice_comm = try self.readU8();
+            if (has_advice_comm == 1) {
+                proof.untrusted_advice_commitment = try self.readDoryCommitment();
+            }
+
+            // 7. Opening claims
+            proof.opening_claims.deinit();
+            proof.opening_claims = try self.readOpeningClaims(allocator);
+
+            // 8. Configuration
+            proof.trace_length = try self.readUsize();
+            proof.ram_K = try self.readUsize();
+            proof.rw_config = .{
+                .ram_rw_phase1_num_rounds = try self.readU8(),
+                .ram_rw_phase2_num_rounds = try self.readU8(),
+                .registers_rw_phase1_num_rounds = try self.readU8(),
+                .registers_rw_phase2_num_rounds = try self.readU8(),
+            };
+            proof.one_hot_config = .{
+                .log_k_chunk = try self.readU8(),
+                .lookups_ra_virtual_log_k_chunk = try self.readU8(),
+            };
+            proof.dory_layout = try self.readU8();
+
+            return proof;
+        }
     };
 }
 
@@ -990,4 +1249,32 @@ test "dory commitment serialization roundtrip" {
 
     // Verify equality
     try testing.expect(gt.eql(decoded));
+}
+
+test "opening claims deserialization roundtrip" {
+    const Claims = jolt_types.OpeningClaims(BN254Scalar);
+    var claims = Claims.init(testing.allocator);
+    defer claims.deinit();
+
+    try claims.insert(.{ .UntrustedAdvice = .SpartanOuter }, BN254Scalar.fromU64(100));
+    try claims.insert(.{ .TrustedAdvice = .RamValCheck }, BN254Scalar.fromU64(200));
+    try claims.insert(.{ .Virtual = .{ .poly = .Product, .sumcheck_id = .SpartanOuter } }, BN254Scalar.fromU64(300));
+    try claims.insert(.{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersClaimReduction } }, BN254Scalar.fromU64(400));
+
+    // Serialize
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+    try serializer.writeOpeningClaims(&claims);
+
+    // Deserialize
+    var deserializer = ArkworksDeserializer(BN254Scalar).init(serializer.bytes());
+    var decoded = try deserializer.readOpeningClaims(testing.allocator);
+    defer decoded.deinit();
+
+    // Verify
+    try testing.expectEqual(claims.len(), decoded.len());
+    for (claims.entries.items, decoded.entries.items) |orig, dec| {
+        try testing.expect(orig.id.order(dec.id) == .eq);
+        try testing.expect(orig.claim.eql(dec.claim));
+    }
 }

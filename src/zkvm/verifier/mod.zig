@@ -22,6 +22,7 @@ pub const batched_sumcheck = @import("batched_sumcheck.zig");
 pub const BatchedSumcheckResult = batched_sumcheck.BatchedSumcheckResult;
 pub const SumcheckInstance = batched_sumcheck.SumcheckInstance;
 pub const stage1_verifier = @import("stage1_verifier.zig");
+pub const stage2_verifier = @import("stage2_verifier.zig");
 
 const GT = jolt_serialization.GT;
 const DoryCommitment = jolt_serialization.DoryCommitment;
@@ -212,7 +213,7 @@ fn verifyInner(
     // 9. Verify Stage 2: UniSkip + 5-instance batched sumcheck
     var s2_uni_skip_claim = F.zero();
     if (proof.stage2_uni_skip_first_round_proof) |uni_skip| {
-        // Stage 2 also has a tau_high challenge before UniSkip
+        // Stage 2 UniSkip has a tau_high challenge before the polynomial
         _ = transcript.challengeScalar(); // tau_high_stage2
         const uni_result = try sumcheck_verifier.verifyUniSkipRound(
             F,
@@ -220,22 +221,46 @@ fn verifyInner(
             univariate_skip.PRODUCT_VIRTUAL_FIRST_ROUND_POLY_DEGREE_BOUND,
             &transcript,
         );
+
+        // Verify UniSkip sum-of-evals (product virtual domain size = 3)
+        stage1_verifier.checkUniSkipSumOfEvals(
+            F,
+            uni_skip.uni_poly,
+            univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
+            F.zero(),
+        ) catch {
+            return VerifyResult{ .valid = false, .failed_stage = 2 };
+        };
+
         s2_uni_skip_claim = uni_result.claim;
+        // Cache UniSkip opening
+        try acc.appendVirtual(.UnivariateSkip, .SpartanProductVirtualization, &[_]F{uni_result.challenge}, uni_result.claim);
+        acc.flushToTranscript(&transcript);
     }
 
-    const s2_result = try sumcheck_verifier.verifySumcheck(
-        F,
-        &proof.stage2_sumcheck_proof,
-        // TODO: Wire proper batched initial claim from 5 instances
-        s2_uni_skip_claim,
-        proof.stage2_sumcheck_proof.compressed_polys.items.len,
-        STAGE2_BATCHED_DEGREE,
-        &transcript,
-        allocator,
-    );
+    const log_ram_k: usize = std.math.log2_int(usize, proof.ram_K);
+
+    // Sample Stage 2 pre-batching challenges
+    const s2_challenges = try stage2_verifier.Stage2Verifier(F).sampleChallenges(&transcript, log_ram_k, allocator);
+    defer allocator.free(s2_challenges.r_address);
+
+    const s2_ctx = stage2_verifier.Stage2Verifier(F){
+        .gamma_rwc = s2_challenges.gamma_rwc,
+        .gamma_instr = s2_challenges.gamma_instr,
+        .r_address_presampled = s2_challenges.r_address,
+        .uni_skip_claim = s2_uni_skip_claim,
+        .n_cycle_vars = n_cycle_vars,
+        .log_ram_k = log_ram_k,
+        .proof_opening_claims = &proof.opening_claims,
+    };
+
+    const s2_result = try s2_ctx.verify(&proof.stage2_sumcheck_proof, &transcript, &acc, allocator);
     defer allocator.free(s2_result.challenges);
 
-    // Stage 2 post: append UniSkip claim
+    // Cache Stage 2 opening claims
+    s2_ctx.cacheOpenings(&acc, s2_result.challenges);
+
+    // Stage 2 post: append final claim to transcript
     transcript.appendScalar("opening_claim", s2_result.final_claim);
 
     // 10-14. Verify Stages 3-7
@@ -324,4 +349,5 @@ test {
     _ = opening_accumulator;
     _ = batched_sumcheck;
     _ = stage1_verifier;
+    _ = stage2_verifier;
 }

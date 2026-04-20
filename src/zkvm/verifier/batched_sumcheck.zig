@@ -157,12 +157,17 @@ pub fn verifyBatched(
         input_claims[i] = inst.inputClaim(accumulator);
     }
 
-    // Append claims to transcript for Fiat-Shamir binding
-    transcript.appendScalars("batched_claims", input_claims);
+    // Append each claim individually to transcript (must match prover's per-claim pattern)
+    for (input_claims) |claim| {
+        transcript.appendScalar("sumcheck_claim", claim);
+    }
 
-    // 3. Sample batching coefficients
-    const batching_coeffs = try transcript.challengeVector(allocator, num_instances);
+    // 3. Sample batching coefficients (one challengeScalarFull per instance, matching prover)
+    var batching_coeffs = try allocator.alloc(F, num_instances);
     errdefer allocator.free(batching_coeffs);
+    for (0..num_instances) |i| {
+        batching_coeffs[i] = transcript.challengeScalarFull();
+    }
 
     // 4. Compute batched initial claim
     // For each instance: batching_coeff[i] * input_claim[i] * 2^(max_rounds - num_rounds[i])
@@ -272,13 +277,11 @@ test "batched sumcheck: single instance matches plain sumcheck" {
 
     // First, compute what transcript will produce:
     var sim_transcript = Blake2bTranscript(F_).init("batch_test");
-    // appendScalars("batched_claims", [claim])
     const claim_val = F_.fromU64(16);
-    sim_transcript.appendScalars("batched_claims", &[_]F_{claim_val});
-    // challengeVector(1) -> batching_coeff
-    const sim_coeffs = try sim_transcript.challengeVector(testing.allocator, 1);
-    defer testing.allocator.free(sim_coeffs);
-    const batching_coeff = sim_coeffs[0];
+    // Per-claim append (matching prover pattern)
+    sim_transcript.appendScalar("sumcheck_claim", claim_val);
+    // Per-coeff challengeScalarFull (matching prover pattern)
+    const batching_coeff = sim_transcript.challengeScalarFull();
 
     // The batched claim = coeff * claim * 2^0 = coeff * claim
     const batched_claim = batching_coeff.mul(claim_val);

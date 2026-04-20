@@ -28,6 +28,7 @@ pub const stage4_verifier = @import("stage4_verifier.zig");
 pub const stage5_verifier = @import("stage5_verifier.zig");
 pub const stage6_verifier = @import("stage6_verifier.zig");
 pub const stage7_verifier = @import("stage7_verifier.zig");
+pub const dory_verifier = @import("dory_verifier.zig");
 
 const GT = jolt_serialization.GT;
 const DoryCommitment = jolt_serialization.DoryCommitment;
@@ -325,16 +326,27 @@ fn verifyInner(
     s7_ctx.cacheOpenings(&acc, s7_result.challenges);
 
     // 15. Opening claims verification
-    // The opening claims in the proof should be consistent with the sumcheck outputs.
-    // Full per-stage claim extraction requires stage-specific logic (deferred).
-    // For now, verify that opening claims exist and are non-empty.
     if (proof.opening_claims.len() == 0) {
         return VerifyResult{ .valid = false, .failed_stage = 7 };
     }
 
-    // 16. Dory opening proof verification (stubbed for now)
-    // TODO: Implement Dory PCS opening verification
-    // This requires pairing-based checks using the DoryVerifierSetup.
+    // 16. Stage 8: Dory PCS batch opening verification
+    // TODO: Compute RLC joint_claim and joint_commitment from accumulated opening claims
+    // For now, verify the Dory proof with transcript replay (Fiat-Shamir binding)
+    if (proof.joint_opening_proof) |*dory_proof| {
+        const dory_valid = dory_verifier.verify(
+            F,
+            &pp.generators,
+            GT.one(), // TODO: compute joint_commitment from RLC
+            proof.opening_point,
+            F.zero(), // TODO: compute joint_claim from RLC
+            dory_proof,
+            &transcript,
+        );
+        if (!dory_valid) {
+            return VerifyResult{ .valid = false, .failed_stage = 8 };
+        }
+    }
 
     return VerifyResult{ .valid = true };
 }
@@ -366,4 +378,5 @@ test {
     _ = stage5_verifier;
     _ = stage6_verifier;
     _ = stage7_verifier;
+    _ = dory_verifier;
 }

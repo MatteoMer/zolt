@@ -42,22 +42,22 @@ fibonacci, factorial, bitwise, collatz, primes, sum, gcd, signed
 - [ ] Eliminate silent zero-fallback (`orelse F.zero()` → explicit errors)
 
 ### Per-Stage Verification (Stages 1–7)
-- [x] Stage 1: Outer Spartan + UniSkip (infrastructure + claim threading; expected_output_claim TODO)
-- [ ] Stage 2: Batched (5 instances — ProductVirtualRemainder, RamRafEvaluation, RamReadWriteChecking, OutputSumcheck, InstructionLookupsClaimReduction)
-- [ ] Stage 3: Batched (3 instances — ShiftSumcheck, InstructionInputSumcheck, RegistersClaimReduction)
-- [ ] Stage 4: Registers RW + RAM val evaluation + RAM val final
-- [ ] Stage 5: Registers val eval + RAM RA claim reduction + lookups read RAF
-- [ ] Stage 6: Batched (6 instances — BytecodeRAF, Hamming, Booleanity, RA virtual, Inc claim reduction)
-- [ ] Stage 7: Hamming weight claim reduction
+- [x] Stage 1: Outer Spartan + UniSkip (claim threading + UniSkip sum check)
+- [x] Stage 2: Batched (5 instances — proper input claims from Stage 1 openings, gamma sampling)
+- [x] Stage 3: Batched (3 instances — Shift, InstructionInput, RegistersClaim)
+- [x] Stage 4: 2 instances (RegistersRW, RamValCheck with gamma domain separator)
+- [x] Stage 5: 3 instances (LookupsReadRaf, RamRaClaim, RegistersValEval)
+- [x] Stage 6: 6 instances (BytecodeRaf, Booleanity, Hamming, RamRaVirt, LookupsRaVirt, Inc)
+- [x] Stage 7: HammingWeightClaimReduction (1 instance, degree 2)
 - [ ] Transcript checkpoint assertions at each stage boundary
+- [ ] Per-stage expectedOutputClaim (algebraic relation check)
+- [ ] Per-stage cacheOpenings (register polynomial IDs from proof.opening_claims)
 
 ### Dory Verifier
-- [ ] VMV message verification
-- [ ] Reduce-and-fold rounds
-- [ ] Final scalar product check
-- [ ] Pairing equation verification
-
-### Dory Verifier
+- [x] Transcript replay (VMV + reduce-and-fold + final message)
+- [ ] Reduce-and-fold algebraic state updates (GT exponentiation, G1/G2 folding)
+- [ ] Final pairing equation verification
+- [x] Stage 8 wiring in verifier/mod.zig (Dory proof → transcript)
 
 ---
 

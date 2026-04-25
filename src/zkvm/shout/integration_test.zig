@@ -308,7 +308,7 @@ test "shout multiple rounds consistent" {
 
     // Track claim consistency
     var prev_claim = shout_prover.expanding_v.sum();
-    var challenges_used: std.ArrayListUnmanaged(F) = .{};
+    var challenges_used: std.ArrayListUnmanaged(F) = .empty;
     defer challenges_used.deinit(allocator);
 
     // Run 3 rounds

@@ -202,8 +202,8 @@ pub fn WitnessGenerator(comptime F: type) type {
             const steps = trace.steps.items;
 
             // Use unmanaged ArrayList for Zig 0.15
-            var reads: std.ArrayListUnmanaged(MemoryTuple(F)) = .{};
-            var writes: std.ArrayListUnmanaged(MemoryTuple(F)) = .{};
+            var reads: std.ArrayListUnmanaged(MemoryTuple(F)) = .empty;
+            var writes: std.ArrayListUnmanaged(MemoryTuple(F)) = .empty;
 
             for (steps, 0..) |step, i| {
                 if (step.memory_addr) |addr| {

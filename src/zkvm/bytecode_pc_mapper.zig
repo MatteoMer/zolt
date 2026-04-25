@@ -26,7 +26,7 @@ pub const BytecodePCMapper = struct {
 
     pub fn init(allocator: Allocator) BytecodePCMapper {
         return .{
-            .indices = .{},
+            .indices = .empty,
             .allocator = allocator,
             .termination_base_pc = 0,
         };

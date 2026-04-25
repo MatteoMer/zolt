@@ -9,6 +9,24 @@
 
 const std = @import("std");
 
+const MonotonicTimer = struct {
+    start_ns: u64,
+    pub fn start() error{}!MonotonicTimer {
+        return .{ .start_ns = clockNs() };
+    }
+    pub fn read(self: MonotonicTimer) u64 {
+        return clockNs() - self.start_ns;
+    }
+    pub fn reset(self: *MonotonicTimer) void {
+        self.start_ns = clockNs();
+    }
+    fn clockNs() u64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
+    }
+};
+
 const MAX_SAMPLES: usize = 101;
 
 pub const Config = struct {
@@ -59,7 +77,7 @@ pub fn run(
     // --- Collect samples ---
     var samples: [MAX_SAMPLES]f64 = undefined;
     for (0..n) |s| {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = MonotonicTimer.start() catch unreachable;
         for (0..iters) |i| {
             sink = body(i);
         }

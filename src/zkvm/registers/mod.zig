@@ -39,7 +39,7 @@ pub const RegisterTrace = struct {
 
     pub fn init(allocator: Allocator) RegisterTrace {
         return .{
-            .accesses = .{},
+            .accesses = .empty,
             .allocator = allocator,
         };
     }

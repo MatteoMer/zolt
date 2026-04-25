@@ -94,14 +94,15 @@ pub const ELFLoader = struct {
 
     /// Load from file path
     pub fn loadFile(self: *ELFLoader, path: []const u8) !Program {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
 
-        const stat = try file.stat();
+        const stat = try file.stat(io);
         const contents = try self.allocator.alloc(u8, stat.size);
         defer self.allocator.free(contents);
 
-        _ = try file.readAll(contents);
+        _ = try file.readPositionalAll(io, contents, 0);
 
         return self.load(contents);
     }

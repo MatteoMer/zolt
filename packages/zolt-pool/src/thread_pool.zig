@@ -19,11 +19,83 @@ pub const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
 pub const has_wasm_atomics = is_wasm and
     std.Target.wasm.featureSetHas(builtin.cpu.features, .atomics);
 
-/// Platform-appropriate futex. On native: std.Thread.Futex.
-/// On WASM with atomics: direct memory.atomic.wait32/notify intrinsics,
-/// bypassing std.Thread.Futex which requires single_threaded=false
-/// (incompatible with std.heap.wasm_allocator).
-const Futex = if (has_wasm_atomics) WasmFutex else std.Thread.Futex;
+/// Platform-appropriate futex.
+/// On WASM with atomics: direct memory.atomic.wait32/notify intrinsics.
+/// On native (macOS/Linux): direct OS syscalls (__ulock / futex(2)).
+const Futex = if (has_wasm_atomics) WasmFutex else NativeFutex;
+
+/// Minimal futex wrapper using direct OS syscalls (replaces the removed std.Thread.Futex).
+const NativeFutex = struct {
+    const native_os = builtin.os.tag;
+
+    fn wait(ptr: *const atomic.Value(u32), expect: u32) void {
+        timedWait(ptr, expect, null) catch {};
+    }
+
+    fn timedWait(ptr: *const atomic.Value(u32), expect: u32, timeout_ns: ?u64) error{Timeout}!void {
+        switch (native_os) {
+            .macos, .ios, .tvos, .watchos, .visionos => {
+                const c = std.c;
+                const flags: c.UL = .{ .op = .COMPARE_AND_WAIT, .NO_ERRNO = true };
+                const status = c.__ulock_wait(flags, &ptr.raw, expect, us: {
+                    const ns = timeout_ns orelse break :us 0;
+                    const us = std.math.lossyCast(u32, ns / std.time.ns_per_us);
+                    if (us == 0) break :us 1;
+                    break :us us;
+                });
+                if (status < 0) {
+                    if (@as(c.E, @enumFromInt(-status)) == .TIMEDOUT) return error.Timeout;
+                }
+            },
+            .linux => {
+                const linux = std.os.linux;
+                var ts_buf: linux.timespec = undefined;
+                const ts: ?*linux.timespec = if (timeout_ns) |ns| blk: {
+                    ts_buf = .{
+                        .sec = @intCast(ns / std.time.ns_per_s),
+                        .nsec = @intCast(ns % std.time.ns_per_s),
+                    };
+                    break :blk &ts_buf;
+                } else null;
+                const rc = linux.futex_4arg(&ptr.raw, .{ .cmd = .WAIT, .private = true }, expect, ts);
+                if (linux.errno(rc) == .TIMEDOUT) return error.Timeout;
+            },
+            else => @compileError("unsupported OS for NativeFutex"),
+        }
+    }
+
+    fn wake(ptr: *const atomic.Value(u32), max_waiters: u32) void {
+        if (max_waiters == 0) return;
+        switch (native_os) {
+            .macos, .ios, .tvos, .watchos, .visionos => {
+                const c = std.c;
+                const flags: c.UL = .{
+                    .op = .COMPARE_AND_WAIT,
+                    .NO_ERRNO = true,
+                    .WAKE_ALL = max_waiters > 1,
+                };
+                while (true) {
+                    const status = c.__ulock_wake(flags, &ptr.raw, 0);
+                    if (status >= 0) return;
+                    switch (@as(c.E, @enumFromInt(-status))) {
+                        .INTR, .CANCELED => continue,
+                        .NOENT => return,
+                        else => return,
+                    }
+                }
+            },
+            .linux => {
+                const linux = std.os.linux;
+                _ = linux.futex_3arg(
+                    &ptr.raw,
+                    .{ .cmd = .WAKE, .private = true },
+                    @min(max_waiters, std.math.maxInt(i32)),
+                );
+            },
+            else => @compileError("unsupported OS for NativeFutex"),
+        }
+    }
+};
 
 const WasmFutex = struct {
     /// Block until woken. Uses memory.atomic.wait32.
@@ -318,9 +390,9 @@ const WorkerData = struct {
     claim_depth: atomic.Value(u32) = atomic.Value(u32).init(0),
 
     fn initRng(self: *WorkerData) void {
-        // Seed RNG with index + timestamp for randomness.
-        // On WASM there is no clock — index-based seed is fine for steal randomization.
-        const ts: u64 = if (is_wasm) 0 else @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+        // Seed RNG with index + thread ID for randomness.
+        // On WASM there is no thread ID — index-based seed is fine for steal randomization.
+        const ts: u64 = if (is_wasm) 0 else @as(u64, @intCast(std.Thread.getCurrentId()));
         self.rng_state = @truncate((self.index +% 1) *% 2654435761 +% ts);
         if (self.rng_state == 0) self.rng_state = 1;
     }
@@ -1646,7 +1718,15 @@ test "ThreadPool: dispatch overhead microbenchmark" {
     defer tp.deinit();
 
     const iters = 1000;
-    var timer = try std.time.Timer.start();
+
+    const getMonotonicNs = struct {
+        fn call() u64 {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(.MONOTONIC, &ts);
+            return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
+        }
+    }.call;
+    const start = getMonotonicNs();
 
     for (0..iters) |_| {
         tp.parallelForForce(16, {}, struct {
@@ -1654,7 +1734,7 @@ test "ThreadPool: dispatch overhead microbenchmark" {
         }.run);
     }
 
-    const elapsed_ns = timer.read();
+    const elapsed_ns = getMonotonicNs() - start;
     const per_dispatch_ns = elapsed_ns / iters;
     std.debug.print("\n  Dispatch overhead: {}ns per dispatch ({} dispatches)\n", .{ per_dispatch_ns, iters });
     try std.testing.expect(per_dispatch_ns < 100_000);

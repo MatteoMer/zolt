@@ -267,7 +267,7 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                     .original_P_size = prefix_size,
                     .original_Q_size = prefix_size,
                 } },
-                .challenges = std.ArrayListUnmanaged(F){},
+                .challenges = std.ArrayListUnmanaged(F).empty,
                 .allocator = allocator,
                 .thread_pool = thread_pool,
             };

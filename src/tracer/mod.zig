@@ -98,7 +98,7 @@ pub const ExecutionTrace = struct {
 
     pub fn init(allocator: Allocator) ExecutionTrace {
         return .{
-            .steps = .{},
+            .steps = .empty,
             .allocator = allocator,
         };
     }

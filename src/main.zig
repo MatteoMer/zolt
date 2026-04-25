@@ -11,13 +11,10 @@ const run_cmd = @import("commands/run.zig");
 const prove_cmd = @import("commands/prove.zig");
 const verify_cmd = @import("commands/verify.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
+    var args = init.minimal.args.iterate();
 
     // Skip program name
     _ = args.skip();
@@ -51,22 +48,11 @@ pub fn main() !void {
             defer if (input_bytes_owned) |b| allocator.free(b);
 
             if (run_args.input_file) |path| {
-                const f = std.fs.cwd().openFile(path, .{}) catch |err| {
-                    std.debug.print("Failed to open input file: {s}\n", .{@errorName(err)});
+                const io = init.io;
+                input_bytes_owned = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024 * 1024)) catch |err| {
+                    std.debug.print("Failed to read input file: {s}\n", .{@errorName(err)});
                     std.process.exit(1);
                 };
-                defer f.close();
-                const stat = f.stat() catch |err| {
-                    std.debug.print("Failed to stat input file: {s}\n", .{@errorName(err)});
-                    std.process.exit(1);
-                };
-                input_bytes_owned = allocator.alloc(u8, stat.size) catch null;
-                if (input_bytes_owned) |buf| {
-                    _ = f.readAll(buf) catch {
-                        std.debug.print("Failed to read input file\n", .{});
-                        std.process.exit(1);
-                    };
-                }
             } else if (run_args.input_hex) |hex| {
                 input_bytes_owned = args_mod.parseHexInput(allocator, hex);
             }

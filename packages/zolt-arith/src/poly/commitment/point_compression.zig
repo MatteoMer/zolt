@@ -437,16 +437,17 @@ test "g2 compressed bytes for arkworks validation" {
     std.debug.print("\n", .{});
 
     // Also write to a file for the Rust test to read
-    const file = std.fs.cwd().createFile("/tmp/zolt_g2_test_points.bin", .{}) catch |err| {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const file = std.Io.Dir.cwd().createFile(io, "/tmp/zolt_g2_test_points.bin", .{}) catch |err| {
         std.debug.print("Could not create file: {}\n", .{err});
         return;
     };
-    defer file.close();
+    defer file.close(io);
 
     // Write 3 compressed G2 points (64 bytes each = 192 bytes total)
-    file.writeAll(&gen_compressed) catch return;
-    file.writeAll(&two_compressed) catch return;
-    file.writeAll(&compressed_42) catch return;
+    file.writeStreamingAll(io, &gen_compressed) catch return;
+    file.writeStreamingAll(io, &two_compressed) catch return;
+    file.writeStreamingAll(io, &compressed_42) catch return;
     std.debug.print("Wrote 3 compressed G2 points to /tmp/zolt_g2_test_points.bin\n", .{});
 }
 

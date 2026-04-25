@@ -2,6 +2,25 @@
 /// Tests same sizes as Dory opening proof (2..4096 points)
 /// Outputs machine-readable [MSM-BENCH] lines for comparison with arkworks.
 const std = @import("std");
+
+const MonotonicTimer = struct {
+    start_ns: u64,
+    pub fn start() error{}!MonotonicTimer {
+        return .{ .start_ns = clockNs() };
+    }
+    pub fn read(self: MonotonicTimer) u64 {
+        return clockNs() - self.start_ns;
+    }
+    pub fn reset(self: *MonotonicTimer) void {
+        self.start_ns = clockNs();
+    }
+    fn clockNs() u64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
+    }
+};
+
 const zolt = @import("zolt");
 const field = zolt.field;
 const msm_mod = zolt.msm;
@@ -84,7 +103,7 @@ fn benchMsmG1(bases: []const G1Affine, scalars: []const Fr, tp: ?*ThreadPool) f6
     var total_ns: u64 = 0;
     var iters: u64 = 0;
     while (iters < MIN_ITERS or total_ns < MIN_TIME_NS) {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = MonotonicTimer.start() catch unreachable;
         _ = G1MSM.computeWithPool(bases, scalars, tp);
         total_ns += timer.read();
         iters += 1;
@@ -102,7 +121,7 @@ fn benchMsmG1I128(bases: []const G1Affine, scalars: []const i128, tp: ?*ThreadPo
     var total_ns: u64 = 0;
     var iters: u64 = 0;
     while (iters < MIN_ITERS or total_ns < MIN_TIME_NS) {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = MonotonicTimer.start() catch unreachable;
         _ = G1MSM.computeI128(bases, scalars, tp);
         total_ns += timer.read();
         iters += 1;
@@ -120,7 +139,7 @@ fn benchMsmG2(bases: []const G2Point, scalars: []const Fr, tp: ?*ThreadPool) f64
     var total_ns: u64 = 0;
     var iters: u64 = 0;
     while (iters < MIN_ITERS or total_ns < MIN_TIME_NS) {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = MonotonicTimer.start() catch unreachable;
         _ = dory.msmG2Bench(Fr, bases, scalars, tp);
         total_ns += timer.read();
         iters += 1;

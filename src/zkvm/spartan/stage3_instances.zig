@@ -319,7 +319,7 @@ pub fn ShiftPrefixSuffixProver(comptime F: type) type {
                 .suffix_n_vars = suffix_n_vars,
                 .current_prefix_size = prefix_size,
                 .current_witness_size = trace_len,
-                .sumcheck_challenges = .{},
+                .sumcheck_challenges = .empty,
                 .in_phase2 = false,
                 .r_outer = r_outer,
                 .r_product = r_product,

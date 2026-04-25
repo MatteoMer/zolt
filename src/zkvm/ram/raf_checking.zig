@@ -336,7 +336,7 @@ pub fn RafEvaluationProver(comptime F: type) type {
                 .params = params,
                 .round = 0,
                 .current_claim = initial_claim,
-                .bound_values = .{},
+                .bound_values = .empty,
                 .allocator = allocator,
             };
         }
@@ -525,7 +525,7 @@ pub fn RafEvaluationVerifier(comptime F: type) type {
             return Self{
                 .params = params,
                 .current_claim = initial_claim,
-                .challenges = .{},
+                .challenges = .empty,
                 .round = 0,
                 .allocator = allocator,
             };

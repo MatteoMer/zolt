@@ -484,7 +484,7 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
 
         pub fn init(allocator: Allocator) Self {
             return Self{
-                .entries = .{},
+                .entries = .empty,
                 .allocator = allocator,
                 .enabled = true,
             };

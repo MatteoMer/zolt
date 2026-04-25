@@ -5,6 +5,25 @@
 //! Run:   ./zig-out/bin/bench-tp
 
 const std = @import("std");
+
+const MonotonicTimer = struct {
+    start_ns: u64,
+    pub fn start() error{}!MonotonicTimer {
+        return .{ .start_ns = clockNs() };
+    }
+    pub fn read(self: MonotonicTimer) u64 {
+        return clockNs() - self.start_ns;
+    }
+    pub fn reset(self: *MonotonicTimer) void {
+        self.start_ns = clockNs();
+    }
+    fn clockNs() u64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
+    }
+};
+
 const zolt = @import("zolt");
 const F = zolt.field.BN254Scalar;
 const ThreadPool = zolt.utils.ThreadPool;
@@ -42,7 +61,7 @@ fn benchParallelReduce(tp: *ThreadPool, a: []const F, b: []const F, half: usize)
         std.mem.doNotOptimizeAway(tp.parallelReduce([2]F, half, identity, ctx, mapFn, reduceFn));
     }
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = MonotonicTimer.start() catch unreachable;
     for (0..ITERS) |_| {
         std.mem.doNotOptimizeAway(tp.parallelReduce([2]F, half, identity, ctx, mapFn, reduceFn));
     }
@@ -62,7 +81,7 @@ fn benchSequential(a: []const F, b: []const F, half: usize) f64 {
         std.mem.doNotOptimizeAway(acc1.reduce());
     }
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = MonotonicTimer.start() catch unreachable;
     for (0..ITERS) |_| {
         var acc0 = UnreducedProductAccum.zero();
         var acc1 = UnreducedProductAccum.zero();

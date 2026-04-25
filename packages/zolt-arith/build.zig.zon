@@ -2,7 +2,7 @@
     .name = .zolt_arith,
     .version = "0.1.0",
     .fingerprint = 0xc9d85b617062d5e7,
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zolt_pool = .{ .path = "../zolt-pool" },
     },

@@ -332,7 +332,7 @@ pub fn Stage2Sumcheck(comptime F: type) type {
             }
 
             // Store challenges for opening claims computation
-            var challenges: std.ArrayListUnmanaged(F) = .{};
+            var challenges: std.ArrayListUnmanaged(F) = .empty;
             defer challenges.deinit(allocator);
 
             // Per-instance timing accumulators (bench only)

@@ -286,7 +286,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
             }
 
-            var entries = std.ArrayListUnmanaged(Entry){};
+            var entries = std.ArrayListUnmanaged(Entry).empty;
             for (trace.accesses.items) |access| {
                 if (access.timestamp >= T) continue;
 
@@ -364,7 +364,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const EqPoly = poly_mod.EqPolynomial(F);
             const eq_evals = try EqPoly.evalsSliceWithScaling(F, allocator, params.r_cycle, null);
 
-            const challenges_list = std.ArrayListUnmanaged(F){};
+            const challenges_list = std.ArrayListUnmanaged(F).empty;
 
             // Initialize GruenSplitEqPolynomial for Phase 1 optimization
             // This matches Jolt's structure for computing round polynomials
@@ -1005,7 +1005,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const K = @as(usize, 1) << @intCast(self.params.log_k);
             const val_init_current_size = K >> @intCast(addr_round);
 
-            var new_entries = std.ArrayListUnmanaged(Entry){};
+            var new_entries = std.ArrayListUnmanaged(Entry).empty;
             try new_entries.ensureTotalCapacity(self.allocator, self.entries.items.len);
 
             var entry_idx: usize = 0;
@@ -1180,7 +1180,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             }
 
             // Pass 1: Find row-pair group boundaries (sequential O(N) scan)
-            var group_starts = std.ArrayListUnmanaged(usize){};
+            var group_starts = std.ArrayListUnmanaged(usize).empty;
             defer group_starts.deinit(self.allocator);
             try group_starts.append(self.allocator, 0);
             for (1..entries.len) |i| {
@@ -1300,7 +1300,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
 
             // Replace old entries
             self.entries.deinit(self.allocator);
-            self.entries = .{};
+            self.entries = .empty;
             self.entries.items = output[0..total_out];
             self.entries.capacity = output.len;
 

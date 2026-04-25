@@ -63,7 +63,7 @@ pub fn ProofSerializer(comptime F: type) type {
         /// Read and verify proof header
         pub fn readHeader(reader: anytype) !void {
             var magic: [4]u8 = undefined;
-            try reader.readNoEof(&magic);
+            try reader.readSliceAll(&magic);
             if (!std.mem.eql(u8, &magic, &MAGIC)) {
                 return error.InvalidProofFormat;
             }
@@ -163,7 +163,7 @@ pub fn ProofSerializer(comptime F: type) type {
 
         /// Convenience function to serialize a proof to a byte buffer
         pub fn toBytes(allocator: Allocator, proof: anytype) ![]u8 {
-            var list: std.ArrayListUnmanaged(u8) = .{};
+            var list: std.ArrayListUnmanaged(u8) = .empty;
             errdefer list.deinit(allocator);
 
             const writer = list.writer();
@@ -218,12 +218,13 @@ test "proof serialization" {
     const original = F.fromU64(12345678);
 
     var buffer: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buffer);
+    var writer = std.Io.Writer.fixed(&buffer);
 
-    try PS.serializeField(fbs.writer(), original);
+    try PS.serializeField(&writer, original);
 
-    fbs.reset();
-    const deserialized = try PS.deserializeField(fbs.reader());
+    const utils = @import("mod.zig");
+    var reader = utils.SliceReader{ .data = buffer[0..writer.end] };
+    const deserialized = try PS.deserializeField(&reader);
 
     try std.testing.expect(original.eql(deserialized));
 }
@@ -242,12 +243,13 @@ test "field array serialization" {
     };
 
     var buffer: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buffer);
+    var writer = std.Io.Writer.fixed(&buffer);
 
-    try PS.serializeFieldArray(fbs.writer(), &original);
+    try PS.serializeFieldArray(&writer, &original);
 
-    fbs.reset();
-    const deserialized = try PS.deserializeFieldArray(fbs.reader(), allocator);
+    const utils = @import("mod.zig");
+    var reader = utils.SliceReader{ .data = buffer[0..writer.end] };
+    const deserialized = try PS.deserializeFieldArray(&reader, allocator);
     defer allocator.free(deserialized);
 
     try std.testing.expectEqual(original.len, deserialized.len);

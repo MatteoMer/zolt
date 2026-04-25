@@ -1962,7 +1962,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             if (comptime bench_timing) bench_init_ns = bench_overall_timer.read();
 
             // Lightweight phase timing (no per-round overhead, just phase boundaries)
-            const s5_do_phase_timing = if (comptime is_wasm) false else (@import("std").posix.getenv("ZOLT_BENCH") != null);
+            const s5_do_phase_timing = if (comptime is_wasm) false else (@import("std").c.getenv("ZOLT_BENCH") != null);
             var s5_phase_timer: ?PlatformTimer = if (s5_do_phase_timing) PlatformTimer.start() catch null else null;
             var s5_addr_compute_ns: u64 = 0;
             var s5_addr_bind_ns: u64 = 0;

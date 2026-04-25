@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const zolt = @import("../root.zig");
+const debug = @import("../zkvm/debug.zig");
 const BN254Scalar = zolt.field.BN254Scalar;
 
 pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []const u8, srs_path: ?[]const u8, preprocessing_path: ?[]const u8, input_bytes: ?[]const u8) !void {
@@ -25,7 +26,7 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
         std.debug.print("  Input bytes: {} bytes\n", .{inputs.len});
     }
 
-    var timer = std.time.Timer.start() catch return;
+    var timer = debug.MonotonicTimer.start() catch return;
 
     // Initialize prover
     std.debug.print("\n[1/2] Initializing prover...\n", .{});
@@ -62,7 +63,7 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
     const prove_time_ms = @as(f64, @floatFromInt(prove_time)) / 1_000_000.0;
     std.debug.print("  Proof generated successfully!\n", .{});
     std.debug.print("  Time: {d:.2} ms\n", .{prove_time_ms});
-    if (std.posix.getenv("ZOLT_BENCH") != null) {
+    if (std.c.getenv("ZOLT_BENCH") != null) {
         std.debug.print("[BENCH] Total time: {d:.1}\n", .{prove_time_ms});
     }
 
@@ -73,13 +74,14 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
     };
     defer allocator.free(jolt_bytes);
 
+    const io = std.Io.Threaded.global_single_threaded.io();
     std.debug.print("\nSaving proof to: {s}\n", .{output_path});
-    const file = std.fs.cwd().createFile(output_path, .{}) catch |err| {
+    const file = std.Io.Dir.cwd().createFile(io, output_path, .{}) catch |err| {
         std.debug.print("  Error creating output file: {}\n", .{err});
         return err;
     };
-    defer file.close();
-    file.writeAll(jolt_bytes) catch |err| {
+    defer file.close(io);
+    file.writeStreamingAll(io, jolt_bytes) catch |err| {
         std.debug.print("  Error writing Jolt proof: {}\n", .{err});
         return err;
     };
@@ -95,9 +97,9 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
         const io_path = try std.fmt.allocPrint(allocator, "{s}.io", .{output_path});
         defer allocator.free(io_path);
 
-        var io_buffer = std.ArrayListUnmanaged(u8){};
+        var io_buffer = std.ArrayListUnmanaged(u8).empty;
         defer io_buffer.deinit(allocator);
-        const w = io_buffer.writer(allocator);
+        var io_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &io_buffer);
 
         // Compute matching memory layout from the same MemoryConfig used by the prover
         const ml_config = zolt.common.MemoryConfig{
@@ -106,26 +108,27 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
         };
         const ml = zolt.common.MemoryLayout.init(&ml_config);
         // inputs (Vec<u8>): u64 len + bytes
-        try w.writeInt(u64, @intCast(jolt_bundle.program_inputs.len), .little);
-        if (jolt_bundle.program_inputs.len > 0) try w.writeAll(jolt_bundle.program_inputs);
+        try io_aw.writer.writeInt(u64, @intCast(jolt_bundle.program_inputs.len), .little);
+        if (jolt_bundle.program_inputs.len > 0) try io_aw.writer.writeAll(jolt_bundle.program_inputs);
         // trusted_advice (Vec<u8>): empty
-        try w.writeInt(u64, 0, .little);
+        try io_aw.writer.writeInt(u64, 0, .little);
         // untrusted_advice (Vec<u8>): empty
-        try w.writeInt(u64, 0, .little);
+        try io_aw.writer.writeInt(u64, 0, .little);
         // outputs (Vec<u8>)
-        try w.writeInt(u64, @intCast(jolt_bundle.program_outputs.len), .little);
-        if (jolt_bundle.program_outputs.len > 0) try w.writeAll(jolt_bundle.program_outputs);
+        try io_aw.writer.writeInt(u64, @intCast(jolt_bundle.program_outputs.len), .little);
+        if (jolt_bundle.program_outputs.len > 0) try io_aw.writer.writeAll(jolt_bundle.program_outputs);
         // panic (bool, 1 byte)
-        try w.writeByte(if (jolt_bundle.program_panic) 1 else 0);
+        try io_aw.writer.writeByte(if (jolt_bundle.program_panic) 1 else 0);
         // memory_layout (20 * u64 LE)
-        try ml.serialize(w);
+        try ml.serialize(&io_aw.writer);
+        io_buffer = io_aw.toArrayList();
 
-        const io_file = std.fs.cwd().createFile(io_path, .{}) catch |err| {
+        const io_file = std.Io.Dir.cwd().createFile(io, io_path, .{}) catch |err| {
             std.debug.print("  Warning: could not create IO sidecar at {s}: {s}\n", .{ io_path, @errorName(err) });
             return err;
         };
-        defer io_file.close();
-        try io_file.writeAll(io_buffer.items);
+        defer io_file.close(io);
+        try io_file.writeStreamingAll(io, io_buffer.items);
         std.debug.print("  IO sidecar written: {s} (outputs={} bytes, panic={})\n", .{ io_path, jolt_bundle.program_outputs.len, jolt_bundle.program_panic });
     }
 
@@ -203,44 +206,46 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
         };
         defer verifier_setup.deinit();
 
-        var buffer = std.ArrayListUnmanaged(u8){};
+        var buffer = std.ArrayListUnmanaged(u8).empty;
         defer buffer.deinit(allocator);
+        var buf_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buffer);
 
-        verifier_setup.serialize(buffer.writer(allocator)) catch |err| {
+        verifier_setup.serialize(&buf_aw.writer) catch |err| {
             std.debug.print("  Error serializing verifier setup: {s}\n", .{@errorName(err)});
             return err;
         };
 
-        shared_prep.serialize(allocator, buffer.writer(allocator)) catch |err| {
+        shared_prep.serialize(allocator, &buf_aw.writer) catch |err| {
             std.debug.print("  Error serializing shared preprocessing: {s}\n", .{@errorName(err)});
             return err;
         };
 
         // blindfold_setup: Option<BlindfoldSetup<C>> = None (arkworks serializes as 0u8)
-        buffer.writer(allocator).writeByte(0) catch |err| {
+        buf_aw.writer.writeByte(0) catch |err| {
             std.debug.print("  Error serializing blindfold_setup: {s}\n", .{@errorName(err)});
             return err;
         };
 
         {
-            const writer = buffer.writer(allocator);
-            try writer.writeAll("ZOLT_RAW\n");
+            try buf_aw.writer.writeAll("ZOLT_RAW\n");
             const raw_words = bytecode_prep.raw_words.items;
-            try writer.writeInt(u64, @intCast(raw_words.len), .little);
+            try buf_aw.writer.writeInt(u64, @intCast(raw_words.len), .little);
             for (raw_words) |w| {
-                try writer.writeInt(u32, w, .little);
+                try buf_aw.writer.writeInt(u32, w, .little);
             }
-            try writer.writeInt(u64, @intCast(bytecode_prep.pc_map.termination_base_pc), .little);
+            try buf_aw.writer.writeInt(u64, @intCast(bytecode_prep.pc_map.termination_base_pc), .little);
             std.debug.print("  Appended {} raw instruction words (termination_base_pc={})\n", .{ raw_words.len, bytecode_prep.pc_map.termination_base_pc });
         }
 
-        const pp_file = std.fs.cwd().createFile(pp_path, .{}) catch |err| {
+        buffer = buf_aw.toArrayList();
+
+        const pp_file = std.Io.Dir.cwd().createFile(io, pp_path, .{}) catch |err| {
             std.debug.print("  Error creating preprocessing file: {s}\n", .{@errorName(err)});
             return err;
         };
-        defer pp_file.close();
+        defer pp_file.close(io);
 
-        pp_file.writeAll(buffer.items) catch |err| {
+        pp_file.writeStreamingAll(io, buffer.items) catch |err| {
             std.debug.print("  Error writing preprocessing: {s}\n", .{@errorName(err)});
             return err;
         };
@@ -249,30 +254,32 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
         std.debug.print("  This file can be loaded by Jolt for cross-verification.\n", .{});
 
         {
-            var ram_buffer = std.ArrayListUnmanaged(u8){};
+            var ram_buffer = std.ArrayListUnmanaged(u8).empty;
             defer ram_buffer.deinit(allocator);
-            const ram_writer = ram_buffer.writer(allocator);
+            var ram_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &ram_buffer);
 
-            try ram_prep.serialize(ram_writer);
-            try device.memory_layout.serialize(ram_writer);
+            try ram_prep.serialize(&ram_aw.writer);
+            try device.memory_layout.serialize(&ram_aw.writer);
 
             const bytecode_K_for_export = zolt.zkvm.computeBytecodeCodeSize(program.bytecode);
-            try ram_writer.writeInt(u64, @intCast(bytecode_K_for_export), .little);
+            try ram_aw.writer.writeInt(u64, @intCast(bytecode_K_for_export), .little);
             std.debug.print("  bytecode code_size (bytecode_K): {}\n", .{bytecode_K_for_export});
 
-            try ram_writer.writeInt(u64, program.entry_point, .little);
-            try ram_writer.writeInt(u64, @intCast(program.bytecode.len), .little);
-            try ram_writer.writeAll(program.bytecode);
+            try ram_aw.writer.writeInt(u64, program.entry_point, .little);
+            try ram_aw.writer.writeInt(u64, @intCast(program.bytecode.len), .little);
+            try ram_aw.writer.writeAll(program.bytecode);
             std.debug.print("  Exported {} raw program bytes (base=0x{x})\n", .{ program.bytecode.len, program.entry_point });
 
-            try ram_writer.writeInt(u64, @intCast(bytecode_prep.pc_map.termination_base_pc), .little);
+            try ram_aw.writer.writeInt(u64, @intCast(bytecode_prep.pc_map.termination_base_pc), .little);
             std.debug.print("  termination_base_pc: {}\n", .{bytecode_prep.pc_map.termination_base_pc});
+
+            ram_buffer = ram_aw.toArrayList();
 
             const ram_path = try std.fmt.allocPrint(allocator, "{s}.ram", .{pp_path});
             defer allocator.free(ram_path);
-            const ram_file = try std.fs.cwd().createFile(ram_path, .{});
-            defer ram_file.close();
-            try ram_file.writeAll(ram_buffer.items);
+            const ram_file = try std.Io.Dir.cwd().createFile(io, ram_path, .{});
+            defer ram_file.close(io);
+            try ram_file.writeStreamingAll(io, ram_buffer.items);
             std.debug.print("  RAM preprocessing exported to: {s} ({} bytes)\n", .{ ram_path, ram_buffer.items.len });
         }
     }

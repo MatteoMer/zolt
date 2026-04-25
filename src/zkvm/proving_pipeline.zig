@@ -683,7 +683,7 @@ pub fn JoltProver(comptime F: type) type {
             // Dense polynomials (RdInc, RamInc) stay at trace_length size.
             const GT = Dory.GT;
             const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
-            var all_commitments: std.ArrayListUnmanaged(GT) = .{};
+            var all_commitments: std.ArrayListUnmanaged(GT) = .empty;
             defer all_commitments.deinit(self.allocator);
 
             // Store dense witness polynomials for Stage 8 opening proof (only RdInc, RamInc)

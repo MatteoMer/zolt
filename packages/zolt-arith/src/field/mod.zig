@@ -1496,9 +1496,12 @@ pub fn MontgomeryField(
             if (!@inComptime() and comptime use_arm64_asm) {
                 const mod_arr: [4]u64 = modulus;
                 return .{ .limbs = arm64SumOfProducts256(
-                    &a[0].limbs, &a[1].limbs,
-                    &b[0].limbs, &b[1].limbs,
-                    &mod_arr, montgomery_inv,
+                    &a[0].limbs,
+                    &a[1].limbs,
+                    &b[0].limbs,
+                    &b[1].limbs,
+                    &mod_arr,
+                    montgomery_inv,
                 ) };
             }
             var t: [5]u64 = .{ 0, 0, 0, 0, 0 };
@@ -3039,7 +3042,7 @@ const _BN254Scalar_legacy = struct {
     }
 
     /// Format for printing
-    pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.Options, writer: anytype) !void {
         _ = fmt;
         _ = options;
         try writer.print("0x{x:0>16}{x:0>16}{x:0>16}{x:0>16}", .{

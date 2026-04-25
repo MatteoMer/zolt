@@ -167,7 +167,7 @@ pub fn JoltProver(comptime F: type) type {
         ) !Stage1Result {
             const StreamingOuterProver = streaming_outer.StreamingOuterProver(F);
             const LagrangePoly = r1cs.univariate_skip.LagrangePolynomial(F);
-            var challenges: std.ArrayListUnmanaged(F) = .{};
+            var challenges: std.ArrayListUnmanaged(F) = .empty;
 
             // Extract tau_high for the UniSkip Lagrange kernel
             // tau has length num_rows_bits = num_cycle_vars + 2

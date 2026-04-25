@@ -1077,7 +1077,7 @@ pub fn ValEvaluationVerifier(comptime F: type) type {
             return Self{
                 .params = params,
                 .current_claim = initial_claim,
-                .challenges = .{},
+                .challenges = .empty,
                 .round = 0,
                 .allocator = allocator,
             };

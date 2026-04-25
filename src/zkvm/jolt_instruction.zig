@@ -184,39 +184,39 @@ pub const JoltInstruction = struct {
         try writer.writeAll("{\"");
         try writer.writeAll(@tagName(self.variant));
         try writer.writeAll("\":{\"address\":");
-        try std.fmt.format(writer, "{}", .{self.address});
+        try writer.print("{}", .{self.address});
 
         try writer.writeAll(",\"operands\":");
         switch (self.operands) {
             .FormatR => |r| {
-                try std.fmt.format(writer, "{{\"rd\":{},\"rs1\":{},\"rs2\":{}}}", .{ r.rd, r.rs1, r.rs2 });
+                try writer.print("{{\"rd\":{},\"rs1\":{},\"rs2\":{}}}", .{ r.rd, r.rs1, r.rs2 });
             },
             .FormatI => |i| {
-                try std.fmt.format(writer, "{{\"rd\":{},\"rs1\":{},\"imm\":{}}}", .{ i.rd, i.rs1, i.imm });
+                try writer.print("{{\"rd\":{},\"rs1\":{},\"imm\":{}}}", .{ i.rd, i.rs1, i.imm });
             },
             .FormatLoad => |l| {
-                try std.fmt.format(writer, "{{\"rd\":{},\"rs1\":{},\"imm\":{}}}", .{ l.rd, l.rs1, l.imm });
+                try writer.print("{{\"rd\":{},\"rs1\":{},\"imm\":{}}}", .{ l.rd, l.rs1, l.imm });
             },
             .FormatS => |s| {
-                try std.fmt.format(writer, "{{\"rs1\":{},\"rs2\":{},\"imm\":{}}}", .{ s.rs1, s.rs2, s.imm });
+                try writer.print("{{\"rs1\":{},\"rs2\":{},\"imm\":{}}}", .{ s.rs1, s.rs2, s.imm });
             },
             .FormatB => |b| {
-                try std.fmt.format(writer, "{{\"rs1\":{},\"rs2\":{},\"imm\":{}}}", .{ b.rs1, b.rs2, b.imm });
+                try writer.print("{{\"rs1\":{},\"rs2\":{},\"imm\":{}}}", .{ b.rs1, b.rs2, b.imm });
             },
             .FormatU => |u_op| {
-                try std.fmt.format(writer, "{{\"rd\":{},\"imm\":{}}}", .{ u_op.rd, u_op.imm });
+                try writer.print("{{\"rd\":{},\"imm\":{}}}", .{ u_op.rd, u_op.imm });
             },
             .FormatJ => |j| {
-                try std.fmt.format(writer, "{{\"rd\":{},\"imm\":{}}}", .{ j.rd, j.imm });
+                try writer.print("{{\"rd\":{},\"imm\":{}}}", .{ j.rd, j.imm });
             },
             .FormatAssert => |a| {
-                try std.fmt.format(writer, "{{\"rs1\":{},\"imm\":{}}}", .{ a.rs1, a.imm });
+                try writer.print("{{\"rs1\":{},\"imm\":{}}}", .{ a.rs1, a.imm });
             },
             .FormatInline => |il| {
-                try std.fmt.format(writer, "{{\"rs1\":{},\"rs2\":{},\"rs3\":{}}}", .{ il.rs1, il.rs2, il.rs3 });
+                try writer.print("{{\"rs1\":{},\"rs2\":{},\"rs3\":{}}}", .{ il.rs1, il.rs2, il.rs3 });
             },
             .FormatVirtualRightShiftI => |vrs| {
-                try std.fmt.format(writer, "{{\"rd\":{},\"rs1\":{},\"imm\":{}}}", .{ vrs.rd, vrs.rs1, vrs.imm });
+                try writer.print("{{\"rd\":{},\"rs1\":{},\"imm\":{}}}", .{ vrs.rd, vrs.rs1, vrs.imm });
             },
             .None => {
                 try writer.writeAll("{}");
@@ -225,7 +225,7 @@ pub const JoltInstruction = struct {
 
         try writer.writeAll(",\"virtual_sequence_remaining\":");
         if (self.virtual_sequence_remaining) |vsr| {
-            try std.fmt.format(writer, "{}", .{vsr});
+            try writer.print("{}", .{vsr});
         } else {
             try writer.writeAll("null");
         }
@@ -244,9 +244,11 @@ pub const JoltInstruction = struct {
     }
 
     pub fn toJson(self: JoltInstruction, allocator: Allocator) ![]u8 {
-        var list = std.ArrayListUnmanaged(u8){};
+        var list = std.ArrayListUnmanaged(u8).empty;
         errdefer list.deinit(allocator);
-        try self.writeJsonTo(list.writer(allocator));
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &list);
+        try self.writeJsonTo(&aw.writer);
+        list = aw.toArrayList();
         return list.toOwnedSlice(allocator);
     }
 };

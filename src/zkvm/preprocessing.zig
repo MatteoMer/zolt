@@ -47,7 +47,7 @@ pub const RAMPreprocessing = struct {
     pub fn init(allocator: Allocator) RAMPreprocessing {
         return .{
             .min_bytecode_address = 0,
-            .bytecode_words = .{},
+            .bytecode_words = .empty,
             .allocator = allocator,
         };
     }
@@ -139,9 +139,11 @@ pub const JoltSharedPreprocessing = struct {
         const Blake2b256 = std.crypto.hash.blake2.Blake2b256;
 
         // Serialize to an in-memory buffer
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(allocator);
-        try self.serialize(allocator, buf.writer(allocator));
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+        try self.serialize(allocator, &aw.writer);
+        buf = aw.toArrayList();
 
         // Hash with Blake2b-256
         var h = Blake2b256.init(.{});

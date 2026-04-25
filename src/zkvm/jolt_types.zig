@@ -497,7 +497,7 @@ pub fn SumcheckInstanceProof(comptime F: type) type {
 
         pub fn init(allocator: Allocator) Self {
             return Self{
-                .compressed_polys = .{},
+                .compressed_polys = .empty,
                 .allocator = allocator,
             };
         }
@@ -592,7 +592,7 @@ pub fn OpeningClaims(comptime F: type) type {
 
         pub fn init(allocator: Allocator) Self {
             return Self{
-                .entries = .{},
+                .entries = .empty,
                 .allocator = allocator,
             };
         }
@@ -757,7 +757,7 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
         pub fn init(allocator: Allocator) Self {
             return Self{
                 .opening_claims = OpeningClaims(F).init(allocator),
-                .commitments = .{},
+                .commitments = .empty,
                 .stage1_uni_skip_first_round_proof = null,
                 .stage1_sumcheck_proof = SumcheckInstanceProof(F).init(allocator),
                 .stage2_uni_skip_first_round_proof = null,

@@ -7,7 +7,7 @@ pub const is_wasm = @import("zolt_pool").is_wasm;
 pub const verbose = false;
 pub const bench_timing = false;
 
-/// Platform timer — no-op stub on WASM, real timer on native.
+/// Platform timer — no-op stub on WASM, real timer on native using clock_gettime.
 pub const PlatformTimer = if (is_wasm) struct {
     pub fn start() error{}!@This() {
         return .{};
@@ -16,18 +16,49 @@ pub const PlatformTimer = if (is_wasm) struct {
         return 0;
     }
     pub fn reset(_: *@This()) void {}
-} else std.time.Timer;
+} else MonotonicTimer;
+
+/// Minimal monotonic timer using clock_gettime (replaces std.time.Timer removed in Zig 0.16).
+pub const MonotonicTimer = struct {
+    start_ns: u64,
+
+    pub fn start() error{}!MonotonicTimer {
+        return .{ .start_ns = clockNs() };
+    }
+
+    pub fn read(self: MonotonicTimer) u64 {
+        return clockNs() - self.start_ns;
+    }
+
+    pub fn reset(self: *MonotonicTimer) void {
+        self.start_ns = clockNs();
+    }
+
+    fn clockNs() u64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
+    }
+};
 
 /// Platform nanoTimestamp — returns 0 on WASM.
 pub fn nanoTimestamp() i128 {
     if (comptime is_wasm) return 0;
-    return std.time.nanoTimestamp();
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+/// Default Io instance for synchronous file operations (not available on WASM).
+pub fn defaultIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
 }
 
 /// Platform getenv — returns null on WASM (no POSIX environment).
-pub fn getenv(key: []const u8) ?[:0]const u8 {
+/// Uses std.c.getenv (direct libc call) since std.posix.getenv was removed in Zig 0.16.
+pub fn getenv(key: [*:0]const u8) ?[*:0]const u8 {
     if (comptime is_wasm) return null;
-    return std.posix.getenv(key);
+    return std.c.getenv(key);
 }
 
 pub fn dbg(comptime fmt: []const u8, args: anytype) void {

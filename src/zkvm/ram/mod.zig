@@ -69,7 +69,7 @@ pub const MemoryTrace = struct {
 
     pub fn init(allocator: Allocator) MemoryTrace {
         return .{
-            .accesses = .{},
+            .accesses = .empty,
             .allocator = allocator,
         };
     }

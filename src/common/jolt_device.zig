@@ -155,7 +155,7 @@ pub const MemoryLayout = struct {
             return (address - lowest_address) / 8;
         }
         if (comptime !is_wasm) {
-            if (std.posix.getenv("ZOLT_REMAP_DEBUG") != null) {
+            if (std.c.getenv("ZOLT_REMAP_DEBUG") != null) {
                 std.debug.print("[REMAP] unmapped address 0x{x} < lowest 0x{x}\n", .{ address, lowest_address });
             }
         }
@@ -217,7 +217,7 @@ pub const MemoryLayout = struct {
         };
     }
 
-    pub fn format(self: *const MemoryLayout, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: *const MemoryLayout, comptime fmt: []const u8, options: std.fmt.Options, writer: anytype) !void {
         _ = fmt;
         _ = options;
         try writer.print("MemoryLayout{{\n", .{});
@@ -248,10 +248,10 @@ pub const JoltDevice = struct {
     /// Create a new JoltDevice with the given memory configuration
     pub fn init(allocator: Allocator, config: *const MemoryConfig) JoltDevice {
         return .{
-            .inputs = .{},
-            .trusted_advice = .{},
-            .untrusted_advice = .{},
-            .outputs = .{},
+            .inputs = .empty,
+            .trusted_advice = .empty,
+            .untrusted_advice = .empty,
+            .outputs = .empty,
             .panic = false,
             .memory_layout = MemoryLayout.init(config),
             .allocator = allocator,

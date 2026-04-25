@@ -117,10 +117,10 @@ pub const DoryVerifierSetup = struct {
     pub fn fromSRS(allocator: Allocator, srs: *const DorySRS, tp: ?*ThreadPool) !DoryVerifierSetup {
         const max_num_rounds = std.math.log2_int(usize, srs.g1_vec.len);
 
-        var delta_1l = std.ArrayListUnmanaged(GT){};
-        var delta_1r = std.ArrayListUnmanaged(GT){};
-        var delta_2r = std.ArrayListUnmanaged(GT){};
-        var chi = std.ArrayListUnmanaged(GT){};
+        var delta_1l = std.ArrayListUnmanaged(GT).empty;
+        var delta_1r = std.ArrayListUnmanaged(GT).empty;
+        var delta_2r = std.ArrayListUnmanaged(GT).empty;
+        var chi = std.ArrayListUnmanaged(GT).empty;
 
         try delta_1l.ensureTotalCapacity(allocator, max_num_rounds + 1);
         try delta_1r.ensureTotalCapacity(allocator, max_num_rounds + 1);
@@ -173,7 +173,7 @@ pub const DoryVerifierSetup = struct {
         }
 
         // delta_2l == delta_1l (clone)
-        var delta_2l = std.ArrayListUnmanaged(GT){};
+        var delta_2l = std.ArrayListUnmanaged(GT).empty;
         try delta_2l.ensureTotalCapacity(allocator, delta_1l.items.len);
         for (delta_1l.items) |item| {
             try delta_2l.append(allocator, item);
@@ -419,10 +419,12 @@ test "DoryVerifierSetup serialization" {
     try std.testing.expect(verifier_setup.chi.items.len == 3);
 
     // Test serialization
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
-    try verifier_setup.serialize(buf.writer(allocator));
+    try verifier_setup.serialize(&aw.writer);
+    buf = aw.toArrayList();
 
     // Should produce non-empty output
     try std.testing.expect(buf.items.len > 0);

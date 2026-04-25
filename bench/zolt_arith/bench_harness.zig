@@ -21,9 +21,8 @@ const MonotonicTimer = struct {
         self.start_ns = clockNs();
     }
     fn clockNs() u64 {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
+        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
+        return @intCast(@max(0, std.Io.Timestamp.now(io, .boot).nanoseconds));
     }
 };
 

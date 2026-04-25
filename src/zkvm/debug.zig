@@ -2,6 +2,7 @@
 //! Set verbose = true to enable debug prints across all prover stages.
 
 const std = @import("std");
+const builtin = @import("builtin");
 pub const is_wasm = @import("zolt_pool").is_wasm;
 
 pub const verbose = false;
@@ -18,35 +19,33 @@ pub const PlatformTimer = if (is_wasm) struct {
     pub fn reset(_: *@This()) void {}
 } else MonotonicTimer;
 
-/// Minimal monotonic timer using clock_gettime (replaces std.time.Timer removed in Zig 0.16).
+/// Minimal monotonic timer using the Zig 0.16 Io clock interface.
+/// Uses std.Io.Threaded.global_single_threaded — no libc dependency on Linux.
 pub const MonotonicTimer = struct {
-    start_ns: u64,
+    start_ts: std.Io.Timestamp,
+
+    const io: std.Io = std.Io.Threaded.global_single_threaded.io();
 
     pub fn start() error{}!MonotonicTimer {
-        return .{ .start_ns = clockNs() };
+        return .{ .start_ts = std.Io.Timestamp.now(io, .boot) };
     }
 
     pub fn read(self: MonotonicTimer) u64 {
-        return clockNs() - self.start_ns;
+        const now = std.Io.Timestamp.now(io, .boot);
+        const dur = self.start_ts.durationTo(now);
+        return @intCast(@max(0, dur.nanoseconds));
     }
 
     pub fn reset(self: *MonotonicTimer) void {
-        self.start_ns = clockNs();
-    }
-
-    fn clockNs() u64 {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
+        self.start_ts = std.Io.Timestamp.now(io, .boot);
     }
 };
 
 /// Platform nanoTimestamp — returns 0 on WASM.
 pub fn nanoTimestamp() i128 {
     if (comptime is_wasm) return 0;
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    const io: std.Io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Timestamp.now(io, .boot).nanoseconds;
 }
 
 /// Default Io instance for synchronous file operations (not available on WASM).
@@ -55,10 +54,22 @@ pub fn defaultIo() std.Io {
 }
 
 /// Platform getenv — returns null on WASM (no POSIX environment).
-/// Uses std.c.getenv (direct libc call) since std.posix.getenv was removed in Zig 0.16.
+/// Scans the process environment block directly (no libc dependency).
 pub fn getenv(key: [*:0]const u8) ?[*:0]const u8 {
     if (comptime is_wasm) return null;
-    return std.c.getenv(key);
+    const key_slice = std.mem.span(key);
+    const t = std.Io.Threaded.global_single_threaded;
+    const block = t.environ.process_environ.block;
+    for (@as([:null]const ?[*:0]const u8, block.slice)) |entry_opt| {
+        const entry = std.mem.span(entry_opt orelse continue);
+        if (entry.len > key_slice.len and
+            entry[key_slice.len] == '=' and
+            std.mem.eql(u8, entry[0..key_slice.len], key_slice))
+        {
+            return (entry_opt.?)[key_slice.len + 1 ..];
+        }
+    }
+    return null;
 }
 
 pub fn dbg(comptime fmt: []const u8, args: anytype) void {

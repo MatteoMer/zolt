@@ -69,9 +69,8 @@ pub const thread_pool = @import("zolt_pool").thread_pool;
 pub const ThreadPool = @import("zolt_pool").ThreadPool;
 
 fn monotonicNs() i128 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    const io: std.Io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Timestamp.now(io, .boot).nanoseconds;
 }
 
 /// Timer for profiling

@@ -63,7 +63,7 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
     const prove_time_ms = @as(f64, @floatFromInt(prove_time)) / 1_000_000.0;
     std.debug.print("  Proof generated successfully!\n", .{});
     std.debug.print("  Time: {d:.2} ms\n", .{prove_time_ms});
-    if (std.c.getenv("ZOLT_BENCH") != null) {
+    if (debug.getenv("ZOLT_BENCH") != null) {
         std.debug.print("[BENCH] Total time: {d:.1}\n", .{prove_time_ms});
     }
 

@@ -8,6 +8,23 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
+
+/// Scan process environ without libc (uses Zig's Threaded Io global).
+fn nativeGetenv(key: [*:0]const u8) ?[*:0]const u8 {
+    if (comptime is_wasm) return null;
+    const key_slice = std.mem.span(key);
+    const block = std.Io.Threaded.global_single_threaded.environ.process_environ.block;
+    for (@as([:null]const ?[*:0]const u8, block.slice)) |entry_opt| {
+        const entry = std.mem.span(entry_opt orelse continue);
+        if (entry.len > key_slice.len and
+            entry[key_slice.len] == '=' and
+            std.mem.eql(u8, entry[0..key_slice.len], key_slice))
+        {
+            return (entry_opt.?)[key_slice.len + 1 ..];
+        }
+    }
+    return null;
+}
 const constants = @import("constants.zig");
 const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
 
@@ -155,7 +172,7 @@ pub const MemoryLayout = struct {
             return (address - lowest_address) / 8;
         }
         if (comptime !is_wasm) {
-            if (std.c.getenv("ZOLT_REMAP_DEBUG") != null) {
+            if (nativeGetenv("ZOLT_REMAP_DEBUG") != null) {
                 std.debug.print("[REMAP] unmapped address 0x{x} < lowest 0x{x}\n", .{ address, lowest_address });
             }
         }

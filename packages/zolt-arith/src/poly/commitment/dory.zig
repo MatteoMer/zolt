@@ -42,9 +42,8 @@ const MonotonicTimer = struct {
         self.start_ns = clockNs();
     }
     fn clockNs() u64 {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
+        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
+        return @intCast(@max(0, std.Io.Timestamp.now(io, .boot).nanoseconds));
     }
 };
 
@@ -1535,7 +1534,16 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             // Build cache path: ~/.cache/zolt/srs_v1_<log_size>.bin
             var path_buf: [256]u8 = undefined;
-            const home = std.c.getenv("HOME") orelse "/tmp";
+            const home = blk: {
+                const block = std.Io.Threaded.global_single_threaded.environ.process_environ.block;
+                for (@as([:null]const ?[*:0]const u8, block.slice)) |entry_opt| {
+                    const entry = std.mem.span(entry_opt orelse continue);
+                    if (entry.len > 5 and entry[4] == '=' and std.mem.eql(u8, entry[0..4], "HOME")) {
+                        break :blk entry[5..];
+                    }
+                }
+                break :blk "/tmp";
+            };
             const path_len = (std.fmt.bufPrint(&path_buf, "{s}/.cache/zolt/srs_v1_{d}.bin", .{ home, max_num_vars }) catch return setup(allocator, max_num_vars)).len;
             const cache_path = path_buf[0..path_len];
 

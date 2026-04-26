@@ -437,7 +437,7 @@ test "g2 compressed bytes for arkworks validation" {
     std.debug.print("\n", .{});
 
     // Also write to a file for the Rust test to read
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io: std.Io = std.Io.Threaded.global_single_threaded.io();
     const file = std.Io.Dir.cwd().createFile(io, "/tmp/zolt_g2_test_points.bin", .{}) catch |err| {
         std.debug.print("Could not create file: {}\n", .{err});
         return;

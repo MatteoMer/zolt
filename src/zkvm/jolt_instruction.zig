@@ -171,7 +171,7 @@ pub const JoltInstruction = struct {
     /// NoOp and UNIMPL are unit variants in Jolt, so they serialize as just "NoOp" or "UNIMPL"
     /// Other instructions serialize as {"VARIANT":{...fields...}}
     /// Write JSON serialization directly to any writer (zero allocation).
-    pub fn writeJsonTo(self: JoltInstruction, writer: anytype) !void {
+    pub fn writeJsonTo(self: JoltInstruction, writer: *std.Io.Writer) !void {
         if (self.variant == .NoOp) {
             try writer.writeAll("\"NoOp\"");
             return;

@@ -3,14 +3,15 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-pub const is_wasm = @import("zolt_pool").is_wasm;
+const zolt_pool = @import("zolt_pool");
+pub const is_wasm = zolt_pool.is_wasm;
 
 pub const verbose = false;
 pub const bench_timing = false;
 
-/// Platform timer — no-op stub on WASM, real timer on native using clock_gettime.
+/// Platform timer — no-op stub on WASM, real timer on native.
 pub const PlatformTimer = if (is_wasm) struct {
-    pub fn start() error{}!@This() {
+    pub fn init(_: std.Io) @This() {
         return .{};
     }
     pub fn read(_: @This()) u64 {
@@ -19,32 +20,12 @@ pub const PlatformTimer = if (is_wasm) struct {
     pub fn reset(_: *@This()) void {}
 } else MonotonicTimer;
 
-/// Minimal monotonic timer using the Zig 0.16 Io clock interface.
-/// Uses std.Io.Threaded.global_single_threaded — no libc dependency on Linux.
-pub const MonotonicTimer = struct {
-    start_ts: std.Io.Timestamp,
-
-    const io: std.Io = std.Io.Threaded.global_single_threaded.io();
-
-    pub fn start() error{}!MonotonicTimer {
-        return .{ .start_ts = std.Io.Timestamp.now(io, .boot) };
-    }
-
-    pub fn read(self: MonotonicTimer) u64 {
-        const now = std.Io.Timestamp.now(io, .boot);
-        const dur = self.start_ts.durationTo(now);
-        return @intCast(@max(0, dur.nanoseconds));
-    }
-
-    pub fn reset(self: *MonotonicTimer) void {
-        self.start_ts = std.Io.Timestamp.now(io, .boot);
-    }
-};
+/// Shared monotonic timer from zolt-pool — takes io: std.Io.
+pub const MonotonicTimer = zolt_pool.MonotonicTimer;
 
 /// Platform nanoTimestamp — returns 0 on WASM.
-pub fn nanoTimestamp() i128 {
+pub fn nanoTimestamp(io: std.Io) i128 {
     if (comptime is_wasm) return 0;
-    const io: std.Io = std.Io.Threaded.global_single_threaded.io();
     return std.Io.Timestamp.now(io, .boot).nanoseconds;
 }
 

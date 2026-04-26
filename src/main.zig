@@ -58,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
             }
 
             if (run_args.elf_path) |path| {
-                run_cmd.runEmulator(allocator, path, run_args.show_regs, run_args.show_trace, run_args.max_trace_steps, input_bytes_owned) catch |err| {
+                run_cmd.runEmulator(allocator, init.io, path, run_args.show_regs, run_args.show_trace, run_args.max_trace_steps, input_bytes_owned) catch |err| {
                     std.debug.print("Failed to run program: {s}\n", .{@errorName(err)});
                     std.process.exit(1);
                 };
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
             }
 
             if (prove_args.elf_path) |path| {
-                prove_cmd.runProver(allocator, path, prove_args.output_path.?, prove_args.srs_path, prove_args.preprocessing_path, input_bytes_owned) catch |err| {
+                prove_cmd.runProver(allocator, init.io, path, prove_args.output_path.?, prove_args.srs_path, prove_args.preprocessing_path, input_bytes_owned) catch |err| {
                     std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
                     std.process.exit(1);
                 };
@@ -130,7 +130,7 @@ pub fn main(init: std.process.Init) !void {
                 return;
             }
 
-            verify_cmd.runVerifier(allocator, verify_args.proof_path.?, verify_args.preprocessing_path.?) catch |err| {
+            verify_cmd.runVerifier(allocator, init.io, verify_args.proof_path.?, verify_args.preprocessing_path.?) catch |err| {
                 std.debug.print("Verification failed: {s}\n", .{@errorName(err)});
                 std.process.exit(1);
             };

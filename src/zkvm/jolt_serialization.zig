@@ -567,6 +567,7 @@ pub fn writeJoltProofToFile(
     proof: *const jolt_types.JoltProof(F, Commitment, Proof),
     path: []const u8,
     allocator: Allocator,
+    io: std.Io,
     writeCommitment: *const fn (*ArkworksSerializer(F), Commitment) anyerror!void,
     writeProof: *const fn (*ArkworksSerializer(F), Proof) anyerror!void,
 ) !void {
@@ -574,8 +575,6 @@ pub fn writeJoltProofToFile(
     defer serializer.deinit();
 
     try serializer.writeJoltProof(Commitment, Proof, proof, writeCommitment, writeProof);
-
-    const io = std.Io.Threaded.global_single_threaded.io();
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
 

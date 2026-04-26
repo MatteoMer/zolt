@@ -30,22 +30,8 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
 
-const MonotonicTimer = struct {
-    start_ns: u64,
-    pub fn start() error{}!MonotonicTimer {
-        return .{ .start_ns = clockNs() };
-    }
-    pub fn read(self: MonotonicTimer) u64 {
-        return clockNs() - self.start_ns;
-    }
-    pub fn reset(self: *MonotonicTimer) void {
-        self.start_ns = clockNs();
-    }
-    fn clockNs() u64 {
-        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
-        return @intCast(@max(0, std.Io.Timestamp.now(io, .boot).nanoseconds));
-    }
-};
+const MonotonicTimer = @import("zolt_pool").MonotonicTimer;
+const dory_io: std.Io = std.Io.Threaded.global_single_threaded.io();
 
 const Allocator = std.mem.Allocator;
 const pairing = @import("../../field/pairing.zig");
@@ -966,8 +952,7 @@ pub const DorySRS = struct {
     const CACHE_VERSION: u32 = 1;
 
     /// Save the full SRS (including prepared caches) to a file for fast reload.
-    pub fn saveToCache(self: *const DorySRS, path: []const u8) !void {
-        const io = std.Io.Threaded.global_single_threaded.io();
+    pub fn saveToCache(self: *const DorySRS, path: []const u8, io: std.Io) !void {
         const file = try std.Io.Dir.cwd().createFile(io, path, .{});
         defer file.close(io);
 
@@ -1001,8 +986,7 @@ pub const DorySRS = struct {
 
     /// Load the full SRS (including prepared caches) from a cache file.
     /// Returns null if file doesn't exist or is invalid.
-    pub fn loadFromCache(allocator: Allocator, path: []const u8) ?DorySRS {
-        const io = std.Io.Threaded.global_single_threaded.io();
+    pub fn loadFromCache(allocator: Allocator, path: []const u8, io: std.Io) ?DorySRS {
         const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
         defer file.close(io);
 
@@ -1262,8 +1246,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         /// - g2_count * 128 bytes: G2 points (arkworks uncompressed format)
         /// - 64 bytes: h1 (blinding G1 generator)
         /// - 128 bytes: h2 (blinding G2 generator)
-        pub fn loadFromFile(allocator: Allocator, path: []const u8) !SetupParams {
-            const io = std.Io.Threaded.global_single_threaded.io();
+        pub fn loadFromFile(allocator: Allocator, path: []const u8, io: std.Io) !SetupParams {
             const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
                 dbg("Failed to open SRS file: {s}\n", .{path});
                 return err;
@@ -1524,7 +1507,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         /// Setup with disk caching. Tries to load from ~/.cache/zolt/srs_v1_{log_size}.bin.
         /// On cache miss, generates SRS + prepared caches and writes to disk.
         /// On WASM, skips caching and generates SRS from scratch.
-        pub fn setupCached(allocator: Allocator, max_num_vars: usize, tp: ?*ThreadPool) !SetupParams {
+        pub fn setupCached(allocator: Allocator, max_num_vars: usize, tp: ?*ThreadPool, io: std.Io) !SetupParams {
             if (comptime is_wasm) {
                 // No filesystem on WASM — generate from scratch
                 var srs = try setup(allocator, max_num_vars);
@@ -1548,7 +1531,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const cache_path = path_buf[0..path_len];
 
             // Try loading from cache
-            if (DorySRS.loadFromCache(allocator, cache_path)) |srs| {
+            if (DorySRS.loadFromCache(allocator, cache_path, io)) |srs| {
                 if (srs.g1_vec.len > 0 and srs.g2_prepared != null) {
                     return srs;
                 }
@@ -1563,9 +1546,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             // Ensure cache directory exists and save
             if (std.fmt.bufPrint(&path_buf, "{s}/.cache/zolt", .{home})) |dir_path| {
-                const io_cache = std.Io.Threaded.global_single_threaded.io();
-                std.Io.Dir.cwd().createDirPath(io_cache, dir_path) catch {};
-                srs.saveToCache(cache_path) catch {};
+                std.Io.Dir.cwd().createDirPath(io, dir_path) catch {};
+                srs.saveToCache(cache_path, io) catch {};
             } else |_| {}
 
             return srs;
@@ -1589,7 +1571,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 return GT.one();
             }
 
-            var bench_timer = if (comptime dory_bench_timing) MonotonicTimer.start() catch unreachable else {};
+            var bench_timer = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
             const poly_len = evals.len;
             const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
@@ -1725,7 +1707,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
             }
 
-            var bench_t = if (comptime dory_bench_timing) MonotonicTimer.start() catch unreachable else {};
+            var bench_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
             const poly_len = evals.len;
             const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
@@ -1973,7 +1955,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const poly_size = k_chunk * trace_length;
             if (poly_size == 0) return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
 
-            var oh_bench_t = if (comptime dory_bench_timing) MonotonicTimer.start() catch unreachable else {};
+            var oh_bench_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
             const num_vars: usize = if (poly_size <= 1) 1 else std.math.log2_int(usize, poly_size);
             const sigma: usize = (num_vars + 1) / 2;
@@ -2694,7 +2676,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             tp: ?*ThreadPool,
             gpu_msm: ?*GpuMsmOps,
         ) !Proof {
-            var open_bench_t = if (comptime dory_bench_timing) MonotonicTimer.start() catch unreachable else {};
+            var open_bench_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
             // Compute nu/sigma from the polynomial's actual size, not from SRS params.
             // This matches Jolt's balanced_sigma_nu: sigma = ceil(num_vars/2), nu = num_vars - sigma
@@ -2717,7 +2699,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             defer if (row_commitments_opt == null) allocator.free(row_commitments);
 
             // Step 2: Compute evaluation vectors
-            var vmv_sub_t = if (comptime dory_bench_timing) MonotonicTimer.start() catch unreachable else {};
+            var vmv_sub_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
             const left_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(nu));
             defer allocator.free(left_vec);
             const right_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(sigma));
@@ -2979,7 +2961,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             while (round < num_rounds) : (round += 1) {
                 const n2 = current_len / 2;
-                var round_t = if (comptime dory_bench_timing) MonotonicTimer.start() catch unreachable else {};
+                var round_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
                 // BATCH NORMALIZE v1_proj → v1_affine, v2_proj → v2_affine for pairing inputs
                 // Overlap G1 and G2 normalizations using thread pool join
@@ -4068,7 +4050,7 @@ test "dory commitment with jolt srs - compare matrix layout" {
     const allocator = std.testing.allocator;
 
     // Load Jolt's SRS file if available
-    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin");
+    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin", dory_io);
     if (srs_result) |srs_const| {
         var srs = srs_const;
         defer srs.deinit();
@@ -4122,7 +4104,7 @@ test "dory commitment debug - compare intermediate values with jolt" {
     const DoryScheme = DoryCommitmentScheme(Fr);
 
     // Load Jolt's SRS file if available
-    const srs_result = DoryScheme.loadFromFile(allocator, "/tmp/jolt_dory_srs.bin");
+    const srs_result = DoryScheme.loadFromFile(allocator, "/tmp/jolt_dory_srs.bin", dory_io);
     if (srs_result) |srs_const| {
         var srs = srs_const;
         defer srs.deinit();
@@ -4391,7 +4373,7 @@ test "dory commitment debug - compare intermediate values with jolt" {
 test "g2 srs points from jolt file" {
     // Load SRS from file and check that G2 points are valid
     const allocator = std.testing.allocator;
-    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin");
+    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin", dory_io);
     if (srs_result) |*srs_mut| {
         var srs = srs_mut.*;
         defer srs.deinit();
@@ -4399,18 +4381,17 @@ test "g2 srs points from jolt file" {
         std.debug.print("\nSRS loaded: {} G1 points, {} G2 points\n", .{ srs.g1_vec.len, srs.g2_vec.len });
 
         // Write all G2 points compressed to a file
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const srs_file = std.Io.Dir.cwd().createFile(io, "/tmp/zolt_g2_srs_points.bin", .{}) catch return;
-        defer srs_file.close(io);
+        const srs_file = std.Io.Dir.cwd().createFile(dory_io, "/tmp/zolt_g2_srs_points.bin", .{}) catch return;
+        defer srs_file.close(dory_io);
 
         // First write the count
         var count_buf: [4]u8 = undefined;
         std.mem.writeInt(u32, &count_buf, @intCast(srs.g2_vec.len), .little);
-        srs_file.writeStreamingAll(io, &count_buf) catch return;
+        srs_file.writeStreamingAll(dory_io, &count_buf) catch return;
 
         for (srs.g2_vec, 0..) |g2, idx| {
             const compressed = compressG2(g2);
-            srs_file.writeStreamingAll(io, &compressed) catch return;
+            srs_file.writeStreamingAll(dory_io, &compressed) catch return;
             if (idx < 3) {
                 std.debug.print("G2 SRS[{}] compressed: ", .{idx});
                 for (compressed) |b| {
@@ -4433,9 +4414,9 @@ test "g2 srs points from jolt file" {
             std.debug.print("\n", .{});
 
             // Write this MSM result for Rust verification
-            const msm_file = std.Io.Dir.cwd().createFile(io, "/tmp/zolt_g2_msm_test.bin", .{}) catch return;
-            defer msm_file.close(io);
-            msm_file.writeStreamingAll(io, &msm_compressed) catch return;
+            const msm_file = std.Io.Dir.cwd().createFile(dory_io, "/tmp/zolt_g2_msm_test.bin", .{}) catch return;
+            defer msm_file.close(dory_io);
+            msm_file.writeStreamingAll(dory_io, &msm_compressed) catch return;
         }
     } else |_| {
         std.debug.print("Skipping SRS test - no file at /tmp/jolt_dory_srs.bin\n", .{});

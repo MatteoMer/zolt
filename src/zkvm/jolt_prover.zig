@@ -725,8 +725,8 @@ pub fn JoltProver(comptime F: type) type {
             jolt_proof.joint_opening_proof = joint_opening_proof;
 
             // Per-stage timing
-            var stage_timer = PlatformTimer.start() catch unreachable;
-            var bench_timer = PlatformTimer.start() catch unreachable;
+            var stage_timer = PlatformTimer.init(zkvm_debug.defaultIo());
+            var bench_timer = PlatformTimer.init(zkvm_debug.defaultIo());
 
             // Use pre-built compact/raw witnesses from config (built during witness gen,
             // outside Stage 1 timing).

@@ -93,8 +93,7 @@ pub const ELFLoader = struct {
     }
 
     /// Load from file path
-    pub fn loadFile(self: *ELFLoader, path: []const u8) !Program {
-        const io = std.Io.Threaded.global_single_threaded.io();
+    pub fn loadFile(self: *ELFLoader, io: std.Io, path: []const u8) !Program {
         const file = try std.Io.Dir.cwd().openFile(io, path, .{});
         defer file.close(io);
 

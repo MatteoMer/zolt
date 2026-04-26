@@ -129,7 +129,7 @@ pub const BytecodePCMapper = struct {
     }
 
     /// Serialize to arkworks format
-    pub fn serialize(self: *const BytecodePCMapper, writer: anytype) !void {
+    pub fn serialize(self: *const BytecodePCMapper, writer: *std.Io.Writer) !void {
         // Vec<Option<(usize, u16)>>
         // Length as u64
         try writer.writeInt(u64, @intCast(self.indices.items.len), .little);

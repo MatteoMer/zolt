@@ -18,7 +18,6 @@ const is_wasm = zkvm_debug.is_wasm;
 const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
 const platformGetenv = zkvm_debug.getenv;
-const platformNanoTimestamp = zkvm_debug.nanoTimestamp;
 const PlatformTimer = zkvm_debug.PlatformTimer;
 
 // Benchmark timing control - set to true to enable fine-grained timing
@@ -431,7 +430,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             r_cycle_val: []const F, // r_cycle_val from RamValEvaluation (n_cycle_vars elements)
         ) !Stage5Result(F) {
             // Start benchmark timer at the very beginning
-            var bench_overall_timer = if (comptime bench_timing) PlatformTimer.start() catch unreachable else {};
+            var bench_overall_timer = if (comptime bench_timing) PlatformTimer.init(zkvm_debug.defaultIo()) else {};
             _ = &bench_overall_timer;
 
             const regs_val_num_rounds = n_cycle_vars;
@@ -600,7 +599,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Sub-timer for init breakdown
-            var init_sub_timer = if (comptime bench_timing) PlatformTimer.start() catch unreachable else {};
+            var init_sub_timer = if (comptime bench_timing) PlatformTimer.init(zkvm_debug.defaultIo()) else {};
             _ = &init_sub_timer;
 
             // Compute LT polynomial using sqrt(T) decomposition
@@ -1932,7 +1931,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Benchmark timing accumulators
-            var bench_timer = if (comptime bench_timing) PlatformTimer.start() catch unreachable else {};
+            var bench_timer = if (comptime bench_timing) PlatformTimer.init(zkvm_debug.defaultIo()) else {};
             var bench_init_ns: u64 = 0;
             var bench_phase_transition_ns: u64 = 0;
             const bench_condense_ns: u64 = 0;
@@ -1963,7 +1962,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Lightweight phase timing (no per-round overhead, just phase boundaries)
             const s5_do_phase_timing = if (comptime is_wasm) false else (platformGetenv("ZOLT_BENCH") != null);
-            var s5_phase_timer: ?PlatformTimer = if (s5_do_phase_timing) PlatformTimer.start() catch null else null;
+            var s5_phase_timer: ?PlatformTimer = if (s5_do_phase_timing) PlatformTimer.init(zkvm_debug.defaultIo()) else null;
             var s5_addr_compute_ns: u64 = 0;
             var s5_addr_bind_ns: u64 = 0;
             var s5_phase_trans_ns: u64 = 0;

@@ -580,7 +580,7 @@ pub fn UniSkipFirstRoundProof(comptime F: type) type {
 
         /// Serialize in Jolt-compatible format
         /// All coefficients are written (no compression)
-        pub fn serialize(self: *const Self, writer: anytype, comptime writeFieldElement: fn (anytype, F) anyerror!void) !void {
+        pub fn serialize(self: *const Self, writer: *std.Io.Writer, comptime writeFieldElement: fn (anytype, F) anyerror!void) !void {
             // Write number of coefficients as u64
             try writer.writeInt(u64, @intCast(self.uni_poly.coeffs.len), .little);
 

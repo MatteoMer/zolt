@@ -10,25 +10,9 @@
 //! Build: zig build bench-scaling -Doptimize=ReleaseFast
 
 const std = @import("std");
-
-const MonotonicTimer = struct {
-    start_ns: u64,
-    pub fn start() error{}!MonotonicTimer {
-        return .{ .start_ns = clockNs() };
-    }
-    pub fn read(self: MonotonicTimer) u64 {
-        return clockNs() - self.start_ns;
-    }
-    pub fn reset(self: *MonotonicTimer) void {
-        self.start_ns = clockNs();
-    }
-    fn clockNs() u64 {
-        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
-        return @intCast(@max(0, std.Io.Timestamp.now(io, .boot).nanoseconds));
-    }
-};
-
 const zolt = @import("zolt");
+const MonotonicTimer = zolt.utils.MonotonicTimer;
+const bench_io: std.Io = std.Io.Threaded.global_single_threaded.io();
 const F = zolt.field.BN254Scalar;
 const ThreadPool = zolt.utils.ThreadPool;
 
@@ -51,7 +35,7 @@ fn forLightPar(tp: *ThreadPool, data: []u64, n: usize) f64 {
 
     for (0..WARMUP) |_| tp.parallelFor(n, ctx, func);
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..ITERS) |_| tp.parallelFor(n, ctx, func);
     return @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(ITERS)) / 1_000_000.0;
 }
@@ -62,7 +46,7 @@ fn forLightSeq(data: []u64, n: usize) f64 {
         v.* = v.* *% (v.* +% 1);
     };
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..ITERS) |_| for (d) |*v| {
         v.* = v.* *% (v.* +% 1);
     };
@@ -85,7 +69,7 @@ fn forHeavyPar(tp: *ThreadPool, a: []F, out: []F, scalar: F, n: usize) f64 {
 
     for (0..WARMUP) |_| tp.parallelFor(n, ctx, func);
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..ITERS) |_| tp.parallelFor(n, ctx, func);
     return @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(ITERS)) / 1_000_000.0;
 }
@@ -95,7 +79,7 @@ fn forHeavySeq(a: []const F, out: []F, scalar: F, n: usize) f64 {
         out[i] = a[i].mul(scalar);
     };
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..ITERS) |_| for (0..n) |i| {
         out[i] = a[i].mul(scalar);
     };
@@ -131,7 +115,7 @@ fn repeatedDispatchPar(tp: *ThreadPool, data: []const u64, n: usize) f64 {
             std.mem.doNotOptimizeAway(tp.parallelReduce(u64, n, @as(u64, 0), ctx, mapFn, redFn));
     }
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..RUNS) |_| {
         for (0..DISPATCH_COUNT) |_|
             std.mem.doNotOptimizeAway(tp.parallelReduce(u64, n, @as(u64, 0), ctx, mapFn, redFn));
@@ -151,7 +135,7 @@ fn repeatedDispatchSeq(data: []const u64, n: usize) f64 {
         }
     }
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..RUNS) |_| {
         for (0..DISPATCH_COUNT) |_| {
             var sum: u64 = 0;
@@ -184,7 +168,7 @@ fn multiArrayBindPar(tp: *ThreadPool, arrays: *[NUM_ARRAYS][]F, scalar: F) f64 {
 
     for (0..WARMUP) |_| tp.parallelForForce(NUM_ARRAYS, ctx, func);
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..ITERS) |_| tp.parallelForForce(NUM_ARRAYS, ctx, func);
     return @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(ITERS)) / 1_000_000.0;
 }
@@ -196,7 +180,7 @@ fn multiArrayBindSeq(arrays: *[NUM_ARRAYS][]F, scalar: F) f64 {
         }
     }
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..ITERS) |_| {
         for (arrays) |arr| {
             for (0..arr.len) |j| arr[j] = arr[j].mul(scalar);
@@ -230,7 +214,7 @@ fn nestedParallelPar(tp: *ThreadPool, arrays: *[NUM_ARRAYS][]F, scalar: F) f64 {
 
     for (0..WARMUP) |_| tp.parallelForForce(NUM_ARRAYS, ctx, outerFunc);
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..ITERS) |_| tp.parallelForForce(NUM_ARRAYS, ctx, outerFunc);
     return @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(ITERS)) / 1_000_000.0;
 }
@@ -241,7 +225,7 @@ fn nestedParallelPar(tp: *ThreadPool, arrays: *[NUM_ARRAYS][]F, scalar: F) f64 {
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
-    const tp = try ThreadPool.init(allocator);
+    const tp = try ThreadPool.init(allocator, bench_io);
     defer tp.deinit();
 
     std.debug.print("Scaling micro-benchmark (Zig)\n", .{});

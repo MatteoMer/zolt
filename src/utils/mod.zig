@@ -67,26 +67,22 @@ pub fn nextPowerOfTwo(n: usize) usize {
 
 pub const thread_pool = @import("zolt_pool").thread_pool;
 pub const ThreadPool = @import("zolt_pool").ThreadPool;
+pub const MonotonicTimer = @import("zolt_pool").MonotonicTimer;
 
-fn monotonicNs() i128 {
-    const io: std.Io = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Timestamp.now(io, .boot).nanoseconds;
-}
-
-/// Timer for profiling
+/// Timer for profiling (uses debug.nanoTimestamp with default Io)
 pub const Timer = struct {
     start_time: i128,
     name: []const u8,
 
     pub fn start(name: []const u8) Timer {
         return .{
-            .start_time = monotonicNs(),
+            .start_time = zkvm_debug.nanoTimestamp(zkvm_debug.defaultIo()),
             .name = name,
         };
     }
 
     pub fn stop(self: Timer) i128 {
-        const end_time = monotonicNs();
+        const end_time = zkvm_debug.nanoTimestamp(zkvm_debug.defaultIo());
         const elapsed = end_time - self.start_time;
         return elapsed;
     }
@@ -97,8 +93,6 @@ pub const Timer = struct {
         dbg("{s}: {d:.2}ms\n", .{ self.name, elapsed_ms });
     }
 };
-
-// ThreadPool re-exported from thread_pool.zig above
 
 /// Bit manipulation utilities
 pub const BitUtils = struct {
@@ -136,86 +130,31 @@ pub const BitUtils = struct {
     }
 };
 
-/// Simple slice-backed reader providing readInt/readByte/readAll/readSliceAll
-/// for use with `anytype` reader parameters in serialization code.
-/// Replaces the removed std.io.fixedBufferStream reader.
-pub const SliceReader = struct {
-    data: []const u8,
-    pos: usize = 0,
-
-    pub fn readInt(self: *SliceReader, comptime T: type, endian: std.builtin.Endian) !T {
-        const n = @divExact(@typeInfo(T).int.bits, 8);
-        if (self.pos + n > self.data.len) return error.EndOfStream;
-        const val = std.mem.readInt(T, self.data[self.pos..][0..n], endian);
-        self.pos += n;
-        return val;
-    }
-
-    pub fn readByte(self: *SliceReader) !u8 {
-        if (self.pos >= self.data.len) return error.EndOfStream;
-        const b = self.data[self.pos];
-        self.pos += 1;
-        return b;
-    }
-
-    pub fn readAll(self: *SliceReader, buf: []u8) !usize {
-        const available = @min(buf.len, self.data.len - self.pos);
-        @memcpy(buf[0..available], self.data[self.pos..][0..available]);
-        self.pos += available;
-        return available;
-    }
-
-    pub fn readSliceAll(self: *SliceReader, buf: []u8) !void {
-        if (self.pos + buf.len > self.data.len) return error.EndOfStream;
-        @memcpy(buf, self.data[self.pos..][0..buf.len]);
-        self.pos += buf.len;
-    }
-
-    pub fn writeAll(self: *SliceReader, buf: []const u8) !void {
-        // Compatibility shim: some code passes reader to writeAll (for readNoEof replacement)
-        return self.readSliceAll(@constCast(buf));
-    }
-};
-
-/// Serialization helpers for primitive types
+/// Serialization helpers for primitive types using std.Io.Writer / std.Io.Reader.
 pub const Serialize = struct {
-    /// Write a u64 in little-endian format
-    pub fn writeU64(writer: anytype, value: u64) !void {
-        var buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &buf, value, .little);
-        try writer.writeAll(&buf);
+    pub fn writeU64(writer: *std.Io.Writer, value: u64) !void {
+        try writer.writeInt(u64, value, .little);
     }
 
-    /// Read a u64 in little-endian format
-    pub fn readU64(reader: anytype) !u64 {
-        var buf: [8]u8 = undefined;
-        try reader.readSliceAll(&buf);
-        return std.mem.readInt(u64, &buf, .little);
+    pub fn readU64(reader: *std.Io.Reader) !u64 {
+        return try reader.takeInt(u64, .little);
     }
 
-    /// Write a u32 in little-endian format
-    pub fn writeU32(writer: anytype, value: u32) !void {
-        var buf: [4]u8 = undefined;
-        std.mem.writeInt(u32, &buf, value, .little);
-        try writer.writeAll(&buf);
+    pub fn writeU32(writer: *std.Io.Writer, value: u32) !void {
+        try writer.writeInt(u32, value, .little);
     }
 
-    /// Read a u32 in little-endian format
-    pub fn readU32(reader: anytype) !u32 {
-        var buf: [4]u8 = undefined;
-        try reader.readSliceAll(&buf);
-        return std.mem.readInt(u32, &buf, .little);
+    pub fn readU32(reader: *std.Io.Reader) !u32 {
+        return try reader.takeInt(u32, .little);
     }
 
-    /// Write a slice with length prefix
-    pub fn writeSlice(writer: anytype, data: []const u8) !void {
-        try writeU64(writer, data.len);
+    pub fn writeSlice(writer: *std.Io.Writer, data: []const u8) !void {
+        try writer.writeInt(u64, data.len, .little);
         try writer.writeAll(data);
     }
 
-    /// Read a slice with length prefix
-    pub fn readSlice(reader: anytype, allocator: Allocator) ![]u8 {
-        const len = try readU64(reader);
+    pub fn readSlice(reader: *std.Io.Reader, allocator: Allocator) ![]u8 {
+        const len = try reader.takeInt(u64, .little);
         const data = try allocator.alloc(u8, @intCast(len));
         try reader.readSliceAll(data);
         return data;

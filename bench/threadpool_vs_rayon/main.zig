@@ -5,25 +5,9 @@
 //! Run:   ./zig-out/bin/bench-tp
 
 const std = @import("std");
-
-const MonotonicTimer = struct {
-    start_ns: u64,
-    pub fn start() error{}!MonotonicTimer {
-        return .{ .start_ns = clockNs() };
-    }
-    pub fn read(self: MonotonicTimer) u64 {
-        return clockNs() - self.start_ns;
-    }
-    pub fn reset(self: *MonotonicTimer) void {
-        self.start_ns = clockNs();
-    }
-    fn clockNs() u64 {
-        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
-        return @intCast(@max(0, std.Io.Timestamp.now(io, .boot).nanoseconds));
-    }
-};
-
 const zolt = @import("zolt");
+const MonotonicTimer = zolt.utils.MonotonicTimer;
+const bench_io: std.Io = std.Io.Threaded.global_single_threaded.io();
 const F = zolt.field.BN254Scalar;
 const ThreadPool = zolt.utils.ThreadPool;
 const UnreducedProductAccum = zolt.field.UnreducedProductAccum;
@@ -60,7 +44,7 @@ fn benchParallelReduce(tp: *ThreadPool, a: []const F, b: []const F, half: usize)
         std.mem.doNotOptimizeAway(tp.parallelReduce([2]F, half, identity, ctx, mapFn, reduceFn));
     }
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..ITERS) |_| {
         std.mem.doNotOptimizeAway(tp.parallelReduce([2]F, half, identity, ctx, mapFn, reduceFn));
     }
@@ -80,7 +64,7 @@ fn benchSequential(a: []const F, b: []const F, half: usize) f64 {
         std.mem.doNotOptimizeAway(acc1.reduce());
     }
 
-    var timer = MonotonicTimer.start() catch unreachable;
+    var timer = MonotonicTimer.init(bench_io);
     for (0..ITERS) |_| {
         var acc0 = UnreducedProductAccum.zero();
         var acc1 = UnreducedProductAccum.zero();
@@ -97,7 +81,7 @@ fn benchSequential(a: []const F, b: []const F, half: usize) f64 {
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
-    const tp = try ThreadPool.init(allocator);
+    const tp = try ThreadPool.init(allocator, bench_io);
     defer tp.deinit();
 
     std.debug.print("ThreadPool micro-benchmark (Zig)\n", .{});

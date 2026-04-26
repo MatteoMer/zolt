@@ -15,6 +15,9 @@ const has_wasm_atomics = @import("zolt_pool").has_wasm_atomics;
 
 const allocator = if (is_wasm) std.heap.wasm_allocator else std.heap.page_allocator;
 
+/// Module-level Io for C FFI entry points (no Init available).
+const c_api_io: std.Io = std.Io.Threaded.global_single_threaded.io();
+
 // ── Opaque handle types ──────────────────────────────────────────────
 
 const ThreadPoolCtx = struct {
@@ -37,7 +40,7 @@ const ProofResult = struct {
 // ── Thread pool lifecycle ────────────────────────────────────────────
 
 export fn zolt_thread_pool_create() callconv(.c) ?*anyopaque {
-    const tp = zolt.utils.ThreadPool.init(allocator) catch return null;
+    const tp = zolt.utils.ThreadPool.init(allocator, c_api_io) catch return null;
     const ctx = allocator.create(ThreadPoolCtx) catch {
         tp.deinit();
         return null;
@@ -58,7 +61,7 @@ export fn zolt_thread_pool_destroy(handle: ?*anyopaque) callconv(.c) void {
 /// Returns null without atomics support or on allocation failure.
 export fn zolt_thread_pool_create_wasm(thread_count: u32) callconv(.c) ?*anyopaque {
     if (comptime has_wasm_atomics) {
-        const tp = zolt.utils.ThreadPool.initWithCount(allocator, thread_count) catch return null;
+        const tp = zolt.utils.ThreadPool.initWithCount(allocator, c_api_io, thread_count) catch return null;
         const ctx = allocator.create(ThreadPoolCtx) catch {
             tp.deinit();
             return null;
@@ -101,7 +104,7 @@ export fn zolt_load_elf(
     const path = path_ptr[0..path_len];
 
     var loader = zolt.host.ELFLoader.init(allocator);
-    const program = loader.loadFile(path) catch return null;
+    const program = loader.loadFile(c_api_io, path) catch return null;
 
     const ctx = allocator.create(LoadedElf) catch {
         var p = program;

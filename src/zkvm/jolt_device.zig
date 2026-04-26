@@ -74,43 +74,42 @@ pub const JoltDevice = struct {
 
     /// Deserialize from arkworks canonical format (from Jolt-generated file)
     pub fn deserialize(allocator: Allocator, data: []const u8) !Self {
-        const utils = @import("../utils/mod.zig");
-        var reader = utils.SliceReader{ .data = data };
+        var reader = std.Io.Reader.fixed(data);
 
         // Read inputs Vec<u8>: length (u64) + bytes
-        const inputs_len: usize = @intCast(try reader.readInt(u64, .little));
+        const inputs_len: usize = @intCast(try reader.takeInt(u64, .little));
         const inputs = try allocator.alloc(u8, inputs_len);
         errdefer allocator.free(inputs);
         if (inputs_len > 0) {
-            _ = try reader.readAll(inputs);
+            try reader.readSliceAll(inputs);
         }
 
         // Read trusted_advice Vec<u8>
-        const trusted_len: usize = @intCast(try reader.readInt(u64, .little));
+        const trusted_len: usize = @intCast(try reader.takeInt(u64, .little));
         const trusted_advice = try allocator.alloc(u8, trusted_len);
         errdefer allocator.free(trusted_advice);
         if (trusted_len > 0) {
-            _ = try reader.readAll(trusted_advice);
+            try reader.readSliceAll(trusted_advice);
         }
 
         // Read untrusted_advice Vec<u8>
-        const untrusted_len: usize = @intCast(try reader.readInt(u64, .little));
+        const untrusted_len: usize = @intCast(try reader.takeInt(u64, .little));
         const untrusted_advice = try allocator.alloc(u8, untrusted_len);
         errdefer allocator.free(untrusted_advice);
         if (untrusted_len > 0) {
-            _ = try reader.readAll(untrusted_advice);
+            try reader.readSliceAll(untrusted_advice);
         }
 
         // Read outputs Vec<u8>
-        const outputs_len: usize = @intCast(try reader.readInt(u64, .little));
+        const outputs_len: usize = @intCast(try reader.takeInt(u64, .little));
         const outputs = try allocator.alloc(u8, outputs_len);
         errdefer allocator.free(outputs);
         if (outputs_len > 0) {
-            _ = try reader.readAll(outputs);
+            try reader.readSliceAll(outputs);
         }
 
         // Read panic bool (1 byte)
-        const panic_val = (try reader.readByte()) != 0;
+        const panic_val = (try reader.takeByte()) != 0;
 
         // Read MemoryLayout
         const memory_layout = try MemoryLayout.deserialize(&reader);

@@ -8,23 +8,8 @@
 //!   }.call);
 
 const std = @import("std");
-
-const MonotonicTimer = struct {
-    start_ns: u64,
-    pub fn start() error{}!MonotonicTimer {
-        return .{ .start_ns = clockNs() };
-    }
-    pub fn read(self: MonotonicTimer) u64 {
-        return clockNs() - self.start_ns;
-    }
-    pub fn reset(self: *MonotonicTimer) void {
-        self.start_ns = clockNs();
-    }
-    fn clockNs() u64 {
-        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
-        return @intCast(@max(0, std.Io.Timestamp.now(io, .boot).nanoseconds));
-    }
-};
+const MonotonicTimer = @import("zolt").utils.MonotonicTimer;
+const bench_io: std.Io = std.Io.Threaded.global_single_threaded.io();
 
 const MAX_SAMPLES: usize = 101;
 
@@ -76,7 +61,7 @@ pub fn run(
     // --- Collect samples ---
     var samples: [MAX_SAMPLES]f64 = undefined;
     for (0..n) |s| {
-        var timer = MonotonicTimer.start() catch unreachable;
+        var timer = MonotonicTimer.init(bench_io);
         for (0..iters) |i| {
             sink = body(i);
         }

@@ -5,14 +5,14 @@ const zolt = @import("../root.zig");
 const debug = @import("../zkvm/debug.zig");
 const BN254Scalar = zolt.field.BN254Scalar;
 
-pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []const u8, srs_path: ?[]const u8, preprocessing_path: ?[]const u8, input_bytes: ?[]const u8) !void {
+pub fn runProver(allocator: std.mem.Allocator, io: std.Io, elf_path: []const u8, output_path: []const u8, srs_path: ?[]const u8, preprocessing_path: ?[]const u8, input_bytes: ?[]const u8) !void {
     std.debug.print("Zolt zkVM Prover\n", .{});
     std.debug.print("================\n\n", .{});
 
     // Load the ELF file
     std.debug.print("Loading ELF: {s}\n", .{elf_path});
     var loader = zolt.host.ELFLoader.init(allocator);
-    const program = loader.loadFile(elf_path) catch |err| {
+    const program = loader.loadFile(io, elf_path) catch |err| {
         return err;
     };
     defer {
@@ -26,12 +26,12 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
         std.debug.print("  Input bytes: {} bytes\n", .{inputs.len});
     }
 
-    var timer = debug.MonotonicTimer.start() catch return;
+    var timer = debug.MonotonicTimer.init(io);
 
     // Initialize prover
     std.debug.print("\n[1/2] Initializing prover...\n", .{});
 
-    const thread_pool = try zolt.utils.ThreadPool.init(allocator);
+    const thread_pool = try zolt.utils.ThreadPool.init(allocator, io);
     defer thread_pool.deinit();
 
     var prover_inst = zolt.zkvm.JoltProver(BN254Scalar).initWithThreadPool(allocator, thread_pool);
@@ -74,7 +74,6 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
     };
     defer allocator.free(jolt_bytes);
 
-    const io = std.Io.Threaded.global_single_threaded.io();
     std.debug.print("\nSaving proof to: {s}\n", .{output_path});
     const file = std.Io.Dir.cwd().createFile(io, output_path, .{}) catch |err| {
         std.debug.print("  Error creating output file: {}\n", .{err});
@@ -186,7 +185,7 @@ pub fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path
         std.debug.print("  Using SRS log_size={} from proof generation\n", .{proof_log_size});
         var srs = blk: {
             if (srs_path) |srs_file| {
-                if (DoryCommitmentScheme.loadFromFile(allocator, srs_file)) |loaded| {
+                if (DoryCommitmentScheme.loadFromFile(allocator, srs_file, io)) |loaded| {
                     break :blk loaded;
                 } else |_| {
                     std.debug.print("  Warning: Could not load SRS for verifier setup\n", .{});

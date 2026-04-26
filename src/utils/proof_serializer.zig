@@ -19,14 +19,14 @@ pub fn ProofSerializer(comptime F: type) type {
         pub const VERSION: u32 = 1;
 
         /// Serialize a field element to bytes (little-endian limbs)
-        pub fn serializeField(writer: anytype, value: F) !void {
+        pub fn serializeField(writer: *std.Io.Writer, value: F) !void {
             for (value.limbs) |limb| {
                 try Serialize.writeU64(writer, limb);
             }
         }
 
         /// Deserialize a field element from bytes
-        pub fn deserializeField(reader: anytype) !F {
+        pub fn deserializeField(reader: *std.Io.Reader) !F {
             var limbs: [4]u64 = undefined;
             for (&limbs) |*limb| {
                 limb.* = try Serialize.readU64(reader);
@@ -35,7 +35,7 @@ pub fn ProofSerializer(comptime F: type) type {
         }
 
         /// Serialize an array of field elements
-        pub fn serializeFieldArray(writer: anytype, values: []const F) !void {
+        pub fn serializeFieldArray(writer: *std.Io.Writer, values: []const F) !void {
             try Serialize.writeU64(writer, values.len);
             for (values) |value| {
                 try serializeField(writer, value);
@@ -43,7 +43,7 @@ pub fn ProofSerializer(comptime F: type) type {
         }
 
         /// Deserialize an array of field elements
-        pub fn deserializeFieldArray(reader: anytype, allocator: Allocator) ![]F {
+        pub fn deserializeFieldArray(reader: *std.Io.Reader, allocator: Allocator) ![]F {
             const len = try Serialize.readU64(reader);
             const values = try allocator.alloc(F, @intCast(len));
             errdefer allocator.free(values);
@@ -55,13 +55,13 @@ pub fn ProofSerializer(comptime F: type) type {
         }
 
         /// Write proof header with magic and version
-        pub fn writeHeader(writer: anytype) !void {
+        pub fn writeHeader(writer: *std.Io.Writer) !void {
             try writer.writeAll(&MAGIC);
             try Serialize.writeU32(writer, VERSION);
         }
 
         /// Read and verify proof header
-        pub fn readHeader(reader: anytype) !void {
+        pub fn readHeader(reader: *std.Io.Reader) !void {
             var magic: [4]u8 = undefined;
             try reader.readSliceAll(&magic);
             if (!std.mem.eql(u8, &magic, &MAGIC)) {
@@ -75,7 +75,7 @@ pub fn ProofSerializer(comptime F: type) type {
         }
 
         /// Serialize a sumcheck proof
-        pub fn serializeSumcheckProof(writer: anytype, proof: anytype) !void {
+        pub fn serializeSumcheckProof(writer: *std.Io.Writer, proof: anytype) !void {
             try serializeField(writer, proof.claim);
 
             try Serialize.writeU64(writer, proof.rounds.len);
@@ -90,7 +90,7 @@ pub fn ProofSerializer(comptime F: type) type {
         }
 
         /// Deserialize a sumcheck proof
-        pub fn deserializeSumcheckProof(reader: anytype, allocator: Allocator) !@import("zolt_arith").subprotocols.Sumcheck(F).Proof {
+        pub fn deserializeSumcheckProof(reader: *std.Io.Reader, allocator: Allocator) !@import("zolt_arith").subprotocols.Sumcheck(F).Proof {
             const poly_mod = @import("zolt_arith").poly;
             const subprotocols = @import("zolt_arith").subprotocols;
 
@@ -124,7 +124,7 @@ pub fn ProofSerializer(comptime F: type) type {
         }
 
         /// Serialize an R1CS/Spartan proof
-        pub fn serializeR1CSProof(writer: anytype, proof: anytype) !void {
+        pub fn serializeR1CSProof(writer: *std.Io.Writer, proof: anytype) !void {
             try serializeFieldArray(writer, proof.tau);
 
             try serializeSumcheckProof(writer, proof.sumcheck_proof);
@@ -137,7 +137,7 @@ pub fn ProofSerializer(comptime F: type) type {
         }
 
         /// Deserialize an R1CS/Spartan proof
-        pub fn deserializeR1CSProof(reader: anytype, allocator: Allocator) !@import("../zkvm/spartan/mod.zig").R1CSProof(F) {
+        pub fn deserializeR1CSProof(reader: *std.Io.Reader, allocator: Allocator) !@import("../zkvm/spartan/mod.zig").R1CSProof(F) {
             const spartan = @import("../zkvm/spartan/mod.zig");
 
             const tau = try deserializeFieldArray(reader, allocator);
@@ -166,23 +166,24 @@ pub fn ProofSerializer(comptime F: type) type {
             var list: std.ArrayListUnmanaged(u8) = .empty;
             errdefer list.deinit(allocator);
 
-            const writer = list.writer();
+            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &list);
 
-            try writeHeader(writer);
+            try writeHeader(&aw.writer);
 
             const ProofType = @TypeOf(proof);
             const type_info = @typeInfo(ProofType);
 
             if (type_info == .@"struct") {
                 if (@hasField(ProofType, "sumcheck_proof") and @hasField(ProofType, "tau")) {
-                    try writer.writeByte(1);
-                    try serializeR1CSProof(writer, proof);
+                    try aw.writer.writeByte(1);
+                    try serializeR1CSProof(&aw.writer, proof);
                 } else if (@hasField(ProofType, "rounds") and @hasField(ProofType, "claim")) {
-                    try writer.writeByte(0);
-                    try serializeSumcheckProof(writer, proof);
+                    try aw.writer.writeByte(0);
+                    try serializeSumcheckProof(&aw.writer, proof);
                 }
             }
 
+            list = aw.toArrayList();
             return list.toOwnedSlice();
         }
 
@@ -222,8 +223,7 @@ test "proof serialization" {
 
     try PS.serializeField(&writer, original);
 
-    const utils = @import("mod.zig");
-    var reader = utils.SliceReader{ .data = buffer[0..writer.end] };
+    var reader = std.Io.Reader.fixed(buffer[0..writer.end]);
     const deserialized = try PS.deserializeField(&reader);
 
     try std.testing.expect(original.eql(deserialized));
@@ -247,8 +247,7 @@ test "field array serialization" {
 
     try PS.serializeFieldArray(&writer, &original);
 
-    const utils = @import("mod.zig");
-    var reader = utils.SliceReader{ .data = buffer[0..writer.end] };
+    var reader = std.Io.Reader.fixed(buffer[0..writer.end]);
     const deserialized = try PS.deserializeFieldArray(&reader, allocator);
     defer allocator.free(deserialized);
 

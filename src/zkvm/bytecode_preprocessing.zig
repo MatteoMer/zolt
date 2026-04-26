@@ -2271,7 +2271,7 @@ pub const BytecodePreprocessing = struct {
     }
 
     /// Serialize to arkworks format
-    pub fn serialize(self: *const BytecodePreprocessing, allocator: Allocator, writer: anytype) !void {
+    pub fn serialize(self: *const BytecodePreprocessing, allocator: Allocator, writer: *std.Io.Writer) !void {
         // code_size as usize (u64)
         try writer.writeInt(u64, @intCast(self.code_size), .little);
 

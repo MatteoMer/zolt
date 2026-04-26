@@ -15,6 +15,8 @@ pub const parallelReduceOptional = helpers.parallelReduceOptional;
 pub const parallelReduceForceOptional = helpers.parallelReduceForceOptional;
 pub const parallelForOptional = helpers.parallelForOptional;
 
+pub const MonotonicTimer = @import("timer.zig").MonotonicTimer;
+
 test {
     _ = @import("thread_pool.zig");
     _ = @import("parallel_sort.zig");

@@ -25,7 +25,9 @@ const claim_reductions = @import("../claim_reductions/mod.zig");
 const jolt_prover = @import("../jolt_prover.zig");
 const sumcheck_helpers = @import("sumcheck_helpers.zig");
 const zkvm_debug = @import("../debug.zig");
-const platformNanoTimestamp = zkvm_debug.nanoTimestamp;
+fn platformNanoTimestamp() i128 {
+    return zkvm_debug.nanoTimestamp(zkvm_debug.defaultIo());
+}
 
 /// Generic Stage 2 sumcheck namespace, parameterised on the field.
 pub fn Stage2Sumcheck(comptime F: type) type {

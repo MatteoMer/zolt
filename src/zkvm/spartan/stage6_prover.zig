@@ -18,8 +18,11 @@ const is_wasm = zkvm_debug.is_wasm;
 const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
 const platformGetenv = zkvm_debug.getenv;
-const platformNanoTimestamp = zkvm_debug.nanoTimestamp;
 const PlatformTimer = zkvm_debug.PlatformTimer;
+
+fn platformNanoTimestamp() i128 {
+    return zkvm_debug.nanoTimestamp(zkvm_debug.defaultIo());
+}
 // Stage 6 fine-grained bench timing — set debug.bench_timing = true to compile in
 const s6_bench_timing = zkvm_debug.bench_timing;
 
@@ -542,7 +545,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // ====================================================================
             const bench_s6 = if (comptime s6_bench_timing) (platformGetenv("ZOLT_BENCH") != null) else false;
             const t_s6_overall_start = if (bench_s6) platformNanoTimestamp() else 0;
-            var s6_init_timer: if (s6_bench_timing) PlatformTimer else void = if (comptime s6_bench_timing) PlatformTimer.start() catch unreachable else {};
+            var s6_init_timer: if (s6_bench_timing) PlatformTimer else void = if (comptime s6_bench_timing) PlatformTimer.init(zkvm_debug.defaultIo()) else {};
 
             // Instance 5: IncClaimReduction (degree 2)
             // IncClaimReduction uses RAM r_cycles (not BytecodeReadRaf r_cycles)
@@ -937,7 +940,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             var s6_t_compute: if (s6_bench_timing) [6]u64 else void = if (comptime s6_bench_timing) [6]u64{ 0, 0, 0, 0, 0, 0 } else {};
             var s6_t_bind: if (s6_bench_timing) [6]u64 else void = if (comptime s6_bench_timing) [6]u64{ 0, 0, 0, 0, 0, 0 } else {};
             var s6_t_transcript: if (s6_bench_timing) u64 else void = if (comptime s6_bench_timing) @as(u64, 0) else {};
-            var s6_timer: if (s6_bench_timing) PlatformTimer else void = if (comptime s6_bench_timing) PlatformTimer.start() catch unreachable else {};
+            var s6_timer: if (s6_bench_timing) PlatformTimer else void = if (comptime s6_bench_timing) PlatformTimer.init(zkvm_debug.defaultIo()) else {};
 
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;

@@ -28,7 +28,9 @@ const is_wasm = zkvm_debug.is_wasm;
 const dbg = zkvm_debug.dbg;
 const debug_verbose = zkvm_debug.verbose;
 const platformGetenv = zkvm_debug.getenv;
-const platformNanoTimestamp = zkvm_debug.nanoTimestamp;
+fn platformNanoTimestamp() i128 {
+    return zkvm_debug.nanoTimestamp(zkvm_debug.defaultIo());
+}
 
 const Allocator = std.mem.Allocator;
 const ThreadPool = @import("zolt_pool").ThreadPool;

@@ -18,11 +18,9 @@ const impl = if (build_options.enable_verifier) struct {
         io_len: usize,
     ) callconv(.c) i32;
 
-    pub fn runVerifier(allocator: std.mem.Allocator, proof_path: []const u8, preprocessing_path: []const u8) !void {
+    pub fn runVerifier(allocator: std.mem.Allocator, io: std.Io, proof_path: []const u8, preprocessing_path: []const u8) !void {
         std.debug.print("Zolt zkVM Verifier\n", .{});
         std.debug.print("==================\n\n", .{});
-
-        const io = std.Io.Threaded.global_single_threaded.io();
 
         // Load preprocessing
         std.debug.print("Loading preprocessing: {s}\n", .{preprocessing_path});
@@ -90,7 +88,7 @@ const impl = if (build_options.enable_verifier) struct {
 
         // Call the Rust verifier
         std.debug.print("\nVerifying...\n", .{});
-        var timer = try debug.MonotonicTimer.start();
+        var timer = debug.MonotonicTimer.init(io);
 
         const io_ptr: ?[*]const u8 = if (io_bytes) |b| b.ptr else null;
         const io_len: usize = if (io_bytes) |b| b.len else 0;
@@ -124,7 +122,7 @@ const impl = if (build_options.enable_verifier) struct {
         }
     }
 } else struct {
-    pub fn runVerifier(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {
+    pub fn runVerifier(_: std.mem.Allocator, _: std.Io, _: []const u8, _: []const u8) !void {
         std.debug.print("Error: this build of zolt does not include the Jolt verifier.\n", .{});
         std.debug.print("Rebuild with `zig build -Dverify=true` to enable the verify command.\n", .{});
         return error.VerifierNotEnabled;

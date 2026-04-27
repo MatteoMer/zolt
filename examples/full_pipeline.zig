@@ -21,10 +21,8 @@ const MemoryConfig = zolt.common.MemoryConfig;
 const MemoryLayout = zolt.common.MemoryLayout;
 const constants = zolt.common.constants;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     std.debug.print("=== Zolt Full Pipeline Example ===\n\n", .{});
     std.debug.print("This demonstrates the complete ZK proving workflow.\n\n", .{});

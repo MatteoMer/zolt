@@ -33,7 +33,7 @@ pub fn parseHexBytesExact(comptime byte_len: usize, text: []const u8) ![byte_len
 
 pub fn parseCsvExact(comptime T: type, text: []const u8, allocator: std.mem.Allocator, parse_one: fn ([]const u8) anyerror!T) ![]T {
     var parts = std.mem.splitScalar(u8, std.mem.trim(u8, text, " \t\r"), ',');
-    var values: std.ArrayListUnmanaged(T) = .{};
+    var values: std.ArrayListUnmanaged(T) = .empty;
     errdefer values.deinit(allocator);
 
     while (parts.next()) |raw_part| {

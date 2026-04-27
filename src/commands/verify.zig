@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
+const debug = @import("../zkvm/debug.zig");
 
 const impl = if (build_options.enable_verifier) struct {
     extern fn jolt_verify(
@@ -17,21 +18,21 @@ const impl = if (build_options.enable_verifier) struct {
         io_len: usize,
     ) callconv(.c) i32;
 
-    pub fn runVerifier(allocator: std.mem.Allocator, proof_path: []const u8, preprocessing_path: []const u8) !void {
+    pub fn runVerifier(allocator: std.mem.Allocator, io: std.Io, proof_path: []const u8, preprocessing_path: []const u8) !void {
         std.debug.print("Zolt zkVM Verifier\n", .{});
         std.debug.print("==================\n\n", .{});
 
         // Load preprocessing
         std.debug.print("Loading preprocessing: {s}\n", .{preprocessing_path});
         const preprocessing_bytes = blk: {
-            const f = std.fs.cwd().openFile(preprocessing_path, .{}) catch |err| {
+            const f = std.Io.Dir.cwd().openFile(io, preprocessing_path, .{}) catch |err| {
                 std.debug.print("Error: failed to open preprocessing file: {s}\n", .{@errorName(err)});
                 return err;
             };
-            defer f.close();
-            const stat = try f.stat();
+            defer f.close(io);
+            const stat = try f.stat(io);
             const buf = try allocator.alloc(u8, stat.size);
-            const n = try f.readAll(buf);
+            const n = try f.readPositionalAll(io, buf, 0);
             if (n != stat.size) {
                 std.debug.print("Error: short read on preprocessing file\n", .{});
                 allocator.free(buf);
@@ -45,14 +46,14 @@ const impl = if (build_options.enable_verifier) struct {
         // Load proof
         std.debug.print("Loading proof: {s}\n", .{proof_path});
         const proof_bytes = blk: {
-            const f = std.fs.cwd().openFile(proof_path, .{}) catch |err| {
+            const f = std.Io.Dir.cwd().openFile(io, proof_path, .{}) catch |err| {
                 std.debug.print("Error: failed to open proof file: {s}\n", .{@errorName(err)});
                 return err;
             };
-            defer f.close();
-            const stat = try f.stat();
+            defer f.close(io);
+            const stat = try f.stat(io);
             const buf = try allocator.alloc(u8, stat.size);
-            const n = try f.readAll(buf);
+            const n = try f.readPositionalAll(io, buf, 0);
             if (n != stat.size) {
                 std.debug.print("Error: short read on proof file\n", .{});
                 allocator.free(buf);
@@ -70,11 +71,11 @@ const impl = if (build_options.enable_verifier) struct {
         var io_bytes: ?[]u8 = null;
         defer if (io_bytes) |b| allocator.free(b);
 
-        if (std.fs.cwd().openFile(io_path, .{})) |f| {
-            defer f.close();
-            const stat = try f.stat();
+        if (std.Io.Dir.cwd().openFile(io, io_path, .{})) |f| {
+            defer f.close(io);
+            const stat = try f.stat(io);
             const buf = try allocator.alloc(u8, stat.size);
-            const n = try f.readAll(buf);
+            const n = try f.readPositionalAll(io, buf, 0);
             if (n == stat.size) {
                 io_bytes = buf;
                 std.debug.print("  IO sidecar loaded: {s} ({} bytes)\n", .{ io_path, buf.len });
@@ -87,7 +88,7 @@ const impl = if (build_options.enable_verifier) struct {
 
         // Call the Rust verifier
         std.debug.print("\nVerifying...\n", .{});
-        var timer = try std.time.Timer.start();
+        var timer = debug.MonotonicTimer.init(io);
 
         const io_ptr: ?[*]const u8 = if (io_bytes) |b| b.ptr else null;
         const io_len: usize = if (io_bytes) |b| b.len else 0;
@@ -121,7 +122,7 @@ const impl = if (build_options.enable_verifier) struct {
         }
     }
 } else struct {
-    pub fn runVerifier(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {
+    pub fn runVerifier(_: std.mem.Allocator, _: std.Io, _: []const u8, _: []const u8) !void {
         std.debug.print("Error: this build of zolt does not include the Jolt verifier.\n", .{});
         std.debug.print("Rebuild with `zig build -Dverify=true` to enable the verify command.\n", .{});
         return error.VerifierNotEnabled;

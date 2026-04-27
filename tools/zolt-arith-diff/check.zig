@@ -24,7 +24,7 @@ const Transcript = transcripts.Blake2bTranscript(Fr);
 fn readFixtureAlloc(allocator: std.mem.Allocator, relative_path: []const u8) ![]u8 {
     const full_path = try std.fs.path.join(allocator, &.{ diff_config.fixtures_root, relative_path });
     defer allocator.free(full_path);
-    return std.fs.cwd().readFileAlloc(allocator, full_path, 16 * 1024 * 1024);
+    return std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), full_path, allocator, .limited(16 * 1024 * 1024));
 }
 
 fn fieldToBytesLE(comptime F: type, value: F) [32]u8 {

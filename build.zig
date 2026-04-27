@@ -49,7 +49,6 @@ pub fn build(b: *std.Build) void {
     });
     const zolt_arith_mod = zolt_arith_dep.module("zolt_arith");
 
-
     // Export zolt module for dependency consumption
     _ = b.addModule("zolt", .{
         .root_source_file = b.path("src/root.zig"),
@@ -211,7 +210,7 @@ pub fn build(b: *std.Build) void {
                 apple_silicon: bool,
                 cargo_step: *std.Build.Step,
             ) void {
-                c.addLibraryPath(.{ .cwd_relative = b_.pathFromRoot("jolt-verifier/target/release-staticlib") });
+                c.root_module.addLibraryPath(.{ .cwd_relative = b_.pathFromRoot("jolt-verifier/target/release-staticlib") });
                 c.root_module.linkSystemLibrary("jolt_verifier", .{ .preferred_link_mode = .static });
                 c.root_module.linkSystemLibrary("c", .{});
                 c.root_module.linkSystemLibrary("m", .{});

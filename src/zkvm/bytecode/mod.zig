@@ -33,7 +33,7 @@ pub const BytecodeTable = struct {
 
     pub fn init(allocator: Allocator) BytecodeTable {
         return .{
-            .entries = .{},
+            .entries = .empty,
             .allocator = allocator,
         };
     }

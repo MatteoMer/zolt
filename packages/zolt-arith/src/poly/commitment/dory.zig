@@ -30,6 +30,9 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
 
+const MonotonicTimer = @import("zolt_pool").MonotonicTimer;
+const dory_io: std.Io = std.Io.Threaded.global_single_threaded.io();
+
 const Allocator = std.mem.Allocator;
 const pairing = @import("../../field/pairing.zig");
 const field = @import("../../field/mod.zig");
@@ -949,109 +952,121 @@ pub const DorySRS = struct {
     const CACHE_VERSION: u32 = 1;
 
     /// Save the full SRS (including prepared caches) to a file for fast reload.
-    pub fn saveToCache(self: *const DorySRS, path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
+    pub fn saveToCache(self: *const DorySRS, path: []const u8, io: std.Io) !void {
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
 
         // Header
-        try file.writeAll(CACHE_MAGIC);
-        try file.writeAll(std.mem.asBytes(&std.mem.nativeToLittle(u32, CACHE_VERSION)));
+        try file.writeStreamingAll(io, CACHE_MAGIC);
+        try file.writeStreamingAll(io, std.mem.asBytes(&std.mem.nativeToLittle(u32, CACHE_VERSION)));
         const n: u64 = @intCast(self.g1_vec.len);
-        try file.writeAll(std.mem.asBytes(&std.mem.nativeToLittle(u64, n)));
-        try file.writeAll(std.mem.asBytes(&std.mem.nativeToLittle(u32, self.sigma)));
-        try file.writeAll(std.mem.asBytes(&std.mem.nativeToLittle(u32, self.nu)));
+        try file.writeStreamingAll(io, std.mem.asBytes(&std.mem.nativeToLittle(u64, n)));
+        try file.writeStreamingAll(io, std.mem.asBytes(&std.mem.nativeToLittle(u32, self.sigma)));
+        try file.writeStreamingAll(io, std.mem.asBytes(&std.mem.nativeToLittle(u32, self.nu)));
 
         // G1 points — raw memory
-        try file.writeAll(std.mem.sliceAsBytes(self.g1_vec));
+        try file.writeStreamingAll(io, std.mem.sliceAsBytes(self.g1_vec));
         // G2 points — raw memory
-        try file.writeAll(std.mem.sliceAsBytes(self.g2_vec));
+        try file.writeStreamingAll(io, std.mem.sliceAsBytes(self.g2_vec));
         // G2Prepared
         if (self.g2_prepared) |prep| {
-            try file.writeAll(&[_]u8{1});
-            try file.writeAll(std.mem.sliceAsBytes(prep));
+            try file.writeStreamingAll(io, &[_]u8{1});
+            try file.writeStreamingAll(io, std.mem.sliceAsBytes(prep));
         } else {
-            try file.writeAll(&[_]u8{0});
+            try file.writeStreamingAll(io, &[_]u8{0});
         }
         // G2PreparedAffine
         if (self.g2_prepared_affine) |affine| {
-            try file.writeAll(&[_]u8{1});
-            try file.writeAll(std.mem.sliceAsBytes(affine));
+            try file.writeStreamingAll(io, &[_]u8{1});
+            try file.writeStreamingAll(io, std.mem.sliceAsBytes(affine));
         } else {
-            try file.writeAll(&[_]u8{0});
+            try file.writeStreamingAll(io, &[_]u8{0});
         }
     }
 
     /// Load the full SRS (including prepared caches) from a cache file.
     /// Returns null if file doesn't exist or is invalid.
-    pub fn loadFromCache(allocator: Allocator, path: []const u8) ?DorySRS {
-        const file = std.fs.cwd().openFile(path, .{}) catch return null;
-        defer file.close();
+    pub fn loadFromCache(allocator: Allocator, path: []const u8, io: std.Io) ?DorySRS {
+        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+        defer file.close(io);
+
+        var offset: u64 = 0;
 
         // Validate header
         var magic: [4]u8 = undefined;
-        _ = file.readAll(&magic) catch return null;
+        _ = file.readPositionalAll(io, &magic, offset) catch return null;
+        offset += @sizeOf(@TypeOf(magic));
         if (!std.mem.eql(u8, &magic, CACHE_MAGIC)) return null;
         var ver_buf: [4]u8 = undefined;
-        _ = file.readAll(&ver_buf) catch return null;
+        _ = file.readPositionalAll(io, &ver_buf, offset) catch return null;
+        offset += @sizeOf(@TypeOf(ver_buf));
         if (std.mem.readInt(u32, &ver_buf, .little) != CACHE_VERSION) return null;
         var n_buf: [8]u8 = undefined;
-        _ = file.readAll(&n_buf) catch return null;
+        _ = file.readPositionalAll(io, &n_buf, offset) catch return null;
+        offset += @sizeOf(@TypeOf(n_buf));
         const n: usize = @intCast(std.mem.readInt(u64, &n_buf, .little));
         var sig_buf: [4]u8 = undefined;
-        _ = file.readAll(&sig_buf) catch return null;
+        _ = file.readPositionalAll(io, &sig_buf, offset) catch return null;
+        offset += @sizeOf(@TypeOf(sig_buf));
         const sigma: u32 = std.mem.readInt(u32, &sig_buf, .little);
         var nu_buf: [4]u8 = undefined;
-        _ = file.readAll(&nu_buf) catch return null;
+        _ = file.readPositionalAll(io, &nu_buf, offset) catch return null;
+        offset += @sizeOf(@TypeOf(nu_buf));
         const nu: u32 = std.mem.readInt(u32, &nu_buf, .little);
 
         // G1 points
         const g1_vec = allocator.alloc(G1Point, n) catch return null;
-        _ = file.readAll(std.mem.sliceAsBytes(g1_vec)) catch {
+        _ = file.readPositionalAll(io, std.mem.sliceAsBytes(g1_vec), offset) catch {
             allocator.free(g1_vec);
             return null;
         };
+        offset += std.mem.sliceAsBytes(g1_vec).len;
         // G2 points
         const g2_vec = allocator.alloc(G2Point, n) catch {
             allocator.free(g1_vec);
             return null;
         };
-        _ = file.readAll(std.mem.sliceAsBytes(g2_vec)) catch {
+        _ = file.readPositionalAll(io, std.mem.sliceAsBytes(g2_vec), offset) catch {
             allocator.free(g1_vec);
             allocator.free(g2_vec);
             return null;
         };
+        offset += std.mem.sliceAsBytes(g2_vec).len;
 
         // G2Prepared (optional)
         var g2_prepared: ?[]G2Prepared = null;
         var flag_buf: [1]u8 = undefined;
-        _ = file.readAll(&flag_buf) catch {
+        _ = file.readPositionalAll(io, &flag_buf, offset) catch {
             allocator.free(g1_vec);
             allocator.free(g2_vec);
             return null;
         };
+        offset += @sizeOf(@TypeOf(flag_buf));
         if (flag_buf[0] == 1) {
             const prep = allocator.alloc(G2Prepared, n) catch {
                 allocator.free(g1_vec);
                 allocator.free(g2_vec);
                 return null;
             };
-            _ = file.readAll(std.mem.sliceAsBytes(prep)) catch {
+            _ = file.readPositionalAll(io, std.mem.sliceAsBytes(prep), offset) catch {
                 allocator.free(prep);
                 allocator.free(g1_vec);
                 allocator.free(g2_vec);
                 return null;
             };
+            offset += std.mem.sliceAsBytes(prep).len;
             g2_prepared = prep;
         }
 
         // G2PreparedAffine (optional)
         var g2_prepared_affine: ?[]G2PreparedAffine = null;
-        _ = file.readAll(&flag_buf) catch {
+        _ = file.readPositionalAll(io, &flag_buf, offset) catch {
             allocator.free(g1_vec);
             allocator.free(g2_vec);
             if (g2_prepared) |p| allocator.free(p);
             return null;
         };
+        offset += @sizeOf(@TypeOf(flag_buf));
         if (flag_buf[0] == 1) {
             const affine = allocator.alloc(G2PreparedAffine, n) catch {
                 allocator.free(g1_vec);
@@ -1059,13 +1074,14 @@ pub const DorySRS = struct {
                 if (g2_prepared) |p| allocator.free(p);
                 return null;
             };
-            _ = file.readAll(std.mem.sliceAsBytes(affine)) catch {
+            _ = file.readPositionalAll(io, std.mem.sliceAsBytes(affine), offset) catch {
                 allocator.free(affine);
                 allocator.free(g1_vec);
                 allocator.free(g2_vec);
                 if (g2_prepared) |p| allocator.free(p);
                 return null;
             };
+            offset += std.mem.sliceAsBytes(affine).len;
             g2_prepared_affine = affine;
         }
 
@@ -1230,23 +1246,27 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         /// - g2_count * 128 bytes: G2 points (arkworks uncompressed format)
         /// - 64 bytes: h1 (blinding G1 generator)
         /// - 128 bytes: h2 (blinding G2 generator)
-        pub fn loadFromFile(allocator: Allocator, path: []const u8) !SetupParams {
-            const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        pub fn loadFromFile(allocator: Allocator, path: []const u8, io: std.Io) !SetupParams {
+            const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
                 dbg("Failed to open SRS file: {s}\n", .{path});
                 return err;
             };
-            defer file.close();
+            defer file.close(io);
+
+            var offset: u64 = 0;
 
             // Read and verify header
             var header: [16]u8 = undefined;
-            _ = try file.readAll(&header);
+            _ = try file.readPositionalAll(io, &header, offset);
+            offset += @sizeOf(@TypeOf(header));
             if (!std.mem.eql(u8, &header, "JOLT_DORY_SRS_V1")) {
                 return error.InvalidSrsFormat;
             }
 
             // Read max_num_vars
             var num_vars_bytes: [8]u8 = undefined;
-            _ = try file.readAll(&num_vars_bytes);
+            _ = try file.readPositionalAll(io, &num_vars_bytes, offset);
+            offset += @sizeOf(@TypeOf(num_vars_bytes));
             const max_num_vars = std.mem.readInt(u64, &num_vars_bytes, .little);
 
             // Calculate matrix dimensions
@@ -1255,7 +1275,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             // Read G1 count and points
             var g1_count_bytes: [8]u8 = undefined;
-            _ = try file.readAll(&g1_count_bytes);
+            _ = try file.readPositionalAll(io, &g1_count_bytes, offset);
+            offset += @sizeOf(@TypeOf(g1_count_bytes));
             const g1_count = std.mem.readInt(u64, &g1_count_bytes, .little);
 
             const g1_vec = try allocator.alloc(G1Point, @intCast(g1_count));
@@ -1263,7 +1284,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             for (g1_vec, 0..) |*g1, idx| {
                 var buf: [64]u8 = undefined;
-                _ = try file.readAll(&buf);
+                _ = try file.readPositionalAll(io, &buf, offset);
+                offset += @sizeOf(@TypeOf(buf));
                 // Debug: print raw bytes for first few points
                 if (idx < 4) {
                     dbg("G1[{}] raw y bytes from file: {x}\n", .{ idx, buf[32..48].* });
@@ -1274,7 +1296,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             // Read G2 count and points
             var g2_count_bytes: [8]u8 = undefined;
-            _ = try file.readAll(&g2_count_bytes);
+            _ = try file.readPositionalAll(io, &g2_count_bytes, offset);
+            offset += @sizeOf(@TypeOf(g2_count_bytes));
             const g2_count = std.mem.readInt(u64, &g2_count_bytes, .little);
 
             const g2_vec = try allocator.alloc(G2Point, @intCast(g2_count));
@@ -1282,18 +1305,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             for (g2_vec) |*g2| {
                 var buf: [128]u8 = undefined;
-                _ = try file.readAll(&buf);
+                _ = try file.readPositionalAll(io, &buf, offset);
+                offset += @sizeOf(@TypeOf(buf));
                 // Parse arkworks uncompressed G2 format (128 bytes: x, y as Fp2 in LE)
                 g2.* = parseG2Uncompressed(&buf);
             }
 
             // Read blinding generators h1 (G1, 64 bytes) and h2 (G2, 128 bytes)
             var h1_buf: [64]u8 = undefined;
-            _ = try file.readAll(&h1_buf);
+            _ = try file.readPositionalAll(io, &h1_buf, offset);
+            offset += @sizeOf(@TypeOf(h1_buf));
             const h1 = parseG1Uncompressed(&h1_buf);
 
             var h2_buf: [128]u8 = undefined;
-            _ = try file.readAll(&h2_buf);
+            _ = try file.readPositionalAll(io, &h2_buf, offset);
+            offset += @sizeOf(@TypeOf(h2_buf));
             const h2 = parseG2Uncompressed(&h2_buf);
 
             return SetupParams{
@@ -1481,7 +1507,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         /// Setup with disk caching. Tries to load from ~/.cache/zolt/srs_v1_{log_size}.bin.
         /// On cache miss, generates SRS + prepared caches and writes to disk.
         /// On WASM, skips caching and generates SRS from scratch.
-        pub fn setupCached(allocator: Allocator, max_num_vars: usize, tp: ?*ThreadPool) !SetupParams {
+        pub fn setupCached(allocator: Allocator, max_num_vars: usize, tp: ?*ThreadPool, io: std.Io) !SetupParams {
             if (comptime is_wasm) {
                 // No filesystem on WASM — generate from scratch
                 var srs = try setup(allocator, max_num_vars);
@@ -1491,12 +1517,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             // Build cache path: ~/.cache/zolt/srs_v1_<log_size>.bin
             var path_buf: [256]u8 = undefined;
-            const home = std.posix.getenv("HOME") orelse "/tmp";
+            const home = blk: {
+                const block = std.Io.Threaded.global_single_threaded.environ.process_environ.block;
+                for (@as([:null]const ?[*:0]const u8, block.slice)) |entry_opt| {
+                    const entry = std.mem.span(entry_opt orelse continue);
+                    if (entry.len > 5 and entry[4] == '=' and std.mem.eql(u8, entry[0..4], "HOME")) {
+                        break :blk entry[5..];
+                    }
+                }
+                break :blk "/tmp";
+            };
             const path_len = (std.fmt.bufPrint(&path_buf, "{s}/.cache/zolt/srs_v1_{d}.bin", .{ home, max_num_vars }) catch return setup(allocator, max_num_vars)).len;
             const cache_path = path_buf[0..path_len];
 
             // Try loading from cache
-            if (DorySRS.loadFromCache(allocator, cache_path)) |srs| {
+            if (DorySRS.loadFromCache(allocator, cache_path, io)) |srs| {
                 if (srs.g1_vec.len > 0 and srs.g2_prepared != null) {
                     return srs;
                 }
@@ -1511,8 +1546,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             // Ensure cache directory exists and save
             if (std.fmt.bufPrint(&path_buf, "{s}/.cache/zolt", .{home})) |dir_path| {
-                std.fs.cwd().makePath(dir_path) catch {};
-                srs.saveToCache(cache_path) catch {};
+                std.Io.Dir.cwd().createDirPath(io, dir_path) catch {};
+                srs.saveToCache(cache_path, io) catch {};
             } else |_| {}
 
             return srs;
@@ -1536,7 +1571,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 return GT.one();
             }
 
-            var bench_timer = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+            var bench_timer = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
             const poly_len = evals.len;
             const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
@@ -1672,7 +1707,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
             }
 
-            var bench_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+            var bench_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
             const poly_len = evals.len;
             const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
@@ -1920,7 +1955,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const poly_size = k_chunk * trace_length;
             if (poly_size == 0) return .{ .commitment = GT.one(), .row_commitments = &[_]G1Point{} };
 
-            var oh_bench_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+            var oh_bench_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
             const num_vars: usize = if (poly_size <= 1) 1 else std.math.log2_int(usize, poly_size);
             const sigma: usize = (num_vars + 1) / 2;
@@ -2641,7 +2676,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             tp: ?*ThreadPool,
             gpu_msm: ?*GpuMsmOps,
         ) !Proof {
-            var open_bench_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+            var open_bench_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
             // Compute nu/sigma from the polynomial's actual size, not from SRS params.
             // This matches Jolt's balanced_sigma_nu: sigma = ceil(num_vars/2), nu = num_vars - sigma
@@ -2664,7 +2699,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             defer if (row_commitments_opt == null) allocator.free(row_commitments);
 
             // Step 2: Compute evaluation vectors
-            var vmv_sub_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+            var vmv_sub_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
             const left_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(nu));
             defer allocator.free(left_vec);
             const right_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(sigma));
@@ -2776,8 +2811,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     }
                     break :blk2 msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], null);
                 } else msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..num_cols], v_vec[0..num_cols], null),
-                if (gpu_msm) |gpu|
-                blk2: {
+                if (gpu_msm) |gpu| blk2: {
                     if (e1_bases.len >= 64) {
                         break :blk2 gpu.computeSingleMsm(e1_bases, left_vec, allocator) catch
                             msm.MSM(F, Fp).computeWithPool(e1_bases, left_vec, null);
@@ -2927,7 +2961,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             while (round < num_rounds) : (round += 1) {
                 const n2 = current_len / 2;
-                var round_t = if (comptime dory_bench_timing) std.time.Timer.start() catch unreachable else {};
+                var round_t = if (comptime dory_bench_timing) MonotonicTimer.init(dory_io) else {};
 
                 // BATCH NORMALIZE v1_proj → v1_affine, v2_proj → v2_affine for pairing inputs
                 // Overlap G1 and G2 normalizations using thread pool join
@@ -3007,8 +3041,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                             }
                             break :blk msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], null);
                         } else msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[0..n2], null),
-                        if (gpu_msm) |gpu|
-                        blk: {
+                        if (gpu_msm) |gpu| blk: {
                             if (n2 >= 64) {
                                 break :blk gpu.computeSingleMsm(params.g1_vec[0..n2], v_vec[n2..current_len], allocator) catch
                                     msm.MSM(F, Fp).computeWithPool(params.g1_vec[0..n2], v_vec[n2..current_len], null);
@@ -3172,10 +3205,11 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 if (comptime debug_verbose) {
                     if (round == 0) {
                         const debug_e2 = compressG2(e2_beta);
-                        const debug_file = std.fs.cwd().createFile("/tmp/zolt_dory_e2_beta_round0.bin", .{}) catch null;
+                        const io_dbg = std.Io.Threaded.global_single_threaded.io();
+                        const debug_file = std.Io.Dir.cwd().createFile(io_dbg, "/tmp/zolt_dory_e2_beta_round0.bin", .{}) catch null;
                         if (debug_file) |f| {
-                            f.writeAll(&debug_e2) catch {};
-                            f.close();
+                            f.writeStreamingAll(io_dbg, &debug_e2) catch {};
+                            f.close(io_dbg);
                         }
                         dbg("[DORY] e2_beta round 0: current_len={}, g2_vec_len={}\n", .{ current_len, params.g2_vec.len });
                         dbg("[DORY] e2_beta compressed: ", .{});
@@ -3337,8 +3371,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                         }
                         break :blk2 msm.MSM(F, Fp).computeWithPool(v1_affine[0..n2], s2_work[n2..current_len], ThreadPool.getPool());
                     } else msm.MSM(F, Fp).computeWithPool(v1_affine[0..n2], s2_work[n2..current_len], ThreadPool.getPool()),
-                    if (gpu_msm) |gpu|
-                    blk2: {
+                    if (gpu_msm) |gpu| blk2: {
                         if (n2 >= 64) {
                             break :blk2 gpu.computeSingleMsm(v1_affine[n2..current_len], s2_work[0..n2], allocator) catch
                                 msm.MSM(F, Fp).computeWithPool(v1_affine[n2..current_len], s2_work[0..n2], ThreadPool.getPool());
@@ -4017,7 +4050,7 @@ test "dory commitment with jolt srs - compare matrix layout" {
     const allocator = std.testing.allocator;
 
     // Load Jolt's SRS file if available
-    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin");
+    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin", dory_io);
     if (srs_result) |srs_const| {
         var srs = srs_const;
         defer srs.deinit();
@@ -4071,7 +4104,7 @@ test "dory commitment debug - compare intermediate values with jolt" {
     const DoryScheme = DoryCommitmentScheme(Fr);
 
     // Load Jolt's SRS file if available
-    const srs_result = DoryScheme.loadFromFile(allocator, "/tmp/jolt_dory_srs.bin");
+    const srs_result = DoryScheme.loadFromFile(allocator, "/tmp/jolt_dory_srs.bin", dory_io);
     if (srs_result) |srs_const| {
         var srs = srs_const;
         defer srs.deinit();
@@ -4340,7 +4373,7 @@ test "dory commitment debug - compare intermediate values with jolt" {
 test "g2 srs points from jolt file" {
     // Load SRS from file and check that G2 points are valid
     const allocator = std.testing.allocator;
-    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin");
+    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin", dory_io);
     if (srs_result) |*srs_mut| {
         var srs = srs_mut.*;
         defer srs.deinit();
@@ -4348,17 +4381,17 @@ test "g2 srs points from jolt file" {
         std.debug.print("\nSRS loaded: {} G1 points, {} G2 points\n", .{ srs.g1_vec.len, srs.g2_vec.len });
 
         // Write all G2 points compressed to a file
-        const srs_file = std.fs.cwd().createFile("/tmp/zolt_g2_srs_points.bin", .{}) catch return;
-        defer srs_file.close();
+        const srs_file = std.Io.Dir.cwd().createFile(dory_io, "/tmp/zolt_g2_srs_points.bin", .{}) catch return;
+        defer srs_file.close(dory_io);
 
         // First write the count
         var count_buf: [4]u8 = undefined;
         std.mem.writeInt(u32, &count_buf, @intCast(srs.g2_vec.len), .little);
-        srs_file.writeAll(&count_buf) catch return;
+        srs_file.writeStreamingAll(dory_io, &count_buf) catch return;
 
         for (srs.g2_vec, 0..) |g2, idx| {
             const compressed = compressG2(g2);
-            srs_file.writeAll(&compressed) catch return;
+            srs_file.writeStreamingAll(dory_io, &compressed) catch return;
             if (idx < 3) {
                 std.debug.print("G2 SRS[{}] compressed: ", .{idx});
                 for (compressed) |b| {
@@ -4381,9 +4414,9 @@ test "g2 srs points from jolt file" {
             std.debug.print("\n", .{});
 
             // Write this MSM result for Rust verification
-            const msm_file = std.fs.cwd().createFile("/tmp/zolt_g2_msm_test.bin", .{}) catch return;
-            defer msm_file.close();
-            msm_file.writeAll(&msm_compressed) catch return;
+            const msm_file = std.Io.Dir.cwd().createFile(dory_io, "/tmp/zolt_g2_msm_test.bin", .{}) catch return;
+            defer msm_file.close(dory_io);
+            msm_file.writeStreamingAll(dory_io, &msm_compressed) catch return;
         }
     } else |_| {
         std.debug.print("Skipping SRS test - no file at /tmp/jolt_dory_srs.bin\n", .{});

@@ -78,9 +78,9 @@ pub const BytecodePreprocessing = struct {
     pub fn init(allocator: Allocator) BytecodePreprocessing {
         return .{
             .code_size = 0,
-            .bytecode = .{},
+            .bytecode = .empty,
             .pc_map = BytecodePCMapper.init(allocator),
-            .raw_words = .{},
+            .raw_words = .empty,
             .entry_address = 0,
             .allocator = allocator,
         };
@@ -2271,7 +2271,7 @@ pub const BytecodePreprocessing = struct {
     }
 
     /// Serialize to arkworks format
-    pub fn serialize(self: *const BytecodePreprocessing, allocator: Allocator, writer: anytype) !void {
+    pub fn serialize(self: *const BytecodePreprocessing, allocator: Allocator, writer: *std.Io.Writer) !void {
         // code_size as usize (u64)
         try writer.writeInt(u64, @intCast(self.code_size), .little);
 
@@ -2280,13 +2280,15 @@ pub const BytecodePreprocessing = struct {
         try writer.writeInt(u64, @intCast(self.bytecode.items.len), .little);
 
         // Reuse a single buffer for JSON serialization to avoid per-instruction allocation
-        var json_buf = std.ArrayListUnmanaged(u8){};
+        var json_buf = std.ArrayListUnmanaged(u8).empty;
         defer json_buf.deinit(allocator);
         try json_buf.ensureTotalCapacity(allocator, 256);
 
         for (self.bytecode.items) |instr| {
             json_buf.clearRetainingCapacity();
-            try instr.writeJsonTo(json_buf.writer(allocator));
+            var json_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_buf);
+            try instr.writeJsonTo(&json_aw.writer);
+            json_buf = json_aw.toArrayList();
             try writer.writeInt(u64, @intCast(json_buf.items.len), .little);
             try writer.writeAll(json_buf.items);
         }

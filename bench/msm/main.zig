@@ -3,6 +3,8 @@
 /// Outputs machine-readable [MSM-BENCH] lines for comparison with arkworks.
 const std = @import("std");
 const zolt = @import("zolt");
+const MonotonicTimer = zolt.utils.MonotonicTimer;
+const bench_io: std.Io = std.Io.Threaded.global_single_threaded.io();
 const field = zolt.field;
 const msm_mod = zolt.msm;
 const pairing = field.pairing;
@@ -84,7 +86,7 @@ fn benchMsmG1(bases: []const G1Affine, scalars: []const Fr, tp: ?*ThreadPool) f6
     var total_ns: u64 = 0;
     var iters: u64 = 0;
     while (iters < MIN_ITERS or total_ns < MIN_TIME_NS) {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = MonotonicTimer.init(bench_io);
         _ = G1MSM.computeWithPool(bases, scalars, tp);
         total_ns += timer.read();
         iters += 1;
@@ -102,7 +104,7 @@ fn benchMsmG1I128(bases: []const G1Affine, scalars: []const i128, tp: ?*ThreadPo
     var total_ns: u64 = 0;
     var iters: u64 = 0;
     while (iters < MIN_ITERS or total_ns < MIN_TIME_NS) {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = MonotonicTimer.init(bench_io);
         _ = G1MSM.computeI128(bases, scalars, tp);
         total_ns += timer.read();
         iters += 1;
@@ -120,7 +122,7 @@ fn benchMsmG2(bases: []const G2Point, scalars: []const Fr, tp: ?*ThreadPool) f64
     var total_ns: u64 = 0;
     var iters: u64 = 0;
     while (iters < MIN_ITERS or total_ns < MIN_TIME_NS) {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = MonotonicTimer.init(bench_io);
         _ = dory.msmG2Bench(Fr, bases, scalars, tp);
         total_ns += timer.read();
         iters += 1;
@@ -132,7 +134,7 @@ pub fn main() !void {
     const alloc = std.heap.page_allocator;
 
     // Initialize thread pool
-    var tp = try ThreadPool.init(alloc);
+    var tp = try ThreadPool.init(alloc, bench_io);
     defer tp.deinit();
 
     const sizes = [_]usize{ 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144 };

@@ -47,7 +47,7 @@ pub const RAMPreprocessing = struct {
     pub fn init(allocator: Allocator) RAMPreprocessing {
         return .{
             .min_bytecode_address = 0,
-            .bytecode_words = .{},
+            .bytecode_words = .empty,
             .allocator = allocator,
         };
     }
@@ -100,7 +100,7 @@ pub const RAMPreprocessing = struct {
     }
 
     /// Serialize to arkworks format
-    pub fn serialize(self: *const RAMPreprocessing, writer: anytype) !void {
+    pub fn serialize(self: *const RAMPreprocessing, writer: *std.Io.Writer) !void {
         // min_bytecode_address
         try writer.writeInt(u64, self.min_bytecode_address, .little);
 
@@ -125,7 +125,7 @@ pub const JoltSharedPreprocessing = struct {
     }
 
     /// Serialize to arkworks format
-    pub fn serialize(self: *const JoltSharedPreprocessing, allocator: Allocator, writer: anytype) !void {
+    pub fn serialize(self: *const JoltSharedPreprocessing, allocator: Allocator, writer: *std.Io.Writer) !void {
         try self.bytecode.serialize(allocator, writer);
         try self.ram.serialize(writer);
         try self.memory_layout.serialize(writer);
@@ -139,9 +139,11 @@ pub const JoltSharedPreprocessing = struct {
         const Blake2b256 = std.crypto.hash.blake2.Blake2b256;
 
         // Serialize to an in-memory buffer
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(allocator);
-        try self.serialize(allocator, buf.writer(allocator));
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+        try self.serialize(allocator, &aw.writer);
+        buf = aw.toArrayList();
 
         // Hash with Blake2b-256
         var h = Blake2b256.init(.{});
@@ -214,7 +216,7 @@ pub const JoltVerifierPreprocessing = struct {
     }
 
     /// Serialize to arkworks format
-    pub fn serialize(self: *const JoltVerifierPreprocessing, allocator: Allocator, writer: anytype) !void {
+    pub fn serialize(self: *const JoltVerifierPreprocessing, allocator: Allocator, writer: *std.Io.Writer) !void {
         // First serialize generators (VerifierSetup)
         try self.generators.serialize(writer);
         // Then serialize shared preprocessing

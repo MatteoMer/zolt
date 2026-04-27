@@ -8,6 +8,8 @@
 //!   }.call);
 
 const std = @import("std");
+const MonotonicTimer = @import("zolt").utils.MonotonicTimer;
+const bench_io: std.Io = std.Io.Threaded.global_single_threaded.io();
 
 const MAX_SAMPLES: usize = 101;
 
@@ -59,7 +61,7 @@ pub fn run(
     // --- Collect samples ---
     var samples: [MAX_SAMPLES]f64 = undefined;
     for (0..n) |s| {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = MonotonicTimer.init(bench_io);
         for (0..iters) |i| {
             sink = body(i);
         }

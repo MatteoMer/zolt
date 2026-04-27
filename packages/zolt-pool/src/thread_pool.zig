@@ -19,12 +19,8 @@ pub const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
 pub const has_wasm_atomics = is_wasm and
     std.Target.wasm.featureSetHas(builtin.cpu.features, .atomics);
 
-/// Platform-appropriate futex. On native: std.Thread.Futex.
-/// On WASM with atomics: direct memory.atomic.wait32/notify intrinsics,
-/// bypassing std.Thread.Futex which requires single_threaded=false
-/// (incompatible with std.heap.wasm_allocator).
-const Futex = if (has_wasm_atomics) WasmFutex else std.Thread.Futex;
-
+/// WASM futex used directly by WasmWorkerPool when atomics are enabled.
+/// Native paths use std.Io futex methods via the pool's stored `io` field.
 const WasmFutex = struct {
     /// Block until woken. Uses memory.atomic.wait32.
     fn wait(ptr: *const atomic.Value(u32), expect: u32) void {
@@ -131,10 +127,12 @@ comptime {
 const CompletionLatch = struct {
     remaining: atomic.Value(u32) align(cache_line),
     done: atomic.Value(u32) = atomic.Value(u32).init(0),
+    io: std.Io,
 
-    fn init(count: u32) CompletionLatch {
+    fn init(count: u32, io: std.Io) CompletionLatch {
         return .{
             .remaining = atomic.Value(u32).init(count),
+            .io = io,
         };
     }
 
@@ -146,7 +144,10 @@ const CompletionLatch = struct {
         const prev = self.remaining.fetchSub(1, .acq_rel);
         if (prev == 1) {
             self.done.store(1, .release);
-            Futex.wake(&self.done, std.math.maxInt(u32));
+            if (comptime has_wasm_atomics)
+                WasmFutex.wake(&self.done, std.math.maxInt(u32))
+            else
+                self.io.futexWake(u32, &self.done.raw, std.math.maxInt(u32));
         }
     }
 
@@ -174,9 +175,12 @@ const CompletionLatch = struct {
                 atomic.spinLoopHint();
             }
 
-            // Futex wait if still not done
+            // Futex wait if still not done (1ms timeout)
             if (!self.isDone()) {
-                Futex.timedWait(&self.done, 0, 1_000_000) catch {}; // 1ms timeout
+                if (comptime has_wasm_atomics)
+                    WasmFutex.timedWait(&self.done, 0, 1_000_000) catch {}
+                else
+                    self.io.futexWaitTimeout(u32, &self.done.raw, 0, .{ .duration = .{ .nanoseconds = 1_000_000 } }) catch {};
             }
         }
     }
@@ -318,9 +322,9 @@ const WorkerData = struct {
     claim_depth: atomic.Value(u32) = atomic.Value(u32).init(0),
 
     fn initRng(self: *WorkerData) void {
-        // Seed RNG with index + timestamp for randomness.
-        // On WASM there is no clock — index-based seed is fine for steal randomization.
-        const ts: u64 = if (is_wasm) 0 else @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+        // Seed RNG with index + thread ID for randomness.
+        // On WASM there is no thread ID — index-based seed is fine for steal randomization.
+        const ts: u64 = if (is_wasm) 0 else @as(u64, @intCast(std.Thread.getCurrentId()));
         self.rng_state = @truncate((self.index +% 1) *% 2654435761 +% ts);
         if (self.rng_state == 0) self.rng_state = 1;
     }
@@ -430,15 +434,16 @@ else
 const WasmThreadPoolStub = struct {
     allocator: Allocator,
     thread_count: usize = 0,
+    io: std.Io = undefined,
 
-    pub fn init(alloc: Allocator) !*WasmThreadPoolStub {
+    pub fn init(alloc: Allocator, io: std.Io) !*WasmThreadPoolStub {
         const self = try alloc.create(WasmThreadPoolStub);
-        self.* = .{ .allocator = alloc };
+        self.* = .{ .allocator = alloc, .io = io };
         return self;
     }
 
-    pub fn initWithCount(alloc: Allocator, _: usize) !*WasmThreadPoolStub {
-        return init(alloc);
+    pub fn initWithCount(alloc: Allocator, io: std.Io, _: usize) !*WasmThreadPoolStub {
+        return init(alloc, io);
     }
 
     pub fn deinit(self: *WasmThreadPoolStub) void {
@@ -549,15 +554,16 @@ const WasmWorkerPool = struct {
     thread_count: usize,
     allocator: Allocator,
     generation: atomic.Value(u32) align(cache_line),
+    io: std.Io,
 
     /// Initialize with zero workers. JS will set the count via initWithCount.
-    pub fn init(alloc: Allocator) !*ThreadPool {
-        return initWithCount(alloc, 0);
+    pub fn init(alloc: Allocator, io: std.Io) !*ThreadPool {
+        return initWithCount(alloc, io, 0);
     }
 
     /// Initialize with a specific worker count. Does NOT spawn threads —
     /// JS creates Web Workers that call workerEntry.
-    pub fn initWithCount(alloc: Allocator, thread_count: usize) !*ThreadPool {
+    pub fn initWithCount(alloc: Allocator, io: std.Io, thread_count: usize) !*ThreadPool {
         const actual_count = @min(thread_count, MAX_THREADS);
         const self = try alloc.create(ThreadPool);
         self.* = .{
@@ -565,6 +571,7 @@ const WasmWorkerPool = struct {
             .thread_count = actual_count,
             .allocator = alloc,
             .generation = atomic.Value(u32).init(0),
+            .io = io,
         };
         for (0..actual_count + 1) |i| {
             self.workers[i].pool_ptr = self;
@@ -581,7 +588,7 @@ const WasmWorkerPool = struct {
         }
         _ = self.generation.fetchAdd(1, .release);
         for (self.workers[0..self.thread_count]) |*w| {
-            Futex.wake(&w.state, 1);
+            WasmFutex.wake(&w.state, 1);
         }
         if (tls_worker) |w| {
             if (w.pool_ptr == self) {
@@ -632,16 +639,17 @@ const NativeThreadPool = struct {
     thread_count: usize,
     allocator: Allocator,
     generation: atomic.Value(u32) align(cache_line),
+    io: std.Io,
 
     /// Initialize a thread pool with auto-detected CPU count (capped at 16).
-    pub fn init(allocator: Allocator) !*ThreadPool {
+    pub fn init(allocator: Allocator, io: std.Io) !*ThreadPool {
         const cpu_count = std.Thread.getCpuCount() catch 4;
         const thread_count = @min(cpu_count, MAX_THREADS);
-        return initWithCount(allocator, thread_count);
+        return initWithCount(allocator, io, thread_count);
     }
 
     /// Initialize a thread pool with a specific number of worker threads.
-    pub fn initWithCount(allocator: Allocator, thread_count: usize) !*ThreadPool {
+    pub fn initWithCount(allocator: Allocator, io: std.Io, thread_count: usize) !*ThreadPool {
         const actual_count = @min(thread_count, MAX_THREADS);
 
         const self = try allocator.create(ThreadPool);
@@ -653,6 +661,7 @@ const NativeThreadPool = struct {
             .thread_count = actual_count,
             .allocator = allocator,
             .generation = atomic.Value(u32).init(0),
+            .io = io,
         };
 
         // Initialize worker metadata
@@ -670,7 +679,7 @@ const NativeThreadPool = struct {
             }
             _ = self.generation.fetchAdd(1, .release);
             for (self.workers[0..spawned]) |*w| {
-                Futex.wake(&w.state, 1);
+                self.io.futexWake(u32, &w.state.raw, 1);
             }
             for (self.threads[0..spawned]) |t| {
                 t.join();
@@ -692,7 +701,7 @@ const NativeThreadPool = struct {
         }
         _ = self.generation.fetchAdd(1, .release);
         for (self.workers[0..self.thread_count]) |*w| {
-            Futex.wake(&w.state, 1);
+            self.io.futexWake(u32, &w.state.raw, 1);
         }
         for (self.threads[0..self.thread_count]) |t| {
             t.join();
@@ -994,7 +1003,7 @@ const NativeThreadPool = struct {
         const Ctx = @TypeOf(context);
         var ctx_copy = context;
 
-        var latch = CompletionLatch.init(1);
+        var latch = CompletionLatch.init(1, self.io);
         var root_spin = SpinLatch{};
 
         const range_payload = RangeJobPayload{
@@ -1385,7 +1394,7 @@ const NativeThreadPool = struct {
             }
 
             worker.state.store(@intFromEnum(WorkerState.parked), .release);
-            Futex.wait(&worker.state, @intFromEnum(WorkerState.parked));
+            self.io.futexWaitUncancelable(u32, &worker.state.raw, @intFromEnum(WorkerState.parked));
             // Woken: state was CAS'd by wakeWorkers or set to shutdown. Don't overwrite.
         }
     }
@@ -1439,7 +1448,7 @@ const NativeThreadPool = struct {
                     .release,
                     .monotonic,
                 ) == null) {
-                    Futex.wake(&worker.state, 1);
+                    self.io.futexWake(u32, &worker.state.raw, 1);
                     woken += 1;
                 }
             } else if (state == @intFromEnum(WorkerState.parking)) {
@@ -1471,8 +1480,10 @@ const NativeThreadPool = struct {
 // Tests
 // ============================================================================
 
+const test_io: std.Io = std.Io.Threaded.global_single_threaded.io();
+
 test "ThreadPool: parallelFor basic" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const n = 1024;
@@ -1496,7 +1507,7 @@ test "ThreadPool: parallelFor basic" {
 }
 
 test "ThreadPool: parallelReduce sum" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const n = 2048;
@@ -1531,7 +1542,7 @@ test "ThreadPool: parallelReduce sum" {
 }
 
 test "ThreadPool: join" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const result = tp.join(
@@ -1556,7 +1567,7 @@ test "ThreadPool: join" {
 }
 
 test "ThreadPool: parallelForEach basic" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const n = 37;
@@ -1576,7 +1587,7 @@ test "ThreadPool: parallelForEach basic" {
 }
 
 test "ThreadPool: small work runs sequentially" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     var data: [10]u64 = undefined;
@@ -1595,7 +1606,7 @@ test "ThreadPool: small work runs sequentially" {
 }
 
 test "ThreadPool: parallelForForce" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const n = 8;
@@ -1615,7 +1626,7 @@ test "ThreadPool: parallelForForce" {
 }
 
 test "ThreadPool: parallelReduceForce" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const n = 16;
@@ -1642,11 +1653,14 @@ test "ThreadPool: parallelReduceForce" {
 }
 
 test "ThreadPool: dispatch overhead microbenchmark" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const iters = 1000;
-    var timer = try std.time.Timer.start();
+
+    const timer_mod = @import("timer.zig");
+    var bench_timer = timer_mod.MonotonicTimer.init(test_io);
+    _ = &bench_timer;
 
     for (0..iters) |_| {
         tp.parallelForForce(16, {}, struct {
@@ -1654,14 +1668,14 @@ test "ThreadPool: dispatch overhead microbenchmark" {
         }.run);
     }
 
-    const elapsed_ns = timer.read();
+    const elapsed_ns = bench_timer.read();
     const per_dispatch_ns = elapsed_ns / iters;
     std.debug.print("\n  Dispatch overhead: {}ns per dispatch ({} dispatches)\n", .{ per_dispatch_ns, iters });
     try std.testing.expect(per_dispatch_ns < 100_000);
 }
 
 test "ThreadPool: nested parallelFor" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const outer_n = 4;
@@ -1701,7 +1715,7 @@ test "ThreadPool: nested parallelFor" {
 }
 
 test "ThreadPool: nested join with reduce" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const PoolCtx = struct { pool: *ThreadPool };
@@ -1765,7 +1779,7 @@ test "ThreadPool: nested join with reduce" {
 }
 
 test "ThreadPool: 3-level nesting" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     // Level 1: parallelForForce(4)
@@ -1833,7 +1847,7 @@ test "ThreadPool: 3-level nesting" {
 }
 
 test "ThreadPool: stress nested dispatches" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     // Each iteration: outer reduce over 32 items, inner parallelFor per chunk.
@@ -1872,7 +1886,7 @@ test "ThreadPool: stress nested dispatches" {
 }
 
 test "ThreadPool: nested parallelForForce exercises parallelism" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const outer_n = 4;
@@ -1906,7 +1920,7 @@ test "ThreadPool: nested parallelForForce exercises parallelism" {
 }
 
 test "ThreadPool: stress addPending race" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     for (0..500) |_| {
@@ -1925,7 +1939,7 @@ test "ThreadPool: stress addPending race" {
 }
 
 test "ThreadPool: parallelChunks basic" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     const n = 1024;
@@ -1946,7 +1960,7 @@ test "ThreadPool: parallelChunks basic" {
 }
 
 test "ThreadPool: getPool returns correct pool" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     var seen_pool = atomic.Value(usize).init(0);
@@ -1966,7 +1980,7 @@ test "ThreadPool: getPool returns correct pool" {
 }
 
 test "ThreadPool: join with thread_count=1" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 1);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 1);
     defer tp.deinit();
 
     // With the fix, thread_count=1 means 1 worker + main = 2 threads, so join should parallelize.
@@ -2001,7 +2015,7 @@ test "ThreadPool: join with thread_count=1" {
 }
 
 test "ThreadPool: deque overflow fallback" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 2);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 2);
     defer tp.deinit();
 
     // Deep nesting that may overflow deque (DEQUE_CAP=256).
@@ -2023,7 +2037,7 @@ test "ThreadPool: deque overflow fallback" {
 }
 
 test "ThreadPool: thread_count=0 sequential fallback" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 0);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 0);
     defer tp.deinit();
 
     // parallelFor should run sequentially
@@ -2081,7 +2095,7 @@ test "ThreadPool: thread_count=0 sequential fallback" {
 }
 
 test "ThreadPool: mixed nesting patterns stress" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     // Outer parallelForForce with heterogeneous inner patterns per iteration:
@@ -2159,7 +2173,7 @@ test "ThreadPool: mixed nesting patterns stress" {
 }
 
 test "ThreadPool: nested reduce inside reduce" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     // Outer reduce: 8 chunks, each chunk's map does an inner reduce over 256 elements.
@@ -2208,7 +2222,7 @@ test "ThreadPool: nested reduce inside reduce" {
 }
 
 test "ThreadPool: concurrent external callers fallback" {
-    var tp = try ThreadPool.initWithCount(std.testing.allocator, 4);
+    var tp = try ThreadPool.initWithCount(std.testing.allocator, test_io, 4);
     defer tp.deinit();
 
     // Two OS threads both try to use the same pool. One should succeed with parallel

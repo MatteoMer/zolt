@@ -8,6 +8,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
+
+const zkvm_debug = @import("../zkvm/debug.zig");
 const constants = @import("constants.zig");
 const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
 
@@ -155,7 +157,7 @@ pub const MemoryLayout = struct {
             return (address - lowest_address) / 8;
         }
         if (comptime !is_wasm) {
-            if (std.posix.getenv("ZOLT_REMAP_DEBUG") != null) {
+            if (zkvm_debug.getenv("ZOLT_REMAP_DEBUG") != null) {
                 std.debug.print("[REMAP] unmapped address 0x{x} < lowest 0x{x}\n", .{ address, lowest_address });
             }
         }
@@ -168,7 +170,7 @@ pub const MemoryLayout = struct {
     }
 
     /// Serialize to arkworks canonical format (little-endian u64 sequence)
-    pub fn serialize(self: *const MemoryLayout, writer: anytype) !void {
+    pub fn serialize(self: *const MemoryLayout, writer: *std.Io.Writer) !void {
         try writer.writeInt(u64, self.program_size, .little);
         try writer.writeInt(u64, self.max_trusted_advice_size, .little);
         try writer.writeInt(u64, self.trusted_advice_start, .little);
@@ -192,32 +194,32 @@ pub const MemoryLayout = struct {
     }
 
     /// Deserialize from arkworks canonical format (little-endian u64 sequence)
-    pub fn deserialize(reader: anytype) !MemoryLayout {
+    pub fn deserialize(reader: *std.Io.Reader) !MemoryLayout {
         return MemoryLayout{
-            .program_size = try reader.readInt(u64, .little),
-            .max_trusted_advice_size = try reader.readInt(u64, .little),
-            .trusted_advice_start = try reader.readInt(u64, .little),
-            .trusted_advice_end = try reader.readInt(u64, .little),
-            .max_untrusted_advice_size = try reader.readInt(u64, .little),
-            .untrusted_advice_start = try reader.readInt(u64, .little),
-            .untrusted_advice_end = try reader.readInt(u64, .little),
-            .max_input_size = try reader.readInt(u64, .little),
-            .max_output_size = try reader.readInt(u64, .little),
-            .input_start = try reader.readInt(u64, .little),
-            .input_end = try reader.readInt(u64, .little),
-            .output_start = try reader.readInt(u64, .little),
-            .output_end = try reader.readInt(u64, .little),
-            .stack_size = try reader.readInt(u64, .little),
-            .stack_end = try reader.readInt(u64, .little),
-            .heap_size = try reader.readInt(u64, .little),
-            .heap_end = try reader.readInt(u64, .little),
-            .panic = try reader.readInt(u64, .little),
-            .termination = try reader.readInt(u64, .little),
-            .io_end = try reader.readInt(u64, .little),
+            .program_size = try reader.takeInt(u64, .little),
+            .max_trusted_advice_size = try reader.takeInt(u64, .little),
+            .trusted_advice_start = try reader.takeInt(u64, .little),
+            .trusted_advice_end = try reader.takeInt(u64, .little),
+            .max_untrusted_advice_size = try reader.takeInt(u64, .little),
+            .untrusted_advice_start = try reader.takeInt(u64, .little),
+            .untrusted_advice_end = try reader.takeInt(u64, .little),
+            .max_input_size = try reader.takeInt(u64, .little),
+            .max_output_size = try reader.takeInt(u64, .little),
+            .input_start = try reader.takeInt(u64, .little),
+            .input_end = try reader.takeInt(u64, .little),
+            .output_start = try reader.takeInt(u64, .little),
+            .output_end = try reader.takeInt(u64, .little),
+            .stack_size = try reader.takeInt(u64, .little),
+            .stack_end = try reader.takeInt(u64, .little),
+            .heap_size = try reader.takeInt(u64, .little),
+            .heap_end = try reader.takeInt(u64, .little),
+            .panic = try reader.takeInt(u64, .little),
+            .termination = try reader.takeInt(u64, .little),
+            .io_end = try reader.takeInt(u64, .little),
         };
     }
 
-    pub fn format(self: *const MemoryLayout, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: *const MemoryLayout, comptime fmt: []const u8, options: std.fmt.Options, writer: anytype) !void {
         _ = fmt;
         _ = options;
         try writer.print("MemoryLayout{{\n", .{});
@@ -248,10 +250,10 @@ pub const JoltDevice = struct {
     /// Create a new JoltDevice with the given memory configuration
     pub fn init(allocator: Allocator, config: *const MemoryConfig) JoltDevice {
         return .{
-            .inputs = .{},
-            .trusted_advice = .{},
-            .untrusted_advice = .{},
-            .outputs = .{},
+            .inputs = .empty,
+            .trusted_advice = .empty,
+            .untrusted_advice = .empty,
+            .outputs = .empty,
             .panic = false,
             .memory_layout = MemoryLayout.init(config),
             .allocator = allocator,

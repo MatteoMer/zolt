@@ -167,7 +167,7 @@ pub fn JoltProver(comptime F: type) type {
         ) !Stage1Result {
             const StreamingOuterProver = streaming_outer.StreamingOuterProver(F);
             const LagrangePoly = r1cs.univariate_skip.LagrangePolynomial(F);
-            var challenges: std.ArrayListUnmanaged(F) = .{};
+            var challenges: std.ArrayListUnmanaged(F) = .empty;
 
             // Extract tau_high for the UniSkip Lagrange kernel
             // tau has length num_rows_bits = num_cycle_vars + 2
@@ -725,8 +725,8 @@ pub fn JoltProver(comptime F: type) type {
             jolt_proof.joint_opening_proof = joint_opening_proof;
 
             // Per-stage timing
-            var stage_timer = PlatformTimer.start() catch unreachable;
-            var bench_timer = PlatformTimer.start() catch unreachable;
+            var stage_timer = PlatformTimer.init(zkvm_debug.defaultIo());
+            var bench_timer = PlatformTimer.init(zkvm_debug.defaultIo());
 
             // Use pre-built compact/raw witnesses from config (built during witness gen,
             // outside Stage 1 timing).

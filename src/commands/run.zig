@@ -3,12 +3,12 @@
 const std = @import("std");
 const zolt = @import("../root.zig");
 
-pub fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, show_regs: bool, show_trace: bool, max_trace_steps: ?usize, input_bytes: ?[]const u8) !void {
+pub fn runEmulator(allocator: std.mem.Allocator, io: std.Io, elf_path: []const u8, show_regs: bool, show_trace: bool, max_trace_steps: ?usize, input_bytes: ?[]const u8) !void {
     std.debug.print("Loading ELF: {s}\n", .{elf_path});
 
     // Load the ELF file
     var loader = zolt.host.ELFLoader.init(allocator);
-    const program = loader.loadFile(elf_path) catch |err| {
+    const program = loader.loadFile(io, elf_path) catch |err| {
         return err;
     };
     defer {

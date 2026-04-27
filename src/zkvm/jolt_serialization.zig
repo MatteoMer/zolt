@@ -44,7 +44,7 @@ pub fn ArkworksSerializer(comptime F: type) type {
 
         pub fn init(allocator: Allocator) Self {
             return Self{
-                .buffer = .{},
+                .buffer = .empty,
                 .allocator = allocator,
             };
         }
@@ -567,6 +567,7 @@ pub fn writeJoltProofToFile(
     proof: *const jolt_types.JoltProof(F, Commitment, Proof),
     path: []const u8,
     allocator: Allocator,
+    io: std.Io,
     writeCommitment: *const fn (*ArkworksSerializer(F), Commitment) anyerror!void,
     writeProof: *const fn (*ArkworksSerializer(F), Proof) anyerror!void,
 ) !void {
@@ -574,11 +575,10 @@ pub fn writeJoltProofToFile(
     defer serializer.deinit();
 
     try serializer.writeJoltProof(Commitment, Proof, proof, writeCommitment, writeProof);
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
 
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
-
-    try file.writeAll(serializer.bytes());
+    try file.writeStreamingAll(io, serializer.bytes());
 }
 
 // =============================================================================

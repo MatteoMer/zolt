@@ -654,9 +654,12 @@ pub fn MontgomeryField(
             if (N == 4 and !@inComptime() and comptime use_arm64_asm) {
                 const mod_arr: [4]u64 = modulus;
                 return .{ .limbs = asm_mod.arm64SumOfProducts256(
-                    &a_pair[0].limbs, &a_pair[1].limbs,
-                    &b_pair[0].limbs, &b_pair[1].limbs,
-                    &mod_arr, n_prime,
+                    &a_pair[0].limbs,
+                    &a_pair[1].limbs,
+                    &b_pair[0].limbs,
+                    &b_pair[1].limbs,
+                    &mod_arr,
+                    n_prime,
                 ) };
             }
             var t: [N + 1]u64 = .{0} ** (N + 1);
@@ -929,7 +932,7 @@ pub fn MontgomeryField(
         }
 
         /// Debug formatter for field elements.
-        pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.Options, writer: anytype) !void {
             _ = fmt;
             _ = options;
             const raw = toRaw(self);

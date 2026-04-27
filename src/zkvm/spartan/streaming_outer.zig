@@ -226,7 +226,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .padded_trace_len = padded_len,
                 .split_eq = split_eq,
                 .current_claim = F.zero(),
-                .challenges = .{},
+                .challenges = .empty,
                 .current_round = 0,
                 .lagrange_evals_r0 = [_]F{F.zero()} ** FIRST_GROUP_SIZE,
                 .r_stream = null,

@@ -395,7 +395,7 @@ pub fn JoltSpartanInterface(comptime F: type) type {
                 .eq_evals = eq_evals,
                 .combined_poly = combined,
                 .current_len = size,
-                .challenges = .{},
+                .challenges = .empty,
                 .allocator = allocator,
             };
         }

@@ -117,10 +117,10 @@ pub const DoryVerifierSetup = struct {
     pub fn fromSRS(allocator: Allocator, srs: *const DorySRS, tp: ?*ThreadPool) !DoryVerifierSetup {
         const max_num_rounds = std.math.log2_int(usize, srs.g1_vec.len);
 
-        var delta_1l = std.ArrayListUnmanaged(GT){};
-        var delta_1r = std.ArrayListUnmanaged(GT){};
-        var delta_2r = std.ArrayListUnmanaged(GT){};
-        var chi = std.ArrayListUnmanaged(GT){};
+        var delta_1l = std.ArrayListUnmanaged(GT).empty;
+        var delta_1r = std.ArrayListUnmanaged(GT).empty;
+        var delta_2r = std.ArrayListUnmanaged(GT).empty;
+        var chi = std.ArrayListUnmanaged(GT).empty;
 
         try delta_1l.ensureTotalCapacity(allocator, max_num_rounds + 1);
         try delta_1r.ensureTotalCapacity(allocator, max_num_rounds + 1);
@@ -173,7 +173,7 @@ pub const DoryVerifierSetup = struct {
         }
 
         // delta_2l == delta_1l (clone)
-        var delta_2l = std.ArrayListUnmanaged(GT){};
+        var delta_2l = std.ArrayListUnmanaged(GT).empty;
         try delta_2l.ensureTotalCapacity(allocator, delta_1l.items.len);
         for (delta_1l.items) |item| {
             try delta_2l.append(allocator, item);
@@ -207,7 +207,7 @@ pub const DoryVerifierSetup = struct {
 
     /// Serialize to arkworks-compatible format
     /// Matches the CanonicalSerialize impl for VerifierSetup<BN254>
-    pub fn serialize(self: *const DoryVerifierSetup, writer: anytype) !void {
+    pub fn serialize(self: *const DoryVerifierSetup, writer: *std.Io.Writer) !void {
         // Serialize delta_1l: Vec<GT>
         try writer.writeInt(u64, @intCast(self.delta_1l.items.len), .little);
         for (self.delta_1l.items) |gt| {
@@ -259,7 +259,7 @@ pub const DoryVerifierSetup = struct {
 };
 
 /// Serialize GT element in arkworks format (uncompressed Fq12)
-pub fn serializeGT(gt: GT, writer: anytype) !void {
+pub fn serializeGT(gt: GT, writer: *std.Io.Writer) !void {
     // GT is Fp12 = (Fp6, Fp6) where Fp6 = (Fp2, Fp2, Fp2)
     // arkworks serializes as c0 first, then c1
     // Each Fp2 is (c0, c1) where each Fp is 32 bytes LE
@@ -270,20 +270,20 @@ pub fn serializeGT(gt: GT, writer: anytype) !void {
     try serializeFp6(&gt.c1, writer);
 }
 
-pub fn serializeFp6(fp6: *const pairing.Fp6, writer: anytype) !void {
+pub fn serializeFp6(fp6: *const pairing.Fp6, writer: *std.Io.Writer) !void {
     // Fp6 = (Fp2, Fp2, Fp2)
     try serializeFp2(&fp6.c0, writer);
     try serializeFp2(&fp6.c1, writer);
     try serializeFp2(&fp6.c2, writer);
 }
 
-pub fn serializeFp2(fp2: *const pairing.Fp2, writer: anytype) !void {
+pub fn serializeFp2(fp2: *const pairing.Fp2, writer: *std.Io.Writer) !void {
     // Fp2 = (c0, c1) where each is Fp
     try serializeFp(&fp2.c0, writer);
     try serializeFp(&fp2.c1, writer);
 }
 
-pub fn serializeFp(fp: *const Fp, writer: anytype) !void {
+pub fn serializeFp(fp: *const Fp, writer: *std.Io.Writer) !void {
     // Fp is 32 bytes in little-endian (standard form)
     const std_form = fp.fromMontgomery();
     for (0..4) |i| {
@@ -291,7 +291,7 @@ pub fn serializeFp(fp: *const Fp, writer: anytype) !void {
     }
 }
 
-pub fn serializeG1(point: G1Point, writer: anytype) !void {
+pub fn serializeG1(point: G1Point, writer: *std.Io.Writer) !void {
     // G1 compressed serialization: 32 bytes (x coordinate + flags)
     // arkworks compressed format: x with flags in MSB of last limb
     if (point.infinity) {
@@ -322,7 +322,7 @@ pub fn serializeG1(point: G1Point, writer: anytype) !void {
     try writer.writeInt(u64, last_limb, .little);
 }
 
-pub fn serializeG2(point: G2Point, writer: anytype) !void {
+pub fn serializeG2(point: G2Point, writer: *std.Io.Writer) !void {
     // G2 compressed serialization: 64 bytes (x as Fp2 + flags)
     // arkworks compressed format: x.c0, x.c1 with flags in MSB of x.c1's last limb
     if (point.infinity) {
@@ -419,10 +419,12 @@ test "DoryVerifierSetup serialization" {
     try std.testing.expect(verifier_setup.chi.items.len == 3);
 
     // Test serialization
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
-    try verifier_setup.serialize(buf.writer(allocator));
+    try verifier_setup.serialize(&aw.writer);
+    buf = aw.toArrayList();
 
     // Should produce non-empty output
     try std.testing.expect(buf.items.len > 0);

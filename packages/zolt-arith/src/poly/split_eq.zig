@@ -84,8 +84,8 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                     .current_index = 0,
                     .current_scalar = scaling_factor orelse F.one(),
                     .tau = &[_]F{},
-                    .E_out_vec = .{},
-                    .E_in_vec = .{},
+                    .E_out_vec = .empty,
+                    .E_in_vec = .empty,
                     .num_x_out = 0,
                     .num_x_in = 0,
                     .allocator = allocator,
@@ -104,8 +104,8 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             @memcpy(tau_copy, tau);
 
             // Build prefix eq tables
-            var E_in_vec: std.ArrayListUnmanaged([]F) = .{};
-            var E_out_vec: std.ArrayListUnmanaged([]F) = .{};
+            var E_in_vec: std.ArrayListUnmanaged([]F) = .empty;
+            var E_out_vec: std.ArrayListUnmanaged([]F) = .empty;
 
             // Build outer prefix tables (E_out_vec) for tau[0..m]
             // E_out_vec[0] = [1] (empty eq is always 1)

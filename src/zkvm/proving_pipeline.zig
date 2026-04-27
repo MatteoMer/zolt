@@ -341,7 +341,7 @@ pub fn JoltProver(comptime F: type) type {
             // `MemoryLayout`. `jolt-bench/src/main.rs` must construct a
             // matching `MemoryConfig` for the same ELF to verify under
             // Jolt's own prover.
-            var overall_timer = PlatformTimer.start() catch unreachable;
+            var overall_timer = PlatformTimer.init(zkvm_debug.defaultIo());
             const bench = if (comptime is_wasm) false else (platformGetenv("ZOLT_BENCH") != null);
             var config = common.MemoryConfig{
                 .program_size = program_bytecode.len,
@@ -364,7 +364,7 @@ pub fn JoltProver(comptime F: type) type {
             }
             try emulator.run();
 
-            var trace_timer = PlatformTimer.start() catch unreachable;
+            var trace_timer = PlatformTimer.init(zkvm_debug.defaultIo());
             const emulate_ns = overall_timer.read();
 
             // Save unpadded length for log_k optimization (padding steps have null memory_addr)
@@ -572,13 +572,14 @@ pub fn JoltProver(comptime F: type) type {
 
             // Load SRS from file if path provided (for Jolt compatibility)
             // Otherwise generate SRS with disk caching for prepared G2 data
-            var phase_timer = PlatformTimer.start() catch unreachable;
+            var phase_timer = PlatformTimer.init(zkvm_debug.defaultIo());
+            const srs_io: std.Io = if (self.thread_pool) |tp| tp.io else zkvm_debug.defaultIo();
             var dory_srs = if (srs_path) |path| blk: {
                 if (comptime is_wasm) return error.FilesystemNotAvailable;
-                var srs = try DoryScheme.loadFromFile(self.allocator, path);
+                var srs = try DoryScheme.loadFromFile(self.allocator, path, srs_io);
                 srs.initPreparedCache(self.thread_pool);
                 break :blk srs;
-            } else try DoryScheme.setupCached(self.allocator, log_size, self.thread_pool);
+            } else try DoryScheme.setupCached(self.allocator, log_size, self.thread_pool, srs_io);
             defer dory_srs.deinit();
             const srs_time_ns = phase_timer.read();
             if (comptime debug_verbose) std.debug.print("    [STAGE-TIMING] SRS setup: {d:.1} ms\n", .{@as(f64, @floatFromInt(srs_time_ns)) / 1_000_000.0});
@@ -683,7 +684,7 @@ pub fn JoltProver(comptime F: type) type {
             // Dense polynomials (RdInc, RamInc) stay at trace_length size.
             const GT = Dory.GT;
             const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
-            var all_commitments: std.ArrayListUnmanaged(GT) = .{};
+            var all_commitments: std.ArrayListUnmanaged(GT) = .empty;
             defer all_commitments.deinit(self.allocator);
 
             // Store dense witness polynomials for Stage 8 opening proof (only RdInc, RamInc)

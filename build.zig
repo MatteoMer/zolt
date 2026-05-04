@@ -8,6 +8,48 @@ fn linkMetalFrameworks(module: *std.Build.Module) void {
     module.linkFramework("Foundation", opts);
 }
 
+/// Add an executable that imports the `zolt` module and wire a `zig build <step>` alias for it.
+/// Used by examples and microbenchmarks — those targets all share the same shape (one imported
+/// module, an optional install, and a run step).
+fn addZoltExe(
+    b: *std.Build,
+    opts: struct {
+        name: []const u8,
+        source: []const u8,
+        zolt_mod: *std.Build.Module,
+        target: std.Build.ResolvedTarget,
+        optimize: std.builtin.OptimizeMode,
+        step_name: []const u8,
+        step_desc: []const u8,
+        install: bool = false,
+    },
+) void {
+    const exe = b.addExecutable(.{
+        .name = opts.name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(opts.source),
+            .target = opts.target,
+            .optimize = opts.optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = opts.zolt_mod },
+            },
+        }),
+    });
+    if (opts.install) b.installArtifact(exe);
+    const run = b.addRunArtifact(exe);
+    const step = b.step(opts.step_name, opts.step_desc);
+    step.dependOn(&run.step);
+}
+
+/// Source paths fed to `zig fmt` for both the `fmt` and `ci` steps.
+const fmt_paths = &[_][]const u8{
+    "src",
+    "packages",
+    "examples",
+    "bench",
+    "build.zig",
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -80,48 +122,35 @@ pub fn build(b: *std.Build) void {
             16 * 1024 * 1024 * 1024 // 16 GB (wasm64, wasm-ld max)
         else
             4 * 1024 * 1024 * 1024; // 4 GB (wasm32 max)
+        const wasm_base_exports = [_][]const u8{
+            "zolt_alloc",
+            "zolt_free",
+            "zolt_thread_pool_create",
+            "zolt_thread_pool_destroy",
+            "zolt_load_elf",
+            "zolt_load_elf_bytes",
+            "zolt_loaded_elf_size",
+            "zolt_loaded_elf_destroy",
+            "zolt_prove",
+            "zolt_proof_result_size",
+            "zolt_proof_result_ptr",
+            "zolt_proof_result_destroy",
+            "zolt_thread_pool_create_wasm",
+            "zolt_thread_pool_ptr",
+            "zolt_worker_entry",
+        };
+        // Workers in atomics/SAB mode need their own stack and TLS regions exposed.
+        const wasm_atomics_extra = [_][]const u8{
+            "__stack_pointer",
+            "__tls_base",
+            "__tls_size",
+            "__tls_align",
+            "__wasm_init_tls",
+        };
         wasm_mod.root_module.export_symbol_names = if (has_wasm_atomics)
-            &.{
-                "zolt_alloc",
-                "zolt_free",
-                "zolt_thread_pool_create",
-                "zolt_thread_pool_destroy",
-                "zolt_load_elf",
-                "zolt_load_elf_bytes",
-                "zolt_loaded_elf_size",
-                "zolt_loaded_elf_destroy",
-                "zolt_prove",
-                "zolt_proof_result_size",
-                "zolt_proof_result_ptr",
-                "zolt_proof_result_destroy",
-                "zolt_thread_pool_create_wasm",
-                "zolt_thread_pool_ptr",
-                "zolt_worker_entry",
-                // Workers need their own stack and TLS regions
-                "__stack_pointer",
-                "__tls_base",
-                "__tls_size",
-                "__tls_align",
-                "__wasm_init_tls",
-            }
+            &(wasm_base_exports ++ wasm_atomics_extra)
         else
-            &.{
-                "zolt_alloc",
-                "zolt_free",
-                "zolt_thread_pool_create",
-                "zolt_thread_pool_destroy",
-                "zolt_load_elf",
-                "zolt_load_elf_bytes",
-                "zolt_loaded_elf_size",
-                "zolt_loaded_elf_destroy",
-                "zolt_prove",
-                "zolt_proof_result_size",
-                "zolt_proof_result_ptr",
-                "zolt_proof_result_destroy",
-                "zolt_thread_pool_create_wasm",
-                "zolt_thread_pool_ptr",
-                "zolt_worker_entry",
-            };
+            &wasm_base_exports;
 
         if (has_wasm_atomics) {
             // Enable shared memory for Web Workers + SharedArrayBuffer
@@ -284,168 +313,101 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_lib_unit_tests.step);
         test_step.dependOn(&run_exe_unit_tests.step);
 
-        // Example: Field Arithmetic
-        const field_example = b.addExecutable(.{
+        // Example & benchmark executables that import the `zolt` module at
+        // the workspace's default optimize level.
+        addZoltExe(b, .{
             .name = "example-field",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/field_arithmetic.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "examples/field_arithmetic.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "example-field",
+            .step_desc = "Run field arithmetic example",
         });
-        const run_field_example = b.addRunArtifact(field_example);
-        const field_example_step = b.step("example-field", "Run field arithmetic example");
-        field_example_step.dependOn(&run_field_example.step);
-
-        // Example: Simple Proof
-        const proof_example = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "example-proof",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/simple_proof.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "examples/simple_proof.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "example-proof",
+            .step_desc = "Run simple proof example",
         });
-        const run_proof_example = b.addRunArtifact(proof_example);
-        const proof_example_step = b.step("example-proof", "Run simple proof example");
-        proof_example_step.dependOn(&run_proof_example.step);
-
-        // Benchmark: ThreadPool vs Rayon
-        const bench_tp = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "bench-tp",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/threadpool_vs_rayon/main.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "bench/threadpool_vs_rayon/main.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "bench-tp",
+            .step_desc = "Run ThreadPool micro-benchmark",
+            .install = true,
         });
-        b.installArtifact(bench_tp);
-        const run_bench_tp = b.addRunArtifact(bench_tp);
-        const bench_tp_step = b.step("bench-tp", "Run ThreadPool micro-benchmark");
-        bench_tp_step.dependOn(&run_bench_tp.step);
-
-        // Benchmark: Scaling (parallelFor, repeated dispatch, multi-array bind)
-        const bench_scaling = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "bench-scaling",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/threadpool_vs_rayon/bench_scaling.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "bench/threadpool_vs_rayon/bench_scaling.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "bench-scaling",
+            .step_desc = "Run scaling micro-benchmark (parallelFor, dispatch, bind)",
+            .install = true,
         });
-        b.installArtifact(bench_scaling);
-        const run_bench_scaling = b.addRunArtifact(bench_scaling);
-        const bench_scaling_step = b.step("bench-scaling", "Run scaling micro-benchmark (parallelFor, dispatch, bind)");
-        bench_scaling_step.dependOn(&run_bench_scaling.step);
-
-        // Benchmark: MSM (G1/G2 multi-scalar multiplication)
-        const bench_msm = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "bench-msm",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/msm/main.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "bench/msm/main.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "bench-msm",
+            .step_desc = "Run MSM benchmark (G1/G2 Pippenger)",
+            .install = true,
         });
-        b.installArtifact(bench_msm);
-        const run_bench_msm = b.addRunArtifact(bench_msm);
-        const bench_msm_step = b.step("bench-msm", "Run MSM benchmark (G1/G2 Pippenger)");
-        bench_msm_step.dependOn(&run_bench_msm.step);
-
-        // Example: RISC-V Emulation
-        const riscv_example = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "example-riscv",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/risc_v_emulation.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "examples/risc_v_emulation.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "example-riscv",
+            .step_desc = "Run RISC-V emulation example",
         });
-        const run_riscv_example = b.addRunArtifact(riscv_example);
-        const riscv_example_step = b.step("example-riscv", "Run RISC-V emulation example");
-        riscv_example_step.dependOn(&run_riscv_example.step);
-
-        // Example: HyperKZG Commitment
-        const hyperkzg_example = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "example-hyperkzg",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/hyperkzg_commitment.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "examples/hyperkzg_commitment.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "example-hyperkzg",
+            .step_desc = "Run HyperKZG commitment example",
         });
-        const run_hyperkzg_example = b.addRunArtifact(hyperkzg_example);
-        const hyperkzg_example_step = b.step("example-hyperkzg", "Run HyperKZG commitment example");
-        hyperkzg_example_step.dependOn(&run_hyperkzg_example.step);
-
-        // Example: Sumcheck Protocol
-        const sumcheck_example = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "example-sumcheck",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/sumcheck_protocol.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "examples/sumcheck_protocol.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "example-sumcheck",
+            .step_desc = "Run sumcheck protocol example",
         });
-        const run_sumcheck_example = b.addRunArtifact(sumcheck_example);
-        const sumcheck_example_step = b.step("example-sumcheck", "Run sumcheck protocol example");
-        sumcheck_example_step.dependOn(&run_sumcheck_example.step);
-
-        // Example: Full Pipeline
-        const pipeline_example = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "example-pipeline",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/full_pipeline.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "examples/full_pipeline.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "example-pipeline",
+            .step_desc = "Run full proving pipeline example",
         });
-        const run_pipeline_example = b.addRunArtifact(pipeline_example);
-        const pipeline_example_step = b.step("example-pipeline", "Run full proving pipeline example");
-        pipeline_example_step.dependOn(&run_pipeline_example.step);
-
-        // Benchmark: Field Arithmetic
-        const field_bench = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "field-bench",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/field_bench.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "examples/field_bench.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "bench-field",
+            .step_desc = "Run field arithmetic benchmark",
         });
-        const run_field_bench = b.addRunArtifact(field_bench);
-        const field_bench_step = b.step("bench-field", "Run field arithmetic benchmark");
-        field_bench_step.dependOn(&run_field_bench.step);
 
         // Release-optimized dep chain for benchmarks (so zolt-arith gets
         // compiled at ReleaseFast instead of Debug, enabling LLVM intrinsics).
@@ -468,69 +430,42 @@ pub fn build(b: *std.Build) void {
         });
         if (is_apple_silicon) linkMetalFrameworks(zolt_mod_release);
 
-        // Benchmark: zolt-arith field microbench (repo-level, optional)
-        const zolt_arith_field_micro = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "zolt-arith-field-micro",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/zolt_arith/field_micro.zig"),
-                .target = target,
-                .optimize = .ReleaseFast,
-                .imports = &.{
-                    .{ .name = "zolt", .module = zolt_mod_release },
-                },
-            }),
+            .source = "bench/zolt_arith/field_micro.zig",
+            .zolt_mod = zolt_mod_release,
+            .target = target,
+            .optimize = .ReleaseFast,
+            .step_name = "bench-zolt-arith-field",
+            .step_desc = "Run zolt-arith field microbench",
         });
-        const run_zolt_arith_field_micro = b.addRunArtifact(zolt_arith_field_micro);
-        const zolt_arith_field_micro_step = b.step("bench-zolt-arith-field", "Run zolt-arith field microbench");
-        zolt_arith_field_micro_step.dependOn(&run_zolt_arith_field_micro.step);
-
-        // Benchmark: zolt-arith pairing microbench (repo-level, optional)
-        const zolt_arith_pairing_micro = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "zolt-arith-pairing-micro",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/zolt_arith/pairing_micro.zig"),
-                .target = target,
-                .optimize = .ReleaseFast,
-                .imports = &.{
-                    .{ .name = "zolt", .module = zolt_mod_release },
-                },
-            }),
+            .source = "bench/zolt_arith/pairing_micro.zig",
+            .zolt_mod = zolt_mod_release,
+            .target = target,
+            .optimize = .ReleaseFast,
+            .step_name = "bench-zolt-arith-pairing",
+            .step_desc = "Run zolt-arith pairing microbench",
         });
-        const run_zolt_arith_pairing_micro = b.addRunArtifact(zolt_arith_pairing_micro);
-        const zolt_arith_pairing_micro_step = b.step("bench-zolt-arith-pairing", "Run zolt-arith pairing microbench");
-        zolt_arith_pairing_micro_step.dependOn(&run_zolt_arith_pairing_micro.step);
-
-        // Benchmark: ARM64 field verification
-        const arm64_verify = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "arm64-verify",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/arm64_verify.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "examples/arm64_verify.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = optimize,
+            .step_name = "bench-arm64",
+            .step_desc = "Run ARM64 field verification benchmark",
         });
-        const run_arm64_verify = b.addRunArtifact(arm64_verify);
-        const arm64_verify_step = b.step("bench-arm64", "Run ARM64 field verification benchmark");
-        arm64_verify_step.dependOn(&run_arm64_verify.step);
-
-        // Benchmark: GPU vs CPU
-        const gpu_bench = b.addExecutable(.{
+        addZoltExe(b, .{
             .name = "gpu-bench",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/gpu_bench.zig"),
-                .target = target,
-                .optimize = .ReleaseFast,
-                .imports = &.{
-                    .{ .name = "zolt", .module = lib.root_module },
-                },
-            }),
+            .source = "examples/gpu_bench.zig",
+            .zolt_mod = lib.root_module,
+            .target = target,
+            .optimize = .ReleaseFast,
+            .step_name = "bench-gpu",
+            .step_desc = "Run GPU vs CPU benchmark",
         });
-        const run_gpu_bench = b.addRunArtifact(gpu_bench);
-        const gpu_bench_step = b.step("bench-gpu", "Run GPU vs CPU benchmark");
-        gpu_bench_step.dependOn(&run_gpu_bench.step);
 
         // Optional: differential fixture generation outside the package
         const gen_zolt_arith_diff = b.addSystemCommand(&.{
@@ -619,13 +554,7 @@ pub fn build(b: *std.Build) void {
         ci_step.dependOn(&run_exe_unit_tests.step);
 
         const fmt_check = b.addFmt(.{
-            .paths = &.{
-                "src",
-                "packages",
-                "examples",
-                "bench",
-                "build.zig",
-            },
+            .paths = fmt_paths,
             .check = true,
         });
         ci_step.dependOn(&fmt_check.step);
@@ -633,14 +562,6 @@ pub fn build(b: *std.Build) void {
 
     // zig build fmt — run zig fmt on all project sources (works for any target)
     const fmt_step = b.step("fmt", "Format all Zig source files");
-    const fmt = b.addFmt(.{
-        .paths = &.{
-            "src",
-            "packages",
-            "examples",
-            "bench",
-            "build.zig",
-        },
-    });
+    const fmt = b.addFmt(.{ .paths = fmt_paths });
     fmt_step.dependOn(&fmt.step);
 }

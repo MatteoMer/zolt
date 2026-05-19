@@ -1530,7 +1530,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         pub const MulUNoOverflow = struct {
             /// Materialize the entry at the given index
             pub fn materializeEntry(index: u128) u64 {
-                return if (index >> 64 == 0) 1 else 0;
+                return if (index >> @intCast(XLEN) == 0) 1 else 0;
             }
 
             /// Evaluate the MLE at point r (length 2*XLEN)

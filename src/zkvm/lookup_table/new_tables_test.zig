@@ -75,7 +75,7 @@ test "new lookup tables materialize known cases" {
 }
 
 test "new lookup table MLEs match materialization at Boolean points" {
-    const Case = struct { table: usize, index: u128 };
+    const Case = struct { comptime table: usize, index: u128 };
     const cases = [_]Case{
         // Pow2W: zero, edge shift, modulo-32 wrap, and ignored high address bits.
         .{ .table = 22, .index = 0 },

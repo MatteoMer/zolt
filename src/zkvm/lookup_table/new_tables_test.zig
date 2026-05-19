@@ -15,24 +15,24 @@ fn bitsFromIndex(index: u128) [128]BN254Scalar {
     return r;
 }
 
-fn expectTableMatches(comptime table_index: usize, index: u128) !void {
+fn expectTableMatches(table_index: usize, index: u128) !void {
     var r = bitsFromIndex(index);
     const mle = Table.evaluateTableMLE(table_index, &r);
     const materialized = Table.materializeTableEntry(table_index, index);
     try std.testing.expect(mle.eql(BN254Scalar.fromU64(materialized)));
 }
 
-fn expectMaterialize(comptime table_index: usize, index: u128, expected: u64) !void {
+fn expectMaterialize(table_index: usize, index: u128, expected: u64) !void {
     try std.testing.expectEqual(expected, Table.materializeTableEntry(table_index, index));
 }
 
-fn expectXorRotMaterialize(comptime table_index: usize, comptime rotation: u6, x: u64, y: u64) !void {
+fn expectXorRotMaterialize(table_index: usize, rotation: u6, x: u64, y: u64) !void {
     const index = lookup_table.interleaveBits(x, y);
     const expected = std.math.rotr(u64, x ^ y, rotation);
     try expectMaterialize(table_index, index, expected);
 }
 
-fn expectXorRotWMaterialize(comptime table_index: usize, comptime rotation: u5, x: u64, y: u64) !void {
+fn expectXorRotWMaterialize(table_index: usize, rotation: u5, x: u64, y: u64) !void {
     const index = lookup_table.interleaveBits(x, y);
     const x32: u32 = @truncate(x);
     const y32: u32 = @truncate(y);
@@ -75,7 +75,7 @@ test "new lookup tables materialize known cases" {
 }
 
 test "new lookup table MLEs match materialization at Boolean points" {
-    const Case = struct { comptime table: usize, index: u128 };
+    const Case = struct { table: usize, index: u128 };
     const cases = [_]Case{
         // Pow2W: zero, edge shift, modulo-32 wrap, and ignored high address bits.
         .{ .table = 22, .index = 0 },

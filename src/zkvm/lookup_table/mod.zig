@@ -1577,8 +1577,9 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 const shift: u6 = XLEN - 1 - i;
                 const coeff = F.fromU64(@as(u64, 1) << shift);
                 const src_bit: u6 = @intCast((XLEN - 1 - i + rotation) % XLEN);
-                const x_i = r[2 * (XLEN - 1 - src_bit)];
-                const y_i = r[2 * (XLEN - 1 - src_bit) + 1];
+                const idx = 2 * (XLEN - 1 - @as(usize, src_bit));
+                const x_i = r[idx];
+                const y_i = r[idx + 1];
                 const xor_val = x_i.mul(F.one().sub(y_i)).add(F.one().sub(x_i).mul(y_i));
                 result = result.add(coeff.mul(xor_val));
             }
@@ -1604,8 +1605,9 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 const shift: u6 = half - 1 - i;
                 const coeff = F.fromU64(@as(u64, 1) << shift);
                 const src_bit: u5 = @intCast((half - 1 - i + rotation) % half);
-                const x_i = r[2 * (XLEN - 1 - src_bit)];
-                const y_i = r[2 * (XLEN - 1 - src_bit) + 1];
+                const idx = 2 * (XLEN - 1 - @as(usize, src_bit));
+                const x_i = r[idx];
+                const y_i = r[idx + 1];
                 const xor_val = x_i.mul(F.one().sub(y_i)).add(F.one().sub(x_i).mul(y_i));
                 result = result.add(coeff.mul(xor_val));
             }

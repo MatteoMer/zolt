@@ -847,6 +847,40 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
         };
 
+        /// Pow2W: 32-bit power-of-two table
+        /// materializeEntry(shift) = 1 << (shift & 31)
+        /// For MLE dispatch on the normal 2*XLEN Boolean address, use the last/low 5
+        /// address bits consistently with existing Pow2 and Zolt's MSB-first r ordering.
+        pub const Pow2W = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const shift: u5 = @truncate(index & 31);
+                return @as(u64, 1) << @intCast(shift);
+            }
+
+            /// Evaluate the MLE at point r (length 2*XLEN)
+            /// Uses the same product formula as Pow2 but only the last 5 address bits.
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                var result = F.one();
+                inline for (0..5) |i| {
+                    const coeff = F.fromU64((@as(u64, 1) << @intCast(@as(u64, 1) << @intCast(i))) - 1);
+                    const idx = r.len - 1 - i;
+                    result = result.mul(F.one().add(coeff.mul(r[idx])));
+                }
+                return result;
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const table = try allocator.alloc(u64, 32);
+                for (0..32) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
         /// SignExtend8: Sign-extend from 8 bits to XLEN bits
         /// Useful for LB (load byte signed) instruction
         pub const SignExtend8 = struct {
@@ -1490,6 +1524,174 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
         };
 
+        /// MulUNoOverflow: Indicator that the upper XLEN bits of the 2*XLEN-bit input are all zero.
+        /// materializeEntry(index) = 1 if (index >> XLEN) == 0, else 0.
+        /// Single-operand identity-path table.
+        pub const MulUNoOverflow = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                return if (index >> 64 == 0) 1 else 0;
+            }
+
+            /// Evaluate the MLE at point r (length 2*XLEN)
+            /// r[0..XLEN-1] are the upper XLEN bits (MSB first).
+            /// The MLE is the product over i in 0..XLEN-1 of (1 - r[i]).
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                var result = F.one();
+                inline for (0..XLEN) |i| {
+                    result = result.mul(F.one().sub(r[i]));
+                }
+                return result;
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                // Only materialize first 256 entries for testing
+                const table = try allocator.alloc(u64, 256);
+                for (0..256) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        // ========================================================================
+        // XORROT / XORROTW Generic Helpers
+        // ========================================================================
+
+        /// Shared helper for 64-bit XOR-then-rotate-right tables (VirtualXORROT*).
+        fn xorRotMaterializeEntry(index: u128, comptime rotation: u6) u64 {
+            const bits = uninterleaveBits(index);
+            return std.math.rotr(u64, bits.x ^ bits.y, rotation);
+        }
+
+        /// Shared MLE for 64-bit XOR-then-rotate-right tables.
+        /// r is length 2*XLEN, MSB-first interleaved (x at odd positions, y at even).
+        /// Output bit i (MSB) = x[(63-i+rotation)%64] ^ y[(63-i+rotation)%64].
+        fn xorRotMLE(r: []const F, comptime rotation: u6) F {
+            @setEvalBranchQuota(200_000);
+            std.debug.assert(r.len == 2 * XLEN);
+            var result = F.zero();
+            inline for (0..XLEN) |i| {
+                const shift: u6 = XLEN - 1 - i;
+                const coeff = F.fromU64(@as(u64, 1) << shift);
+                const src_bit: u6 = @intCast((XLEN - 1 - i + rotation) % XLEN);
+                const x_i = r[2 * (XLEN - 1 - src_bit)];
+                const y_i = r[2 * (XLEN - 1 - src_bit) + 1];
+                const xor_val = x_i.mul(F.one().sub(y_i)).add(F.one().sub(x_i).mul(y_i));
+                result = result.add(coeff.mul(xor_val));
+            }
+            return result;
+        }
+
+        /// Shared helper for 32-bit XOR-then-rotate-right tables (VirtualXORROTW*).
+        fn xorRotWMaterializeEntry(index: u128, comptime rotation: u5) u64 {
+            const bits = uninterleaveBits(index);
+            const x32: u32 = @truncate(bits.x);
+            const y32: u32 = @truncate(bits.y);
+            return std.math.rotr(u32, x32 ^ y32, rotation);
+        }
+
+        /// Shared MLE for 32-bit XOR-then-rotate-right tables.
+        /// Only the lower 32 bits of x and y are used; result is zero-extended.
+        fn xorRotWMLE(r: []const F, comptime rotation: u5) F {
+            @setEvalBranchQuota(200_000);
+            std.debug.assert(r.len == 2 * XLEN);
+            const half = XLEN / 2;
+            var result = F.zero();
+            inline for (0..half) |i| {
+                const shift: u6 = half - 1 - i;
+                const coeff = F.fromU64(@as(u64, 1) << shift);
+                const src_bit: u5 = @intCast((half - 1 - i + rotation) % half);
+                const x_i = r[2 * (XLEN - 1 - src_bit)];
+                const y_i = r[2 * (XLEN - 1 - src_bit) + 1];
+                const xor_val = x_i.mul(F.one().sub(y_i)).add(F.one().sub(x_i).mul(y_i));
+                result = result.add(coeff.mul(xor_val));
+            }
+            return result;
+        }
+
+        /// VirtualXORROT32: 64-bit XOR then rotate-right by 32
+        pub const VirtualXORROT32 = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return xorRotMaterializeEntry(index, 32);
+            }
+            pub fn evaluateMLE(r: []const F) F {
+                return xorRotMLE(r, 32);
+            }
+        };
+
+        /// VirtualXORROT24: 64-bit XOR then rotate-right by 24
+        pub const VirtualXORROT24 = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return xorRotMaterializeEntry(index, 24);
+            }
+            pub fn evaluateMLE(r: []const F) F {
+                return xorRotMLE(r, 24);
+            }
+        };
+
+        /// VirtualXORROT16: 64-bit XOR then rotate-right by 16
+        pub const VirtualXORROT16 = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return xorRotMaterializeEntry(index, 16);
+            }
+            pub fn evaluateMLE(r: []const F) F {
+                return xorRotMLE(r, 16);
+            }
+        };
+
+        /// VirtualXORROT63: 64-bit XOR then rotate-right by 63
+        pub const VirtualXORROT63 = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return xorRotMaterializeEntry(index, 63);
+            }
+            pub fn evaluateMLE(r: []const F) F {
+                return xorRotMLE(r, 63);
+            }
+        };
+
+        /// VirtualXORROTW16: 32-bit XOR then rotate-right by 16, zero-extended
+        pub const VirtualXORROTW16 = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return xorRotWMaterializeEntry(index, 16);
+            }
+            pub fn evaluateMLE(r: []const F) F {
+                return xorRotWMLE(r, 16);
+            }
+        };
+
+        /// VirtualXORROTW12: 32-bit XOR then rotate-right by 12, zero-extended
+        pub const VirtualXORROTW12 = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return xorRotWMaterializeEntry(index, 12);
+            }
+            pub fn evaluateMLE(r: []const F) F {
+                return xorRotWMLE(r, 12);
+            }
+        };
+
+        /// VirtualXORROTW8: 32-bit XOR then rotate-right by 8, zero-extended
+        pub const VirtualXORROTW8 = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return xorRotWMaterializeEntry(index, 8);
+            }
+            pub fn evaluateMLE(r: []const F) F {
+                return xorRotWMLE(r, 8);
+            }
+        };
+
+        /// VirtualXORROTW7: 32-bit XOR then rotate-right by 7, zero-extended
+        pub const VirtualXORROTW7 = struct {
+            pub fn materializeEntry(index: u128) u64 {
+                return xorRotWMaterializeEntry(index, 7);
+            }
+            pub fn evaluateMLE(r: []const F) F {
+                return xorRotWMLE(r, 7);
+            }
+        };
+
         /// Number of lookup tables in Jolt
         pub const NUM_TABLES: usize = 42;
 
@@ -1562,7 +1764,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                     }
                     break :blk_pow2_dispatch pow2_res;
                 },
-                22 => @panic("Pow2W MLE not implemented"),
+                22 => Pow2W.evaluateMLE(r),
                 23 => ShiftRightBitmask.evaluateMLE(r),
                 24 => VirtualRev8W.evaluateMLE(r),
                 25 => VirtualSRL.evaluateMLE(r),
@@ -1571,15 +1773,15 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 28 => VirtualROTRW.evaluateMLE(r),
                 29 => @panic("VirtualChangeDivisor MLE not implemented"),
                 30 => @panic("VirtualChangeDivisorW MLE not implemented"),
-                31 => @panic("MulUNoOverflow MLE not implemented"),
-                32 => @panic("VirtualXORROT32 MLE not implemented"),
-                33 => @panic("VirtualXORROT24 MLE not implemented"),
-                34 => @panic("VirtualXORROT16 MLE not implemented"),
-                35 => @panic("VirtualXORROT63 MLE not implemented"),
-                36 => @panic("VirtualXORROTW16 MLE not implemented"),
-                37 => @panic("VirtualXORROTW12 MLE not implemented"),
-                38 => @panic("VirtualXORROTW8 MLE not implemented"),
-                39 => @panic("VirtualXORROTW7 MLE not implemented"),
+                31 => MulUNoOverflow.evaluateMLE(r),
+                32 => VirtualXORROT32.evaluateMLE(r),
+                33 => VirtualXORROT24.evaluateMLE(r),
+                34 => VirtualXORROT16.evaluateMLE(r),
+                35 => VirtualXORROT63.evaluateMLE(r),
+                36 => VirtualXORROTW16.evaluateMLE(r),
+                37 => VirtualXORROTW12.evaluateMLE(r),
+                38 => VirtualXORROTW8.evaluateMLE(r),
+                39 => VirtualXORROTW7.evaluateMLE(r),
                 else => std.debug.panic("unsupported lookup table index: {}", .{table_index}),
             };
         }
@@ -1646,6 +1848,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                     break :blk_seh @bitCast(sign_extended);
                 },
                 21 => Pow2.materializeEntry(index), // identity
+                22 => Pow2W.materializeEntry(index), // identity (32-bit power-of-2)
                 23 => ShiftRightBitmask.materializeEntry(index), // identity
                 24 => VirtualRev8W.materializeEntry(index), // identity (byte-swap 32-bit halves)
                 25 => VirtualSRL.materializeEntry(index), // interleaved
@@ -1657,6 +1860,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 },
                 27 => VirtualROTR.materializeEntry(index), // interleaved
                 28 => VirtualROTRW.materializeEntry(index), // interleaved
+                29 => std.debug.panic("unsupported lookup table index for materializeTableEntry: {}", .{table_index}),
                 30 => blk_cdw: { // VirtualChangeDivisorW
                     const dividend_u32: u32 = @truncate(x_left_bits);
                     const divisor_u32: u32 = @truncate(y_right_bits);
@@ -1667,6 +1871,15 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                     else
                         @bitCast(@as(i64, divisor_i32));
                 },
+                31 => MulUNoOverflow.materializeEntry(index), // identity
+                32 => VirtualXORROT32.materializeEntry(index), // interleaved
+                33 => VirtualXORROT24.materializeEntry(index), // interleaved
+                34 => VirtualXORROT16.materializeEntry(index), // interleaved
+                35 => VirtualXORROT63.materializeEntry(index), // interleaved
+                36 => VirtualXORROTW16.materializeEntry(index), // interleaved
+                37 => VirtualXORROTW12.materializeEntry(index), // interleaved
+                38 => VirtualXORROTW8.materializeEntry(index), // interleaved
+                39 => VirtualXORROTW7.materializeEntry(index), // interleaved
                 else => std.debug.panic("unsupported lookup table index for materializeTableEntry: {}", .{table_index}),
             };
         }

@@ -40,4 +40,7 @@ test {
 
     // Run integration tests
     _ = @import("integration_tests.zig");
+
+    // Campaign tests for lookup table indices 22, 31, and 32..39.
+    _ = @import("zkvm/lookup_table/new_tables_test.zig");
 }

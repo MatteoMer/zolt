@@ -1575,7 +1575,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
 
             /// Evaluate the MLE at point r (length 2*XLEN, MSB-first interleaved).
-            /// Returns overflow + (1 - overflow) * divisor_value where:
+            /// Returns divisor_value + overflow * (1 - (2^64 - 1)) where:
             ///   overflow = r[0] * prod_{i=1}^{XLEN-1} (1 - r[2*i]) * prod_{i=0}^{XLEN-1} r[2*i+1]
             ///     i.e., dividend == INT_MIN (MSB=1, rest=0) AND divisor == -1 (all bits=1)
             ///   divisor_value = sum_{i=0}^{XLEN-1} 2^{XLEN-1-i} * r[2*i+1]
@@ -1602,9 +1602,12 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                     divisor_value = divisor_value.add(coeff.mul(r[2 * i + 1]));
                 }
 
-                // result = overflow + (1 - overflow) * divisor_value
+                // result = divisor_value + overflow * (1 - (2^64 - 1))
+                // Uses constant correction instead of variable-dependent (1 - divisor_value)
                 const one = F.one();
-                return overflow.add(one.sub(overflow).mul(divisor_value));
+                const max_u64 = F.fromU64(std.math.maxInt(u64));
+                const correction = one.sub(max_u64);
+                return divisor_value.add(overflow.mul(correction));
             }
         };
 
@@ -1628,7 +1631,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
 
             /// Evaluate the MLE at point r (length 2*XLEN, MSB-first interleaved).
             /// Only the lower 32 bits of each operand are used.
-            /// Returns overflow_32 + (1 - overflow_32) * divisor_value_32 where:
+            /// Returns divisor_value_32 + overflow_32 * (1 - (2^64 - 1)) where:
             ///   overflow_32 = (lower 32 bits of x == INT_MIN_32) AND (lower 32 bits of y == -1)
             ///   divisor_value_32 = sum_{i=32}^{63} 2^{63-i} * r[2*i+1] + r[65] * (2^64 - 2^32)
             pub fn evaluateMLE(r: []const F) F {
@@ -1666,8 +1669,11 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 const upper_extension = two_pow_64.sub(two_pow_32);
                 divisor_value = divisor_value.add(sign_bit.mul(upper_extension));
 
-                // result = overflow + (1 - overflow) * divisor_value
-                return overflow.add(one.sub(overflow).mul(divisor_value));
+                // result = divisor_value + overflow * (1 - (2^64 - 1))
+                // Uses constant correction instead of variable-dependent (1 - divisor_value)
+                const max_u64 = F.fromU64(std.math.maxInt(u64));
+                const correction = one.sub(max_u64);
+                return divisor_value.add(overflow.mul(correction));
             }
         };
 

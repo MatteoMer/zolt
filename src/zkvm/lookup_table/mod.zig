@@ -1556,6 +1556,127 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
         };
 
+        /// VirtualChangeDivisor: signed-division divisor-change table.
+        /// Returns the divisor normally, but returns 1 when dividend == INT_MIN
+        /// and divisor == -1 (handling the signed overflow case per RISC-V spec).
+        /// Interleaved-path table: index = interleaveBits(dividend, divisor).
+        pub const VirtualChangeDivisor = struct {
+            /// Materialize the entry at the given index.
+            /// x = dividend (odd interleaved bits), y = divisor (even interleaved bits).
+            /// Returns divisor unless dividend == INT_MIN && divisor == -1, then returns 1.
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                const dividend: i64 = @bitCast(bits.x);
+                const divisor: i64 = @bitCast(bits.y);
+                if (dividend == std.math.minInt(i64) and divisor == -1) {
+                    return 1;
+                }
+                return bits.y;
+            }
+
+            /// Evaluate the MLE at point r (length 2*XLEN, MSB-first interleaved).
+            /// Returns divisor_value + overflow * (1 - (2^64 - 1)) where:
+            ///   overflow = r[0] * prod_{i=1}^{XLEN-1} (1 - r[2*i]) * prod_{i=0}^{XLEN-1} r[2*i+1]
+            ///     i.e., dividend == INT_MIN (MSB=1, rest=0) AND divisor == -1 (all bits=1)
+            ///   divisor_value = sum_{i=0}^{XLEN-1} 2^{XLEN-1-i} * r[2*i+1]
+            pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
+                std.debug.assert(r.len == 2 * XLEN);
+
+                // overflow = (dividend == INT_MIN && divisor == -1)
+                // INT_MIN = 0x8000... = x[63]=1, x[62..0]=0 → r[0]=1, r[2..126]=0
+                // -1 = 0xFFFF... = y[63..0]=1 → r[1..127]=1
+                var overflow = r[0];
+                inline for (1..XLEN) |i| {
+                    overflow = overflow.mul(F.one().sub(r[2 * i]));
+                }
+                inline for (0..XLEN) |i| {
+                    overflow = overflow.mul(r[2 * i + 1]);
+                }
+
+                // divisor_value = sum_{i=0}^{XLEN-1} 2^{XLEN-1-i} * r[2*i+1]
+                var divisor_value = F.zero();
+                inline for (0..XLEN) |i| {
+                    const shift: u6 = XLEN - 1 - i;
+                    const coeff = F.fromU64(@as(u64, 1) << shift);
+                    divisor_value = divisor_value.add(coeff.mul(r[2 * i + 1]));
+                }
+
+                // result = divisor_value + overflow * (1 - (2^64 - 1))
+                // Uses constant correction instead of variable-dependent (1 - divisor_value)
+                const one = F.one();
+                const max_u64 = F.fromU64(std.math.maxInt(u64));
+                const correction = one.sub(max_u64);
+                return divisor_value.add(overflow.mul(correction));
+            }
+        };
+
+        /// VirtualChangeDivisorW: 32-bit signed-division divisor-change table.
+        /// Same as VirtualChangeDivisor but operates on the lower 32 bits of each operand.
+        /// Returns the divisor sign-extended from 32 bits, except i32::MIN / -1 → 1.
+        /// Interleaved-path table: index = interleaveBits(dividend, divisor).
+        pub const VirtualChangeDivisorW = struct {
+            /// Materialize the entry at the given index (32-bit operands, sign-extended result).
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                const dividend_u32: u32 = @truncate(bits.x);
+                const divisor_u32: u32 = @truncate(bits.y);
+                const dividend_i32: i32 = @bitCast(dividend_u32);
+                const divisor_i32: i32 = @bitCast(divisor_u32);
+                if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1) {
+                    return 1;
+                }
+                return @bitCast(@as(i64, divisor_i32));
+            }
+
+            /// Evaluate the MLE at point r (length 2*XLEN, MSB-first interleaved).
+            /// Only the lower 32 bits of each operand are used.
+            /// Returns divisor_value_32 + overflow_32 * (1 - (2^64 - 1)) where:
+            ///   overflow_32 = (lower 32 bits of x == INT_MIN_32) AND (lower 32 bits of y == -1)
+            ///   divisor_value_32 = sum_{i=32}^{63} 2^{63-i} * r[2*i+1] + r[65] * (2^64 - 2^32)
+            pub fn evaluateMLE(r: []const F) F {
+                @setEvalBranchQuota(200_000);
+                std.debug.assert(r.len == 2 * XLEN);
+                const half = XLEN / 2;
+                const one = F.one();
+
+                // overflow_32: lower 32 bits of x == INT_MIN_32 (=0x80000000) and lower 32 bits of y == -1
+                // x[31]=1 at r[64], x[30..0]=0 at r[66..126], y[31..0]=1 at r[65..127]
+                var overflow = r[2 * half]; // r[64] = x[31]
+                inline for (half + 1..XLEN) |i| {
+                    overflow = overflow.mul(one.sub(r[2 * i]));
+                }
+                inline for (half..XLEN) |i| {
+                    overflow = overflow.mul(r[2 * i + 1]);
+                }
+
+                // divisor_value (sign-extended from 32 bits):
+                //   lower 32 bits of result = sum_{i=0}^{31} 2^i * y[i]
+                //                         = sum_{k=32}^{63} 2^{63-k} * r[2*k+1]
+                //   upper 32 bits of result = sign_bit * (2^32 + 2^33 + ... + 2^63)
+                //                           = r[65] * (2^64 - 2^32)
+                var divisor_value = F.zero();
+                inline for (half..XLEN) |i| {
+                    const shift: u6 = XLEN - 1 - i;
+                    const coeff = F.fromU64(@as(u64, 1) << shift);
+                    divisor_value = divisor_value.add(coeff.mul(r[2 * i + 1]));
+                }
+                // sign-extension: add r[65] * (2^64 - 2^32)
+                const sign_bit = r[2 * half + 1]; // r[65] = y[31]
+                // (2^64 - 2^32) in BN254 scalar: 2^64 mod p - 2^32 mod p
+                const two_pow_32 = F.fromU64(0x1_0000_0000);
+                const two_pow_64 = two_pow_32.mul(two_pow_32); // 2^64 mod p
+                const upper_extension = two_pow_64.sub(two_pow_32);
+                divisor_value = divisor_value.add(sign_bit.mul(upper_extension));
+
+                // result = divisor_value + overflow * (1 - (2^64 - 1))
+                // Uses constant correction instead of variable-dependent (1 - divisor_value)
+                const max_u64 = F.fromU64(std.math.maxInt(u64));
+                const correction = one.sub(max_u64);
+                return divisor_value.add(overflow.mul(correction));
+            }
+        };
+
         // ========================================================================
         // XORROT / XORROTW Generic Helpers
         // ========================================================================
@@ -1773,8 +1894,8 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 26 => VirtualSRA.evaluateMLE(r),
                 27 => VirtualROTR.evaluateMLE(r),
                 28 => VirtualROTRW.evaluateMLE(r),
-                29 => @panic("VirtualChangeDivisor MLE not implemented"),
-                30 => @panic("VirtualChangeDivisorW MLE not implemented"),
+                29 => VirtualChangeDivisor.evaluateMLE(r),
+                30 => VirtualChangeDivisorW.evaluateMLE(r),
                 31 => MulUNoOverflow.evaluateMLE(r),
                 32 => VirtualXORROT32.evaluateMLE(r),
                 33 => VirtualXORROT24.evaluateMLE(r),
@@ -1862,17 +1983,8 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 },
                 27 => VirtualROTR.materializeEntry(index), // interleaved
                 28 => VirtualROTRW.materializeEntry(index), // interleaved
-                29 => std.debug.panic("unsupported lookup table index for materializeTableEntry: {}", .{table_index}),
-                30 => blk_cdw: { // VirtualChangeDivisorW
-                    const dividend_u32: u32 = @truncate(x_left_bits);
-                    const divisor_u32: u32 = @truncate(y_right_bits);
-                    const dividend_i32: i32 = @bitCast(dividend_u32);
-                    const divisor_i32: i32 = @bitCast(divisor_u32);
-                    break :blk_cdw if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1)
-                        1
-                    else
-                        @bitCast(@as(i64, divisor_i32));
-                },
+                29 => VirtualChangeDivisor.materializeEntry(index),
+                30 => VirtualChangeDivisorW.materializeEntry(index),
                 31 => MulUNoOverflow.materializeEntry(index), // identity
                 32 => VirtualXORROT32.materializeEntry(index), // interleaved
                 33 => VirtualXORROT24.materializeEntry(index), // interleaved

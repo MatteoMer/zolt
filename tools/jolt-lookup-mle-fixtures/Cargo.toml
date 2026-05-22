@@ -1,0 +1,23 @@
+[package]
+name = "jolt-lookup-mle-fixtures"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "jolt-lookup-mle-fixtures"
+path = "src/main.rs"
+
+[dependencies]
+jolt-core = { git = "https://github.com/a16z/jolt.git", rev = "b10e80ac6a9b62672bd196b8a6daf7dce652c9b3", features = ["host"], default-features = false }
+ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false }
+ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout", default-features = false }
+
+[patch.crates-io]
+ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-ec = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+allocative = { git = "https://github.com/facebookexperimental/allocative", rev = "85b773d85d526d068ce94724ff7a7b81203fc95e" }
+
+[profile.release]
+opt-level = 3

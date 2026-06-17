@@ -8,6 +8,7 @@ checked-in copy. It intentionally does not write to testdata by default.
 from __future__ import annotations
 
 import difflib
+import os
 import subprocess
 import sys
 import tempfile
@@ -36,9 +37,12 @@ def main() -> None:
             "--out",
             str(generated),
         ]
+        env = os.environ.copy()
+        env["CARGO_TARGET_DIR"] = str(Path(tmpdir) / "cargo-target")
         proc = subprocess.run(
             cmd,
             cwd=ROOT,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

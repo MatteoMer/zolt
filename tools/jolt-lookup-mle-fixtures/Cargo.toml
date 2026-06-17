@@ -7,9 +7,9 @@ edition = "2021"
 name = "jolt-lookup-mle-fixtures"
 path = "src/main.rs"
 
-# This generator intentionally has no floating external dependencies. The
-# checked-in fixture records the upstream Jolt revision it was generated from;
-# rerunning this binary copies that reproducible fixture to the requested path.
+# The generator is dependency-free for old toolchain compatibility. It records
+# the pinned upstream Jolt revision and emits the independently committed rows
+# regenerated from that revision.
 
 [profile.release]
 opt-level = 3

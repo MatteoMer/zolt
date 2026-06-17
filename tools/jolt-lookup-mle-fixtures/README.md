@@ -2,7 +2,7 @@
 
 Generates `testdata/lookup-table-mle/nonboolean_bn254.txt`, the pinned-upstream non-Boolean MLE fixture consumed by `src/zkvm/lookup_table/new_tables_test.zig`.
 
-The checked-in fixture records the upstream `a16z/jolt` commit that produced it (`b10e80ac6a9b62672bd196b8a6daf7dce652c9b3`). This crate is intentionally dependency-free and has a committed `Cargo.lock`, so maintenance checks can reproduce the fixture bytes without network access or lockfile rewrites.
+The checked-in fixture records the upstream `a16z/jolt` commit that produced it (`b10e80ac6a9b62672bd196b8a6daf7dce652c9b3`). The generator computes the rows from direct translations of that commit's Jolt lookup-table `evaluate_mle` implementations (not from the committed fixture). Its small arithmetic dependencies are pinned by `Cargo.lock`, so maintenance checks can reproduce the fixture bytes without lockfile rewrites.
 
 From the repository root, check that the committed fixture is still reproducible without modifying the working tree:
 

@@ -1,56 +1,226 @@
+use num_bigint::BigUint;
+use num_traits::{One, Zero};
 use std::{env, fs, path::PathBuf};
 
-const JOLT_REV: &str = "b10e80ac6a9b62672bd196b8a6daf7dce652c9b3";
-const ROWS: &[&str] = &[
-    "22|Pow2W|random_0|7640891619905685769|0000000000000000000000000000000019d1b77bc0fd68c2c1e1b597c1029680",
-    "22|Pow2W|random_1|17599680077517731100|0000000000000000000000000000000039f349eee867a1969ca4c3876d0d4ed0",
-    "22|Pow2W|random_2|6225968112712823075|000000000000000000000000000000000796af64e62c2e1a2101f770b9b29500",
-    "22|Pow2W|random_3|12731547905536802102|0000000000000000000000000000000078f2edb30efa9e136b31be724ce92be0",
-    "29|VirtualChangeDivisor|random_0|7640891658560391433|2ae9f2c3a0047f8452739467054822d08148db4dbe4cba3242929abbe69e6e6b",
-    "29|VirtualChangeDivisor|random_1|17599680056042894620|305abfd9de131ebec6db6cd34fc15a32e7e3b183b65827b1520d13119fcc303b",
-    "29|VirtualChangeDivisor|random_2|6225968134187659555|119383a9fdf373d9ca75ac67d04168183970f56429162b223d9f56b54c558a10",
-    "29|VirtualChangeDivisor|random_3|12731547875472031030|1331185ecb989d22f20e7ee731c0a4e27d5c407d9435d2e977793a2a284c94f0",
-    "30|VirtualChangeDivisorW|random_0|7640891654265424137|1d94b54f2c346a5a9b7b0cb332a528602bc8299dba534e6cc74161524508bd13",
-    "30|VirtualChangeDivisorW|random_1|17599680043157992732|0df672b9a7c8d8db44f0ead06f4ca612781f880f899ed95a811815cf1d1d379d",
-    "30|VirtualChangeDivisorW|random_2|6225968147072561443|1bceefff2a760c3761018b6f5b133932930aba68e5edbb785ec18af63533dc12",
-    "30|VirtualChangeDivisorW|random_3|12731547871177063734|1764be448f3fb397fb699f42a65f28797dbb6888f246c262093efffa936add7d",
-    "31|MulUNoOverflow|random_0|7640891649970456841|031e87994c5cc9bf1713d835c31b1fa4a98991aa0372f8941a3977e330569c36",
-    "31|MulUNoOverflow|random_1|17599680047452960028|26f2e8b04fdb4b76b2b74e4dbedf122c0f3e84282bf3fe2ee90a47b377c10569",
-    "31|MulUNoOverflow|random_2|6225968142777594147|2cd0d4cb97fb007f369e8d664c667c532546a4e05a89761bd736f45284039169",
-    "31|MulUNoOverflow|random_3|12731547866882096438|2ebe3a120232ca3590831afb58d9445c287909091099b8e328a534e6ad6a522b",
-    "32|VirtualXORROT32|random_0|7640891439517059337|30644e72e131a029b85045b68181585d2833e77426b7c09861bfa77cd2f6ea1a",
-    "32|VirtualXORROT32|random_1|17599680309445965084|30644e72e131a029b85045b68181585d2833e807a97119508b36cfb782038f54",
-    "32|VirtualXORROT32|random_2|6225968327461187875|30644e72e131a029b85045b68181585d2833e8293222e5b1de70960f72a4e902",
-    "32|VirtualXORROT32|random_3|12731547965666344246|30644e72e131a029b85045b68181585d2833e7e8ab4fda12bae09504a3eef914",
-    "33|VirtualXORROT24|random_0|7640891435222092041|30644e72e131a029b85045b68181585d2833e7fba0dd2500f886e85f6efb305a",
-    "33|VirtualXORROT24|random_1|17599680313740932380|30644e72e131a029b85045b68181585d2833e7fedeff6d0441df6302d5aa3214",
-    "33|VirtualXORROT24|random_2|6225968323166220579|30644e72e131a029b85045b68181585d2833e776e1a9a32aad4994731f04af82",
-    "33|VirtualXORROT24|random_3|12731547961371376950|30644e72e131a029b85045b68181585d2833e815292c9a302c8edbd9b87873d4",
-    "34|VirtualXORROT16|random_0|7640891430927124745|30644e72e131a029b85045b68181585d2833e7751f65f19e27e14d9096841c1a",
-    "34|VirtualXORROT16|random_1|17599680300856030492|30644e72e131a029b85045b68181585d2833e7cc54b37e7ae86f38743e331154",
-    "34|VirtualXORROT16|random_2|6225968336051122467|30644e72e131a029b85045b68181585d2833e7b45d4815fd6ab9c9090ec43f82",
-    "34|VirtualXORROT16|random_3|12731547957076409654|30644e72e131a029b85045b68181585d2833e7e2278d901c3665ffa2c60579d4",
-    "35|VirtualXORROT63|random_0|7640891426632157449|30644e72e131a029b85045b68181585d2833e7ea4f97077c0a8662005f732482",
-    "35|VirtualXORROT63|random_1|17599680305150997788|30644e72e131a029b85045b68181585d2833e7b9f313ef8bb9fc9cdb39bc69b4",
-    "35|VirtualXORROT63|random_2|6225968331756155171|30644e72e131a029b85045b68181585d2833e7b212812c7b9eea5266cbb9a0fa",
-    "35|VirtualXORROT63|random_3|12731547952781442358|30644e72e131a029b85045b68181585d2833e80774d572d95a1f4393f9129b44",
-    "36|VirtualXORROTW16|random_0|7640891422337190153|30644e72e131a029b85045b68181585d2833e84879b96fe0b2fcd6eb162f4ada",
-    "36|VirtualXORROTW16|random_1|17599680292266095900|30644e72e131a029b85045b68181585d2833e84879b96fff33f5820397ff9614",
-    "36|VirtualXORROTW16|random_2|6225968310281318691|30644e72e131a029b85045b68181585d2833e84879b97038606c1d60963c8682",
-    "36|VirtualXORROTW16|random_3|12731547982846213430|30644e72e131a029b85045b68181585d2833e84879b9706f914ccc6793b829d4",
-    "37|VirtualXORROTW12|random_0|7640891418042222857|30644e72e131a029b85045b68181585d2833e84879b9705ec5f8eef0007de95a",
-    "37|VirtualXORROTW12|random_1|17599680296561063196|30644e72e131a029b85045b68181585d2833e84879b96fc116d6391e18f860f4",
-    "37|VirtualXORROTW12|random_2|6225968305986351395|30644e72e131a029b85045b68181585d2833e84879b970565727fb03630321c2",
-    "37|VirtualXORROTW12|random_3|12731547978551246134|30644e72e131a029b85045b68181585d2833e84879b96fa6a1ae278ea72885b4",
-    "38|VirtualXORROTW8|random_0|7640891413747255561|30644e72e131a029b85045b68181585d2833e84879b97014fb4a85b56b77681a",
-    "38|VirtualXORROTW8|random_1|17599680283676161308|30644e72e131a029b85045b68181585d2833e84879b9700d1a008c51e3d67194",
-    "38|VirtualXORROTW8|random_2|6225968318871253283|30644e72e131a029b85045b68181585d2833e84879b96fb08f4fac267994c782",
-    "38|VirtualXORROTW8|random_3|12731547974256278838|30644e72e131a029b85045b68181585d2833e84879b9704e9501138f6271c214",
-    "39|VirtualXORROTW7|random_0|7640891409452288265|30644e72e131a029b85045b68181585d2833e84879b97061b9fcd96f4e5d1dc2",
-    "39|VirtualXORROTW7|random_1|17599680287971128604|30644e72e131a029b85045b68181585d2833e84879b96fe8c0f3ffd5d0cfc334",
-    "39|VirtualXORROTW7|random_2|6225968314576285987|30644e72e131a029b85045b68181585d2833e84879b9706063cdbffd202a40ba",
-    "39|VirtualXORROTW7|random_3|12731547969961311542|30644e72e131a029b85045b68181585d2833e84879b9704c8108b74ce46bb744",
+const UPSTREAM_JOLT_REV: &str = "b10e80ac6a9b62672bd196b8a6daf7dce652c9b3";
+const CASES_PER_TABLE: usize = 4;
+const XLEN: usize = 64;
+const NUM_LOOKUP_BITS: usize = 2 * XLEN;
+const LCG_MUL: u64 = 6_364_136_223_846_793_005;
+const LCG_INC: u64 = 1_442_695_040_888_963_407;
+const CHALLENGE_MODULUS: u64 = 1_000_000;
+
+// Field modulus for ark_bn254::Fr used by upstream Jolt at UPSTREAM_JOLT_REV.
+const BN254_FR_MODULUS_BE: &str =
+    "30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001";
+
+const TABLES: &[(usize, &str)] = &[
+    (22, "Pow2W"),
+    (29, "VirtualChangeDivisor"),
+    (30, "VirtualChangeDivisorW"),
+    (31, "MulUNoOverflow"),
+    (32, "VirtualXORROT32"),
+    (33, "VirtualXORROT24"),
+    (34, "VirtualXORROT16"),
+    (35, "VirtualXORROT63"),
+    (36, "VirtualXORROTW16"),
+    (37, "VirtualXORROTW12"),
+    (38, "VirtualXORROTW8"),
+    (39, "VirtualXORROTW7"),
 ];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Fr {
+    n: BigUint,
+}
+
+impl Fr {
+    fn modulus() -> BigUint {
+        BigUint::parse_bytes(BN254_FR_MODULUS_BE.as_bytes(), 16).unwrap()
+    }
+
+    fn new(n: BigUint) -> Self {
+        Self {
+            n: n % Self::modulus(),
+        }
+    }
+
+    fn zero() -> Self {
+        Self { n: BigUint::zero() }
+    }
+
+    fn one() -> Self {
+        Self { n: BigUint::one() }
+    }
+
+    fn from_u64(n: u64) -> Self {
+        Self::new(BigUint::from(n))
+    }
+
+    fn from_u128(n: u128) -> Self {
+        Self::new(BigUint::from(n))
+    }
+
+    fn to_hex_be_32(&self) -> String {
+        let mut bytes = self.n.to_bytes_be();
+        if bytes.len() < 32 {
+            let mut padded = vec![0u8; 32 - bytes.len()];
+            padded.extend_from_slice(&bytes);
+            bytes = padded;
+        }
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+impl std::ops::Add for Fr {
+    type Output = Fr;
+    fn add(self, rhs: Fr) -> Fr {
+        Fr::new(self.n + rhs.n)
+    }
+}
+
+impl std::ops::AddAssign for Fr {
+    fn add_assign(&mut self, rhs: Fr) {
+        *self = self.clone() + rhs;
+    }
+}
+
+impl std::ops::Sub for Fr {
+    type Output = Fr;
+    fn sub(self, rhs: Fr) -> Fr {
+        let m = Fr::modulus();
+        Fr::new((self.n + &m) - rhs.n)
+    }
+}
+
+impl std::ops::Mul for Fr {
+    type Output = Fr;
+    fn mul(self, rhs: Fr) -> Fr {
+        Fr::new(self.n * rhs.n)
+    }
+}
+
+impl std::ops::MulAssign for Fr {
+    fn mul_assign(&mut self, rhs: Fr) {
+        *self = self.clone() * rhs;
+    }
+}
+
+fn evaluate_upstream_formula(table_index: usize, r: &[Fr]) -> Fr {
+    // These are direct translations of a16z/jolt jolt-core lookup table
+    // evaluate_mle implementations at UPSTREAM_JOLT_REV:
+    // pow2_w.rs, virtual_change_divisor.rs, virtual_change_divisor_w.rs,
+    // mulu_no_overflow.rs, virtual_xor_rot.rs, and virtual_xor_rotw.rs.
+    match table_index {
+        22 => eval_pow2_w(r),
+        29 => eval_change_divisor(r),
+        30 => eval_change_divisor_w(r),
+        31 => eval_mulu_no_overflow(r),
+        32 => eval_xor_rot(r, 32),
+        33 => eval_xor_rot(r, 24),
+        34 => eval_xor_rot(r, 16),
+        35 => eval_xor_rot(r, 63),
+        36 => eval_xor_rotw(r, 16),
+        37 => eval_xor_rotw(r, 12),
+        38 => eval_xor_rotw(r, 8),
+        39 => eval_xor_rotw(r, 7),
+        _ => panic!("unsupported table index {table_index}"),
+    }
+}
+
+fn eval_pow2_w(r: &[Fr]) -> Fr {
+    let mut result = Fr::one();
+    for i in 0..5 {
+        result *= Fr::one() + Fr::from_u64((1 << (1 << i)) - 1) * r[r.len() - i - 1].clone();
+    }
+    result
+}
+
+fn eval_change_divisor(r: &[Fr]) -> Fr {
+    let mut divisor_value = Fr::zero();
+    for i in 0..XLEN {
+        divisor_value += Fr::from_u128(1u128 << (XLEN - 1 - i)) * r[2 * i + 1].clone();
+    }
+    let mut x_product = r[0].clone();
+    for i in 1..XLEN {
+        x_product *= Fr::one() - r[2 * i].clone();
+    }
+    let mut y_product = Fr::one();
+    for i in 0..XLEN {
+        y_product *= r[2 * i + 1].clone();
+    }
+    let adjustment = Fr::from_u64(2) - Fr::from_u128(1u128 << XLEN);
+    divisor_value + x_product * y_product * adjustment
+}
+
+fn eval_change_divisor_w(r: &[Fr]) -> Fr {
+    let sign_bit = r[XLEN + 1].clone();
+    let mut divisor_value = Fr::zero();
+    for i in XLEN / 2..XLEN {
+        divisor_value += Fr::from_u64(1u64 << (XLEN - 1 - i)) * r[2 * i + 1].clone();
+    }
+    let mut x_product = r[XLEN].clone();
+    for i in XLEN / 2 + 1..XLEN {
+        x_product *= Fr::one() - r[2 * i].clone();
+    }
+    let mut y_product = Fr::one();
+    for i in XLEN / 2..XLEN {
+        y_product *= r[2 * i + 1].clone();
+    }
+    let sign_extension = Fr::from_u128((1u128 << XLEN) - (1u128 << (XLEN / 2))) * sign_bit;
+    let adjustment = Fr::from_u64(2) - Fr::from_u128(1u128 << XLEN);
+    divisor_value + adjustment * x_product * y_product + sign_extension
+}
+
+fn eval_mulu_no_overflow(r: &[Fr]) -> Fr {
+    let mut result = Fr::one();
+    for value in r.iter().take(XLEN) {
+        result *= Fr::one() - value.clone();
+    }
+    result
+}
+
+fn eval_xor_rot(r: &[Fr], rotation: usize) -> Fr {
+    let mut result = Fr::zero();
+    for i in 0..XLEN {
+        let x_i = r[2 * i].clone();
+        let y_i = r[2 * i + 1].clone();
+        let rotated_position = (i + rotation) % XLEN;
+        let bit_position = XLEN - 1 - rotated_position;
+        let xor_bit = (Fr::one() - x_i.clone()) * y_i.clone() + x_i * (Fr::one() - y_i);
+        result += Fr::from_u64(1u64 << bit_position) * xor_bit;
+    }
+    result
+}
+
+fn eval_xor_rotw(r: &[Fr], rotation: usize) -> Fr {
+    let mut result = Fr::zero();
+    for idx in XLEN / 2..XLEN {
+        let r_x = r[2 * idx].clone();
+        let r_y = r[2 * idx + 1].clone();
+        let xor_bit = (Fr::one() - r_x.clone()) * r_y.clone() + r_x * (Fr::one() - r_y);
+        let position = idx - (XLEN / 2);
+        let rotated_position = (XLEN / 2) - 1 - ((position + rotation) % (XLEN / 2));
+        result += Fr::from_u64(1u64 << rotated_position) * xor_bit;
+    }
+    result
+}
+
+fn seed_for(table_index: usize, case_index: usize) -> u64 {
+    0x6a09_e667_f3bc_c909u64
+        ^ ((table_index as u64) << 32)
+        ^ (case_index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
+fn non_boolean_challenges(seed: u64) -> Vec<Fr> {
+    let mut state = seed;
+    let mut r = Vec::with_capacity(NUM_LOOKUP_BITS);
+    for _ in 0..NUM_LOOKUP_BITS {
+        state = state.wrapping_mul(LCG_MUL).wrapping_add(LCG_INC);
+        r.push(Fr::from_u64(2 + (state % CHALLENGE_MODULUS)));
+    }
+    r
+}
 
 fn output_path_from_args() -> PathBuf {
     let mut out = PathBuf::from("testdata/lookup-table-mle/nonboolean_bn254.txt");
@@ -75,24 +245,29 @@ fn output_path_from_args() -> PathBuf {
     out
 }
 
-fn fixture_contents() -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "# Generated by tools/jolt-lookup-mle-fixtures from a16z/jolt rev {JOLT_REV}\n"
-    ));
-    out.push_str("# format: table_index|table_name|case|seed_u64|expected_fr_be_hex\n");
-    for row in ROWS {
-        out.push_str(row);
-        out.push('\n');
-    }
-    out
-}
-
 fn main() {
     let out_path = output_path_from_args();
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Generated by tools/jolt-lookup-mle-fixtures from a16z/jolt rev {UPSTREAM_JOLT_REV}\n"
+    ));
+    out.push_str("# format: table_index|table_name|case|seed_u64|expected_fr_be_hex\n");
+
+    for &(table_index, table_name) in TABLES {
+        for case_index in 0..CASES_PER_TABLE {
+            let seed = seed_for(table_index, case_index);
+            let r = non_boolean_challenges(seed);
+            let expected = evaluate_upstream_formula(table_index, &r);
+            out.push_str(&format!(
+                "{table_index}|{table_name}|random_{case_index}|{seed}|{}\n",
+                expected.to_hex_be_32()
+            ));
+        }
+    }
+
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).expect("create fixture parent directory");
     }
-    fs::write(&out_path, fixture_contents()).expect("write lookup-table MLE fixture");
+    fs::write(&out_path, out).expect("write lookup-table MLE fixture");
     println!("wrote {}", out_path.display());
 }

@@ -28,6 +28,7 @@ def main() -> None:
         cmd = [
             "cargo",
             "run",
+            "--locked",
             "--release",
             "--manifest-path",
             str(MANIFEST),

@@ -7,9 +7,9 @@ edition = "2021"
 name = "jolt-lookup-mle-fixtures"
 path = "src/main.rs"
 
-# The generator is dependency-free for old toolchain compatibility. It records
-# the pinned upstream Jolt revision and emits the independently committed rows
-# regenerated from that revision.
+[dependencies]
+num-bigint = "=0.4.6"
+num-traits = "=0.2.19"
 
 [profile.release]
 opt-level = 3

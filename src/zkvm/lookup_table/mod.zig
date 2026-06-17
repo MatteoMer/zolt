@@ -1913,6 +1913,9 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// Returns the u64 table output for the given lookup index.
         /// Used for diagnostics: verifying that combined_vals lookup_output matches the table.
         pub fn materializeTableEntry(table_index: usize, index: u128) u64 {
+            // Explicitly supported maintained lookup tables in the switch below:
+            // 22, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39.
+            // Unsupported table indices reach the switch fallback, which calls @panic(...)/std.debug.panic(...).
             // Uninterleave for interleaved-path tables.
             // Convention (matches Jolt's uninterleave_bits):
             //   x (LEFT operand) = bits at ODD positions 1,3,5,...

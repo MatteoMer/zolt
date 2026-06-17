@@ -560,6 +560,16 @@ pub fn build(b: *std.Build) void {
         ci_step.dependOn(&fmt_check.step);
     } // end !is_wasm
 
+    // zig build check-lookup-tables — maintained lookup-table compatibility checks.
+    // This step is opt-in so normal `zig build test` does not compile or run the
+    // upstream Rust/Jolt fixture generator.
+    const check_lookup_static = b.addSystemCommand(&.{ "python3", "tools/check_lookup_table_unsupported.py" });
+    const check_lookup_fixture = b.addSystemCommand(&.{ "python3", "tools/check_lookup_table_fixture.py" });
+    check_lookup_fixture.step.dependOn(&check_lookup_static.step);
+    const check_lookup_tables_step = b.step("check-lookup-tables", "Check lookup-table support and fixture reproducibility");
+    check_lookup_tables_step.dependOn(&check_lookup_static.step);
+    check_lookup_tables_step.dependOn(&check_lookup_fixture.step);
+
     // zig build fmt — run zig fmt on all project sources (works for any target)
     const fmt_step = b.step("fmt", "Format all Zig source files");
     const fmt = b.addFmt(.{ .paths = fmt_paths });

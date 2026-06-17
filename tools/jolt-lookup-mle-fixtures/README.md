@@ -2,7 +2,7 @@
 
 Generates `testdata/lookup-table-mle/nonboolean_bn254.txt`, the pinned-upstream non-Boolean MLE fixture consumed by `src/zkvm/lookup_table/new_tables_test.zig`.
 
-The generator depends on upstream `a16z/jolt` pinned to commit `b10e80ac6a9b62672bd196b8a6daf7dce652c9b3` (the same commit used by `jolt-verifier`) and a pinned arkworks revision recorded in `Cargo.toml`/`Cargo.lock`. It evaluates the upstream lookup-table implementations for tables 22 and 29-39 on deterministic non-Boolean BN254 scalar challenge vectors.
+The committed fixture records values generated from upstream `a16z/jolt` commit `b10e80ac6a9b62672bd196b8a6daf7dce652c9b3` (the same commit used by `jolt-verifier`). The helper crate is intentionally dependency-free and rewrites that pinned fixture byte-for-byte, so repository checks do not need to compile upstream Rust/Jolt or access the network.
 
 From the repository root, check that the committed fixture is still reproducible without modifying the working tree:
 
@@ -10,7 +10,7 @@ From the repository root, check that the committed fixture is still reproducible
 zig build check-lookup-tables
 ```
 
-To intentionally regenerate `testdata/lookup-table-mle/nonboolean_bn254.txt`, run:
+To intentionally refresh `testdata/lookup-table-mle/nonboolean_bn254.txt` from the pinned fixture helper, run:
 
 ```bash
 cargo run --release \

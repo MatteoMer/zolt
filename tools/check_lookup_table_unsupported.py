@@ -36,6 +36,34 @@ SUPPORTED_TABLES = {
     39: "VirtualXORROTW7",
 }
 
+PLACEHOLDER_WORDS = ("not implemented", "not_implemented", "unimplemented", "todo", "placeholder")
+
+
+def switch_arm(body: str, table: int) -> str | None:
+    """Return the full text of a numeric switch arm, including multi-line blocks."""
+    match = re.search(
+        rf"(?m)^\s*{table}\s*=>\s*(?P<arm>.*?)(?=^\s*(?:\d+|else)\s*=>|\Z)",
+        body,
+        flags=re.S,
+    )
+    return None if match is None else match.group("arm").strip()
+
+
+def has_placeholder_panic(arm: str) -> bool:
+    lowered = arm.lower()
+    has_panic = "@panic" in lowered or "std.debug.panic" in lowered or "unreachable" in lowered
+    return has_panic and any(word in lowered for word in PLACEHOLDER_WORDS)
+
+
+def strip_line_comments(text: str) -> str:
+    return "\n".join(line.split("//", 1)[0] for line in text.splitlines()).strip()
+
+
+def is_zero_only_arm(arm: str) -> bool:
+    expression = strip_line_comments(arm).rstrip(",;").strip()
+    return re.fullmatch(r"(?:0|@as\([^,]+,\s*0\)|@intCast\(0\)|(?:F\.)?zero\(\))", expression) is not None
+
+
 # The requested supported tables must not remain as placeholder panics in the dispatcher.
 evaluate_match = re.search(
     r"pub fn evaluateTableMLE\(table_index: usize, r: \[\]const F\) F \{(?P<body>.*?)\n        \}\n\n        /// Materialize",
@@ -45,12 +73,11 @@ evaluate_match = re.search(
 require(evaluate_match is not None, "could not locate evaluateTableMLE body")
 evaluate_body = evaluate_match.group("body")
 for table, name in SUPPORTED_TABLES.items():
-    arm = re.search(rf"\b{table}\s*=>\s*(?P<body>[^,;\n]*(?:\([^\n]*\))?)", evaluate_body)
-    require(arm is not None, f"table {table} ({name}) is missing from evaluateTableMLE")
-    arm_body = arm.group("body").lower()
+    arm_body = switch_arm(evaluate_body, table)
+    require(arm_body is not None, f"table {table} ({name}) is missing from evaluateTableMLE")
     require(
-        not ("@panic" in arm_body and any(word in arm_body for word in ("not implemented", "todo", "placeholder"))),
-        f"table {table} ({name}) is still an evaluateTableMLE placeholder panic",
+        not has_placeholder_panic(arm_body),
+        f"table {table} ({name}) is still an evaluateTableMLE placeholder/not-implemented panic",
     )
 
 require(
@@ -71,9 +98,18 @@ match = re.search(
 require(match is not None, "could not locate materializeTableEntry body")
 body = match.group("body")
 for table, name in SUPPORTED_TABLES.items():
+    arm_body = switch_arm(body, table)
     require(
-        re.search(rf"\b{table}\s*=>", body),
+        arm_body is not None,
         f"materializeTableEntry lacks explicit support for table {table} ({name})",
+    )
+    require(
+        not is_zero_only_arm(arm_body),
+        f"materializeTableEntry table {table} ({name}) silently returns zero instead of explicit support",
+    )
+    require(
+        not has_placeholder_panic(arm_body),
+        f"materializeTableEntry table {table} ({name}) is a placeholder/not-implemented panic",
     )
 require(
     re.search(r"else\s*=>\s*std\.debug\.panic\(\"unsupported lookup table index for materializeTableEntry", body),

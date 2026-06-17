@@ -28,6 +28,7 @@ def main() -> None:
         cmd = [
             "cargo",
             "run",
+            "--locked",
             "--release",
             "--manifest-path",
             str(MANIFEST),
@@ -59,7 +60,7 @@ def main() -> None:
             )
             sys.stdout.write(diff)
             fail(
-                "committed fixture is stale; regenerate with `cargo run --release "
+                "committed fixture is stale; regenerate with `cargo run --locked --release "
                 "--manifest-path tools/jolt-lookup-mle-fixtures/Cargo.toml -- "
                 "--out testdata/lookup-table-mle/nonboolean_bn254.txt`"
             )
